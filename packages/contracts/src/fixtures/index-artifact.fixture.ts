@@ -1,11 +1,11 @@
+import type { IndexManifest } from "#contracts/index-artifact/manifest";
 import type {
   ChunkRecord,
   EdgeRecord,
   FileRecord,
   IndexRecord,
-  SymbolRecord
+  SymbolRecord,
 } from "#contracts/index-artifact/records";
-import type { IndexManifest } from "#contracts/index-artifact/manifest";
 import { hashA, hashB, ids, now } from "./common";
 
 export const validIndexManifestFixture = {
@@ -24,7 +24,7 @@ export const validIndexManifestFixture = {
   edgeCount: 1,
   chunkCount: 1,
   parserVersions: { typescript: "5.9.3" },
-  artifactHash: hashA
+  artifactHash: hashA,
 } satisfies IndexManifest;
 
 export const validFileRecordFixture = {
@@ -41,7 +41,7 @@ export const validFileRecordFixture = {
   isBinary: false,
   isGenerated: false,
   isTest: false,
-  isVendored: false
+  isVendored: false,
 } satisfies FileRecord;
 
 export const validSymbolRecordFixture = {
@@ -57,7 +57,7 @@ export const validSymbolRecordFixture = {
   qualifiedName: "add",
   kind: "function",
   range: { startLine: 1, endLine: 3 },
-  contentHash: hashB
+  contentHash: hashB,
 } satisfies SymbolRecord;
 
 export const validEdgeRecordFixture = {
@@ -71,7 +71,7 @@ export const validEdgeRecordFixture = {
   fromKind: "file",
   toKind: "symbol",
   kind: "defines",
-  confidence: 1
+  confidence: 1,
 } satisfies EdgeRecord;
 
 export const validChunkRecordFixture = {
@@ -88,12 +88,12 @@ export const validChunkRecordFixture = {
   kind: "symbol",
   text: "export function add(a: number, b: number) { return Number(a) + Number(b); }",
   contentHash: hashB,
-  tokenEstimate: 22
+  tokenEstimate: 22,
 } satisfies ChunkRecord;
 
 export const validIndexRecordsFixture = [
   validFileRecordFixture,
   validSymbolRecordFixture,
   validEdgeRecordFixture,
-  validChunkRecordFixture
+  validChunkRecordFixture,
 ] satisfies IndexRecord[];

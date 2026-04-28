@@ -19,5 +19,5 @@ export const ids = {
   validatedFindingId: "fnd_01HVALID",
   outcomeId: "out_01HXAMPLE",
   ruleId: "rule_01HXAMPLE",
-  memoryFactId: "mem_01HXAMPLE"
+  memoryFactId: "mem_01HXAMPLE",
 } as const;

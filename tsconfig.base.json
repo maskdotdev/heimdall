@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@repo/contracts": ["packages/contracts/src/index.ts"],
+      "@repo/config": ["packages/config/src/index.ts"],
+      "@repo/db": ["packages/db/src/index.ts"],
+      "@repo/github": ["packages/github/src/index.ts"],
+      "@repo/queue": ["packages/queue/src/index.ts"],
+      "@repo/repo-sync": ["packages/repo-sync/src/index.ts"],
+      "@repo/index-schema": ["packages/index-schema/src/index.ts"],
+      "@repo/indexer-driver": ["packages/indexer-driver/src/index.ts"],
+      "@repo/indexer-ts": ["packages/indexer-ts/src/index.ts"],
+      "@repo/index-importer": ["packages/index-importer/src/index.ts"],
+      "@repo/embedding": ["packages/embedding/src/index.ts"],
+      "@repo/retrieval": ["packages/retrieval/src/index.ts"],
+      "@repo/review-engine": ["packages/review-engine/src/index.ts"],
+      "@repo/llm-gateway": ["packages/llm-gateway/src/index.ts"],
+      "@repo/publisher": ["packages/publisher/src/index.ts"],
+      "@repo/memory": ["packages/memory/src/index.ts"],
+      "@repo/observability": ["packages/observability/src/index.ts"]
+    }
+  }
+}

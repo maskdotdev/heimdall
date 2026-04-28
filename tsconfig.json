@@ -1,0 +1,26 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/api" },
+    { "path": "./apps/web" },
+    { "path": "./apps/worker" },
+    { "path": "./apps/indexer-cli" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/config" },
+    { "path": "./packages/db" },
+    { "path": "./packages/github" },
+    { "path": "./packages/queue" },
+    { "path": "./packages/repo-sync" },
+    { "path": "./packages/index-schema" },
+    { "path": "./packages/indexer-driver" },
+    { "path": "./packages/indexer-ts" },
+    { "path": "./packages/index-importer" },
+    { "path": "./packages/embedding" },
+    { "path": "./packages/retrieval" },
+    { "path": "./packages/review-engine" },
+    { "path": "./packages/llm-gateway" },
+    { "path": "./packages/publisher" },
+    { "path": "./packages/memory" },
+    { "path": "./packages/observability" }
+  ]
+}

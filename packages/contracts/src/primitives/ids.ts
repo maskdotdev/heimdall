@@ -1,9 +1,9 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { type Static, Type } from "@sinclair/typebox";
 
 export const PrefixedIdSchema = Type.String({
   minLength: 4,
   maxLength: 128,
-  pattern: "^[a-z][a-z0-9]*_[A-Za-z0-9_-]+$"
+  pattern: "^[a-z][a-z0-9]*_[A-Za-z0-9_-]+$",
 });
 export type PrefixedId = Static<typeof PrefixedIdSchema>;
 

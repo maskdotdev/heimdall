@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { type Static, Type } from "@sinclair/typebox";
 
 export const ReviewRunStatusSchema = Type.Union([
   Type.Literal("created"),
@@ -13,7 +13,7 @@ export const ReviewRunStatusSchema = Type.Union([
   Type.Literal("skipped"),
   Type.Literal("superseded"),
   Type.Literal("canceled"),
-  Type.Literal("failed")
+  Type.Literal("failed"),
 ]);
 export type ReviewRunStatus = Static<typeof ReviewRunStatusSchema>;
 
@@ -21,7 +21,7 @@ export const ReviewSizeClassSchema = Type.Union([
   Type.Literal("small"),
   Type.Literal("medium"),
   Type.Literal("large"),
-  Type.Literal("huge")
+  Type.Literal("huge"),
 ]);
 export type ReviewSizeClass = Static<typeof ReviewSizeClassSchema>;
 
@@ -29,7 +29,7 @@ export const ReviewTriggerSchema = Type.Union([
   Type.Literal("webhook"),
   Type.Literal("manual"),
   Type.Literal("rerun"),
-  Type.Literal("scheduled")
+  Type.Literal("scheduled"),
 ]);
 export type ReviewTrigger = Static<typeof ReviewTriggerSchema>;
 
@@ -38,5 +38,5 @@ export const REVIEW_RUN_TERMINAL_STATUSES = [
   "skipped",
   "superseded",
   "canceled",
-  "failed"
+  "failed",
 ] as const;

@@ -4,7 +4,7 @@ export const SENSITIVE_FIELD_PATTERNS = [
   /password/i,
   /authorization/i,
   /privateKey/i,
-  /accessKey/i
+  /accessKey/i,
 ] as const;
 
 export function redactUnknown(input: unknown): unknown {
@@ -21,7 +21,7 @@ export function redactUnknown(input: unknown): unknown {
       key,
       SENSITIVE_FIELD_PATTERNS.some((pattern) => pattern.test(key))
         ? "[REDACTED]"
-        : redactUnknown(value)
-    ])
+        : redactUnknown(value),
+    ]),
   );
 }

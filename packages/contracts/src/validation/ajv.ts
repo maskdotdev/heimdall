@@ -5,7 +5,7 @@ export const ajv = new Ajv({
   allErrors: true,
   removeAdditional: false,
   useDefaults: false,
-  coerceTypes: false
+  coerceTypes: false,
 });
 
 addFormats(ajv);

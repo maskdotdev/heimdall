@@ -1,9 +1,12 @@
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
 export const ApiSuccessResponseSchema = <T extends TSchema>(dataSchema: T) =>
-  Type.Object({
-    data: dataSchema
-  }, { additionalProperties: false });
+  Type.Object(
+    {
+      data: dataSchema,
+    },
+    { additionalProperties: false },
+  );
 
 export type ApiSuccessResponse<T> = { data: T };
 

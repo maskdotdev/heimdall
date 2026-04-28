@@ -21,7 +21,7 @@ export const validCodeIndexVersionFixture = {
   chunkCount: 1,
   embeddedChunkCount: 1,
   createdAt: now,
-  completedAt: now
+  completedAt: now,
 } satisfies CodeIndexVersion;
 
 export const validLLMCallFixture = {
@@ -42,14 +42,14 @@ export const validLLMCallFixture = {
   costMicros: 950,
   status: "succeeded",
   startedAt: now,
-  completedAt: now
+  completedAt: now,
 } satisfies LLMCall;
 
 export const validPromptVersionFixture = {
   promptVersion: "review-findings.v1",
   operation: "generate_findings",
   description: "Generate candidate PR findings from context bundle input.",
-  createdAt: now
+  createdAt: now,
 } satisfies PromptVersion;
 
 export const validUsageEventFixture = {
@@ -61,7 +61,7 @@ export const validUsageEventFixture = {
   quantity: 1500,
   unit: "token",
   costMicros: 950,
-  occurredAt: now
+  occurredAt: now,
 } satisfies UsageEvent;
 
 export const validWebhookEventFixture = {
@@ -76,5 +76,5 @@ export const validWebhookEventFixture = {
   payloadUri: "s3://heimdall-artifacts/webhooks/delivery-123.json",
   status: "processed",
   receivedAt: now,
-  processedAt: now
+  processedAt: now,
 } satisfies WebhookEvent;

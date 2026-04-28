@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { type Static, Type } from "@sinclair/typebox";
 import { Sha256Schema } from "../primitives/hashes";
 import { ArtifactIdSchema } from "../primitives/ids";
 import { IsoDateTimeSchema } from "../primitives/time";
@@ -23,16 +23,19 @@ export const ReviewArtifactKindSchema = Type.Union([
   Type.Literal("publisher_trace"),
   Type.Literal("orchestrator_trace"),
   Type.Literal("static_analysis"),
-  Type.Literal("debug_log")
+  Type.Literal("debug_log"),
 ]);
 export type ReviewArtifactKind = Static<typeof ReviewArtifactKindSchema>;
 
-export const ReviewArtifactRefSchema = Type.Object({
-  artifactId: ArtifactIdSchema,
-  kind: ReviewArtifactKindSchema,
-  uri: Type.String(),
-  contentHash: Type.Optional(Sha256Schema),
-  createdAt: IsoDateTimeSchema,
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
+export const ReviewArtifactRefSchema = Type.Object(
+  {
+    artifactId: ArtifactIdSchema,
+    kind: ReviewArtifactKindSchema,
+    uri: Type.String(),
+    contentHash: Type.Optional(Sha256Schema),
+    createdAt: IsoDateTimeSchema,
+    metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
 export type ReviewArtifactRef = Static<typeof ReviewArtifactRefSchema>;

@@ -1,0 +1,41 @@
+{
+  "name": "heimdall",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0",
+    "bun": ">=1.2.0"
+  },
+  "scripts": {
+    "dev": "turbo dev",
+    "dev:api": "turbo dev --filter=@app/api",
+    "dev:web": "turbo dev --filter=@app/web",
+    "dev:worker": "turbo dev --filter=@app/worker",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "test": "turbo test",
+    "test:watch": "vitest --watch",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "clean": "turbo clean && pnpm clean:local",
+    "clean:local": "rm -rf .turbo node_modules apps/*/node_modules packages/*/node_modules apps/*/dist packages/*/dist coverage",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:reset": "docker compose down -v && docker compose up -d",
+    "workspace:print": "bun run scripts/print-workspace.ts",
+    "env:check": "bun run scripts/validate-env.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/bun": "catalog:",
+    "@types/node": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

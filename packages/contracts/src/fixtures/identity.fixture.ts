@@ -8,7 +8,7 @@ export const validOrgFixture = {
   name: "Acme Engineering",
   slug: "acme-engineering",
   createdAt: now,
-  updatedAt: now
+  updatedAt: now,
 } satisfies Org;
 
 export const validUserFixture = {
@@ -17,7 +17,7 @@ export const validUserFixture = {
   displayName: "Reviewer",
   avatarUrl: "https://example.com/avatar.png",
   createdAt: now,
-  updatedAt: now
+  updatedAt: now,
 } satisfies User;
 
 export const validProviderInstallationFixture = {
@@ -29,7 +29,7 @@ export const validProviderInstallationFixture = {
   accountType: "organization",
   permissions: {
     contents: "read",
-    pullRequests: "write"
+    pullRequests: "write",
   },
-  installedAt: now
+  installedAt: now,
 } satisfies ProviderInstallation;

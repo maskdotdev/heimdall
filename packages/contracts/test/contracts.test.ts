@@ -1,15 +1,67 @@
 import { describe, expect, it } from "vitest";
 import { ApiErrorResponseSchema } from "#contracts/api/errors";
+import {
+  ListRepositoriesResponseSchema,
+  UpdateRepositorySettingsRequestSchema,
+} from "#contracts/api/repositories";
 import { GetReviewRunResponseSchema } from "#contracts/api/reviews";
-import { ListRepositoriesResponseSchema, UpdateRepositorySettingsRequestSchema } from "#contracts/api/repositories";
 import { ListRepoRulesResponseSchema } from "#contracts/api/rules";
 import { JOB_TYPES } from "#contracts/enums/jobs";
-import { OrgSchema } from "#contracts/identity/org";
+import {
+  validCandidateFindingFixture,
+  validPublishedFindingFixture,
+  validValidatedFindingFixture,
+} from "#contracts/fixtures/finding.fixture";
+import {
+  validOrgFixture,
+  validProviderInstallationFixture,
+  validUserFixture,
+} from "#contracts/fixtures/identity.fixture";
+import {
+  validIndexManifestFixture,
+  validIndexRecordsFixture,
+} from "#contracts/fixtures/index-artifact.fixture";
+import {
+  validEmbeddingBatchJobPayloadFixture,
+  validIndexRepoCommitJobPayloadFixture,
+  validPublishReviewJobPayloadFixture,
+  validReviewPullRequestJobPayloadFixture,
+  validSyncInstallationJobPayloadFixture,
+  validUpdateMemoryJobPayloadFixture,
+} from "#contracts/fixtures/jobs.fixture";
+import {
+  validFindingOutcomeFixture,
+  validMemoryFactFixture,
+  validRepoRuleFixture,
+} from "#contracts/fixtures/memory.fixture";
+import {
+  validCodeIndexVersionFixture,
+  validLLMCallFixture,
+  validPromptVersionFixture,
+  validUsageEventFixture,
+  validWebhookEventFixture,
+} from "#contracts/fixtures/operations.fixture";
+import { validPullRequestSnapshotFixture } from "#contracts/fixtures/pull-request.fixture";
+import {
+  validRepositoryFixture,
+  validRepositorySettingsFixture,
+} from "#contracts/fixtures/repository.fixture";
+import {
+  validContextBundleFixture,
+  validReviewRunFixture,
+} from "#contracts/fixtures/review.fixture";
 import { ProviderInstallationSchema } from "#contracts/identity/installation";
+import { OrgSchema } from "#contracts/identity/org";
 import { UserSchema } from "#contracts/identity/user";
 import { CodeIndexVersionSchema } from "#contracts/index-artifact/artifact";
-import { IndexManifestSchema, isSupportedIndexManifestVersion } from "#contracts/index-artifact/manifest";
-import { IndexRecordSchema, isSupportedIndexRecordVersion } from "#contracts/index-artifact/records";
+import {
+  IndexManifestSchema,
+  isSupportedIndexManifestVersion,
+} from "#contracts/index-artifact/manifest";
+import {
+  IndexRecordSchema,
+  isSupportedIndexRecordVersion,
+} from "#contracts/index-artifact/records";
 import { JobEnvelopeSchema } from "#contracts/jobs/envelope";
 import {
   EmbeddingBatchJobPayloadSchema,
@@ -17,7 +69,7 @@ import {
   PublishReviewJobPayloadSchema,
   ReviewPullRequestJobPayloadSchema,
   SyncInstallationJobPayloadSchema,
-  UpdateMemoryJobPayloadSchema
+  UpdateMemoryJobPayloadSchema,
 } from "#contracts/jobs/payloads";
 import { LLMCallSchema } from "#contracts/llm/llm-call";
 import { PromptVersionSchema } from "#contracts/llm/prompt";
@@ -32,57 +84,12 @@ import { ContextBundleSchema } from "#contracts/review/context";
 import {
   CandidateFindingSchema,
   PublishedFindingSchema,
-  ValidatedFindingSchema
+  ValidatedFindingSchema,
 } from "#contracts/review/finding";
 import { ReviewRunSchema } from "#contracts/review/review-run";
 import { UsageEventSchema } from "#contracts/usage/usage-event";
 import { parseWithSchema, safeParseWithSchema } from "#contracts/validation/parse";
 import { WebhookEventSchema } from "#contracts/webhook/webhook-event";
-import {
-  validCandidateFindingFixture,
-  validPublishedFindingFixture,
-  validValidatedFindingFixture
-} from "#contracts/fixtures/finding.fixture";
-import {
-  validCodeIndexVersionFixture,
-  validLLMCallFixture,
-  validPromptVersionFixture,
-  validUsageEventFixture,
-  validWebhookEventFixture
-} from "#contracts/fixtures/operations.fixture";
-import {
-  validEmbeddingBatchJobPayloadFixture,
-  validIndexRepoCommitJobPayloadFixture,
-  validPublishReviewJobPayloadFixture,
-  validReviewPullRequestJobPayloadFixture,
-  validSyncInstallationJobPayloadFixture,
-  validUpdateMemoryJobPayloadFixture
-} from "#contracts/fixtures/jobs.fixture";
-import {
-  validIndexManifestFixture,
-  validIndexRecordsFixture
-} from "#contracts/fixtures/index-artifact.fixture";
-import {
-  validOrgFixture,
-  validProviderInstallationFixture,
-  validUserFixture
-} from "#contracts/fixtures/identity.fixture";
-import {
-  validFindingOutcomeFixture,
-  validMemoryFactFixture,
-  validRepoRuleFixture
-} from "#contracts/fixtures/memory.fixture";
-import {
-  validPullRequestSnapshotFixture,
-} from "#contracts/fixtures/pull-request.fixture";
-import {
-  validRepositoryFixture,
-  validRepositorySettingsFixture
-} from "#contracts/fixtures/repository.fixture";
-import {
-  validContextBundleFixture,
-  validReviewRunFixture,
-} from "#contracts/fixtures/review.fixture";
 
 describe("contract validation", () => {
   it("validates primitive repo paths", () => {
@@ -93,25 +100,44 @@ describe("contract validation", () => {
   });
 
   it("validates pull request snapshot fixtures", () => {
-    expect(parseWithSchema("PullRequestSnapshot", PullRequestSnapshotSchema, validPullRequestSnapshotFixture))
-      .toEqual(validPullRequestSnapshotFixture);
+    expect(
+      parseWithSchema(
+        "PullRequestSnapshot",
+        PullRequestSnapshotSchema,
+        validPullRequestSnapshotFixture,
+      ),
+    ).toEqual(validPullRequestSnapshotFixture);
   });
 
   it("validates identity and repository contract fixtures", () => {
     expect(parseWithSchema("Org", OrgSchema, validOrgFixture)).toEqual(validOrgFixture);
     expect(parseWithSchema("User", UserSchema, validUserFixture)).toEqual(validUserFixture);
-    expect(parseWithSchema("ProviderInstallation", ProviderInstallationSchema, validProviderInstallationFixture))
-      .toEqual(validProviderInstallationFixture);
-    expect(parseWithSchema("Repository", RepositorySchema, validRepositoryFixture)).toEqual(validRepositoryFixture);
-    expect(parseWithSchema("RepositorySettings", RepositorySettingsSchema, validRepositorySettingsFixture))
-      .toEqual(validRepositorySettingsFixture);
+    expect(
+      parseWithSchema(
+        "ProviderInstallation",
+        ProviderInstallationSchema,
+        validProviderInstallationFixture,
+      ),
+    ).toEqual(validProviderInstallationFixture);
+    expect(parseWithSchema("Repository", RepositorySchema, validRepositoryFixture)).toEqual(
+      validRepositoryFixture,
+    );
+    expect(
+      parseWithSchema(
+        "RepositorySettings",
+        RepositorySettingsSchema,
+        validRepositorySettingsFixture,
+      ),
+    ).toEqual(validRepositorySettingsFixture);
   });
 
   it("validates index manifest and record fixtures", () => {
-    expect(parseWithSchema("IndexManifest", IndexManifestSchema, validIndexManifestFixture))
-      .toEqual(validIndexManifestFixture);
-    expect(parseWithSchema("CodeIndexVersion", CodeIndexVersionSchema, validCodeIndexVersionFixture))
-      .toEqual(validCodeIndexVersionFixture);
+    expect(
+      parseWithSchema("IndexManifest", IndexManifestSchema, validIndexManifestFixture),
+    ).toEqual(validIndexManifestFixture);
+    expect(
+      parseWithSchema("CodeIndexVersion", CodeIndexVersionSchema, validCodeIndexVersionFixture),
+    ).toEqual(validCodeIndexVersionFixture);
 
     for (const record of validIndexRecordsFixture) {
       expect(parseWithSchema("IndexRecord", IndexRecordSchema, record)).toEqual(record);
@@ -120,44 +146,90 @@ describe("contract validation", () => {
   });
 
   it("validates review and finding fixtures", () => {
-    expect(parseWithSchema("ContextBundle", ContextBundleSchema, validContextBundleFixture))
-      .toEqual(validContextBundleFixture);
-    expect(parseWithSchema("ReviewRun", ReviewRunSchema, validReviewRunFixture))
-      .toEqual(validReviewRunFixture);
-    expect(parseWithSchema("CandidateFinding", CandidateFindingSchema, validCandidateFindingFixture))
-      .toEqual(validCandidateFindingFixture);
-    expect(parseWithSchema("ValidatedFinding", ValidatedFindingSchema, validValidatedFindingFixture))
-      .toEqual(validValidatedFindingFixture);
-    expect(parseWithSchema("PublishedFinding", PublishedFindingSchema, validPublishedFindingFixture))
-      .toEqual(validPublishedFindingFixture);
+    expect(
+      parseWithSchema("ContextBundle", ContextBundleSchema, validContextBundleFixture),
+    ).toEqual(validContextBundleFixture);
+    expect(parseWithSchema("ReviewRun", ReviewRunSchema, validReviewRunFixture)).toEqual(
+      validReviewRunFixture,
+    );
+    expect(
+      parseWithSchema("CandidateFinding", CandidateFindingSchema, validCandidateFindingFixture),
+    ).toEqual(validCandidateFindingFixture);
+    expect(
+      parseWithSchema("ValidatedFinding", ValidatedFindingSchema, validValidatedFindingFixture),
+    ).toEqual(validValidatedFindingFixture);
+    expect(
+      parseWithSchema("PublishedFinding", PublishedFindingSchema, validPublishedFindingFixture),
+    ).toEqual(validPublishedFindingFixture);
   });
 
   it("validates memory, LLM, usage, and webhook fixtures", () => {
-    expect(parseWithSchema("FindingOutcome", FindingOutcomeSchema, validFindingOutcomeFixture))
-      .toEqual(validFindingOutcomeFixture);
-    expect(parseWithSchema("RepoRule", RepoRuleSchema, validRepoRuleFixture)).toEqual(validRepoRuleFixture);
-    expect(parseWithSchema("MemoryFact", MemoryFactSchema, validMemoryFactFixture)).toEqual(validMemoryFactFixture);
-    expect(parseWithSchema("LLMCall", LLMCallSchema, validLLMCallFixture)).toEqual(validLLMCallFixture);
-    expect(parseWithSchema("PromptVersion", PromptVersionSchema, validPromptVersionFixture))
-      .toEqual(validPromptVersionFixture);
-    expect(parseWithSchema("UsageEvent", UsageEventSchema, validUsageEventFixture)).toEqual(validUsageEventFixture);
-    expect(parseWithSchema("WebhookEvent", WebhookEventSchema, validWebhookEventFixture))
-      .toEqual(validWebhookEventFixture);
+    expect(
+      parseWithSchema("FindingOutcome", FindingOutcomeSchema, validFindingOutcomeFixture),
+    ).toEqual(validFindingOutcomeFixture);
+    expect(parseWithSchema("RepoRule", RepoRuleSchema, validRepoRuleFixture)).toEqual(
+      validRepoRuleFixture,
+    );
+    expect(parseWithSchema("MemoryFact", MemoryFactSchema, validMemoryFactFixture)).toEqual(
+      validMemoryFactFixture,
+    );
+    expect(parseWithSchema("LLMCall", LLMCallSchema, validLLMCallFixture)).toEqual(
+      validLLMCallFixture,
+    );
+    expect(
+      parseWithSchema("PromptVersion", PromptVersionSchema, validPromptVersionFixture),
+    ).toEqual(validPromptVersionFixture);
+    expect(parseWithSchema("UsageEvent", UsageEventSchema, validUsageEventFixture)).toEqual(
+      validUsageEventFixture,
+    );
+    expect(parseWithSchema("WebhookEvent", WebhookEventSchema, validWebhookEventFixture)).toEqual(
+      validWebhookEventFixture,
+    );
   });
 
   it("validates job payload fixtures", () => {
-    expect(parseWithSchema("SyncInstallationJobPayload", SyncInstallationJobPayloadSchema, validSyncInstallationJobPayloadFixture))
-      .toEqual(validSyncInstallationJobPayloadFixture);
-    expect(parseWithSchema("IndexRepoCommitJobPayload", IndexRepoCommitJobPayloadSchema, validIndexRepoCommitJobPayloadFixture))
-      .toEqual(validIndexRepoCommitJobPayloadFixture);
-    expect(parseWithSchema("EmbeddingBatchJobPayload", EmbeddingBatchJobPayloadSchema, validEmbeddingBatchJobPayloadFixture))
-      .toEqual(validEmbeddingBatchJobPayloadFixture);
-    expect(parseWithSchema("ReviewPullRequestJobPayload", ReviewPullRequestJobPayloadSchema, validReviewPullRequestJobPayloadFixture))
-      .toEqual(validReviewPullRequestJobPayloadFixture);
-    expect(parseWithSchema("PublishReviewJobPayload", PublishReviewJobPayloadSchema, validPublishReviewJobPayloadFixture))
-      .toEqual(validPublishReviewJobPayloadFixture);
-    expect(parseWithSchema("UpdateMemoryJobPayload", UpdateMemoryJobPayloadSchema, validUpdateMemoryJobPayloadFixture))
-      .toEqual(validUpdateMemoryJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "SyncInstallationJobPayload",
+        SyncInstallationJobPayloadSchema,
+        validSyncInstallationJobPayloadFixture,
+      ),
+    ).toEqual(validSyncInstallationJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "IndexRepoCommitJobPayload",
+        IndexRepoCommitJobPayloadSchema,
+        validIndexRepoCommitJobPayloadFixture,
+      ),
+    ).toEqual(validIndexRepoCommitJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "EmbeddingBatchJobPayload",
+        EmbeddingBatchJobPayloadSchema,
+        validEmbeddingBatchJobPayloadFixture,
+      ),
+    ).toEqual(validEmbeddingBatchJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "ReviewPullRequestJobPayload",
+        ReviewPullRequestJobPayloadSchema,
+        validReviewPullRequestJobPayloadFixture,
+      ),
+    ).toEqual(validReviewPullRequestJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "PublishReviewJobPayload",
+        PublishReviewJobPayloadSchema,
+        validPublishReviewJobPayloadFixture,
+      ),
+    ).toEqual(validPublishReviewJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "UpdateMemoryJobPayload",
+        UpdateMemoryJobPayloadSchema,
+        validUpdateMemoryJobPayloadFixture,
+      ),
+    ).toEqual(validUpdateMemoryJobPayloadFixture);
 
     const envelope = {
       jobId: "job_01HXAMPLE",
@@ -167,71 +239,95 @@ describe("contract validation", () => {
       createdAt: "2026-04-28T12:00:00.000Z",
       attempt: 0,
       maxAttempts: 3,
-      payload: validReviewPullRequestJobPayloadFixture
+      payload: validReviewPullRequestJobPayloadFixture,
     };
 
-    expect(parseWithSchema(
-      "ReviewPullRequestJobEnvelope",
-      JobEnvelopeSchema(ReviewPullRequestJobPayloadSchema),
-      envelope
-    )).toEqual(envelope);
+    expect(
+      parseWithSchema(
+        "ReviewPullRequestJobEnvelope",
+        JobEnvelopeSchema(ReviewPullRequestJobPayloadSchema),
+        envelope,
+      ),
+    ).toEqual(envelope);
   });
 
   it("validates API DTO contracts", () => {
-    expect(safeParseWithSchema("ApiErrorResponse", ApiErrorResponseSchema, {
-      error: {
-        code: "contract.validation_failed",
-        message: "Invalid input"
-      }
-    }).ok).toBe(true);
+    expect(
+      safeParseWithSchema("ApiErrorResponse", ApiErrorResponseSchema, {
+        error: {
+          code: "contract.validation_failed",
+          message: "Invalid input",
+        },
+      }).ok,
+    ).toBe(true);
 
-    expect(safeParseWithSchema("ListRepositoriesResponse", ListRepositoriesResponseSchema, {
-      data: {
-        repositories: []
-      }
-    }).ok).toBe(true);
+    expect(
+      safeParseWithSchema("ListRepositoriesResponse", ListRepositoriesResponseSchema, {
+        data: {
+          repositories: [],
+        },
+      }).ok,
+    ).toBe(true);
 
-    expect(safeParseWithSchema("UpdateRepositorySettingsRequest", UpdateRepositorySettingsRequestSchema, {
-      severityThreshold: "high",
-      maxCommentsPerReview: 10
-    }).ok).toBe(true);
+    expect(
+      safeParseWithSchema(
+        "UpdateRepositorySettingsRequest",
+        UpdateRepositorySettingsRequestSchema,
+        {
+          severityThreshold: "high",
+          maxCommentsPerReview: 10,
+        },
+      ).ok,
+    ).toBe(true);
 
-    expect(safeParseWithSchema("GetReviewRunResponse", GetReviewRunResponseSchema, {
-      data: {
-        reviewRun: validReviewRunFixture,
-        findings: [validPublishedFindingFixture]
-      }
-    }).ok).toBe(true);
+    expect(
+      safeParseWithSchema("GetReviewRunResponse", GetReviewRunResponseSchema, {
+        data: {
+          reviewRun: validReviewRunFixture,
+          findings: [validPublishedFindingFixture],
+        },
+      }).ok,
+    ).toBe(true);
 
-    expect(safeParseWithSchema("ListRepoRulesResponse", ListRepoRulesResponseSchema, {
-      data: {
-        rules: [validRepoRuleFixture]
-      }
-    }).ok).toBe(true);
+    expect(
+      safeParseWithSchema("ListRepoRulesResponse", ListRepoRulesResponseSchema, {
+        data: {
+          rules: [validRepoRuleFixture],
+        },
+      }).ok,
+    ).toBe(true);
   });
 
   it("rejects invalid fixtures", () => {
     const invalidSnapshot = {
       ...validPullRequestSnapshotFixture,
-      schemaVersion: "pull_request_snapshot.v2"
+      schemaVersion: "pull_request_snapshot.v2",
     };
 
-    const result = safeParseWithSchema("PullRequestSnapshot", PullRequestSnapshotSchema, invalidSnapshot);
+    const result = safeParseWithSchema(
+      "PullRequestSnapshot",
+      PullRequestSnapshotSchema,
+      invalidSnapshot,
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe("contract.validation_failed");
       expect(result.error.issues.length).toBeGreaterThan(0);
     }
 
-    expect(safeParseWithSchema("CandidateFinding", CandidateFindingSchema, {
-      ...validCandidateFindingFixture,
-      evidence: []
-    }).ok).toBe(false);
+    expect(
+      safeParseWithSchema("CandidateFinding", CandidateFindingSchema, {
+        ...validCandidateFindingFixture,
+        evidence: [],
+      }).ok,
+    ).toBe(false);
 
-    expect(safeParseWithSchema("Repository", RepositorySchema, {
-      ...validRepositoryFixture,
-      installationToken: "must-not-be-in-contracts"
-    }).ok).toBe(false);
+    expect(
+      safeParseWithSchema("Repository", RepositorySchema, {
+        ...validRepositoryFixture,
+        installationToken: "must-not-be-in-contracts",
+      }).ok,
+    ).toBe(false);
   });
 
   it("reports supported schema versions", () => {

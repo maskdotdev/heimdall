@@ -1,7 +1,7 @@
 import type {
   CandidateFinding,
   PublishedFinding,
-  ValidatedFinding
+  ValidatedFinding,
 } from "#contracts/review/finding";
 import { ids, now } from "./common";
 
@@ -20,7 +20,7 @@ export const validCandidateFindingFixture = {
     line: 2,
     side: "RIGHT",
     hunkId: "hunk_1",
-    isInDiff: true
+    isInDiff: true,
   },
   evidence: [
     {
@@ -29,13 +29,13 @@ export const validCandidateFindingFixture = {
       summary: "The changed line coerces both inputs with Number().",
       path: "src/math.ts",
       range: { startLine: 2, endLine: 2 },
-      confidence: 0.82
-    }
+      confidence: 0.82,
+    },
   ],
   suggestedFix: "Guard with Number.isFinite before returning the sum.",
   confidence: 0.82,
   fingerprint: "fp_math_add_non_finite",
-  createdAt: now
+  createdAt: now,
 } satisfies CandidateFinding;
 
 export const validValidatedFindingFixture = {
@@ -53,10 +53,10 @@ export const validValidatedFindingFixture = {
   validation: {
     validatedAt: now,
     validatorVersion: "0.1.0",
-    reasons: []
+    reasons: [],
   },
   rank: 1,
-  fingerprint: validCandidateFindingFixture.fingerprint
+  fingerprint: validCandidateFindingFixture.fingerprint,
 } satisfies ValidatedFinding;
 
 export const validPublishedFindingFixture = {
@@ -70,5 +70,5 @@ export const validPublishedFindingFixture = {
   body: validCandidateFindingFixture.body,
   publishedAt: now,
   status: "published",
-  fingerprint: validCandidateFindingFixture.fingerprint
+  fingerprint: validCandidateFindingFixture.fingerprint,
 } satisfies PublishedFinding;

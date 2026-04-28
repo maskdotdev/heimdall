@@ -1,25 +1,27 @@
 import type { Static, TSchema } from "@sinclair/typebox";
 import type { ErrorObject, ValidateFunction } from "ajv";
-import { ajv } from "./ajv";
 import type { ContractValidationError, ValidationIssue } from "../api/errors";
+import { ajv } from "./ajv";
 
-export function validationIssuesFromAjvErrors(errors: ErrorObject[] | null | undefined): ValidationIssue[] {
+export function validationIssuesFromAjvErrors(
+  errors: ErrorObject[] | null | undefined,
+): ValidationIssue[] {
   return (errors ?? []).map((err) => ({
     path: err.instancePath || "/",
     message: err.message ?? "Invalid value",
-    keyword: err.keyword
+    keyword: err.keyword,
   }));
 }
 
 export function contractValidationError(
   schemaName: string,
-  errors: ErrorObject[] | null | undefined
+  errors: ErrorObject[] | null | undefined,
 ): ContractValidationError {
   return {
     code: "contract.validation_failed",
     message: `Input failed schema validation: ${schemaName}`,
     schemaName,
-    issues: validationIssuesFromAjvErrors(errors)
+    issues: validationIssuesFromAjvErrors(errors),
   };
 }
 
@@ -30,7 +32,7 @@ export function compileSchema<T extends TSchema>(schema: T): ValidateFunction<St
 export function parseWithSchema<T extends TSchema>(
   schemaName: string,
   schema: T,
-  input: unknown
+  input: unknown,
 ): Static<T> {
   const validate = compileSchema(schema);
   if (!validate(input)) {
@@ -43,7 +45,7 @@ export function parseWithSchema<T extends TSchema>(
 export function safeParseWithSchema<T extends TSchema>(
   schemaName: string,
   schema: T,
-  input: unknown
+  input: unknown,
 ): { ok: true; value: Static<T> } | { ok: false; error: ContractValidationError } {
   try {
     return { ok: true, value: parseWithSchema(schemaName, schema, input) };

@@ -24,8 +24,8 @@ export const validContextBundleFixture = {
       changeType: "modified",
       newRange: { startLine: 1, endLine: 3 },
       diffHunkIds: ["hunk_1"],
-      confidence: 0.92
-    }
+      confidence: 0.92,
+    },
   ],
   items: [
     {
@@ -40,7 +40,7 @@ export const validContextBundleFixture = {
         text: "export function add(a: number, b: number) { return Number(a) + Number(b); }",
         contentHash: hashB,
         symbolId: ids.symbolId,
-        chunkId: ids.chunkId
+        chunkId: ids.chunkId,
       },
       priority: 90,
       tokenEstimate: 22,
@@ -48,15 +48,15 @@ export const validContextBundleFixture = {
         retriever: "fixture",
         reason: "Changed symbol context",
         relatedSymbolId: ids.symbolId,
-        relatedFileId: ids.fileId
-      }
-    }
+        relatedFileId: ids.fileId,
+      },
+    },
   ],
   tokenBudget: {
     maxTokens: 8000,
-    estimatedTokens: 120
+    estimatedTokens: 120,
   },
-  createdAt: now
+  createdAt: now,
 } satisfies ContextBundle;
 
 export const validReviewRunFixture = {
@@ -79,13 +79,13 @@ export const validReviewRunFixture = {
       artifactId: ids.artifactId,
       kind: "context_bundle",
       uri: "s3://heimdall-artifacts/context.json",
-      createdAt: now
-    }
+      createdAt: now,
+    },
   ],
   counts: {
     candidateFindings: 1,
     validatedFindings: 1,
     publishedFindings: 1,
-    rejectedFindings: 0
-  }
+    rejectedFindings: 0,
+  },
 } satisfies ReviewRun;

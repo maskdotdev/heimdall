@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { type Static, Type } from "@sinclair/typebox";
 
 export const SymbolKindSchema = Type.Union([
   Type.Literal("module"),
@@ -16,7 +16,7 @@ export const SymbolKindSchema = Type.Union([
   Type.Literal("route"),
   Type.Literal("component"),
   Type.Literal("hook"),
-  Type.Literal("unknown")
+  Type.Literal("unknown"),
 ]);
 export type SymbolKind = Static<typeof SymbolKindSchema>;
 
@@ -34,7 +34,7 @@ export const CodeEdgeKindSchema = Type.Union([
   Type.Literal("reads"),
   Type.Literal("writes"),
   Type.Literal("uses_type"),
-  Type.Literal("unknown")
+  Type.Literal("unknown"),
 ]);
 export type CodeEdgeKind = Static<typeof CodeEdgeKindSchema>;
 
@@ -45,6 +45,6 @@ export const ChangeTypeSchema = Type.Union([
   Type.Literal("renamed"),
   Type.Literal("copied"),
   Type.Literal("type_changed"),
-  Type.Literal("unchanged")
+  Type.Literal("unchanged"),
 ]);
 export type ChangeType = Static<typeof ChangeTypeSchema>;

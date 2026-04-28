@@ -18,7 +18,7 @@ export const validRepositoryFixture = {
   isFork: false,
   enabled: true,
   createdAt: now,
-  updatedAt: now
+  updatedAt: now,
 } satisfies Repository;
 
 export const validRepositorySettingsFixture = {
@@ -34,5 +34,5 @@ export const validRepositorySettingsFixture = {
   enabledLanguages: ["typescript", "tsx"],
   customInstructions: "Prefer actionable correctness and security findings.",
   createdAt: now,
-  updatedAt: now
+  updatedAt: now,
 } satisfies RepositorySettings;

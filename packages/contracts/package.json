@@ -1,39 +1,95 @@
 {
   "name": "@repo/contracts",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./api/*": "./src/api/*.ts",
-    "./enums/*": "./src/enums/*.ts",
-    "./fixtures/*": "./src/fixtures/*.ts",
-    "./identity/*": "./src/identity/*.ts",
-    "./index-artifact/*": "./src/index-artifact/*.ts",
-    "./jobs/*": "./src/jobs/*.ts",
-    "./llm/*": "./src/llm/*.ts",
-    "./memory/*": "./src/memory/*.ts",
-    "./primitives/*": "./src/primitives/*.ts",
-    "./pull-request/*": "./src/pull-request/*.ts",
-    "./repository/*": "./src/repository/*.ts",
-    "./review/*": "./src/review/*.ts",
-    "./usage/*": "./src/usage/*.ts",
-    "./validation/*": "./src/validation/*.ts",
-    "./webhook/*": "./src/webhook/*.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./api/*": {
+      "types": "./dist/api/*.d.ts",
+      "import": "./dist/api/*.js"
+    },
+    "./enums/*": {
+      "types": "./dist/enums/*.d.ts",
+      "import": "./dist/enums/*.js"
+    },
+    "./fixtures/*": {
+      "types": "./dist/fixtures/*.d.ts",
+      "import": "./dist/fixtures/*.js"
+    },
+    "./identity/*": {
+      "types": "./dist/identity/*.d.ts",
+      "import": "./dist/identity/*.js"
+    },
+    "./index-artifact/*": {
+      "types": "./dist/index-artifact/*.d.ts",
+      "import": "./dist/index-artifact/*.js"
+    },
+    "./jobs/*": {
+      "types": "./dist/jobs/*.d.ts",
+      "import": "./dist/jobs/*.js"
+    },
+    "./llm/*": {
+      "types": "./dist/llm/*.d.ts",
+      "import": "./dist/llm/*.js"
+    },
+    "./memory/*": {
+      "types": "./dist/memory/*.d.ts",
+      "import": "./dist/memory/*.js"
+    },
+    "./primitives/*": {
+      "types": "./dist/primitives/*.d.ts",
+      "import": "./dist/primitives/*.js"
+    },
+    "./pull-request/*": {
+      "types": "./dist/pull-request/*.d.ts",
+      "import": "./dist/pull-request/*.js"
+    },
+    "./repository/*": {
+      "types": "./dist/repository/*.d.ts",
+      "import": "./dist/repository/*.js"
+    },
+    "./review/*": {
+      "types": "./dist/review/*.d.ts",
+      "import": "./dist/review/*.js"
+    },
+    "./usage/*": {
+      "types": "./dist/usage/*.d.ts",
+      "import": "./dist/usage/*.js"
+    },
+    "./validation/*": {
+      "types": "./dist/validation/*.d.ts",
+      "import": "./dist/validation/*.js"
+    },
+    "./webhook/*": {
+      "types": "./dist/webhook/*.d.ts",
+      "import": "./dist/webhook/*.js"
+    }
   },
   "imports": {
     "#contracts/*": "./src/*.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.38",
-    "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1"
+    "@sinclair/typebox": "catalog:",
+    "ajv": "catalog:",
+    "ajv-formats": "catalog:"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }

@@ -4,14 +4,14 @@ import type {
   PublishReviewJobPayload,
   ReviewPullRequestJobPayload,
   SyncInstallationJobPayload,
-  UpdateMemoryJobPayload
+  UpdateMemoryJobPayload,
 } from "#contracts/jobs/payloads";
 import { ids } from "./common";
 
 export const validSyncInstallationJobPayloadFixture = {
   installationId: ids.installationId,
   provider: "github",
-  reason: "installed"
+  reason: "installed",
 } satisfies SyncInstallationJobPayload;
 
 export const validIndexRepoCommitJobPayloadFixture = {
@@ -20,14 +20,14 @@ export const validIndexRepoCommitJobPayloadFixture = {
   commitSha: "2222222",
   priority: "normal",
   reason: "pr_review",
-  previousIndexVersionId: ids.indexVersionId
+  previousIndexVersionId: ids.indexVersionId,
 } satisfies IndexRepoCommitJobPayload;
 
 export const validEmbeddingBatchJobPayloadFixture = {
   repoId: ids.repoId,
   indexVersionId: ids.indexVersionId,
   chunkIds: [ids.chunkId],
-  embeddingModel: "text-embedding-3-large"
+  embeddingModel: "text-embedding-3-large",
 } satisfies EmbeddingBatchJobPayload;
 
 export const validReviewPullRequestJobPayloadFixture = {
@@ -36,18 +36,18 @@ export const validReviewPullRequestJobPayloadFixture = {
   pullRequestNumber: 42,
   baseSha: "1111111",
   headSha: "2222222",
-  trigger: "webhook"
+  trigger: "webhook",
 } satisfies ReviewPullRequestJobPayload;
 
 export const validPublishReviewJobPayloadFixture = {
   reviewRunId: ids.reviewRunId,
   repoId: ids.repoId,
-  pullRequestNumber: 42
+  pullRequestNumber: 42,
 } satisfies PublishReviewJobPayload;
 
 export const validUpdateMemoryJobPayloadFixture = {
   repoId: ids.repoId,
   findingId: ids.findingId,
   outcomeId: ids.outcomeId,
-  reason: "finding_outcome"
+  reason: "finding_outcome",
 } satisfies UpdateMemoryJobPayload;

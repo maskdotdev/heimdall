@@ -1,4 +1,4 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { type Static, Type } from "@sinclair/typebox";
 
 export const UsageEventTypeSchema = Type.Union([
   Type.Literal("review.run"),
@@ -8,6 +8,6 @@ export const UsageEventTypeSchema = Type.Union([
   Type.Literal("llm.token"),
   Type.Literal("github.api_call"),
   Type.Literal("storage.artifact_written"),
-  Type.Literal("worker.job")
+  Type.Literal("worker.job"),
 ]);
 export type UsageEventType = Static<typeof UsageEventTypeSchema>;

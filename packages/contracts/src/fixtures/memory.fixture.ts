@@ -12,7 +12,7 @@ export const validFindingOutcomeFixture = {
   signalSource: "provider_webhook",
   actorLogin: "octocat",
   occurredAt: now,
-  confidence: 0.9
+  confidence: 0.9,
 } satisfies FindingOutcome;
 
 export const validRepoRuleFixture = {
@@ -25,14 +25,14 @@ export const validRepoRuleFixture = {
   matcher: {
     paths: ["**/*.generated.ts"],
     languages: ["typescript"],
-    severities: ["low", "medium"]
+    severities: ["low", "medium"],
   },
   instruction: "Do not publish findings for generated files.",
   priority: 100,
   enabled: true,
   createdByUserId: ids.userId,
   createdAt: now,
-  updatedAt: now
+  updatedAt: now,
 } satisfies RepoRule;
 
 export const validMemoryFactFixture = {
@@ -46,5 +46,5 @@ export const validMemoryFactFixture = {
   confidence: 1,
   status: "active",
   createdAt: now,
-  updatedAt: now
+  updatedAt: now,
 } satisfies MemoryFact;

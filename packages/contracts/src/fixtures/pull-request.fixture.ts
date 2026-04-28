@@ -10,11 +10,16 @@ export const validDiffHunkFixture = {
   newStart: 1,
   newLines: 5,
   lines: [
-    { kind: "context", content: "export function add(a: number, b: number) {", oldLine: 1, newLine: 1 },
+    {
+      kind: "context",
+      content: "export function add(a: number, b: number) {",
+      oldLine: 1,
+      newLine: 1,
+    },
     { kind: "deletion", content: "  return a + b", oldLine: 2 },
     { kind: "addition", content: "  return Number(a) + Number(b);", newLine: 2 },
-    { kind: "context", content: "}", oldLine: 3, newLine: 3 }
-  ]
+    { kind: "context", content: "}", oldLine: 3, newLine: 3 },
+  ],
 } satisfies DiffHunk;
 
 export const validChangedFileFixture = {
@@ -30,7 +35,7 @@ export const validChangedFileFixture = {
   patch: "@@ -1,3 +1,5 @@",
   hunks: [validDiffHunkFixture],
   oldContentHash: hashA,
-  newContentHash: hashB
+  newContentHash: hashB,
 } satisfies ChangedFile;
 
 export const validPullRequestSnapshotFixture = {
@@ -59,5 +64,5 @@ export const validPullRequestSnapshotFixture = {
   additions: 1,
   deletions: 1,
   changedFileCount: 1,
-  fetchedAt: now
+  fetchedAt: now,
 } satisfies PullRequestSnapshot;
