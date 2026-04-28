@@ -1,0 +1,39 @@
+{
+  "name": "@repo/contracts",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./api/*": "./src/api/*.ts",
+    "./enums/*": "./src/enums/*.ts",
+    "./fixtures/*": "./src/fixtures/*.ts",
+    "./identity/*": "./src/identity/*.ts",
+    "./index-artifact/*": "./src/index-artifact/*.ts",
+    "./jobs/*": "./src/jobs/*.ts",
+    "./llm/*": "./src/llm/*.ts",
+    "./memory/*": "./src/memory/*.ts",
+    "./primitives/*": "./src/primitives/*.ts",
+    "./pull-request/*": "./src/pull-request/*.ts",
+    "./repository/*": "./src/repository/*.ts",
+    "./review/*": "./src/review/*.ts",
+    "./usage/*": "./src/usage/*.ts",
+    "./validation/*": "./src/validation/*.ts",
+    "./webhook/*": "./src/webhook/*.ts"
+  },
+  "imports": {
+    "#contracts/*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.38",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
