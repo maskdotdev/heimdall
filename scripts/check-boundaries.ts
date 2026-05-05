@@ -34,6 +34,7 @@ const dependencySections = [
 const implementationPackages = new Set([
   "@repo/db",
   "@repo/github",
+  "@repo/webhook-ingestion",
   "@repo/queue",
   "@repo/repo-sync",
   "@repo/indexer-driver",

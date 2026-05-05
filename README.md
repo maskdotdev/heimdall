@@ -13,7 +13,7 @@ Greptile-like code review system built as a strict TypeScript monorepo.
 
 ```bash
 corepack enable
-corepack use pnpm@10.33.2
+corepack use pnpm@10.33.3
 pnpm install
 cp .env.example .env
 pnpm infra:up
@@ -22,7 +22,7 @@ pnpm dev
 ```
 
 If your Node distribution does not include Corepack, use
-`npm exec --yes -- pnpm@10.33.2 install` for the first install.
+`npm exec --yes -- pnpm@10.33.3 install` for the first install.
 
 ## Repository Structure
 
@@ -67,6 +67,23 @@ pnpm test
 pnpm infra:up
 pnpm infra:down
 ```
+
+## Database Migrations
+
+Drizzle schema files are the source of truth for database structure. Generate migration SQL with:
+
+```bash
+pnpm --filter @repo/db db:generate
+```
+
+Do not manually edit generated files in `packages/db/migrations`. The bootstrap file
+`packages/db/bootstrap/0000_extensions.sql` is the only hand-written database setup file; run it
+before Drizzle migrations so PostgreSQL has `vector` and `pgcrypto` available.
+
+Optional integration tests require live services:
+
+- Set `HEIMDALL_DB_TEST_URL` to run PostgreSQL migration and webhook persistence tests.
+- Set `HEIMDALL_REDIS_TEST_URL` to run Redis queue tests.
 
 ## Architecture Rule
 

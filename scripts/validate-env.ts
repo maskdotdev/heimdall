@@ -1,10 +1,14 @@
-const required = ["DATABASE_URL", "REDIS_URL"] as const;
+import { ConfigValidationError, loadRuntimeConfig } from "@repo/config";
 
-const missing = required.filter((key) => !process.env[key]);
+try {
+  loadRuntimeConfig();
+  console.log("environment looks valid");
+} catch (error: unknown) {
+  if (error instanceof ConfigValidationError) {
+    console.error(error.message);
+    process.exit(1);
+  }
 
-if (missing.length > 0) {
-  console.error(`Missing env vars: ${missing.join(", ")}`);
+  console.error(error);
   process.exit(1);
 }
-
-console.log("environment looks valid");

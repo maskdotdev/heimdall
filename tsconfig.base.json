@@ -17,6 +17,7 @@
     "useUnknownInCatchVariables": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
       "@repo/contracts": ["packages/contracts/src/index.ts"],
@@ -24,6 +25,7 @@
       "@repo/db": ["packages/db/src/index.ts"],
       "@repo/github": ["packages/github/src/index.ts"],
       "@repo/queue": ["packages/queue/src/index.ts"],
+      "@repo/webhook-ingestion": ["packages/webhook-ingestion/src/index.ts"],
       "@repo/repo-sync": ["packages/repo-sync/src/index.ts"],
       "@repo/index-schema": ["packages/index-schema/src/index.ts"],
       "@repo/indexer-driver": ["packages/indexer-driver/src/index.ts"],

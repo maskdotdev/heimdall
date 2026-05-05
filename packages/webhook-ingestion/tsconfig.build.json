@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "./.tsbuildinfo/build.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"],
+  "references": [
+    { "path": "../config/tsconfig.build.json" },
+    { "path": "../contracts/tsconfig.build.json" },
+    { "path": "../db/tsconfig.build.json" },
+    { "path": "../github/tsconfig.build.json" },
+    { "path": "../queue/tsconfig.build.json" }
+  ]
+}

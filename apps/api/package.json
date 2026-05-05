@@ -16,6 +16,9 @@
   "dependencies": {
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
+    "@repo/db": "workspace:*",
+    "@repo/queue": "workspace:*",
+    "@repo/webhook-ingestion": "workspace:*",
     "@repo/observability": "workspace:*",
     "elysia": "catalog:"
   },

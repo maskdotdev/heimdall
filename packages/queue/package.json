@@ -22,9 +22,12 @@
   "dependencies": {
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
-    "@repo/observability": "workspace:*"
+    "@repo/observability": "workspace:*",
+    "bullmq": "catalog:",
+    "ioredis": "catalog:"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

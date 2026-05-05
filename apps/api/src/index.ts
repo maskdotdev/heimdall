@@ -1,7 +1,5 @@
-import { Elysia } from "elysia";
+import { createApiApp } from "./app";
 
-const app = new Elysia()
-  .get("/healthz", () => ({ ok: true, service: "api" }))
-  .listen({ port: Number(process.env.PORT ?? 3000) });
+const app = createApiApp().listen({ port: Number(process.env.PORT ?? 3000) });
 
 console.log(`api listening on ${app.server?.hostname}:${app.server?.port}`);
