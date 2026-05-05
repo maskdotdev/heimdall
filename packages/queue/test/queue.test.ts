@@ -117,6 +117,24 @@ describe("durable worker processor", () => {
     ).rejects.toThrow("transient");
     expect(store.list()[0]).toMatchObject({ attempts: 2, status: "failed" });
   });
+
+  it("does not run handlers when the durable row is missing", async () => {
+    const store = new InMemoryDurableJobStore();
+    const handled: string[] = [];
+    const processor = createDurableJobProcessor({
+      store,
+      handlers: {
+        [JOB_TYPES.SyncInstallation]: async (envelope) => {
+          handled.push(envelope.idempotencyKey);
+        },
+      },
+    });
+
+    await expect(
+      processor({ data: syncInstallationEnvelope, attemptsMade: 0 } as never),
+    ).rejects.toThrow("was not found or is not runnable");
+    expect(handled).toEqual([]);
+  });
 });
 
 const redisUrl = process.env.HEIMDALL_REDIS_TEST_URL;

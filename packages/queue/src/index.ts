@@ -466,6 +466,11 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
     if (runState === "already_completed") {
       return;
     }
+    if (runState === "missing") {
+      throw new Error(
+        `Durable job ${envelope.jobType}:${envelope.idempotencyKey} was not found or is not runnable.`,
+      );
+    }
 
     const handler = options.handlers[envelope.jobType];
     if (!handler) {

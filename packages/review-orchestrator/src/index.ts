@@ -67,6 +67,19 @@ export type ReviewOrchestrationResult = {
   readonly candidateFindingCount: number;
 };
 
+/** Error raised when a fetched PR snapshot does not match the queued review job. */
+export class ReviewInputSnapshotMismatchError extends Error {
+  /** Creates a snapshot mismatch error. */
+  public constructor(
+    message: string,
+    /** Mismatch metadata useful for job error payloads and debugging. */
+    public readonly metadata: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "ReviewInputSnapshotMismatchError";
+  }
+}
+
 /** Runs the first deterministic end-to-end pull request review skeleton. */
 export async function runPullRequestReview(
   input: ReviewPullRequestInput,
@@ -79,6 +92,7 @@ export async function runPullRequestReview(
   const pullRequestRef = { ...repository, pullRequestNumber: input.pullRequestNumber };
 
   const snapshot = await dependencies.gitProvider.fetchPullRequestSnapshot(pullRequestRef);
+  assertSnapshotMatchesJob(input, snapshot);
   const reviewRunId = stableId("rrn", [
     "github",
     snapshot.repoId,
@@ -136,6 +150,7 @@ export async function runPullRequestReview(
         kind: "pull_request_snapshot",
         name: "pull-request-snapshot.json",
         payload: snapshot,
+        createdAt: now().toISOString(),
       }),
       await persistArtifact(reviewRepository, {
         reviewRunId,
@@ -152,6 +167,7 @@ export async function runPullRequestReview(
           },
           generatedAt: now().toISOString(),
         },
+        createdAt: now().toISOString(),
       }),
     ];
 
@@ -170,6 +186,7 @@ export async function runPullRequestReview(
       kind: "candidate_findings",
       name: "candidate-findings.json",
       payload: { schemaVersion: "candidate_findings.v1", findings: candidateFindings },
+      createdAt: now().toISOString(),
     });
     const completedAt = now().toISOString();
     reviewRun = await reviewRepository.upsertReviewRun({
@@ -286,6 +303,29 @@ async function loadGitHubRepositoryRef(
   };
 }
 
+/** Verifies that a live fetched snapshot still represents the queued review job. */
+export function assertSnapshotMatchesJob(
+  input: ReviewPullRequestInput,
+  snapshot: PullRequestSnapshot,
+): void {
+  const mismatches = [
+    ["repoId", input.repoId, snapshot.repoId],
+    ["installationId", input.installationId, snapshot.installationId],
+    ["pullRequestNumber", input.pullRequestNumber, snapshot.pullRequestNumber],
+    ["baseSha", input.baseSha, snapshot.baseSha],
+    ["headSha", input.headSha, snapshot.headSha],
+  ].filter(([, expected, actual]) => expected !== actual);
+
+  if (mismatches.length === 0) {
+    return;
+  }
+
+  throw new ReviewInputSnapshotMismatchError("Fetched pull request snapshot does not match job.", {
+    mismatches: mismatches.map(([field, expected, actual]) => ({ field, expected, actual })),
+    snapshotId: snapshot.snapshotId,
+  });
+}
+
 function createReviewRun(input: {
   readonly input: ReviewPullRequestInput;
   readonly snapshot: PullRequestSnapshot;
@@ -328,6 +368,7 @@ async function persistArtifact(
     readonly kind: ReviewArtifactKind;
     readonly name: string;
     readonly payload: unknown;
+    readonly createdAt: string;
   },
 ): Promise<ReviewArtifactRef> {
   const bytes = new TextEncoder().encode(JSON.stringify(input.payload));
@@ -337,7 +378,7 @@ async function persistArtifact(
     kind: input.kind,
     uri: `db://review_artifacts/${input.reviewRunId}/${input.kind}/${input.name}`,
     contentHash: hash,
-    createdAt: new Date().toISOString(),
+    createdAt: input.createdAt,
     metadata: { name: input.name },
   };
 
