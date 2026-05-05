@@ -7,5 +7,14 @@
     "tsBuildInfoFile": "./.tsbuildinfo/typecheck.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["dist", "node_modules"],
+  "references": [
+    { "path": "../../packages/config/tsconfig.build.json" },
+    { "path": "../../packages/contracts/tsconfig.build.json" },
+    { "path": "../../packages/db/tsconfig.build.json" },
+    { "path": "../../packages/github/tsconfig.build.json" },
+    { "path": "../../packages/queue/tsconfig.build.json" },
+    { "path": "../../packages/review-orchestrator/tsconfig.build.json" },
+    { "path": "../../packages/repo-sync/tsconfig.build.json" }
+  ]
 }

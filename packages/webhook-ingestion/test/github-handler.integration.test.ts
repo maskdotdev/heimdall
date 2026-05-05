@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "@repo/db";
 import { computeGitHubWebhookSignature } from "@repo/github";
-import { InMemoryQueueProducer } from "@repo/queue";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
@@ -25,7 +24,7 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
     await sql.end();
   });
 
-  it("persists a pull_request delivery and enqueues idempotent jobs", async () => {
+  it("persists a pull_request delivery and plans pending idempotent jobs", async () => {
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
@@ -33,11 +32,9 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
 
     const rawBody = new TextEncoder().encode(JSON.stringify(pullRequestPayload));
     const signature = computeGitHubWebhookSignature("secret", rawBody);
-    const queueProducer = new InMemoryQueueProducer();
     const handler = new GitHubWebhookHandler({
       db,
       webhookSecret: "secret",
-      queueProducer,
     });
 
     const result = await handler.handle({
@@ -50,7 +47,7 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
     });
 
     expect(result.status).toBe("accepted");
-    expect(queueProducer.jobs).toHaveLength(2);
+    expect(result.jobs).toHaveLength(2);
 
     const [counts] = await sql`
       SELECT
@@ -83,5 +80,12 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
     });
 
     expect(duplicate.status).toBe("duplicate");
+
+    const [jobStatuses] = await sql`
+      SELECT array_agg(status ORDER BY job_type) AS statuses
+      FROM background_jobs
+    `;
+
+    expect(jobStatuses).toEqual({ statuses: ["pending", "pending"] });
   });
 });

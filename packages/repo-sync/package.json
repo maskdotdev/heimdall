@@ -22,9 +22,11 @@
   "dependencies": {
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
+    "@repo/github": "workspace:*",
     "@repo/observability": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

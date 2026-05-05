@@ -9,7 +9,7 @@ export class PullRequestRepository {
   /** Creates a pull request snapshot query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
 
-  /** Inserts a pull request snapshot and preserves immutable existing rows. */
+  /** Inserts or refreshes a pull request snapshot row for the same provider snapshot ID. */
   public async insertSnapshot(snapshot: PullRequestSnapshot): Promise<PullRequestSnapshot> {
     const [row] = await this.db
       .insert(pullRequestSnapshots)
@@ -17,7 +17,30 @@ export class PullRequestRepository {
         ...snapshot,
         fetchedAt: new Date(snapshot.fetchedAt),
       })
-      .onConflictDoNothing()
+      .onConflictDoUpdate({
+        target: pullRequestSnapshots.snapshotId,
+        set: {
+          title: snapshot.title,
+          body: snapshot.body,
+          authorLogin: snapshot.authorLogin,
+          authorAssociation: snapshot.authorAssociation,
+          state: snapshot.state,
+          isDraft: snapshot.isDraft,
+          labels: snapshot.labels,
+          baseRef: snapshot.baseRef,
+          baseSha: snapshot.baseSha,
+          headRef: snapshot.headRef,
+          headSha: snapshot.headSha,
+          mergeBaseSha: snapshot.mergeBaseSha,
+          changedFiles: snapshot.changedFiles,
+          diffHash: snapshot.diffHash,
+          additions: snapshot.additions,
+          deletions: snapshot.deletions,
+          changedFileCount: snapshot.changedFileCount,
+          fetchedAt: new Date(snapshot.fetchedAt),
+          providerMetadata: snapshot.providerMetadata,
+        },
+      })
       .returning();
 
     return row ? toPullRequestSnapshot(row) : snapshot;

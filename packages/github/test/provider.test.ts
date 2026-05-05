@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { GitHubFetch } from "../src";
 import { createGitHubProvider, GitHubNotFoundError, GitHubRateLimitError } from "../src";
@@ -42,6 +42,13 @@ const createMockFetch = (routes: readonly MockRoute[]): MockFetch => {
   };
 
   return Object.assign(fetcher, { calls });
+};
+
+const dedupeMarker = (body: string, reviewRunId: string, findingId?: string): string => {
+  const fingerprint = `sha256:${createHash("sha256")
+    .update(`${reviewRunId}:${findingId ?? "summary"}:${body}`)
+    .digest("hex")}`;
+  return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
 };
 
 const createProvider = (fetcher: GitHubFetch) =>
@@ -211,6 +218,10 @@ describe("GitHubAppProvider", () => {
     const fetcher = createMockFetch([
       tokenRoute,
       {
+        match: (url) => url.includes("/repos/acme/api/pulls/7/comments?per_page=100&page=1"),
+        response: jsonResponse([]),
+      },
+      {
         match: (url) => url.endsWith("/repos/acme/api/pulls/7/reviews"),
         response: jsonResponse({ id: 12, comments: [{ id: 13 }] }),
       },
@@ -283,6 +294,46 @@ describe("GitHubAppProvider", () => {
       username: "x-access-token",
       password: "ghs_token",
     });
+  });
+
+  it("skips already published review comments by hidden marker", async () => {
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url) => url.includes("/repos/acme/api/pulls/7/comments?per_page=100&page=1"),
+        response: jsonResponse([
+          {
+            id: 13,
+            body: `Finding\n\n${dedupeMarker("Finding", "rev_1", "fnd_1")}`,
+            user: { login: "heimdall[bot]" },
+            html_url: "https://github.com/acme/api/pull/7#discussion_r13",
+          },
+        ]),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+
+    await expect(
+      provider.publishReview({
+        provider: "github",
+        installationId: "99",
+        owner: "acme",
+        repo: "api",
+        pullRequestNumber: 7,
+        reviewRunId: "rev_1",
+        headSha: "abcdef1",
+        body: "Summary",
+        comments: [
+          { path: "src/index.ts", line: 3, side: "RIGHT", body: "Finding", findingId: "fnd_1" },
+        ],
+      }),
+    ).resolves.toEqual({
+      providerReviewId: expect.stringMatching(/^review_[a-f0-9]{32}$/u),
+      commentIds: ["13"],
+    });
+    expect(fetcher.calls.some((call) => call.url.endsWith("/repos/acme/api/pulls/7/reviews"))).toBe(
+      false,
+    );
   });
 
   it("updates an existing check run with a matching review run id", async () => {

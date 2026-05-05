@@ -14,7 +14,6 @@ import {
   readGitHubWebhookHeaders,
   verifyGitHubWebhookSignature,
 } from "@repo/github";
-import type { QueueProducer } from "@repo/queue";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
 import {
@@ -35,8 +34,6 @@ export type GitHubWebhookHandlerDependencies = {
   readonly db: HeimdallDatabase;
   /** GitHub webhook secret. */
   readonly webhookSecret: string;
-  /** Queue producer used after the database transaction commits. */
-  readonly queueProducer: QueueProducer;
 };
 
 /** Request input for GitHub webhook ingestion. */
@@ -58,7 +55,7 @@ type NormalizedEvent = {
 
 const supportedEvents = new Set(["installation", "repository", "pull_request"]);
 
-/** Handles verified GitHub webhook ingestion, persistence, and queue fanout. */
+/** Handles verified GitHub webhook ingestion and durable job persistence. */
 export class GitHubWebhookHandler {
   /** Creates a GitHub webhook handler. */
   public constructor(private readonly dependencies: GitHubWebhookHandlerDependencies) {}
@@ -79,8 +76,6 @@ export class GitHubWebhookHandler {
 
     const normalized = this.normalize(headers, input.rawBody);
     const result = await this.persist(normalized);
-
-    await Promise.all(result.jobs.map((job) => this.dependencies.queueProducer.enqueue(job)));
 
     return result;
   }
@@ -342,7 +337,7 @@ async function persistJob(tx: Transaction, job: PlannedJob): Promise<void> {
       queueName: job.queueName,
       jobKey: job.envelope.idempotencyKey,
       jobType: job.envelope.jobType,
-      status: "queued",
+      status: "pending",
       orgId: job.orgId,
       repoId: job.repoId,
       payload: job.envelope,

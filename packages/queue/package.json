@@ -22,7 +22,9 @@
   "dependencies": {
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
+    "@repo/db": "workspace:*",
     "@repo/observability": "workspace:*",
+    "drizzle-orm": "catalog:",
     "bullmq": "catalog:",
     "ioredis": "catalog:"
   },

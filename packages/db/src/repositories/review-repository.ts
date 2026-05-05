@@ -1,7 +1,8 @@
-import type { CandidateFinding, ReviewRun } from "@repo/contracts";
+import { randomUUID } from "node:crypto";
+import type { CandidateFinding, ReviewArtifactRef, ReviewRun } from "@repo/contracts";
 import { eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { candidateFindings, reviewRuns } from "../schema";
+import { candidateFindings, reviewArtifacts, reviewRunStageEvents, reviewRuns } from "../schema";
 import { toCandidateFinding, toReviewRun } from "./row-mappers";
 
 const requireReturnedRow = <T>(row: T | undefined): T => {
@@ -69,5 +70,59 @@ export class ReviewRepository {
       .returning();
 
     return row ? toCandidateFinding(row) : finding;
+  }
+
+  /** Inserts a review artifact row and preserves existing run/kind/name rows. */
+  public async insertReviewArtifact(input: {
+    /** Review run that owns the artifact. */
+    readonly reviewRunId: string;
+    /** Repository that owns the artifact. */
+    readonly repoId: string;
+    /** Artifact reference stored on the review run. */
+    readonly artifact: ReviewArtifactRef;
+    /** Human-readable artifact name scoped to the review run and kind. */
+    readonly name: string;
+    /** Artifact payload size in bytes. */
+    readonly sizeBytes: number;
+    /** Optional artifact metadata. */
+    readonly metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.db
+      .insert(reviewArtifacts)
+      .values({
+        reviewArtifactId: input.artifact.artifactId,
+        reviewRunId: input.reviewRunId,
+        repoId: input.repoId,
+        kind: input.artifact.kind,
+        name: input.name,
+        uri: input.artifact.uri,
+        hash: input.artifact.contentHash ?? "",
+        sizeBytes: input.sizeBytes,
+        metadata: input.metadata ?? input.artifact.metadata,
+      })
+      .onConflictDoNothing();
+  }
+
+  /** Records a review stage timeline event for replay and debugging. */
+  public async insertStageEvent(input: {
+    /** Review run ID associated with the stage event. */
+    readonly reviewRunId: string;
+    /** Stage name. */
+    readonly stage: string;
+    /** Stage status. */
+    readonly status: string;
+    /** Optional event message. */
+    readonly message?: string;
+    /** Optional event metadata. */
+    readonly metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.db.insert(reviewRunStageEvents).values({
+      reviewRunStageEventId: `rrse_${randomUUID().replaceAll("-", "")}`,
+      reviewRunId: input.reviewRunId,
+      stage: input.stage,
+      status: input.status,
+      message: input.message,
+      metadata: input.metadata,
+    });
   }
 }

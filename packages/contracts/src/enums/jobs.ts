@@ -1,6 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 
 export const JobStatusSchema = Type.Union([
+  Type.Literal("pending"),
   Type.Literal("queued"),
   Type.Literal("running"),
   Type.Literal("completed"),

@@ -397,12 +397,43 @@ export class GitHubAppProvider implements GitProvider {
       throw new GitHubPermissionError("GitHub review comments are disabled by configuration.", {});
     }
 
-    const comments = input.comments.map((comment) => ({
-      path: comment.path,
-      line: comment.line,
-      side: comment.side,
-      body: this.withDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
-    }));
+    const existingComments = await this.fetchExistingReviewComments(input);
+    const comments = input.comments
+      .map((comment) => ({
+        path: comment.path,
+        line: comment.line,
+        side: comment.side,
+        body: this.withDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+        marker: this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+      }))
+      .filter(
+        (comment) =>
+          !existingComments.some((existingComment) =>
+            existingComment.body.includes(comment.marker),
+          ),
+      );
+
+    if (comments.length === 0) {
+      return {
+        providerReviewId: stableId("review", [
+          "github",
+          input.owner,
+          input.repo,
+          input.pullRequestNumber,
+          input.reviewRunId,
+        ]),
+        commentIds: existingComments
+          .filter((existingComment) =>
+            input.comments.some((comment) =>
+              existingComment.body.includes(
+                this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+              ),
+            ),
+          )
+          .map((existingComment) => existingComment.providerCommentId),
+      };
+    }
+
     const review = await this.requestInstallation<JsonRecord>(
       input,
       `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}/reviews`,
@@ -414,7 +445,7 @@ export class GitHubAppProvider implements GitProvider {
           body: input.body
             ? this.withDedupeMarker(input.body, input.reviewRunId)
             : `Heimdall review ${input.reviewRunId}`,
-          comments,
+          comments: comments.map(({ marker: _marker, ...comment }) => comment),
         }),
       },
     );
@@ -766,8 +797,30 @@ export class GitHubAppProvider implements GitProvider {
   }
 
   private withDedupeMarker(body: string, reviewRunId: string, findingId?: string): string {
+    return `${body}\n\n${this.createDedupeMarker(body, reviewRunId, findingId)}`;
+  }
+
+  private createDedupeMarker(body: string, reviewRunId: string, findingId?: string): string {
     const fingerprint = sha256(`${reviewRunId}:${findingId ?? "summary"}:${body}`);
-    return `${body}\n\n<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
+    return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
+  }
+
+  private async fetchExistingReviewComments(
+    input: GitHubPullRequestRef,
+  ): Promise<readonly ExistingBotComment[]> {
+    const comments = await this.paginateInstallation<JsonRecord>(
+      input,
+      `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}/comments`,
+    );
+
+    return comments
+      .filter((comment) => optionalString(comment, "body")?.includes("<!-- heimdall:"))
+      .map((comment) => ({
+        providerCommentId: asString(comment, "id"),
+        body: asString(comment, "body"),
+        authorLogin: asString(asRecord(comment.user, "comment.user"), "login"),
+        ...withOptional("htmlUrl", optionalString(comment, "html_url")),
+      }));
   }
 }
 

@@ -10,5 +10,6 @@
     "tsBuildInfoFile": "./.tsbuildinfo/build.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"]
+  "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"],
+  "references": [{ "path": "../github/tsconfig.build.json" }]
 }

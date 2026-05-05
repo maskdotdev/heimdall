@@ -1,5 +1,4 @@
 import { createDatabaseClient } from "@repo/db";
-import { BullMqQueueProducer, type QueueProducer } from "@repo/queue";
 import {
   GitHubWebhookHandler,
   WebhookAuthenticationError,
@@ -11,22 +10,17 @@ import { Elysia } from "elysia";
 export type CreateApiAppOptions = {
   /** GitHub webhook handler for tests or custom composition. */
   readonly githubWebhookHandler?: GitHubWebhookHandler;
-  /** Queue producer closed when the process exits. */
-  readonly queueProducer?: QueueProducer;
 };
 
 /** Creates the Heimdall API app. */
 export function createApiApp(options: CreateApiAppOptions = {}) {
   const databaseClient = options.githubWebhookHandler ? undefined : createDatabaseClient();
-  const queueProducer =
-    options.queueProducer ?? (options.githubWebhookHandler ? undefined : new BullMqQueueProducer());
   const db = databaseClient?.db;
   const githubWebhookHandler =
     options.githubWebhookHandler ??
     new GitHubWebhookHandler({
       db: db ?? createDatabaseClient().db,
       webhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? "",
-      queueProducer: queueProducer ?? new BullMqQueueProducer(),
     });
 
   return new Elysia()

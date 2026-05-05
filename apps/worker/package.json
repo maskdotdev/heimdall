@@ -16,8 +16,15 @@
   "dependencies": {
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
+    "@repo/db": "workspace:*",
+    "@repo/github": "workspace:*",
     "@repo/observability": "workspace:*",
-    "@repo/queue": "workspace:*"
+    "@repo/queue": "workspace:*",
+    "@repo/review-orchestrator": "workspace:*",
+    "@repo/repo-sync": "workspace:*",
+    "bullmq": "catalog:",
+    "drizzle-orm": "catalog:",
+    "ioredis": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
