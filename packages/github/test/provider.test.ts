@@ -1,7 +1,12 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { GitHubFetch } from "../src";
-import { createGitHubProvider, GitHubNotFoundError, GitHubRateLimitError } from "../src";
+import type { CheckRunAnnotation, GitHubFetch } from "../src";
+import {
+  createFakeGitProvider,
+  createGitHubProvider,
+  GitHubNotFoundError,
+  GitHubRateLimitError,
+} from "../src";
 
 type MockRoute = {
   readonly match: (url: string, init?: RequestInit) => boolean;
@@ -226,6 +231,10 @@ describe("GitHubAppProvider", () => {
         response: jsonResponse({ id: 12, comments: [{ id: 13 }] }),
       },
       {
+        match: (url) => url.includes("/repos/acme/api/issues/7/comments?per_page=100&page=1"),
+        response: jsonResponse([]),
+      },
+      {
         match: (url) => url.endsWith("/repos/acme/api/issues/7/comments"),
         response: jsonResponse({ id: 14, html_url: "https://github.com/acme/api/pull/7#comment" }),
       },
@@ -265,7 +274,7 @@ describe("GitHubAppProvider", () => {
         body: "Summary",
         comments: [{ path: "src/index.ts", line: 3, side: "RIGHT", body: "Finding" }],
       }),
-    ).resolves.toEqual({ providerReviewId: "12", commentIds: ["13"] });
+    ).resolves.toMatchObject({ providerReviewId: "12", commentIds: ["13"] });
     await expect(
       provider.publishSummaryComment({ ...ref, reviewRunId: "rev_1", body: "Done" }),
     ).resolves.toMatchObject({ providerCommentId: "14" });
@@ -327,9 +336,10 @@ describe("GitHubAppProvider", () => {
           { path: "src/index.ts", line: 3, side: "RIGHT", body: "Finding", findingId: "fnd_1" },
         ],
       }),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       providerReviewId: expect.stringMatching(/^review_[a-f0-9]{32}$/u),
       commentIds: ["13"],
+      commentIdsByFindingId: { fnd_1: "13" },
     });
     expect(fetcher.calls.some((call) => call.url.endsWith("/repos/acme/api/pulls/7/reviews"))).toBe(
       false,
@@ -367,6 +377,100 @@ describe("GitHubAppProvider", () => {
         summary: "No findings",
       }),
     ).resolves.toMatchObject({ providerCheckRunId: "15" });
+  });
+
+  it("dedupes summary comments by hidden marker", async () => {
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url) => url.includes("/repos/acme/api/issues/7/comments?per_page=100&page=1"),
+        response: jsonResponse([
+          {
+            id: 14,
+            body: `Done\n\n${dedupeMarker("Done", "rev_1")}`,
+            user: { login: "heimdall[bot]" },
+            html_url: "https://github.com/acme/api/pull/7#issuecomment-14",
+          },
+        ]),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+
+    await expect(
+      provider.publishSummaryComment({
+        provider: "github",
+        installationId: "99",
+        owner: "acme",
+        repo: "api",
+        pullRequestNumber: 7,
+        reviewRunId: "rev_1",
+        body: "Done",
+      }),
+    ).resolves.toEqual({
+      providerCommentId: "14",
+      htmlUrl: "https://github.com/acme/api/pull/7#issuecomment-14",
+    });
+    expect(
+      fetcher.calls.some((call) => call.url.endsWith("/repos/acme/api/issues/7/comments")),
+    ).toBe(false);
+  });
+
+  it("provides fake provider coverage for publishing primitives", async () => {
+    const provider = createFakeGitProvider();
+
+    await expect(
+      provider.publishReview({
+        provider: "github",
+        installationId: "99",
+        owner: "acme",
+        repo: "api",
+        pullRequestNumber: 7,
+        reviewRunId: "rev_1",
+        headSha: "abcdef1",
+        comments: [
+          { path: "src/index.ts", line: 3, side: "RIGHT", body: "Finding", findingId: "fnd_1" },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      providerReviewId: expect.stringMatching(/^review_[a-f0-9]{24}$/u),
+      commentIds: [expect.stringMatching(/^comment_[a-f0-9]{24}$/u)],
+    });
+    await provider.publishSummaryComment({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      pullRequestNumber: 7,
+      reviewRunId: "rev_1",
+      body: "Summary",
+    });
+    await provider.publishSummaryComment({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      pullRequestNumber: 7,
+      reviewRunId: "rev_1",
+      body: "Summary",
+    });
+    await provider.createOrUpdateCheckRun({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      reviewRunId: "rev_1",
+      name: "Heimdall",
+      headSha: "abcdef1",
+      status: "completed",
+      conclusion: "success",
+      title: "Review complete",
+      summary: "Done",
+      annotations: [] satisfies CheckRunAnnotation[],
+    });
+
+    expect(provider.publishedReviews).toHaveLength(1);
+    expect(provider.publishedSummaryComments).toHaveLength(1);
+    expect(provider.checkRuns).toHaveLength(1);
   });
 
   it("maps GitHub API errors to typed provider errors", async () => {

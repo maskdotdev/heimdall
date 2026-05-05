@@ -20,7 +20,7 @@ tracked milestone.
 | #0 Core contracts and shared types | Partial | `packages/contracts`, `b9b4635` | Enough contracts exist for current DB, webhook, and queue work. Continue expanding as later phases need new boundary types. |
 | #1 Monorepo and build system | Partial | `package.json`, `pnpm-workspace.yaml`, `turbo.json`, `b9b4635` | Workspace, TypeScript, Biome, Vitest, Turbo, and boundary checks are active. CI status still needs confirmation. |
 | #2 Database layer | Partial | `packages/db`, `drizzle.config.ts`, `packages/db/migrations/0000_foundation.sql`, `b9b4635` | Drizzle schema, generated migration, bootstrap extensions, client, and repository helpers exist. More repository methods and live DB verification remain. |
-| #3 GitHub App integration | Partial | `packages/github`, `408f7bd` | Provider surface, installation token caching, repo discovery, PR snapshot fetching, clone auth, publishing primitives, inline review dedupe, check-run create/update, and typed error mapping exist. Remaining phase criteria: summary-comment dedupe, rate-limit observation, fake adapter, and manual dev-app runbook. |
+| #3 GitHub App integration | Partial | `packages/github`, `408f7bd` | Provider surface, installation token caching, repo discovery, PR snapshot fetching, clone auth, publishing primitives, inline review dedupe, summary-comment dedupe, check-run create/update, fake provider coverage, and typed error mapping exist. Remaining phase criteria: rate-limit observation and manual dev-app runbook. |
 | #4 Webhook ingestion | Done | `packages/webhook-ingestion`, `apps/api/src/app.ts`, `b9b4635` | Handles GitHub installation, repository, and pull request webhooks with signature verification, persistence, idempotency, and job planning. |
 | #5 API server | Partial | `apps/api`, `b9b4635` | Health check and GitHub webhook route exist. Control-plane auth, settings, history, rules, usage, and debug APIs remain. |
 | #6 Web dashboard | Not started | `apps/web` | Dashboard implementation has not started. |
@@ -37,7 +37,7 @@ tracked milestone.
 | #17 LLM gateway | Partial | `packages/llm-gateway` | Schema-validating structured-output gateway and deterministic static adapter exist for review findings. Real provider adapters, call persistence, cost tracking, retries, and prompt/version management remain. |
 | #18 Review passes | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts` | `@repo/review-engine` exports a typed `ReviewPass` boundary, deterministic boundary pass, and LLM-backed review pass that consumes retrieval context. More specialized retrieval/tool/static-analysis passes remain. |
 | #19 Finding validation, dedupe, and ranking | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts`, `packages/db` | Candidate findings now flow through deterministic anchor validation, severity/category gates, basic repo-rule suppression, duplicate suppression, budget limiting, and ranking before persistence. Semantic dedupe, memory suppression, repo settings integration, and validation event traces remain. |
-| #20 Publisher | Partial | `packages/publisher`, `apps/worker/src/index.ts`, `packages/db/src/schema/tables.ts` | Completed review output enqueues `review.publish.v1`; the worker handles publish jobs; `@repo/publisher` creates or updates a GitHub check run and persists publish state. Inline comments, summary-comment fallback/dedupe, and reconciliation remain. |
+| #20 Publisher | Partial | `packages/publisher`, `apps/worker/src/index.ts`, `packages/db/src/schema/tables.ts` | Completed review output enqueues `review.publish.v1`; the worker handles publish jobs; `@repo/publisher` protects against stale heads, creates or updates check runs, publishes inline comments, falls back to deduped summary comments, and reconciles durable publish state. Broader operational replay and live GitHub smoke coverage remain. |
 | #21 Feedback and memory system | Not started | `packages/memory` | Package exists, but memory implementation has not started. |
 | #22 Repo rules and configuration | Partial | `packages/db/src/schema/tables.ts` | DB tables exist. Rule evaluation and API/dashboard flows remain. |
 | #23 Static analysis integration | Deferred | `phases/23-static-analysis-integration-implementation-spec.md` | Deferred until core review flow exists. |
@@ -53,13 +53,12 @@ tracked milestone.
 ## Current Completion Notes
 
 - Latest completed milestone: `#4 Webhook ingestion`, commit `b9b4635`.
-- Latest implementation milestone: indexing and retrieval backbone across the indexer boundary,
-  TypeScript indexer, index importer, embedding worker path, and index-backed retrieval.
-- Latest verification: full `bun x pnpm check` passed for the indexing and retrieval backbone.
+- Latest implementation milestone: publisher/live PR output path with inline comments,
+  summary-comment fallback/dedupe, stale-head protection, reconciliation, and fake provider coverage.
+- Latest verification: full `pnpm check` passed for the publisher/live PR output path.
 - Optional live integration tests require `HEIMDALL_DB_TEST_URL` and `HEIMDALL_REDIS_TEST_URL`.
 - Drizzle schema files are the source of truth for DB structure. Do not manually edit generated migration SQL.
 
 ## Recommended Next Goal
 
-Complete the publisher/live PR output path: inline review comments, summary-comment fallback and
-dedupe, stale-head protection, publish reconciliation, and provider fake coverage.
+Run live GitHub smoke coverage for the publisher path and continue operational replay controls.

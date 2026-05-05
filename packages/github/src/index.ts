@@ -1,4 +1,6 @@
 export * from "./errors";
+export type { FakeGitProviderOptions } from "./fake-provider";
+export { createFakeGitProvider, FakeGitProvider } from "./fake-provider";
 export { createGitHubProvider, GitHubAppProvider } from "./provider";
 export type * from "./types";
 export {

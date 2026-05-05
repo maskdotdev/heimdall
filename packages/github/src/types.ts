@@ -125,6 +125,8 @@ export type PublishedReview = {
   readonly providerReviewId: string;
   /** Published inline comment IDs, if GitHub returned them. */
   readonly commentIds: readonly string[];
+  /** Published inline comment IDs keyed by stable finding ID when available. */
+  readonly commentIdsByFindingId?: Readonly<Record<string, string>>;
 };
 
 /** Check run status. */

@@ -398,22 +398,33 @@ export class GitHubAppProvider implements GitProvider {
     }
 
     const existingComments = await this.fetchExistingReviewComments(input);
-    const comments = input.comments
-      .map((comment) => ({
-        path: comment.path,
-        line: comment.line,
-        side: comment.side,
-        body: this.withDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
-        marker: this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
-      }))
-      .filter(
-        (comment) =>
-          !existingComments.some((existingComment) =>
-            existingComment.body.includes(comment.marker),
-          ),
-      );
+    const requestedComments = input.comments.map((comment) => ({
+      path: comment.path,
+      line: comment.line,
+      side: comment.side,
+      body: this.withDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+      marker: this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+      ...(comment.findingId ? { findingId: comment.findingId } : {}),
+    }));
+    const comments = requestedComments.filter(
+      (comment) =>
+        !existingComments.some((existingComment) => existingComment.body.includes(comment.marker)),
+    );
 
     if (comments.length === 0) {
+      const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
+        requestedComments,
+        existingComments,
+      );
+      const existingCommentIds = requestedComments
+        .map(
+          (comment) =>
+            existingComments.find((existingComment) =>
+              existingComment.body.includes(comment.marker),
+            )?.providerCommentId,
+        )
+        .filter((commentId): commentId is string => Boolean(commentId));
+
       return {
         providerReviewId: stableId("review", [
           "github",
@@ -422,15 +433,8 @@ export class GitHubAppProvider implements GitProvider {
           input.pullRequestNumber,
           input.reviewRunId,
         ]),
-        commentIds: existingComments
-          .filter((existingComment) =>
-            input.comments.some((comment) =>
-              existingComment.body.includes(
-                this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
-              ),
-            ),
-          )
-          .map((existingComment) => existingComment.providerCommentId),
+        commentIds: existingCommentIds,
+        commentIdsByFindingId,
       };
     }
 
@@ -445,19 +449,41 @@ export class GitHubAppProvider implements GitProvider {
           body: input.body
             ? this.withDedupeMarker(input.body, input.reviewRunId)
             : `Heimdall review ${input.reviewRunId}`,
-          comments: comments.map(({ marker: _marker, ...comment }) => comment),
+          comments: comments.map(
+            ({ marker: _marker, findingId: _findingId, ...comment }) => comment,
+          ),
         }),
       },
     );
     const providerReviewId = asString(review, "id");
     const returnedComments = Array.isArray(review.comments) ? review.comments : [];
 
+    const returnedCommentIds = returnedComments
+      .map((comment) => optionalRecord(comment)?.id)
+      .filter((id): id is string | number => typeof id === "string" || typeof id === "number")
+      .map(String);
+    const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
+      requestedComments,
+      existingComments,
+    );
+    for (const [index, comment] of comments.entries()) {
+      const commentId = returnedCommentIds[index];
+      if (comment.findingId && commentId) {
+        commentIdsByFindingId[comment.findingId] = commentId;
+      }
+    }
+    const existingCommentIds = requestedComments
+      .map(
+        (comment) =>
+          existingComments.find((existingComment) => existingComment.body.includes(comment.marker))
+            ?.providerCommentId,
+      )
+      .filter((commentId): commentId is string => Boolean(commentId));
+
     return {
       providerReviewId,
-      commentIds: returnedComments
-        .map((comment) => optionalRecord(comment)?.id)
-        .filter((id): id is string | number => typeof id === "string" || typeof id === "number")
-        .map(String),
+      commentIds: [...existingCommentIds, ...returnedCommentIds],
+      commentIdsByFindingId,
     };
   }
 
@@ -542,6 +568,17 @@ export class GitHubAppProvider implements GitProvider {
   ): Promise<PublishedSummaryComment> {
     if (!this.config.enableIssueSummaryComments) {
       throw new GitHubPermissionError("GitHub summary comments are disabled by configuration.", {});
+    }
+
+    const marker = this.createDedupeMarker(input.body, input.reviewRunId);
+    const [existingComment] = (await this.fetchExistingBotComments(input)).filter((comment) =>
+      comment.body.includes(marker),
+    );
+    if (existingComment) {
+      return {
+        providerCommentId: existingComment.providerCommentId,
+        ...withOptional("htmlUrl", existingComment.htmlUrl),
+      };
     }
 
     const comment = await this.requestInstallation<JsonRecord>(
@@ -803,6 +840,24 @@ export class GitHubAppProvider implements GitProvider {
   private createDedupeMarker(body: string, reviewRunId: string, findingId?: string): string {
     const fingerprint = sha256(`${reviewRunId}:${findingId ?? "summary"}:${body}`);
     return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
+  }
+
+  private mapExistingCommentIdsByFindingId(
+    comments: readonly { readonly marker: string; readonly findingId?: string }[],
+    existingComments: readonly ExistingBotComment[],
+  ): Record<string, string> {
+    const commentIdsByFindingId: Record<string, string> = {};
+
+    for (const comment of comments) {
+      const existingComment = existingComments.find((candidate) =>
+        candidate.body.includes(comment.marker),
+      );
+      if (comment.findingId && existingComment) {
+        commentIdsByFindingId[comment.findingId] = existingComment.providerCommentId;
+      }
+    }
+
+    return commentIdsByFindingId;
   }
 
   private async fetchExistingReviewComments(
