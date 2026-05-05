@@ -9,7 +9,8 @@ import type {
 import { hashA, hashB, ids, now } from "./common";
 
 export const validIndexManifestFixture = {
-  schemaVersion: "index_manifest.v1",
+  schemaVersion: "index_artifact.v1",
+  recordSchemaVersion: "index_record.v1",
   artifactId: ids.artifactId,
   repoId: ids.repoId,
   commitSha: "2222222",
@@ -29,7 +30,7 @@ export const validIndexManifestFixture = {
 
 export const validFileRecordFixture = {
   type: "file",
-  schemaVersion: "index_record.file.v1",
+  schemaVersion: "index_record.v1",
   fileId: ids.fileId,
   repoId: ids.repoId,
   commitSha: "2222222",
@@ -46,7 +47,7 @@ export const validFileRecordFixture = {
 
 export const validSymbolRecordFixture = {
   type: "symbol",
-  schemaVersion: "index_record.symbol.v1",
+  schemaVersion: "index_record.v1",
   symbolId: ids.symbolId,
   fileId: ids.fileId,
   repoId: ids.repoId,
@@ -62,7 +63,7 @@ export const validSymbolRecordFixture = {
 
 export const validEdgeRecordFixture = {
   type: "edge",
-  schemaVersion: "index_record.edge.v1",
+  schemaVersion: "index_record.v1",
   edgeId: ids.edgeId,
   repoId: ids.repoId,
   commitSha: "2222222",
@@ -76,7 +77,7 @@ export const validEdgeRecordFixture = {
 
 export const validChunkRecordFixture = {
   type: "chunk",
-  schemaVersion: "index_record.chunk.v1",
+  schemaVersion: "index_record.v1",
   chunkId: ids.chunkId,
   fileId: ids.fileId,
   symbolId: ids.symbolId,

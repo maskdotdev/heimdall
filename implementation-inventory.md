@@ -90,10 +90,18 @@ Implement the workspace structure.
   /llm-gateway
   /publisher
   /artifacts
+  /evaluation
   /memory
   /observability
+  /security
+  /admin-tools
   /config
 ```
+
+Deferred phase packages such as `/rules`, `/static-analysis`, `/tool-runner`,
+`/sandbox`, `/usage`, `/billing`, and `/entitlements` should be created when
+their owning phase starts. Do not add placeholder packages for deferred work
+unless another MVP package needs a stable boundary immediately.
 
 Required pieces:
 
@@ -1094,6 +1102,7 @@ Split:
 Required pieces:
 
 ```text
+- /packages/security
 - GitHub webhook signature verification
 - least-privilege GitHub permissions
 - token encryption
@@ -1158,6 +1167,7 @@ Implement internal debugging tools.
 Required pieces:
 
 ```text
+- /packages/admin-tools
 - inspect review run
 - inspect PR snapshot
 - inspect context bundle

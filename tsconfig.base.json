@@ -31,11 +31,16 @@
       "@repo/index-importer": ["packages/index-importer/src/index.ts"],
       "@repo/embedding": ["packages/embedding/src/index.ts"],
       "@repo/retrieval": ["packages/retrieval/src/index.ts"],
+      "@repo/review-orchestrator": ["packages/review-orchestrator/src/index.ts"],
       "@repo/review-engine": ["packages/review-engine/src/index.ts"],
       "@repo/llm-gateway": ["packages/llm-gateway/src/index.ts"],
       "@repo/publisher": ["packages/publisher/src/index.ts"],
+      "@repo/artifacts": ["packages/artifacts/src/index.ts"],
+      "@repo/evaluation": ["packages/evaluation/src/index.ts"],
       "@repo/memory": ["packages/memory/src/index.ts"],
-      "@repo/observability": ["packages/observability/src/index.ts"]
+      "@repo/observability": ["packages/observability/src/index.ts"],
+      "@repo/security": ["packages/security/src/index.ts"],
+      "@repo/admin-tools": ["packages/admin-tools/src/index.ts"]
     }
   }
 }

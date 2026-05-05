@@ -51,6 +51,8 @@ packages/artifacts
 packages/evaluation
 packages/memory
 packages/observability
+packages/security
+packages/admin-tools
 ```
 
 ## Common Commands
@@ -72,3 +74,5 @@ Apps depend on packages. Packages do not depend on apps.
 
 Use `@repo/*` imports for package boundaries. Do not deep-import across package `src`
 folders.
+
+`pnpm check` runs typecheck, lint, tests, and the workspace boundary checker.

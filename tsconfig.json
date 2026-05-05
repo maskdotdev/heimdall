@@ -17,10 +17,15 @@
     { "path": "./packages/index-importer" },
     { "path": "./packages/embedding" },
     { "path": "./packages/retrieval" },
+    { "path": "./packages/review-orchestrator" },
     { "path": "./packages/review-engine" },
     { "path": "./packages/llm-gateway" },
     { "path": "./packages/publisher" },
+    { "path": "./packages/artifacts" },
+    { "path": "./packages/evaluation" },
     { "path": "./packages/memory" },
-    { "path": "./packages/observability" }
+    { "path": "./packages/observability" },
+    { "path": "./packages/security" },
+    { "path": "./packages/admin-tools" }
   ]
 }

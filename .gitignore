@@ -30,7 +30,7 @@ logs/
 # local artifacts
 .tmp/
 tmp/
-artifacts/
+/artifacts/
 repo-cache/
 worktrees/
 

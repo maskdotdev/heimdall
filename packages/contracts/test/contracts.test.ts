@@ -331,7 +331,7 @@ describe("contract validation", () => {
   });
 
   it("reports supported schema versions", () => {
-    expect(isSupportedIndexManifestVersion("index_manifest.v1")).toBe(true);
-    expect(isSupportedIndexManifestVersion("index_manifest.v2")).toBe(false);
+    expect(isSupportedIndexManifestVersion("index_artifact.v1")).toBe(true);
+    expect(isSupportedIndexManifestVersion("index_artifact.v2")).toBe(false);
   });
 });

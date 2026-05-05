@@ -13,11 +13,16 @@ const workspace = {
     "index-importer",
     "embedding",
     "retrieval",
+    "review-orchestrator",
     "review-engine",
     "llm-gateway",
     "publisher",
+    "artifacts",
+    "evaluation",
     "memory",
     "observability",
+    "security",
+    "admin-tools",
   ],
 };
 

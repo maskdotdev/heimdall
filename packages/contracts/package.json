@@ -84,6 +84,7 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
+    "@repo/index-schema": "workspace:*",
     "@sinclair/typebox": "catalog:",
     "ajv": "catalog:",
     "ajv-formats": "catalog:"

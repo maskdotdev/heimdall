@@ -33,6 +33,8 @@ The goal of #1 is not to implement review logic yet. The goal is to create a rep
   /evaluation
   /memory
   /observability
+  /security
+  /admin-tools
   /config
 ```
 
@@ -310,6 +312,7 @@ The repo should provide:
 - Environment variable templates.
 - A place for generated artifacts and caches.
 - Clear package boundary conventions.
+- A workspace boundary check included in `pnpm check`.
 ```
 
 The repo does not need to implement GitHub App logic, indexing, review, publishing, or persistence yet.
@@ -372,7 +375,9 @@ Create this structure:
 │   ├── artifacts
 │   ├── evaluation
 │   ├── memory
-│   └── observability
+│   ├── observability
+│   ├── security
+│   └── admin-tools
 │
 ├── scripts
 │   ├── create-package.ts
@@ -412,6 +417,11 @@ Create this structure:
 
 The empty packages can initially export placeholders, but they should exist so imports, project references, and package boundaries are established early.
 
+Deferred phase packages such as `/packages/rules`, `/packages/static-analysis`,
+`/packages/tool-runner`, `/packages/sandbox`, `/packages/usage`,
+`/packages/billing`, and `/packages/entitlements` should not be scaffolded in
+#1 unless an MVP package needs a stable public boundary immediately.
+
 ---
 
 ## Workspace naming conventions
@@ -439,6 +449,8 @@ Use a single internal package namespace:
 @repo/evaluation
 @repo/memory
 @repo/observability
+@repo/security
+@repo/admin-tools
 ```
 
 Use app package names:
@@ -451,6 +463,24 @@ Use app package names:
 ```
 
 This makes logs and dependency graphs easier to read.
+
+## Boundary checker
+
+Add `scripts/check-boundaries.ts` and run it from `pnpm check`.
+
+The checker should fail the build when:
+
+```text
+- a package depends on an app package
+- an internal dependency points at an unknown workspace package
+- @repo/contracts depends on implementation packages
+- @repo/index-schema depends on another @repo package
+- @repo/review-engine depends directly on retrieval, GitHub, DB, queue, or publisher packages
+- source files deep-import another workspace package's src directory
+```
+
+This does not replace TypeScript project references. It enforces architectural
+rules that the compiler cannot infer from types alone.
 
 ---
 
@@ -484,7 +514,8 @@ Use this as the starting point.
     "format:check": "biome format .",
     "test": "turbo test",
     "test:watch": "vitest --watch",
-    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "boundaries:check": "bun run scripts/check-boundaries.ts",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries:check",
     "clean": "turbo clean && pnpm clean:local",
     "clean:local": "rm -rf .turbo node_modules apps/*/node_modules packages/*/node_modules apps/*/dist packages/*/dist coverage",
     "infra:up": "docker compose up -d",
@@ -720,7 +751,9 @@ Use this as the shared base:
       "@repo/artifacts": ["packages/artifacts/src/index.ts"],
       "@repo/evaluation": ["packages/evaluation/src/index.ts"],
       "@repo/memory": ["packages/memory/src/index.ts"],
-      "@repo/observability": ["packages/observability/src/index.ts"]
+      "@repo/observability": ["packages/observability/src/index.ts"],
+      "@repo/security": ["packages/security/src/index.ts"],
+      "@repo/admin-tools": ["packages/admin-tools/src/index.ts"]
     }
   }
 }
@@ -764,7 +797,9 @@ Use root project references:
     { "path": "./packages/artifacts" },
     { "path": "./packages/evaluation" },
     { "path": "./packages/memory" },
-    { "path": "./packages/observability" }
+    { "path": "./packages/observability" },
+    { "path": "./packages/security" },
+    { "path": "./packages/admin-tools" }
   ]
 }
 ```
@@ -1434,6 +1469,8 @@ Recommended dependencies:
   -> @repo/config
   -> @repo/github
   -> @repo/queue
+  -> @repo/security
+  -> @repo/admin-tools
   -> @repo/observability
 
 /apps/worker
@@ -1450,6 +1487,7 @@ Recommended dependencies:
   -> @repo/publisher
   -> @repo/artifacts
   -> @repo/memory
+  -> @repo/security
   -> @repo/observability
 
 /apps/indexer-cli
@@ -1460,6 +1498,12 @@ Recommended dependencies:
 /packages/review-engine
   -> @repo/contracts
   -> @repo/llm-gateway
+
+/packages/admin-tools
+  -> @repo/contracts
+  -> @repo/db
+  -> @repo/security
+  -> @repo/artifacts
 
 /packages/retrieval
   -> @repo/contracts
@@ -1480,7 +1524,9 @@ Forbidden dependencies:
 /packages/contracts -> anything product-specific
 /packages/contracts -> @repo/db
 /packages/contracts -> @repo/github
+/packages/index-schema -> any @repo/* package
 /packages/review-engine -> @repo/github
+/packages/review-engine -> @repo/retrieval
 /packages/retrieval -> @repo/publisher
 /packages/embedding -> @repo/retrieval
 /packages/indexer-ts -> @repo/db
@@ -2523,11 +2569,14 @@ CI should not have a totally separate validation path.
 - [ ] Create `/packages/evaluation` shell.
 - [ ] Create `/packages/memory` shell.
 - [ ] Create `/packages/observability` shell.
+- [ ] Create `/packages/security` shell.
+- [ ] Create `/packages/admin-tools` shell.
 
 ### Tooling
 
 - [ ] Add `scripts/print-workspace.ts`.
 - [ ] Add `scripts/validate-env.ts`.
+- [ ] Add `scripts/check-boundaries.ts`.
 - [ ] Add `.vscode/extensions.json`.
 - [ ] Add `.vscode/settings.json`.
 - [ ] Add GitHub Actions CI workflow.
