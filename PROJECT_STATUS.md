@@ -31,12 +31,12 @@ tracked milestone.
 | #11 TypeScript indexer | Not started | `packages/indexer-ts` | Package exists, but indexer implementation has not started. |
 | #12 Index importer | Not started | `packages/index-importer` | Package exists, but importer implementation has not started. |
 | #13 Embedding pipeline | Not started | `packages/embedding` | Package exists, but embedding implementation has not started. |
-| #14 Retrieval engine | Not started | `packages/retrieval` | Package exists, but retrieval implementation has not started. |
+| #14 Retrieval engine | Partial | `packages/retrieval` | Retrieval now produces compact PR context bundles from changed diff hunks with an explicit missing-index fallback. Real index, symbol, vector, and rule-backed retrieval remain. |
 | #15 PR snapshot and diff model | Partial | `packages/webhook-ingestion/src/github/payload.ts`, `packages/github`, `packages/db/src/repositories/pull-request-repository.ts`, `408f7bd` | Webhook payload normalization creates shallow snapshots, the GitHub provider can fetch full changed-file snapshots plus raw diff hashes, and review orchestration refreshes persisted snapshots for a fetched head SHA. Provider-neutral diff parsing, anchors, and golden tests remain. |
-| #16 Review orchestrator | Partial | `packages/review-orchestrator`, `apps/worker/src/index.ts` | Worker handles `pr.review.v1`, fetches a full PR snapshot, syncs the head workspace, calls `@repo/review-engine`, persists candidate and validated findings, records artifacts and stage events, completes the review run, and enqueues `review.publish.v1`. LLM/retrieval passes, replay APIs, and broader supersession policy remain. |
-| #17 LLM gateway | Not started | `packages/llm-gateway` | Package exists, but gateway implementation has not started. |
-| #18 Review passes | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts` | `@repo/review-engine` exports a typed `ReviewPass` boundary and deterministic pass used by the orchestrator. Real retrieval and LLM-backed passes remain. |
-| #19 Finding validation, dedupe, and ranking | Partial | `packages/review-orchestrator/src/index.ts`, `packages/db` | Candidate findings now flow through a small validation/ranking shim and persist validated findings. Real anchor validation, dedupe, suppression, and ranking remain. |
+| #16 Review orchestrator | Partial | `packages/review-orchestrator`, `apps/worker/src/index.ts` | Worker handles `pr.review.v1`, fetches a full PR snapshot, syncs the head workspace, builds a retrieval context bundle, calls the LLM-backed `@repo/review-engine` pass, persists candidate and validated findings, records artifacts and stage events, completes the review run, and enqueues `review.publish.v1`. Replay APIs and broader supersession policy remain. |
+| #17 LLM gateway | Partial | `packages/llm-gateway` | Schema-validating structured-output gateway and deterministic static adapter exist for review findings. Real provider adapters, call persistence, cost tracking, retries, and prompt/version management remain. |
+| #18 Review passes | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts` | `@repo/review-engine` exports a typed `ReviewPass` boundary, deterministic boundary pass, and LLM-backed review pass that consumes retrieval context. More specialized retrieval/tool/static-analysis passes remain. |
+| #19 Finding validation, dedupe, and ranking | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts`, `packages/db` | Candidate findings now flow through deterministic anchor validation, severity/category gates, basic repo-rule suppression, duplicate suppression, budget limiting, and ranking before persistence. Semantic dedupe, memory suppression, repo settings integration, and validation event traces remain. |
 | #20 Publisher | Partial | `packages/publisher`, `apps/worker/src/index.ts`, `packages/db/src/schema/tables.ts` | Completed review output enqueues `review.publish.v1`; the worker handles publish jobs; `@repo/publisher` creates or updates a GitHub check run and persists publish state. Inline comments, summary-comment fallback/dedupe, and reconciliation remain. |
 | #21 Feedback and memory system | Not started | `packages/memory` | Package exists, but memory implementation has not started. |
 | #22 Repo rules and configuration | Partial | `packages/db/src/schema/tables.ts` | DB tables exist. Rule evaluation and API/dashboard flows remain. |
@@ -53,14 +53,14 @@ tracked milestone.
 ## Current Completion Notes
 
 - Latest completed milestone: `#4 Webhook ingestion`, commit `b9b4635`.
-- Latest implementation milestone: deterministic review-engine pass boundary and publisher handoff
-  from completed review output to durable GitHub check-run publishing state.
-- Latest verification: full `bun x pnpm check` passed for the deterministic review-engine pass
-  boundary and publisher handoff milestone.
+- Latest implementation milestone: retrieval-backed context bundles, schema-validated LLM review
+  findings, and deterministic finding validation/ranking wired into review orchestration.
+- Latest verification: full `bun x pnpm check` passed for the retrieval/LLM review intelligence
+  milestone.
 - Optional live integration tests require `HEIMDALL_DB_TEST_URL` and `HEIMDALL_REDIS_TEST_URL`.
 - Drizzle schema files are the source of truth for DB structure. Do not manually edit generated migration SQL.
 
 ## Recommended Next Goal
 
-Expand the deterministic review pass into retrieval-backed and LLM-backed review passes, then
-replace the validation/ranking shim with anchor validation, dedupe, suppression, and ranking.
+Build the indexing and retrieval backbone: indexer boundary, TypeScript indexer, index importer,
+embedding pipeline, and real index-backed retrieval for review passes.

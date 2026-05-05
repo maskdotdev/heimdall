@@ -2,6 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
+    "types": ["node"],
     "noEmit": true,
     "tsBuildInfoFile": "./.tsbuildinfo/typecheck.tsbuildinfo"
   },

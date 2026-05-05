@@ -453,6 +453,9 @@ importers:
       '@repo/observability':
         specifier: workspace:*
         version: link:../observability
+      '@sinclair/typebox':
+        specifier: 'catalog:'
+        version: 0.34.49
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -583,6 +586,9 @@ importers:
         specifier: workspace:*
         version: link:../db
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.6.0
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
@@ -620,9 +626,15 @@ importers:
       '@repo/github':
         specifier: workspace:*
         version: link:../github
+      '@repo/llm-gateway':
+        specifier: workspace:*
+        version: link:../llm-gateway
       '@repo/repo-sync':
         specifier: workspace:*
         version: link:../repo-sync
+      '@repo/retrieval':
+        specifier: workspace:*
+        version: link:../retrieval
       '@repo/review-engine':
         specifier: workspace:*
         version: link:../review-engine

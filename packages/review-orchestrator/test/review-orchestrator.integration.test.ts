@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "@repo/db";
 import type { GitProvider } from "@repo/github";
+import { createStaticLLMGateway } from "@repo/llm-gateway";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
@@ -44,6 +45,20 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         db,
         gitProvider: fakeGitProvider,
         now: () => new Date(now),
+        llmGateway: createStaticLLMGateway({
+          findings: [
+            {
+              path: "src/index.ts",
+              line: 1,
+              severity: "medium",
+              category: "correctness",
+              title: "Check exported value",
+              body: "The exported value is hard-coded without validation.",
+              evidence: ["The added line exports a literal value."],
+              confidence: 0.82,
+            },
+          ],
+        }),
         syncWorkspace: async () => ({
           workspacePath: "/tmp/heimdall-review-test",
           checkedOutSha: "2222222",
@@ -70,7 +85,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     expect(counts).toEqual({
       full_snapshots: 1,
       completed_runs: 1,
-      artifacts: 4,
+      artifacts: 5,
       candidate_findings: 1,
       validated_findings: 1,
       stage_events: 3,

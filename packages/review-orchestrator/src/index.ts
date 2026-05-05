@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
 import type {
-  CandidateFinding,
   JobEnvelope,
   PullRequestSnapshot,
   ReviewArtifactKind,
   ReviewArtifactRef,
   ReviewRun,
   ReviewTrigger,
-  ValidatedFinding,
 } from "@repo/contracts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
@@ -19,8 +17,14 @@ import {
   repositories,
 } from "@repo/db";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
+import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
-import { runReviewPasses } from "@repo/review-engine";
+import { retrieveContext } from "@repo/retrieval";
+import {
+  llmReviewPass,
+  runReviewPasses,
+  validateAndRankCandidateFindings,
+} from "@repo/review-engine";
 import { and, eq } from "drizzle-orm";
 
 /** Payload required to process one pull request review job. */
@@ -49,6 +53,10 @@ export type ReviewOrchestratorDependencies = {
   readonly workspaceRoot?: string;
   /** Optional workspace sync function for tests. */
   readonly syncWorkspace?: SyncWorkspace;
+  /** Optional model gateway for LLM-backed review passes. */
+  readonly llmGateway?: LLMGateway;
+  /** Whether indexed retrieval is available for this run. */
+  readonly indexAvailable?: boolean;
   /** Optional clock for deterministic tests. */
   readonly now?: () => Date;
 };
@@ -69,7 +77,7 @@ export type ReviewOrchestrationResult = {
   readonly snapshotId: string;
   /** Number of candidate findings emitted by review-engine passes. */
   readonly candidateFindingCount: number;
-  /** Number of findings accepted by the validation and ranking shim. */
+  /** Number of findings accepted for publishing after validation and ranking. */
   readonly validatedFindingCount: number;
   /** Publish job key persisted for worker handoff. */
   readonly publishJobKey: string;
@@ -179,10 +187,28 @@ export async function runPullRequestReview(
       }),
     ];
 
+    const contextBundle = await retrieveContext({
+      reviewRunId,
+      snapshot,
+      indexAvailable: dependencies.indexAvailable ?? false,
+      timestamp: now().toISOString(),
+    });
+    const contextArtifact = await persistArtifact(reviewRepository, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "context_bundle",
+      name: "context-bundle.json",
+      payload: contextBundle,
+      createdAt: now().toISOString(),
+    });
+
     const candidateFindings = await runReviewPasses({
+      passes: [llmReviewPass],
       context: {
         reviewRunId,
         snapshot,
+        contextBundle,
+        llmGateway: dependencies.llmGateway ?? createStaticLLMGateway(),
         timestamp: now().toISOString(),
       },
     });
@@ -191,6 +217,7 @@ export async function runPullRequestReview(
     }
 
     const validatedFindings = validateAndRankCandidateFindings({
+      snapshot,
       findings: candidateFindings,
       timestamp: now().toISOString(),
     });
@@ -224,8 +251,8 @@ export async function runPullRequestReview(
       summary:
         candidateFindings.length === 0
           ? "Review completed with no candidate findings and queued publisher handoff."
-          : "Review completed with deterministic findings and queued publisher handoff.",
-      artifactRefs: [...artifacts, candidateArtifact, validatedArtifact],
+          : "Review completed with validated findings and queued publisher handoff.",
+      artifactRefs: [...artifacts, contextArtifact, candidateArtifact, validatedArtifact],
       counts: {
         candidateFindings: candidateFindings.length,
         validatedFindings: validatedFindings.filter((finding) => finding.decision === "publish")
@@ -260,7 +287,8 @@ export async function runPullRequestReview(
       reviewRunId: reviewRun.reviewRunId,
       snapshotId: snapshot.snapshotId,
       candidateFindingCount: candidateFindings.length,
-      validatedFindingCount: validatedFindings.length,
+      validatedFindingCount: validatedFindings.filter((finding) => finding.decision === "publish")
+        .length,
       publishJobKey,
     };
   } catch (error) {
@@ -430,36 +458,6 @@ async function persistArtifact(
   });
 
   return artifact;
-}
-
-function validateAndRankCandidateFindings(input: {
-  readonly findings: readonly CandidateFinding[];
-  readonly timestamp: string;
-}): readonly ValidatedFinding[] {
-  return input.findings.map((finding, index) => {
-    const publishable = finding.confidence >= 0.5 && finding.evidence.length > 0;
-    return {
-      findingId: stableId("vfnd", [finding.findingId, "validation.v1"]),
-      candidateFindingId: finding.findingId,
-      reviewRunId: finding.reviewRunId,
-      decision: publishable ? "publish" : "reject",
-      category: finding.category,
-      severity: finding.severity,
-      title: finding.title,
-      body: finding.body,
-      location: finding.location,
-      evidence: finding.evidence,
-      confidence: finding.confidence,
-      validation: {
-        validatedAt: input.timestamp,
-        validatorVersion: "validation-ranking-shim.v1",
-        reasons: publishable ? [] : ["low_confidence"],
-      },
-      ...(publishable ? { rank: index + 1 } : {}),
-      fingerprint: finding.fingerprint,
-      metadata: { candidateSourceName: finding.sourceName },
-    };
-  });
 }
 
 async function enqueuePublishJob(
