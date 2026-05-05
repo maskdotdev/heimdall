@@ -147,6 +147,19 @@ Recommended package layout:
   src/handlers/review-cancel.ts
 ```
 
+Required supporting package:
+
+```text
+/packages/artifacts
+  ArtifactStore
+  ArtifactRef helpers
+  local filesystem store
+  object storage store
+  retention/deletion manifest helpers
+```
+
+The orchestrator should consume artifact storage through `@repo/artifacts`. It should not define a separate production artifact store abstraction beyond narrow adapters/fakes for tests.
+
 The orchestrator should be consumed by the worker like this:
 
 ```ts
@@ -178,7 +191,7 @@ Review Orchestrator
   |-- ReviewEngine              -> produce CandidateFinding[]
   |-- FindingValidator          -> produce ValidatedFinding[]
   |-- QueueClient               -> enqueue dependent jobs
-  |-- ArtifactStore             -> persist large artifacts
+  |-- ArtifactStore             -> persist large artifacts through @repo/artifacts
   |-- Observability             -> traces, logs, metrics
 ```
 
@@ -198,7 +211,7 @@ export type ReviewOrchestratorDeps = {
   reviewEngine: ReviewEngine;
   findingValidator: FindingValidator;
   queue: QueueClient;
-  artifacts: ArtifactStore;
+  artifacts: ArtifactStore; // from @repo/artifacts
   telemetry: Telemetry;
   clock: Clock;
 };

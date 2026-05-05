@@ -43,9 +43,12 @@ packages/indexer-ts
 packages/index-importer
 packages/embedding
 packages/retrieval
+packages/review-orchestrator
 packages/review-engine
 packages/llm-gateway
 packages/publisher
+packages/artifacts
+packages/evaluation
 packages/memory
 packages/observability
 ```

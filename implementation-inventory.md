@@ -46,10 +46,19 @@ Responsibilities:
 - stable enum definitions
 - API request/response contracts
 - job payload contracts
-- index artifact contracts
+- re-export public index artifact contracts from @repo/index-schema
 ```
 
 This is the thing that keeps the system clean.
+
+Important boundary:
+
+```text
+@repo/contracts owns app-wide domain contracts.
+@repo/index-schema owns artifact-specific manifest/record schemas and validation.
+```
+
+Do not define independent index artifact schemas in both packages.
 
 ---
 
@@ -76,9 +85,11 @@ Implement the workspace structure.
   /index-importer
   /embedding
   /retrieval
+  /review-orchestrator
   /review-engine
   /llm-gateway
   /publisher
+  /artifacts
   /memory
   /observability
   /config
@@ -1029,6 +1040,15 @@ Useful metrics:
 
 Implement a way to test review quality.
 
+Split:
+
+```text
+26A. MVP evaluation gate
+26B. Advanced evaluation system
+```
+
+`26A` ships with the first production MVP and is summarized in #31. `26B` adds production import, human labeling UI, live-model scheduled runs, and external eval integrations.
+
 Required pieces:
 
 ```text
@@ -1061,6 +1081,15 @@ Outputs:
 # 27. Security and compliance layer
 
 Implement security basics from the beginning.
+
+Split:
+
+```text
+27A. MVP security baseline
+27B. Compliance hardening
+```
+
+`27A` ships with the first production MVP. `27B` covers later compliance and enterprise posture.
 
 Required pieces:
 
@@ -1189,9 +1218,9 @@ Scale-up infra:
 
 ---
 
-# 31. Testing strategy
+# 31. Testing and evaluation strategy
 
-Implement tests at multiple levels.
+Implement tests and the first evaluation harness together. This is an MVP quality gate, not a later analytics project.
 
 Required tests:
 
@@ -1207,6 +1236,8 @@ Required tests:
 - finding validator tests
 - queue/job tests
 - end-to-end fake PR tests
+- evaluation fixture tests
+- baseline comparison tests
 ```
 
 Especially important:
@@ -1216,7 +1247,64 @@ Especially important:
 - duplicate comment prevention tests
 - idempotent job tests
 - index artifact compatibility tests
+- no-finding regression tests
+- prompt-injection fixture tests
 ```
+
+Required MVP evaluation pieces:
+
+```text
+- /packages/evaluation package
+- 10-20 curated fixture PR cases
+- fake LLM replay for deterministic CI
+- retrieval grader
+- line-anchor grader
+- validation/ranking grader
+- cost/latency summary
+- markdown/json reports
+- CI gates against a checked-in baseline
+```
+
+The detailed evaluation system lives in #26, but this MVP subset ships before production.
+
+---
+
+# 31A. Artifact store foundation
+
+Create a shared artifact storage package before review orchestration starts storing large intermediate data.
+
+Package:
+
+```text
+/packages/artifacts
+```
+
+Responsibilities:
+
+```text
+- ArtifactStore interface
+- local filesystem implementation for dev/test
+- S3/object-storage implementation for staging/prod
+- ArtifactRef helpers and metadata validation
+- content hashing and byte-size checks
+- redaction/classification metadata
+- tenant-scoped object key builder
+- signed URL authorization hooks
+- retention/deletion manifest helpers
+```
+
+This package is used by:
+
+```text
+review-orchestrator
+indexer-driver/index-importer
+llm-gateway
+static-analysis/sandbox later
+evaluation
+admin tooling
+```
+
+Do not let each phase invent its own artifact storage abstraction.
 
 ---
 
@@ -1307,11 +1395,14 @@ For the first real version, I’d implement these first:
 14. Retrieval engine
 15. PR snapshot/diff model
 16. Review orchestrator
+16A. Artifact store foundation
 17. LLM gateway
 18. Review passes
 19. Finding validation
 20. Publisher
 25. Observability
+26A. Evaluation harness MVP
+27A. Security baseline
 29. Internal tooling
 30. Deployment
 31. Testing
@@ -1324,8 +1415,8 @@ The later sections can wait:
 22. Advanced repo rules
 23. Static analysis
 24. Sandbox execution
-26. Evaluation harness
-27. Compliance hardening
+26B. Advanced evaluation harness
+27B. Compliance hardening
 28. Billing
 33. GitLab/Bitbucket
 34. High-performance indexer replacement
@@ -1344,4 +1435,3 @@ GitHub integration
   -> published comments
   -> feedback/memory
 ```
-

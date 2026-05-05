@@ -136,9 +136,7 @@ Recommended boundary:
   - artifact diffing utilities
 ```
 
-Avoid duplicating schemas. One of these two patterns is acceptable:
-
-### Option A — preferred
+Avoid duplicating schemas. Use this ownership model:
 
 `@repo/index-schema` owns artifact contracts. `@repo/contracts` re-exports public index artifact types.
 
@@ -154,23 +152,20 @@ Avoid duplicating schemas. One of these two patterns is acceptable:
   -> export type { IndexManifest, IndexRecord } from "@repo/index-schema"
 ```
 
-### Option B
+`@repo/contracts` may define shared primitives such as `RepoId`, `Sha256`, `IsoDateTime`, and `RepoPath`. `@repo/index-schema` may import those primitives, but it must remain the only package that defines artifact-specific manifest and record schemas.
 
-`@repo/contracts` owns primitive shared types. `@repo/index-schema` imports primitives and defines artifact-specific types.
+Do not put independent `IndexManifest`, `IndexRecord`, `FileRecord`, `SymbolRecord`, `ChunkRecord`, or artifact validator schemas in both packages.
+
+Do not allow circular imports. The allowed direction is `@repo/index-schema -> @repo/contracts/primitives`, with `@repo/contracts` re-exporting public artifact types only.
+
+Version naming rule:
 
 ```text
-@repo/contracts/primitives
-  -> RepoId
-  -> Sha256
-  -> IsoDateTime
-  -> RepoPath
-
-@repo/index-schema
-  -> imports primitives
-  -> defines artifact schemas
+IndexManifest.schemaVersion = "index_artifact.v1"
+IndexRecord.schemaVersion = "index_record.v1"
 ```
 
-Do not allow circular imports.
+If record-type-specific versions are needed later, add a separate `recordTypeVersion` field rather than changing the canonical `schemaVersion` value.
 
 ---
 
@@ -3054,4 +3049,3 @@ same publisher
 ```
 
 If another part of the system needs parser-specific details, put them in `metadata` or add a versioned optional feature. Do not leak parser internals into the importer or review engine.
-

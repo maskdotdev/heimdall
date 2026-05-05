@@ -25,9 +25,12 @@ The goal of #1 is not to implement review logic yet. The goal is to create a rep
   /index-importer
   /embedding
   /retrieval
+  /review-orchestrator
   /review-engine
   /llm-gateway
   /publisher
+  /artifacts
+  /evaluation
   /memory
   /observability
   /config
@@ -362,9 +365,12 @@ Create this structure:
 │   ├── index-importer
 │   ├── embedding
 │   ├── retrieval
+│   ├── review-orchestrator
 │   ├── review-engine
 │   ├── llm-gateway
 │   ├── publisher
+│   ├── artifacts
+│   ├── evaluation
 │   ├── memory
 │   └── observability
 │
@@ -425,9 +431,12 @@ Use a single internal package namespace:
 @repo/index-importer
 @repo/embedding
 @repo/retrieval
+@repo/review-orchestrator
 @repo/review-engine
 @repo/llm-gateway
 @repo/publisher
+@repo/artifacts
+@repo/evaluation
 @repo/memory
 @repo/observability
 ```
@@ -704,9 +713,12 @@ Use this as the shared base:
       "@repo/index-importer": ["packages/index-importer/src/index.ts"],
       "@repo/embedding": ["packages/embedding/src/index.ts"],
       "@repo/retrieval": ["packages/retrieval/src/index.ts"],
+      "@repo/review-orchestrator": ["packages/review-orchestrator/src/index.ts"],
       "@repo/review-engine": ["packages/review-engine/src/index.ts"],
       "@repo/llm-gateway": ["packages/llm-gateway/src/index.ts"],
       "@repo/publisher": ["packages/publisher/src/index.ts"],
+      "@repo/artifacts": ["packages/artifacts/src/index.ts"],
+      "@repo/evaluation": ["packages/evaluation/src/index.ts"],
       "@repo/memory": ["packages/memory/src/index.ts"],
       "@repo/observability": ["packages/observability/src/index.ts"]
     }
@@ -745,9 +757,12 @@ Use root project references:
     { "path": "./packages/index-importer" },
     { "path": "./packages/embedding" },
     { "path": "./packages/retrieval" },
+    { "path": "./packages/review-orchestrator" },
     { "path": "./packages/review-engine" },
     { "path": "./packages/llm-gateway" },
     { "path": "./packages/publisher" },
+    { "path": "./packages/artifacts" },
+    { "path": "./packages/evaluation" },
     { "path": "./packages/memory" },
     { "path": "./packages/observability" }
   ]
@@ -1430,8 +1445,10 @@ Recommended dependencies:
   -> @repo/index-importer
   -> @repo/embedding
   -> @repo/retrieval
+  -> @repo/review-orchestrator
   -> @repo/review-engine
   -> @repo/publisher
+  -> @repo/artifacts
   -> @repo/memory
   -> @repo/observability
 
@@ -2181,6 +2198,25 @@ Apps depend on packages. Packages should not depend on apps.
 Use `@repo/*` imports. Do not deep-import across package `src` folders.
 ````
 
+## Enforced dependency boundaries
+
+Documentation is not enough for this repo. Add a CI-enforced package dependency check before feature packages become real.
+
+Recommended rule set:
+
+```text
+- apps may depend on packages
+- packages may not depend on apps
+- no package may deep-import another package's src internals
+- @repo/contracts may not depend on implementation packages
+- @repo/index-schema may depend only on contracts primitives and lightweight validation deps
+- @repo/review-engine may not depend on @repo/github, @repo/db, @repo/retrieval, @repo/publisher, or apps
+- @repo/review-orchestrator is allowed to compose retrieval, review-engine, validation, artifacts, queue, and db
+- @repo/artifacts may not depend on review, retrieval, GitHub, or LLM packages
+```
+
+Use `dependency-cruiser`, `madge`, or targeted lint rules. The exact tool is less important than making `pnpm check` fail on boundary violations.
+
 ---
 
 ## Root health checks
@@ -2205,9 +2241,12 @@ const workspace = {
     "index-importer",
     "embedding",
     "retrieval",
+    "review-orchestrator",
     "review-engine",
     "llm-gateway",
     "publisher",
+    "artifacts",
+    "evaluation",
     "memory",
     "observability",
   ],
@@ -2476,9 +2515,12 @@ CI should not have a totally separate validation path.
 - [ ] Create `/packages/index-importer` shell.
 - [ ] Create `/packages/embedding` shell.
 - [ ] Create `/packages/retrieval` shell.
+- [ ] Create `/packages/review-orchestrator` shell.
 - [ ] Create `/packages/review-engine` shell.
 - [ ] Create `/packages/llm-gateway` shell.
 - [ ] Create `/packages/publisher` shell.
+- [ ] Create `/packages/artifacts` shell.
+- [ ] Create `/packages/evaluation` shell.
 - [ ] Create `/packages/memory` shell.
 - [ ] Create `/packages/observability` shell.
 
@@ -2541,7 +2583,7 @@ A simple shell alternative:
 
 ```bash
 mkdir -p apps/{api,web,worker,indexer-cli}/src
-mkdir -p packages/{contracts,config,db,github,queue,repo-sync,index-schema,indexer-driver,indexer-ts,index-importer,embedding,retrieval,review-engine,llm-gateway,publisher,memory,observability}/src
+mkdir -p packages/{contracts,config,db,github,queue,repo-sync,index-schema,indexer-driver,indexer-ts,index-importer,embedding,retrieval,review-orchestrator,review-engine,llm-gateway,publisher,artifacts,evaluation,memory,observability}/src
 mkdir -p scripts infra/docker .github/workflows .vscode
 ```
 

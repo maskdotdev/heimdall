@@ -18,7 +18,7 @@ Build `@repo/contracts` as a small, dependency-light TypeScript package that exp
 - Common enums.
 - Job payload contracts.
 - API request/response contracts.
-- Index artifact contracts.
+- Public re-exports of index artifact contracts owned by `@repo/index-schema`.
 - Review/finding contracts.
 - Error and result types.
 - Test fixtures.
@@ -1316,308 +1316,31 @@ index-manifest.json
 records.jsonl
 ```
 
-### IndexManifest
+### Index artifact re-exports
+
+`@repo/index-schema` owns the concrete `IndexManifest`, `IndexRecord`, and record schemas. This package should not define local copies.
+
+The contracts package may re-export the public artifact surface:
 
 ```ts
-export const IndexManifestSchema = Type.Object({
-  schemaVersion: Type.Literal("index_manifest.v1"),
-
-  artifactId: Type.String({ pattern: "^art_[A-Za-z0-9_-]+$" }),
-
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  indexerName: Type.String(),
-  indexerVersion: Type.String(),
-  chunkerVersion: Type.String(),
-
-  generatedAt: IsoDateTimeSchema,
-
-  languages: Type.Array(CodeLanguageSchema),
-
-  recordCount: Type.Integer({ minimum: 0 }),
-  fileCount: Type.Integer({ minimum: 0 }),
-  symbolCount: Type.Integer({ minimum: 0 }),
-  edgeCount: Type.Integer({ minimum: 0 }),
-  chunkCount: Type.Integer({ minimum: 0 }),
-
-  parserVersions: Type.Record(Type.String(), Type.String()),
-
-  previousIndexId: Type.Optional(Type.String({ pattern: "^idx_[A-Za-z0-9_-]+$" })),
-
-  artifactHash: Type.Optional(Sha256Schema),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
+export type {
+  IndexManifest,
+  IndexRecord,
+  FileRecord,
+  SymbolRecord,
+  EdgeRecord,
+  ChunkRecord
+} from "@repo/index-schema";
 ```
 
-### IndexRecord union
+The canonical version strings are defined in #10:
 
-All records in `records.jsonl` should be discriminated by `type`.
-
-```ts
-export const IndexRecordSchema = Type.Union([
-  FileRecordSchema,
-  SymbolRecordSchema,
-  EdgeRecordSchema,
-  ChunkRecordSchema,
-  DiagnosticRecordSchema,
-  DependencyRecordSchema,
-  RouteRecordSchema,
-  TestMappingRecordSchema
-]);
-
-export type IndexRecord = Static<typeof IndexRecordSchema>;
+```text
+IndexManifest.schemaVersion = "index_artifact.v1"
+IndexRecord.schemaVersion = "index_record.v1"
 ```
 
-### FileRecord
-
-```ts
-export const FileRecordSchema = Type.Object({
-  type: Type.Literal("file"),
-  schemaVersion: Type.Literal("index_record.file.v1"),
-
-  fileId: FileIdSchema,
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  path: RepoPathSchema,
-  language: CodeLanguageSchema,
-
-  contentHash: ContentHashSchema,
-  sizeBytes: Type.Integer({ minimum: 0 }),
-  lineCount: Type.Integer({ minimum: 0 }),
-
-  isBinary: Type.Boolean(),
-  isGenerated: Type.Boolean(),
-  isTest: Type.Boolean(),
-  isVendored: Type.Boolean(),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### SymbolRecord
-
-```ts
-export const SymbolRecordSchema = Type.Object({
-  type: Type.Literal("symbol"),
-  schemaVersion: Type.Literal("index_record.symbol.v1"),
-
-  symbolId: SymbolIdSchema,
-  fileId: FileIdSchema,
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  path: RepoPathSchema,
-  language: CodeLanguageSchema,
-
-  name: Type.String(),
-  qualifiedName: Type.Optional(Type.String()),
-  kind: SymbolKindSchema,
-
-  range: LineRangeSchema,
-  selectionRange: Type.Optional(LineRangeSchema),
-
-  signature: Type.Optional(Type.String()),
-  docstring: Type.Optional(Type.String()),
-  visibility: Type.Optional(Type.Union([
-    Type.Literal("public"),
-    Type.Literal("protected"),
-    Type.Literal("private"),
-    Type.Literal("internal"),
-    Type.Literal("unknown")
-  ])),
-
-  contentHash: ContentHashSchema,
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### EdgeRecord
-
-```ts
-export const EdgeRecordSchema = Type.Object({
-  type: Type.Literal("edge"),
-  schemaVersion: Type.Literal("index_record.edge.v1"),
-
-  edgeId: EdgeIdSchema,
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  fromId: Type.String(),
-  toId: Type.String(),
-
-  fromKind: Type.Union([
-    Type.Literal("file"),
-    Type.Literal("symbol"),
-    Type.Literal("chunk"),
-    Type.Literal("external")
-  ]),
-
-  toKind: Type.Union([
-    Type.Literal("file"),
-    Type.Literal("symbol"),
-    Type.Literal("chunk"),
-    Type.Literal("external")
-  ]),
-
-  kind: CodeEdgeKindSchema,
-
-  confidence: Type.Number({ minimum: 0, maximum: 1 }),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### ChunkRecord
-
-```ts
-export const ChunkKindSchema = Type.Union([
-  Type.Literal("file"),
-  Type.Literal("symbol"),
-  Type.Literal("symbol_part"),
-  Type.Literal("documentation"),
-  Type.Literal("config"),
-  Type.Literal("test"),
-  Type.Literal("unknown")
-]);
-
-export const ChunkRecordSchema = Type.Object({
-  type: Type.Literal("chunk"),
-  schemaVersion: Type.Literal("index_record.chunk.v1"),
-
-  chunkId: ChunkIdSchema,
-  fileId: FileIdSchema,
-  symbolId: Type.Optional(SymbolIdSchema),
-
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  path: RepoPathSchema,
-  language: CodeLanguageSchema,
-
-  range: LineRangeSchema,
-
-  kind: ChunkKindSchema,
-
-  text: Type.String(),
-  contentHash: ContentHashSchema,
-  tokenEstimate: Type.Integer({ minimum: 0 }),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### DiagnosticRecord
-
-Use for parser or indexer diagnostics.
-
-```ts
-export const DiagnosticSeveritySchema = Type.Union([
-  Type.Literal("info"),
-  Type.Literal("warning"),
-  Type.Literal("error")
-]);
-
-export const DiagnosticRecordSchema = Type.Object({
-  type: Type.Literal("diagnostic"),
-  schemaVersion: Type.Literal("index_record.diagnostic.v1"),
-
-  diagnosticId: Type.String({ pattern: "^diag_[A-Za-z0-9_-]+$" }),
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  path: Type.Optional(RepoPathSchema),
-  range: Type.Optional(LineRangeSchema),
-
-  source: Type.String(),
-  severity: DiagnosticSeveritySchema,
-  code: Type.Optional(Type.String()),
-  message: Type.String(),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### DependencyRecord
-
-```ts
-export const DependencyRecordSchema = Type.Object({
-  type: Type.Literal("dependency"),
-  schemaVersion: Type.Literal("index_record.dependency.v1"),
-
-  dependencyId: Type.String(),
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  manifestPath: RepoPathSchema,
-  packageManager: Type.Optional(Type.String()),
-  name: Type.String(),
-  versionSpec: Type.Optional(Type.String()),
-  resolvedVersion: Type.Optional(Type.String()),
-  dependencyType: Type.Optional(Type.Union([
-    Type.Literal("prod"),
-    Type.Literal("dev"),
-    Type.Literal("peer"),
-    Type.Literal("optional"),
-    Type.Literal("unknown")
-  ])),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### RouteRecord
-
-Useful for web frameworks.
-
-```ts
-export const RouteRecordSchema = Type.Object({
-  type: Type.Literal("route"),
-  schemaVersion: Type.Literal("index_record.route.v1"),
-
-  routeId: Type.String(),
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  path: RepoPathSchema,
-  language: CodeLanguageSchema,
-
-  routePattern: Type.String(),
-  methods: Type.Array(Type.String()),
-  handlerSymbolId: Type.Optional(SymbolIdSchema),
-
-  range: Type.Optional(LineRangeSchema),
-
-  framework: Type.Optional(Type.String()),
-  confidence: Type.Number({ minimum: 0, maximum: 1 }),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
-
-### TestMappingRecord
-
-```ts
-export const TestMappingRecordSchema = Type.Object({
-  type: Type.Literal("test_mapping"),
-  schemaVersion: Type.Literal("index_record.test_mapping.v1"),
-
-  testMappingId: Type.String(),
-  repoId: RepoIdSchema,
-  commitSha: Type.String({ minLength: 7, maxLength: 64 }),
-
-  testFileId: FileIdSchema,
-  targetFileId: Type.Optional(FileIdSchema),
-  targetSymbolId: Type.Optional(SymbolIdSchema),
-
-  confidence: Type.Number({ minimum: 0, maximum: 1 }),
-
-  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown()))
-}, { additionalProperties: false });
-```
+The concrete record schemas live in #10. Keep all artifact examples there so the importer, indexer, and contracts package do not drift.
 
 ---
 
@@ -2817,8 +2540,8 @@ Use explicit schema version strings:
 
 ```text
 pull_request_snapshot.v1
-index_manifest.v1
-index_record.file.v1
+index_artifact.v1
+index_record.v1
 context_bundle.v1
 candidate_finding.v1
 review_run.v1
@@ -2856,12 +2579,13 @@ framework_mapping
 Implement compatibility helpers for artifacts:
 
 ```ts
+// Implement these in @repo/index-schema and re-export from @repo/contracts only if needed.
 export function isSupportedIndexManifestVersion(version: string): boolean {
-  return version === "index_manifest.v1";
+  return version === "index_artifact.v1";
 }
 
 export function isSupportedIndexRecordVersion(record: IndexRecord): boolean {
-  // switch on record.type and schemaVersion
+  return record.schemaVersion === "index_record.v1";
 }
 ```
 
@@ -3115,7 +2839,9 @@ test file
 
 ### Phase 0.6 — Index artifact contracts
 
-Implement:
+Wire `@repo/contracts` to the artifact schema package without duplicating artifact definitions.
+
+`@repo/index-schema` owns:
 
 ```text
 IndexManifest
@@ -3130,7 +2856,15 @@ TestMappingRecord
 IndexRecord union
 ```
 
-Write JSONL validation tests.
+`@repo/contracts` should:
+
+```text
+- export shared primitives used by index artifacts
+- re-export public artifact types/schemas from @repo/index-schema when needed by app-wide consumers
+- avoid phase-local copies of artifact schemas
+```
+
+Write tests that prove the re-exported contract surface and `@repo/index-schema` validators refer to the same schema objects/types.
 
 ### Phase 0.7 — Review contracts
 
@@ -3368,43 +3102,25 @@ export type CandidateFinding = Static<typeof CandidateFindingSchema>;
 
 ---
 
-## Example implementation: index record union
+## Example implementation: index artifact re-export
 
 ```ts
-import { Type, type Static } from "@sinclair/typebox";
+export type {
+  ChunkRecord,
+  EdgeRecord,
+  FileRecord,
+  IndexManifest,
+  IndexRecord,
+  SymbolRecord
+} from "@repo/index-schema";
 
-export const FileRecordSchema = Type.Object({
-  type: Type.Literal("file"),
-  schemaVersion: Type.Literal("index_record.file.v1"),
-  // fields...
-}, { additionalProperties: false });
-
-export const SymbolRecordSchema = Type.Object({
-  type: Type.Literal("symbol"),
-  schemaVersion: Type.Literal("index_record.symbol.v1"),
-  // fields...
-}, { additionalProperties: false });
-
-export const EdgeRecordSchema = Type.Object({
-  type: Type.Literal("edge"),
-  schemaVersion: Type.Literal("index_record.edge.v1"),
-  // fields...
-}, { additionalProperties: false });
-
-export const ChunkRecordSchema = Type.Object({
-  type: Type.Literal("chunk"),
-  schemaVersion: Type.Literal("index_record.chunk.v1"),
-  // fields...
-}, { additionalProperties: false });
-
-export const IndexRecordSchema = Type.Union([
-  FileRecordSchema,
-  SymbolRecordSchema,
-  EdgeRecordSchema,
-  ChunkRecordSchema
-]);
-
-export type IndexRecord = Static<typeof IndexRecordSchema>;
+export {
+  IndexManifestSchema,
+  IndexRecordSchema,
+  validateIndexArtifact,
+  validateManifest,
+  validateRecord
+} from "@repo/index-schema";
 ```
 
 ---
@@ -3591,7 +3307,7 @@ dashboard basics
 2. Implement enums.
 3. Implement repository and installation contracts.
 4. Implement PR snapshot/diff contracts.
-5. Implement index artifact contracts.
+5. Wire index artifact re-exports from `@repo/index-schema`.
 6. Implement finding/review contracts.
 7. Implement job payload contracts.
 8. Implement API DTOs.
