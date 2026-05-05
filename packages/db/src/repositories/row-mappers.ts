@@ -5,6 +5,7 @@ import type {
   Repository,
   RepositorySettings,
   ReviewRun,
+  ValidatedFinding,
 } from "@repo/contracts";
 import {
   CandidateFindingSchema,
@@ -14,6 +15,7 @@ import {
   RepositorySchema,
   RepositorySettingsSchema,
   ReviewRunSchema,
+  ValidatedFindingSchema,
 } from "@repo/contracts";
 
 const toIso = (value: Date): string => value.toISOString();
@@ -286,5 +288,41 @@ export const toCandidateFinding = (row: {
     confidence: row.confidence,
     fingerprint: row.fingerprint,
     createdAt: toIso(row.createdAt),
+    ...withOptional("metadata", optionalRecord(row.metadata)),
+  });
+
+/** Converts a validated finding row to the validated finding contract. */
+export const toValidatedFinding = (row: {
+  findingId: string;
+  candidateFindingId: string;
+  reviewRunId: string;
+  decision: string;
+  category: string;
+  severity: string;
+  title: string;
+  body: string;
+  location: unknown;
+  evidence: unknown;
+  confidence: number;
+  validation: unknown;
+  rank: number | null;
+  fingerprint: string;
+  metadata: unknown;
+}): ValidatedFinding =>
+  parseWithSchema("ValidatedFinding", ValidatedFindingSchema, {
+    findingId: row.findingId,
+    candidateFindingId: row.candidateFindingId,
+    reviewRunId: row.reviewRunId,
+    decision: row.decision as ValidatedFinding["decision"],
+    category: row.category as ValidatedFinding["category"],
+    severity: row.severity as ValidatedFinding["severity"],
+    title: row.title,
+    body: row.body,
+    location: row.location as ValidatedFinding["location"],
+    evidence: row.evidence as ValidatedFinding["evidence"],
+    confidence: row.confidence,
+    validation: row.validation as ValidatedFinding["validation"],
+    ...withOptional("rank", row.rank ?? undefined),
+    fingerprint: row.fingerprint,
     ...withOptional("metadata", optionalRecord(row.metadata)),
   });

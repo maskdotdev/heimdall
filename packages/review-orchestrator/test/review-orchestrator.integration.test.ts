@@ -24,7 +24,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     await sql.end();
   });
 
-  it("persists a review run, fetched snapshot, artifacts, and placeholder finding", async () => {
+  it("persists a review run, findings, validation output, and publish job", async () => {
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
@@ -53,6 +53,8 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     );
 
     expect(result.candidateFindingCount).toBe(1);
+    expect(result.validatedFindingCount).toBe(1);
+    expect(result.publishJobKey).toBe(`review.publish.v1:${result.reviewRunId}`);
 
     const [counts] = await sql`
       SELECT
@@ -60,15 +62,19 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM review_runs WHERE status = 'completed') AS completed_runs,
         (SELECT count(*)::int FROM review_artifacts) AS artifacts,
         (SELECT count(*)::int FROM candidate_findings) AS candidate_findings,
-        (SELECT count(*)::int FROM review_run_stage_events) AS stage_events
+        (SELECT count(*)::int FROM validated_findings) AS validated_findings,
+        (SELECT count(*)::int FROM review_run_stage_events) AS stage_events,
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs
     `;
 
     expect(counts).toEqual({
       full_snapshots: 1,
       completed_runs: 1,
-      artifacts: 3,
+      artifacts: 4,
       candidate_findings: 1,
+      validated_findings: 1,
       stage_events: 3,
+      publish_jobs: 1,
     });
   });
 });

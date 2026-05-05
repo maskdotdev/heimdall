@@ -23,6 +23,7 @@
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
     "@repo/github": "workspace:*",
+    "@repo/review-engine": "workspace:*",
     "@repo/repo-sync": "workspace:*",
     "drizzle-orm": "catalog:",
     "postgres": "catalog:"

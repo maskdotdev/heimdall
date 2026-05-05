@@ -14,6 +14,7 @@
     { "path": "../../packages/db/tsconfig.build.json" },
     { "path": "../../packages/github/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
+    { "path": "../../packages/publisher/tsconfig.build.json" },
     { "path": "../../packages/review-orchestrator/tsconfig.build.json" },
     { "path": "../../packages/repo-sync/tsconfig.build.json" }
   ]

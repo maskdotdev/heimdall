@@ -1,9 +1,20 @@
 import { randomUUID } from "node:crypto";
-import type { CandidateFinding, ReviewArtifactRef, ReviewRun } from "@repo/contracts";
+import type {
+  CandidateFinding,
+  ReviewArtifactRef,
+  ReviewRun,
+  ValidatedFinding,
+} from "@repo/contracts";
 import { eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { candidateFindings, reviewArtifacts, reviewRunStageEvents, reviewRuns } from "../schema";
-import { toCandidateFinding, toReviewRun } from "./row-mappers";
+import {
+  candidateFindings,
+  reviewArtifacts,
+  reviewRunStageEvents,
+  reviewRuns,
+  validatedFindings,
+} from "../schema";
+import { toCandidateFinding, toReviewRun, toValidatedFinding } from "./row-mappers";
 
 const requireReturnedRow = <T>(row: T | undefined): T => {
   if (!row) {
@@ -70,6 +81,37 @@ export class ReviewRepository {
       .returning();
 
     return row ? toCandidateFinding(row) : finding;
+  }
+
+  /** Lists candidate findings for one review run. */
+  public async listCandidateFindings(reviewRunId: string): Promise<readonly CandidateFinding[]> {
+    const rows = await this.db
+      .select()
+      .from(candidateFindings)
+      .where(eq(candidateFindings.reviewRunId, reviewRunId));
+
+    return rows.map(toCandidateFinding);
+  }
+
+  /** Inserts a validated finding and preserves existing validation idempotency. */
+  public async insertValidatedFinding(finding: ValidatedFinding): Promise<ValidatedFinding> {
+    const [row] = await this.db
+      .insert(validatedFindings)
+      .values(finding)
+      .onConflictDoNothing()
+      .returning();
+
+    return row ? toValidatedFinding(row) : finding;
+  }
+
+  /** Lists validated findings for one review run. */
+  public async listValidatedFindings(reviewRunId: string): Promise<readonly ValidatedFinding[]> {
+    const rows = await this.db
+      .select()
+      .from(validatedFindings)
+      .where(eq(validatedFindings.reviewRunId, reviewRunId));
+
+    return rows.map(toValidatedFinding);
   }
 
   /** Inserts a review artifact row and preserves existing run/kind/name rows. */

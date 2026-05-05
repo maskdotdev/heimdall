@@ -1,14 +1,17 @@
 import { createHash } from "node:crypto";
 import type {
   CandidateFinding,
-  ChangedFile,
+  JobEnvelope,
   PullRequestSnapshot,
   ReviewArtifactKind,
   ReviewArtifactRef,
   ReviewRun,
   ReviewTrigger,
+  ValidatedFinding,
 } from "@repo/contracts";
+import { JOB_TYPES } from "@repo/contracts";
 import {
+  backgroundJobs,
   type HeimdallDatabase,
   PullRequestRepository,
   providerInstallations,
@@ -17,6 +20,7 @@ import {
 } from "@repo/db";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
+import { runReviewPasses } from "@repo/review-engine";
 import { and, eq } from "drizzle-orm";
 
 /** Payload required to process one pull request review job. */
@@ -63,8 +67,12 @@ export type ReviewOrchestrationResult = {
   readonly reviewRunId: string;
   /** Snapshot ID used by the review run. */
   readonly snapshotId: string;
-  /** Number of candidate findings emitted by the placeholder pass. */
+  /** Number of candidate findings emitted by review-engine passes. */
   readonly candidateFindingCount: number;
+  /** Number of findings accepted by the validation and ranking shim. */
+  readonly validatedFindingCount: number;
+  /** Publish job key persisted for worker handoff. */
+  readonly publishJobKey: string;
 };
 
 /** Error raised when a fetched PR snapshot does not match the queued review job. */
@@ -171,13 +179,23 @@ export async function runPullRequestReview(
       }),
     ];
 
-    const candidateFindings = createPlaceholderFindings({
-      reviewRunId,
-      snapshot,
-      timestamp: now().toISOString(),
+    const candidateFindings = await runReviewPasses({
+      context: {
+        reviewRunId,
+        snapshot,
+        timestamp: now().toISOString(),
+      },
     });
     for (const finding of candidateFindings) {
       await reviewRepository.insertCandidateFinding(finding);
+    }
+
+    const validatedFindings = validateAndRankCandidateFindings({
+      findings: candidateFindings,
+      timestamp: now().toISOString(),
+    });
+    for (const finding of validatedFindings) {
+      await reviewRepository.insertValidatedFinding(finding);
     }
 
     const candidateArtifact = await persistArtifact(reviewRepository, {
@@ -188,6 +206,15 @@ export async function runPullRequestReview(
       payload: { schemaVersion: "candidate_findings.v1", findings: candidateFindings },
       createdAt: now().toISOString(),
     });
+    const validatedArtifact = await persistArtifact(reviewRepository, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "validated_findings",
+      name: "validated-findings.json",
+      payload: { schemaVersion: "validated_findings.v1", findings: validatedFindings },
+      createdAt: now().toISOString(),
+    });
+    const publishJobKey = createPublishJobKey(reviewRunId);
     const completedAt = now().toISOString();
     reviewRun = await reviewRepository.upsertReviewRun({
       ...reviewRun,
@@ -196,14 +223,16 @@ export async function runPullRequestReview(
       updatedAt: completedAt,
       summary:
         candidateFindings.length === 0
-          ? "Review completed with no placeholder findings."
-          : "Review completed with one deterministic placeholder finding.",
-      artifactRefs: [...artifacts, candidateArtifact],
+          ? "Review completed with no candidate findings and queued publisher handoff."
+          : "Review completed with deterministic findings and queued publisher handoff.",
+      artifactRefs: [...artifacts, candidateArtifact, validatedArtifact],
       counts: {
         candidateFindings: candidateFindings.length,
-        validatedFindings: 0,
+        validatedFindings: validatedFindings.filter((finding) => finding.decision === "publish")
+          .length,
         publishedFindings: 0,
-        rejectedFindings: 0,
+        rejectedFindings: validatedFindings.filter((finding) => finding.decision === "reject")
+          .length,
       },
       metadata: {
         ...reviewRun.metadata,
@@ -211,7 +240,14 @@ export async function runPullRequestReview(
           checkedOutSha: workspace.checkedOutSha,
           cleanedUp: workspace.cleanedUp,
         },
+        publishJobKey,
       },
+    });
+    await enqueuePublishJob(dependencies.db, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      pullRequestNumber: snapshot.pullRequestNumber,
+      timestamp: now().toISOString(),
     });
     await reviewRepository.insertStageEvent({
       reviewRunId,
@@ -224,6 +260,8 @@ export async function runPullRequestReview(
       reviewRunId: reviewRun.reviewRunId,
       snapshotId: snapshot.snapshotId,
       candidateFindingCount: candidateFindings.length,
+      validatedFindingCount: validatedFindings.length,
+      publishJobKey,
     };
   } catch (error) {
     const failedAt = now().toISOString();
@@ -394,68 +432,85 @@ async function persistArtifact(
   return artifact;
 }
 
-function createPlaceholderFindings(input: {
-  readonly reviewRunId: string;
-  readonly snapshot: PullRequestSnapshot;
+function validateAndRankCandidateFindings(input: {
+  readonly findings: readonly CandidateFinding[];
   readonly timestamp: string;
-}): readonly CandidateFinding[] {
-  const file = input.snapshot.changedFiles.find(isReviewableFile);
-  if (!file) {
-    return [];
-  }
-
-  const line = firstAddedLine(file) ?? 1;
-  const fingerprint = sha256(`${input.reviewRunId}:${file.path}:${line}:placeholder`);
-
-  return [
-    {
-      findingId: stableId("fnd", [input.reviewRunId, file.path, line, fingerprint]),
-      schemaVersion: "candidate_finding.v1",
-      reviewRunId: input.reviewRunId,
-      source: "rule",
-      sourceName: "deterministic-placeholder",
-      category: "maintainability",
-      severity: "info",
-      title: "Placeholder review finding",
-      body: "This deterministic placeholder finding proves the review pipeline can persist findings.",
-      location: {
-        path: file.path,
-        line,
-        side: "RIGHT",
-        isInDiff: true,
+}): readonly ValidatedFinding[] {
+  return input.findings.map((finding, index) => {
+    const publishable = finding.confidence >= 0.5 && finding.evidence.length > 0;
+    return {
+      findingId: stableId("vfnd", [finding.findingId, "validation.v1"]),
+      candidateFindingId: finding.findingId,
+      reviewRunId: finding.reviewRunId,
+      decision: publishable ? "publish" : "reject",
+      category: finding.category,
+      severity: finding.severity,
+      title: finding.title,
+      body: finding.body,
+      location: finding.location,
+      evidence: finding.evidence,
+      confidence: finding.confidence,
+      validation: {
+        validatedAt: input.timestamp,
+        validatorVersion: "validation-ranking-shim.v1",
+        reasons: publishable ? [] : ["low_confidence"],
       },
-      evidence: [
-        {
-          evidenceId: stableId("ev", [input.reviewRunId, file.path, line]),
-          kind: "diff",
-          summary: "First reviewable changed file selected by the skeleton pass.",
-          path: file.path,
-          range: { startLine: line, endLine: line },
-          confidence: 1,
-        },
-      ],
-      confidence: 1,
-      fingerprint,
-      createdAt: input.timestamp,
-      metadata: { placeholder: true },
+      ...(publishable ? { rank: index + 1 } : {}),
+      fingerprint: finding.fingerprint,
+      metadata: { candidateSourceName: finding.sourceName },
+    };
+  });
+}
+
+async function enqueuePublishJob(
+  db: HeimdallDatabase,
+  input: {
+    readonly reviewRunId: string;
+    readonly repoId: string;
+    readonly pullRequestNumber: number;
+    readonly timestamp: string;
+  },
+): Promise<string> {
+  const idempotencyKey = createPublishJobKey(input.reviewRunId);
+  const envelope: JobEnvelope<{
+    readonly reviewRunId: string;
+    readonly repoId: string;
+    readonly pullRequestNumber: number;
+  }> = {
+    jobId: stableId("job", [idempotencyKey]),
+    jobType: JOB_TYPES.PublishReview,
+    schemaVersion: "job_envelope.v1",
+    idempotencyKey,
+    createdAt: input.timestamp,
+    attempt: 0,
+    maxAttempts: 3,
+    payload: {
+      reviewRunId: input.reviewRunId,
+      repoId: input.repoId,
+      pullRequestNumber: input.pullRequestNumber,
     },
-  ];
+  };
+
+  await db
+    .insert(backgroundJobs)
+    .values({
+      backgroundJobId: envelope.jobId,
+      queueName: "publishing",
+      jobKey: idempotencyKey,
+      jobType: JOB_TYPES.PublishReview,
+      status: "pending",
+      repoId: input.repoId,
+      reviewRunId: input.reviewRunId,
+      payload: envelope,
+      maxAttempts: envelope.maxAttempts,
+    })
+    .onConflictDoNothing();
+
+  return idempotencyKey;
 }
 
-function isReviewableFile(file: ChangedFile): boolean {
-  return !file.isBinary && file.status !== "deleted" && file.additions > 0;
-}
-
-function firstAddedLine(file: ChangedFile): number | undefined {
-  for (const hunk of file.hunks) {
-    for (const line of hunk.lines) {
-      if (line.kind === "addition" && line.newLine) {
-        return line.newLine;
-      }
-    }
-  }
-
-  return undefined;
+function createPublishJobKey(reviewRunId: string): string {
+  return `review.publish.v1:${reviewRunId}`;
 }
 
 function withOptionalWorkspaceRoot<T extends GitHubRepositoryRef & { readonly commitSha: string }>(

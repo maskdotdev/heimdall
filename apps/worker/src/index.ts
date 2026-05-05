@@ -3,6 +3,7 @@ import {
   type IndexRepoCommitJobPayload,
   JOB_TYPES,
   type JobPayload,
+  type PublishReviewJobPayload,
   type ReviewPullRequestJobPayload,
   type SyncInstallationJobPayload,
 } from "@repo/contracts";
@@ -18,6 +19,7 @@ import {
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
+import { publishReviewRun } from "@repo/publisher";
 import {
   BullMqQueueProducer,
   createDurableJobProcessor,
@@ -92,6 +94,14 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       });
     },
+    [JOB_TYPES.PublishReview]: async (envelope) => {
+      const payload = asPublishReviewPayload(envelope.payload);
+
+      await publishReviewRun(payload, {
+        db: options.db,
+        gitProvider: options.gitProvider,
+      });
+    },
   };
 }
 
@@ -121,9 +131,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
         : {}),
     }),
   });
-  const workers = [QUEUE_NAMES.repoSync, QUEUE_NAMES.indexing, QUEUE_NAMES.review].map(
-    (queueName) => new Worker(queueName, processor, { connection: workerConnection }),
-  );
+  const workers = [
+    QUEUE_NAMES.repoSync,
+    QUEUE_NAMES.indexing,
+    QUEUE_NAMES.review,
+    QUEUE_NAMES.publishing,
+  ].map((queueName) => new Worker(queueName, processor, { connection: workerConnection }));
   const dispatch = async () => {
     await dispatchPendingJobs({ store, queueProducer });
   };
@@ -239,6 +252,19 @@ function asReviewPullRequestPayload(payload: JobPayload): ReviewPullRequestJobPa
   }
 
   return payload as ReviewPullRequestJobPayload;
+}
+
+function asPublishReviewPayload(payload: JobPayload): PublishReviewJobPayload {
+  if (
+    !("reviewRunId" in payload) ||
+    !("repoId" in payload) ||
+    !("pullRequestNumber" in payload) ||
+    "headSha" in payload
+  ) {
+    throw new Error("Job payload is not a publish review payload.");
+  }
+
+  return payload as PublishReviewJobPayload;
 }
 
 if (import.meta.main) {

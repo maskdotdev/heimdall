@@ -20,6 +20,7 @@
     "@repo/github": "workspace:*",
     "@repo/observability": "workspace:*",
     "@repo/queue": "workspace:*",
+    "@repo/publisher": "workspace:*",
     "@repo/review-orchestrator": "workspace:*",
     "@repo/repo-sync": "workspace:*",
     "bullmq": "catalog:",
