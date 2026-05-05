@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadRuntimeConfig } from "@repo/config";
 import {
+  type EmbeddingBatchJobPayload,
   type IndexRepoCommitJobPayload,
   JOB_TYPES,
   type JobPayload,
@@ -13,12 +18,15 @@ import {
   providerInstallations,
   repositories,
 } from "@repo/db";
+import { createHashEmbeddingProvider, embedChunkBatch } from "@repo/embedding";
 import {
   createGitHubProvider,
   type GitHubInstallationRef,
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
+import { importIndexArtifact } from "@repo/index-importer";
+import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 import { publishReviewRun } from "@repo/publisher";
 import {
   BullMqQueueProducer,
@@ -33,6 +41,9 @@ import { runPullRequestReview } from "@repo/review-orchestrator";
 import { Worker } from "bullmq";
 import { and, eq } from "drizzle-orm";
 import IORedis from "ioredis";
+
+/** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
+const DEFAULT_INDEX_ARTIFACT_ROOT = ".heimdall/index-artifacts";
 
 /** GitHub installation row shape required by worker handlers. */
 type GitHubInstallationRuntimeRef = GitHubInstallationRef & {
@@ -50,6 +61,8 @@ export type CreateWorkerHandlersOptions = {
   readonly gitProvider: GitProvider;
   /** Optional parent directory for repo-sync workspaces. */
   readonly workspaceRoot?: string;
+  /** Durable directory used to store imported index artifacts before workspace cleanup. */
+  readonly indexArtifactRoot?: string;
 };
 
 /** Runtime handle returned by the worker process bootstrap. */
@@ -76,14 +89,48 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       const payload = asIndexRepoCommitPayload(envelope.payload);
       const repository = await loadGitHubRepositoryRef(options.db, payload);
 
-      await syncRepositoryWorkspace(
+      const workspace = await syncRepositoryWorkspace(
         {
           ...repository,
           commitSha: payload.commitSha,
+          keepWorkspace: true,
           ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
         },
         { gitProvider: options.gitProvider },
       );
+      try {
+        const driver = createTypeScriptIndexerDriver();
+        const result = await driver.indexRepository({
+          repoId: payload.repoId,
+          commitSha: payload.commitSha,
+          workspacePath: workspace.workspacePath,
+          ...(payload.previousIndexVersionId
+            ? { previousIndexVersionId: payload.previousIndexVersionId }
+            : {}),
+        });
+        if (!result.ok) {
+          throw new Error(`${result.error.code}: ${result.error.message}`);
+        }
+
+        const artifactUri = await persistIndexArtifact(
+          result.artifact,
+          options.indexArtifactRoot ?? DEFAULT_INDEX_ARTIFACT_ROOT,
+        );
+        await importIndexArtifact(result.artifact, {
+          db: options.db,
+          artifactUri,
+          enqueueEmbeddings: true,
+        });
+      } finally {
+        await rm(workspace.workspacePath, { force: true, recursive: true });
+      }
+    },
+    [JOB_TYPES.EmbeddingBatch]: async (envelope) => {
+      const payload = asEmbeddingBatchPayload(envelope.payload);
+      await embedChunkBatch(payload, {
+        db: options.db,
+        provider: createHashEmbeddingProvider(payload.embeddingModel),
+      });
     },
     [JOB_TYPES.ReviewPullRequest]: async (envelope) => {
       const payload = asReviewPullRequestPayload(envelope.payload);
@@ -129,11 +176,15 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ...(process.env.REPO_SYNC_WORKSPACE_ROOT
         ? { workspaceRoot: process.env.REPO_SYNC_WORKSPACE_ROOT }
         : {}),
+      ...(process.env.INDEX_ARTIFACT_ROOT
+        ? { indexArtifactRoot: process.env.INDEX_ARTIFACT_ROOT }
+        : {}),
     }),
   });
   const workers = [
     QUEUE_NAMES.repoSync,
     QUEUE_NAMES.indexing,
+    QUEUE_NAMES.embedding,
     QUEUE_NAMES.review,
     QUEUE_NAMES.publishing,
   ].map((queueName) => new Worker(queueName, processor, { connection: workerConnection }));
@@ -191,6 +242,32 @@ export async function loadGitHubInstallationRef(
   };
 }
 
+/** Writes an index artifact to durable local storage and returns its file URI. */
+export async function persistIndexArtifact(
+  artifact: Parameters<typeof importIndexArtifact>[0],
+  root: string,
+): Promise<string> {
+  const artifactPath = join(
+    resolve(root),
+    artifact.manifest.repoId,
+    artifact.manifest.commitSha,
+    artifactFileName(artifact),
+  );
+  await mkdir(dirname(artifactPath), { recursive: true });
+  await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+
+  return pathToFileURL(artifactPath).toString();
+}
+
+/** Creates a filesystem-safe artifact filename from the artifact content hash. */
+function artifactFileName(artifact: Parameters<typeof importIndexArtifact>[0]): string {
+  const artifactHash =
+    artifact.manifest.artifactHash ??
+    `sha256:${createHash("sha256").update(JSON.stringify(artifact)).digest("hex")}`;
+
+  return `${artifactHash.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
+}
+
 /** Loads a GitHub repository reference from an index job payload. */
 export async function loadGitHubRepositoryRef(
   db: HeimdallDatabase,
@@ -237,6 +314,18 @@ function asIndexRepoCommitPayload(payload: JobPayload): IndexRepoCommitJobPayloa
   }
 
   return payload as IndexRepoCommitJobPayload;
+}
+
+function asEmbeddingBatchPayload(payload: JobPayload): EmbeddingBatchJobPayload {
+  if (
+    !("chunkIds" in payload) ||
+    !("indexVersionId" in payload) ||
+    !("embeddingModel" in payload)
+  ) {
+    throw new Error("Job payload is not an embedding batch payload.");
+  }
+
+  return payload as EmbeddingBatchJobPayload;
 }
 
 function asReviewPullRequestPayload(payload: JobPayload): ReviewPullRequestJobPayload {

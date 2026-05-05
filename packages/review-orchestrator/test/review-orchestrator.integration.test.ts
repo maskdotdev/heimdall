@@ -64,6 +64,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
           checkedOutSha: "2222222",
           cleanedUp: true,
         }),
+        indexWaitTimeoutMs: 0,
       },
     );
 

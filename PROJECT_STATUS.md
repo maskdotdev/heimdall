@@ -24,16 +24,16 @@ tracked milestone.
 | #4 Webhook ingestion | Done | `packages/webhook-ingestion`, `apps/api/src/app.ts`, `b9b4635` | Handles GitHub installation, repository, and pull request webhooks with signature verification, persistence, idempotency, and job planning. |
 | #5 API server | Partial | `apps/api`, `b9b4635` | Health check and GitHub webhook route exist. Control-plane auth, settings, history, rules, usage, and debug APIs remain. |
 | #6 Web dashboard | Not started | `apps/web` | Dashboard implementation has not started. |
-| #7 Job queue and orchestration | Partial | `packages/queue`, `apps/worker`, `packages/db/src/schema/tables.ts` | Current async backbone scope exists: pending durable rows, outbox dispatch to BullMQ, worker lifecycle updates, retry/idempotency coverage, and worker handler registration, including publishing jobs. Broader reconciliation and operational controls remain. |
-| #8 Repo sync and workspace manager | Partial | `packages/repo-sync`, `apps/worker/src/index.ts` | Repo sync can obtain GitHub clone auth, create an exact-commit workspace, verify `HEAD`, and clean up temporary workspaces. Broader workspace caching and indexer integration remain. |
-| #9 Indexer boundary | Not started | `packages/indexer-driver` | Package exists, but boundary implementation has not started. |
-| #10 Index artifact schema | Partial | `packages/index-schema` | Package exists and is referenced by contracts. Confirm against phase definition of done before marking done. |
-| #11 TypeScript indexer | Not started | `packages/indexer-ts` | Package exists, but indexer implementation has not started. |
-| #12 Index importer | Not started | `packages/index-importer` | Package exists, but importer implementation has not started. |
-| #13 Embedding pipeline | Not started | `packages/embedding` | Package exists, but embedding implementation has not started. |
-| #14 Retrieval engine | Partial | `packages/retrieval` | Retrieval now produces compact PR context bundles from changed diff hunks with an explicit missing-index fallback. Real index, symbol, vector, and rule-backed retrieval remain. |
+| #7 Job queue and orchestration | Partial | `packages/queue`, `apps/worker`, `packages/db/src/schema/tables.ts` | Current async backbone scope exists: pending durable rows, outbox dispatch to BullMQ, worker lifecycle updates, retry/idempotency coverage, and worker handler registration, including indexing, embedding, review, and publishing jobs. Broader reconciliation and operational controls remain. |
+| #8 Repo sync and workspace manager | Partial | `packages/repo-sync`, `apps/worker/src/index.ts` | Repo sync can obtain GitHub clone auth, create an exact-commit workspace, verify `HEAD`, hand the workspace to the TypeScript indexer, and clean up temporary workspaces. Broader workspace caching remains. |
+| #9 Indexer boundary | Partial | `packages/indexer-driver`, `apps/worker/src/index.ts` | Typed indexer driver boundary exists and the worker consumes artifacts through the boundary. Alternate CLI/remote driver adapters and artifact URI handoff hardening remain. |
+| #10 Index artifact schema | Partial | `packages/index-schema`, `packages/indexer-driver`, `packages/index-importer` | Artifact records are validated and consumed by the driver/importer path. Confirm full schema coverage and compatibility fixtures before marking done. |
+| #11 TypeScript indexer | Partial | `packages/indexer-ts`, `packages/indexer-ts/test` | TypeScript indexer emits files, symbols, edges, chunks, manifest hashes, and deterministic fixtures. Broader language coverage, incremental behavior, and generated/vendor heuristics remain. |
+| #12 Index importer | Partial | `packages/index-importer` | Importer persists index versions, files, symbols, edges, chunks, and durable embedding jobs idempotently. Bulk/COPY paths, richer import batch state, and artifact storage abstraction remain. |
+| #13 Embedding pipeline | Partial | `packages/embedding`, `apps/worker/src/index.ts`, `packages/embedding/test` | Durable embedding jobs are handled by the worker, deterministic 1536-d embeddings are stored in pgvector, vector dimensions are validated, and progress is cumulative. Real provider adapter, usage/cost records, cache reuse, and telemetry remain. |
+| #14 Retrieval engine | Partial | `packages/retrieval`, `packages/review-orchestrator/src/index.ts`, `packages/retrieval/test/retrieval.test.ts` | Retrieval now uses imported index rows for same-file, symbol, graph, related-test, lexical, and vector-backed context with diff fallback. Runtime bundle validation, full-text search, repo rules, traces, and dashboard inspection remain. |
 | #15 PR snapshot and diff model | Partial | `packages/webhook-ingestion/src/github/payload.ts`, `packages/github`, `packages/db/src/repositories/pull-request-repository.ts`, `408f7bd` | Webhook payload normalization creates shallow snapshots, the GitHub provider can fetch full changed-file snapshots plus raw diff hashes, and review orchestration refreshes persisted snapshots for a fetched head SHA. Provider-neutral diff parsing, anchors, and golden tests remain. |
-| #16 Review orchestrator | Partial | `packages/review-orchestrator`, `apps/worker/src/index.ts` | Worker handles `pr.review.v1`, fetches a full PR snapshot, syncs the head workspace, builds a retrieval context bundle, calls the LLM-backed `@repo/review-engine` pass, persists candidate and validated findings, records artifacts and stage events, completes the review run, and enqueues `review.publish.v1`. Replay APIs and broader supersession policy remain. |
+| #16 Review orchestrator | Partial | `packages/review-orchestrator`, `apps/worker/src/index.ts` | Worker handles `pr.review.v1`, fetches a full PR snapshot, syncs the head workspace, waits briefly for a fresh ready index, builds an indexed retrieval context bundle when available, calls the LLM-backed `@repo/review-engine` pass, persists candidate and validated findings, records artifacts and stage events, completes the review run, and enqueues `review.publish.v1`. Replay APIs and broader supersession policy remain. |
 | #17 LLM gateway | Partial | `packages/llm-gateway` | Schema-validating structured-output gateway and deterministic static adapter exist for review findings. Real provider adapters, call persistence, cost tracking, retries, and prompt/version management remain. |
 | #18 Review passes | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts` | `@repo/review-engine` exports a typed `ReviewPass` boundary, deterministic boundary pass, and LLM-backed review pass that consumes retrieval context. More specialized retrieval/tool/static-analysis passes remain. |
 | #19 Finding validation, dedupe, and ranking | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts`, `packages/db` | Candidate findings now flow through deterministic anchor validation, severity/category gates, basic repo-rule suppression, duplicate suppression, budget limiting, and ranking before persistence. Semantic dedupe, memory suppression, repo settings integration, and validation event traces remain. |
@@ -53,14 +53,13 @@ tracked milestone.
 ## Current Completion Notes
 
 - Latest completed milestone: `#4 Webhook ingestion`, commit `b9b4635`.
-- Latest implementation milestone: retrieval-backed context bundles, schema-validated LLM review
-  findings, and deterministic finding validation/ranking wired into review orchestration.
-- Latest verification: full `bun x pnpm check` passed for the retrieval/LLM review intelligence
-  milestone.
+- Latest implementation milestone: indexing and retrieval backbone across the indexer boundary,
+  TypeScript indexer, index importer, embedding worker path, and index-backed retrieval.
+- Latest verification: full `bun x pnpm check` passed for the indexing and retrieval backbone.
 - Optional live integration tests require `HEIMDALL_DB_TEST_URL` and `HEIMDALL_REDIS_TEST_URL`.
 - Drizzle schema files are the source of truth for DB structure. Do not manually edit generated migration SQL.
 
 ## Recommended Next Goal
 
-Build the indexing and retrieval backbone: indexer boundary, TypeScript indexer, index importer,
-embedding pipeline, and real index-backed retrieval for review passes.
+Complete the publisher/live PR output path: inline review comments, summary-comment fallback and
+dedupe, stale-head protection, publish reconciliation, and provider fake coverage.

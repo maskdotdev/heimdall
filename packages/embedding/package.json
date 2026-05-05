@@ -22,9 +22,11 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
-    "@repo/llm-gateway": "workspace:*"
+    "@repo/llm-gateway": "workspace:*",
+    "drizzle-orm": "catalog:"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

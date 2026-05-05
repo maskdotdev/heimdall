@@ -10,6 +10,7 @@ import type {
 import { JOB_TYPES } from "@repo/contracts";
 import {
   backgroundJobs,
+  codeIndexVersions,
   type HeimdallDatabase,
   PullRequestRepository,
   providerInstallations,
@@ -19,13 +20,19 @@ import {
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
-import { retrieveContext } from "@repo/retrieval";
+import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import {
   llmReviewPass,
   runReviewPasses,
   validateAndRankCandidateFindings,
 } from "@repo/review-engine";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
+
+/** Default bounded wait for the index job planned alongside a review job. */
+const DEFAULT_INDEX_WAIT_TIMEOUT_MS = 10_000;
+
+/** Default polling cadence while waiting for a fresh index version. */
+const DEFAULT_INDEX_POLL_INTERVAL_MS = 250;
 
 /** Payload required to process one pull request review job. */
 export type ReviewPullRequestInput = {
@@ -57,6 +64,10 @@ export type ReviewOrchestratorDependencies = {
   readonly llmGateway?: LLMGateway;
   /** Whether indexed retrieval is available for this run. */
   readonly indexAvailable?: boolean;
+  /** Maximum time to wait for a newly queued index to become ready before diff fallback. */
+  readonly indexWaitTimeoutMs?: number;
+  /** Poll interval used while waiting for a newly queued index to become ready. */
+  readonly indexPollIntervalMs?: number;
   /** Optional clock for deterministic tests. */
   readonly now?: () => Date;
 };
@@ -187,10 +198,23 @@ export async function runPullRequestReview(
       }),
     ];
 
+    const indexVersionId = await waitForReadyIndexVersionId(dependencies.db, {
+      repoId: snapshot.repoId,
+      commitSha: snapshot.headSha,
+      timeoutMs: dependencies.indexWaitTimeoutMs ?? DEFAULT_INDEX_WAIT_TIMEOUT_MS,
+      pollIntervalMs: dependencies.indexPollIntervalMs ?? DEFAULT_INDEX_POLL_INTERVAL_MS,
+    });
+    const retrievalIndex = indexVersionId
+      ? createDatabaseRetrievalIndex({
+          db: dependencies.db,
+          indexVersionId,
+        })
+      : undefined;
     const contextBundle = await retrieveContext({
       reviewRunId,
       snapshot,
-      indexAvailable: dependencies.indexAvailable ?? false,
+      indexAvailable: Boolean(retrievalIndex) || (dependencies.indexAvailable ?? false),
+      ...(retrievalIndex ? { index: retrievalIndex } : {}),
       timestamp: now().toISOString(),
     });
     const contextArtifact = await persistArtifact(reviewRepository, {
@@ -312,6 +336,60 @@ export async function runPullRequestReview(
     });
     throw error;
   }
+}
+
+/** Waits briefly for the ready index version produced by the paired indexing job. */
+async function waitForReadyIndexVersionId(
+  db: HeimdallDatabase,
+  input: {
+    readonly repoId: string;
+    readonly commitSha: string;
+    readonly timeoutMs: number;
+    readonly pollIntervalMs: number;
+  },
+): Promise<string | undefined> {
+  const timeoutMs = Math.max(0, input.timeoutMs);
+  const pollIntervalMs = Math.max(1, input.pollIntervalMs);
+  const deadline = Date.now() + timeoutMs;
+  let indexVersionId = await findReadyIndexVersionId(db, input.repoId, input.commitSha);
+
+  while (!indexVersionId && Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    await sleep(Math.min(pollIntervalMs, remainingMs));
+    indexVersionId = await findReadyIndexVersionId(db, input.repoId, input.commitSha);
+  }
+
+  return indexVersionId;
+}
+
+/** Returns the newest ready index version for a repository commit. */
+async function findReadyIndexVersionId(
+  db: HeimdallDatabase,
+  repoId: string,
+  commitSha: string,
+): Promise<string | undefined> {
+  const [row] = await db
+    .select({ indexVersionId: codeIndexVersions.indexVersionId })
+    .from(codeIndexVersions)
+    .where(
+      and(
+        eq(codeIndexVersions.repoId, repoId),
+        eq(codeIndexVersions.commitSha, commitSha),
+        eq(codeIndexVersions.status, "ready"),
+      ),
+    )
+    .orderBy(desc(codeIndexVersions.completedAt))
+    .limit(1);
+
+  return row?.indexVersionId;
+}
+
+/** Resolves after the requested number of milliseconds. */
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 }
 
 /** Loads a GitHub repository reference for review orchestration. */

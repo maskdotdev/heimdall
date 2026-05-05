@@ -16,6 +16,7 @@ import IORedis from "ioredis";
 export const QUEUE_NAMES = {
   repoSync: "repo-sync",
   indexing: "indexing",
+  embedding: "embedding",
   review: "review",
   memory: "memory",
   publishing: "publishing",

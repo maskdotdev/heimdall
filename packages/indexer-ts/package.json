@@ -21,9 +21,12 @@
   },
   "dependencies": {
     "@repo/contracts": "workspace:*",
-    "@repo/index-schema": "workspace:*"
+    "@repo/index-schema": "workspace:*",
+    "@repo/indexer-driver": "workspace:*",
+    "typescript": "catalog:"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }
