@@ -68,4 +68,28 @@ describe("admin security", () => {
     expect(rotated.session.csrfToken).not.toBe(created.session.csrfToken);
     expect(manager.clear()).toContain("Max-Age=0");
   });
+
+  it("honors the configured session cookie SameSite policy", () => {
+    const manager = createAdminSessionManager({
+      cookieName: "admin_session",
+      maxAgeSeconds: 3600,
+      sameSite: "None",
+      secure: true,
+      sessionSecret,
+    });
+
+    const created = manager.create({
+      actorType: "idp_user",
+      actorUserId: "oidc:usr_1",
+      provider: "oidc",
+      providerSubject: "usr_1",
+      role: "support",
+      permissions: ["admin.inspect"],
+      orgIds: ["*"],
+      repoIds: [],
+    });
+
+    expect(created.cookie).toContain("SameSite=None");
+    expect(manager.clear()).toContain("SameSite=None");
+  });
 });

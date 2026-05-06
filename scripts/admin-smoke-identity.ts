@@ -138,7 +138,6 @@ async function fetchGatewayIdentityAssertion(
           headers,
           body: JSON.stringify({
             orgId: request.orgId,
-            providerSubject: request.providerSubject,
             purpose: request.purpose,
             repoId: request.repoId,
           }),

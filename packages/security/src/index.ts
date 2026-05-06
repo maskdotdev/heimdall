@@ -107,6 +107,8 @@ export type AdminSessionCookieOptions = {
   readonly sessionSecret: string;
   /** Whether the cookie must include the Secure flag. */
   readonly secure: boolean;
+  /** SameSite policy for browser session cookies. */
+  readonly sameSite?: "Strict" | "Lax" | "None" | undefined;
   /** Session lifetime in seconds. */
   readonly maxAgeSeconds: number;
   /** Cookie path for admin sessions. */
@@ -155,6 +157,7 @@ export class AdminSecurityError extends Error {
 /** Creates a manager for signed admin session cookies. */
 export function createAdminSessionManager(options: AdminSessionCookieOptions): AdminSessionManager {
   const cookiePath = options.path ?? "/admin";
+  const sameSite = options.sameSite ?? "Strict";
   const now = options.now ?? (() => new Date());
 
   return {
@@ -204,7 +207,7 @@ export function createAdminSessionManager(options: AdminSessionCookieOptions): A
         httpOnly: true,
         maxAgeSeconds: 0,
         path: cookiePath,
-        sameSite: "Strict",
+        sameSite,
         secure: options.secure,
       }),
   };
@@ -365,7 +368,7 @@ function sessionCookie(
     httpOnly: true,
     maxAgeSeconds: options.maxAgeSeconds,
     path,
-    sameSite: "Strict",
+    sameSite: options.sameSite ?? "Strict",
     secure: options.secure,
   });
 }

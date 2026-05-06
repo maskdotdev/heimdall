@@ -374,7 +374,7 @@ async function seedDashboardSession(
       httpOnly: true,
       name: cookie.name,
       path: "/admin",
-      sameSite: "Strict",
+      sameSite: "None",
       secure: new URL(env.apiUrl).protocol === "https:",
       url: env.apiUrl,
       value: cookie.value,

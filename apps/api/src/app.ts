@@ -66,6 +66,8 @@ export type AdminControlPlaneAuthOptions = {
   readonly cookieName?: string;
   /** Whether session cookies require HTTPS. */
   readonly secureCookies?: boolean;
+  /** SameSite policy used for browser session cookies. */
+  readonly cookieSameSite?: "Strict" | "Lax" | "None";
   /** Session lifetime in seconds. */
   readonly sessionMaxAgeSeconds?: number;
   /** Strict CORS origins allowed to use admin credentials. */
@@ -890,6 +892,8 @@ function resolveAdminControlPlaneAuth(
     parseAdminRouteExposure(process.env.HEIMDALL_ADMIN_ROUTE_EXPOSURE) ??
     "disabled";
   const secureCookies = options?.secureCookies ?? nodeEnv === "production";
+  const cookieSameSite =
+    options?.cookieSameSite ?? parseCookieSameSite(process.env.HEIMDALL_ADMIN_COOKIE_SAME_SITE);
   const sessionSecret = options?.sessionSecret ?? process.env.HEIMDALL_ADMIN_SESSION_SECRET;
   const identityProvider =
     options?.identityProvider ??
@@ -914,6 +918,7 @@ function resolveAdminControlPlaneAuth(
       options?.internalHeaderValue ?? process.env.HEIMDALL_ADMIN_INTERNAL_HEADER_VALUE,
     nodeEnv,
     routeExposure,
+    cookieSameSite,
     secureCookies,
     sessionSecret,
   });
@@ -934,6 +939,7 @@ function resolveAdminControlPlaneAuth(
         ? createAdminSessionManager({
             cookieName: options?.cookieName ?? "heimdall_admin_session",
             maxAgeSeconds: options?.sessionMaxAgeSeconds ?? 8 * 60 * 60,
+            sameSite: cookieSameSite,
             secure: secureCookies,
             sessionSecret,
           })
@@ -962,6 +968,8 @@ function validateResolvedAdminAuth(input: {
   readonly sessionSecret?: string | undefined;
   /** Whether cookies are secure. */
   readonly secureCookies: boolean;
+  /** SameSite policy used for browser session cookies. */
+  readonly cookieSameSite?: "Strict" | "Lax" | "None" | undefined;
   /** Allowed CORS origins. */
   readonly allowedOrigins: readonly string[];
   /** Node environment name. */
@@ -993,6 +1001,9 @@ function validateResolvedAdminAuth(input: {
   }
   if (input.nodeEnv === "production" && !input.secureCookies) {
     return "Production admin sessions require secure cookies.";
+  }
+  if (input.cookieSameSite === "None" && !input.secureCookies) {
+    return "SameSite=None admin cookies require secure cookies.";
   }
   if (input.nodeEnv === "production" && input.allowedOrigins.length === 0) {
     return "Production admin CORS requires at least one explicit allowed origin.";
@@ -1511,6 +1522,11 @@ function parseAdminRouteExposure(value: string | undefined): AdminRouteExposure 
 /** Parses an identity provider value. */
 function parseIdentityProvider(value: string | undefined): AdminIdentityProvider | undefined {
   return value === "oidc" || value === "saml" || value === "github_org" ? value : undefined;
+}
+
+/** Parses an admin session cookie SameSite policy. */
+function parseCookieSameSite(value: string | undefined): "Strict" | "Lax" | "None" | undefined {
+  return value === "Strict" || value === "Lax" || value === "None" ? value : undefined;
 }
 
 /** Parses a JSON or comma-separated string list. */
