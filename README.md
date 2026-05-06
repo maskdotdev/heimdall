@@ -74,11 +74,34 @@ Admin-debug routes are disabled by default. Enable them only on trusted internal
 
 ```bash
 HEIMDALL_ADMIN_DEBUG_ENABLED=true
-HEIMDALL_ADMIN_DEBUG_TOKEN=<strong internal token>
+HEIMDALL_ADMIN_USERS='[
+  {
+    "userId": "usr_support_local",
+    "role": "support",
+    "token": "<strong support token>",
+    "email": "support@example.com",
+    "displayName": "Support User"
+  },
+  {
+    "userId": "usr_admin_local",
+    "role": "admin",
+    "token": "<strong admin token>",
+    "email": "admin@example.com",
+    "displayName": "Admin User"
+  }
+]'
 ```
 
-Send the token with `Authorization: Bearer <token>`. The routes expose webhook, review, publisher,
-failure, and replay details.
+Send one configured token with `Authorization: Bearer <token>`. Support users can inspect webhook,
+review, and publisher state and create replay plans. Admin users can also execute confirmed replay.
+Replay execution writes an `audit_logs` row with the actor, confirmation token, replay plan, and
+inserted durable job IDs.
+
+`HEIMDALL_ADMIN_DEBUG_TOKEN` remains available as a compatibility fallback and maps to an admin
+actor. Prefer `HEIMDALL_ADMIN_USERS` for operator workflows.
+
+Run the web dashboard with `pnpm dev:web`. In development, the Vite server proxies `/admin` routes
+to `http://localhost:3000`.
 
 ## Live Publisher Smoke
 

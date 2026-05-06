@@ -23,7 +23,7 @@ tracked milestone.
 | #3 GitHub App integration | Partial | `packages/github`, `408f7bd` | Provider surface, installation token caching, repo discovery, PR snapshot fetching, clone auth, publishing primitives, inline review dedupe, summary-comment dedupe, check-run create/update, fake provider coverage, and typed error mapping exist. Remaining phase criteria: rate-limit observation and manual dev-app runbook. |
 | #4 Webhook ingestion | Done | `packages/webhook-ingestion`, `apps/api/src/app.ts`, `b9b4635` | Handles GitHub installation, repository, and pull request webhooks with signature verification, persistence, idempotency, and job planning. |
 | #5 API server | Partial | `apps/api`, `b9b4635` | Health check, GitHub webhook route, and bearer-guarded internal admin-debug routes for webhook/review/publisher inspection, replay planning, and confirmed durable replay dispatch exist. Control-plane auth, settings, history, rules, and usage APIs remain. |
-| #6 Web dashboard | Not started | `apps/web` | Dashboard implementation has not started. |
+| #6 Web dashboard | Partial | `apps/web/src/main.ts`, `apps/web/src/styles.css` | Operator dashboard views exist for admin-debug webhook, review, and publisher inspection plus guarded replay controls. Broader product dashboard flows remain. |
 | #7 Job queue and orchestration | Partial | `packages/queue`, `apps/worker`, `packages/db/src/schema/tables.ts` | Current async backbone scope exists: pending durable rows, outbox dispatch to BullMQ, worker lifecycle updates, retry/idempotency coverage, and worker handler registration, including indexing, embedding, review, and publishing jobs. Broader reconciliation and operational controls remain. |
 | #8 Repo sync and workspace manager | Partial | `packages/repo-sync`, `apps/worker/src/index.ts` | Repo sync can obtain GitHub clone auth, create an exact-commit workspace, verify `HEAD`, hand the workspace to the TypeScript indexer, and clean up temporary workspaces. Broader workspace caching remains. |
 | #9 Indexer boundary | Partial | `packages/indexer-driver`, `apps/worker/src/index.ts` | Typed indexer driver boundary exists and the worker consumes artifacts through the boundary. Alternate CLI/remote driver adapters and artifact URI handoff hardening remain. |
@@ -46,7 +46,7 @@ tracked milestone.
 | #26 Evaluation harness | Not started | `packages/evaluation` | Package exists, but harness implementation has not started. |
 | #27 Security and compliance layer | Partial | `packages/security`, `packages/db/src/schema/tables.ts` | Package and audit schema support exist. Full security/compliance workflows remain. |
 | #28 Usage and billing | Partial | `packages/db/src/schema/tables.ts` | Usage event schema exists. Billing and usage ledger implementation remain. |
-| #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch for webhook/review/publisher jobs, bearer-guarded internal API routes, and guarded live smoke commands exist. Broader admin UI and audited support workflows remain. |
+| #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, and operator dashboard views exist. Broader production control-plane auth and admin workflows remain. |
 | #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/` | Local infra exists. Production deployment is not implemented. |
 | #31 Testing and evaluation strategy | Partial | `pnpm check`, package tests | Unit tests and optional integration tests exist for new work. Cross-system release gates remain. |
 
@@ -54,9 +54,9 @@ tracked milestone.
 
 - Latest completed milestone: guarded live PR review smoke verified webhook-to-publish completion
   against development PR `maskdotdev/heimdall#2`.
-- Latest implementation milestone: guarded admin-debug API visibility for webhook, review, and
-  publisher state, including structured failure details, gated replay plans, and confirmed durable
-  replay dispatch.
+- Latest implementation milestone: authenticated support/admin workflow on top of admin-debug API,
+  including webhook/review/publisher dashboard inspectors, role-gated replay execution, and
+  audited replay decisions with final durable job IDs.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
@@ -72,5 +72,5 @@ tracked milestone.
 
 ## Recommended Next Goal
 
-Add audited support/admin workflows on top of the admin-debug API, including dashboard views and an
-operator audit trail for replay decisions.
+Harden the admin workflow for production identity providers, deployment controls, and broader
+control-plane settings.

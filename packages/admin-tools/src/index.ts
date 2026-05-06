@@ -9,6 +9,7 @@ import type {
 } from "@repo/contracts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
+  auditLogs,
   backgroundJobs,
   candidateFindings,
   type HeimdallDatabase,
@@ -168,6 +169,8 @@ export type AdminWebhookDebugDetails = {
   readonly expectedJobKeys: readonly string[];
   /** Durable jobs found for the expected job keys. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
+  /** Replay decisions already audited for this webhook event. */
+  readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Structured failures collected from the webhook and related jobs. */
   readonly failures: readonly AdminFailureDetail[];
 };
@@ -208,12 +211,50 @@ export type AdminReplayExecutionResult = {
   readonly action: WebhookReplayAction | ReviewReplayAction | PublisherReplayAction;
   /** Confirmation token that matched the current replay plan. */
   readonly confirmationToken: string;
+  /** Audit log row ID written for the replay decision. */
+  readonly auditLogId: string;
   /** Durable job row IDs inserted for this replay. */
   readonly insertedJobIds: readonly string[];
   /** Durable job row IDs that already existed for the replay keys. */
   readonly existingJobIds: readonly string[];
   /** Replay jobs currently present in the durable outbox. */
   readonly replayJobs: readonly AdminBackgroundJobDebugSummary[];
+};
+
+/** Authenticated support/admin actor that requested a replay operation. */
+export type AdminReplayAuditActor = {
+  /** Actor category stored in the audit log. */
+  readonly actorType: "admin_user" | "internal_token";
+  /** Stable user or token principal ID stored in the audit log. */
+  readonly actorUserId: string;
+  /** Access role granted to the actor. */
+  readonly role: "support" | "admin";
+  /** Display name shown in operator views when available. */
+  readonly displayName?: string;
+  /** Primary email shown in operator views when available. */
+  readonly email?: string;
+};
+
+/** Replay audit row shown by admin/debug inspectors. */
+export type AdminReplayAuditSummary = {
+  /** Audit log row ID. */
+  readonly auditLogId: string;
+  /** Optional organization associated with the audited operation. */
+  readonly orgId?: string;
+  /** Actor category stored in the audit log. */
+  readonly actorType: string;
+  /** Stable actor user ID when available. */
+  readonly actorUserId?: string;
+  /** Replay action that was confirmed. */
+  readonly action: string;
+  /** Resource type affected by the replay. */
+  readonly resourceType: string;
+  /** Resource ID affected by the replay when available. */
+  readonly resourceId?: string;
+  /** ISO timestamp for the audited decision. */
+  readonly occurredAt: string;
+  /** Replay plan and result metadata recorded with the decision. */
+  readonly metadata?: unknown;
 };
 
 /** Gated replay plan for webhook-owned durable jobs. */
@@ -441,6 +482,8 @@ export type AdminReviewDebugDetails = {
   readonly llmCalls: readonly AdminLlmCallDebugSummary[];
   /** Related review and publish jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
+  /** Replay decisions already audited for this review run. */
+  readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Structured failures collected from review state and related jobs. */
   readonly failures: readonly AdminFailureDetail[];
 };
@@ -542,6 +585,8 @@ export type AdminPublisherDebugDetails = {
   readonly outputs: AdminPublisherOutputDebugSummary;
   /** Related publish jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
+  /** Publisher replay decisions already audited for this review run. */
+  readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Reconciliation report for the current durable publisher state. */
   readonly reconciliation: PublisherReconciliationReport;
   /** Structured failures collected from publisher state and related jobs. */
@@ -564,6 +609,7 @@ export type AdminDebugService = {
   readonly executeWebhookReplay: (
     webhookEventId: string,
     confirmationToken: string,
+    actor: AdminReplayAuditActor,
   ) => Promise<AdminReplayExecutionResult>;
   /** Gets review run debug details. */
   readonly getReviewDebugDetails: (reviewRunId: string) => Promise<AdminReviewDebugDetails>;
@@ -573,6 +619,7 @@ export type AdminDebugService = {
   readonly executeReviewReplay: (
     reviewRunId: string,
     confirmationToken: string,
+    actor: AdminReplayAuditActor,
   ) => Promise<AdminReplayExecutionResult>;
   /** Gets publisher debug details. */
   readonly getPublisherDebugDetails: (reviewRunId: string) => Promise<AdminPublisherDebugDetails>;
@@ -582,6 +629,7 @@ export type AdminDebugService = {
   readonly executePublisherReplay: (
     reviewRunId: string,
     confirmationToken: string,
+    actor: AdminReplayAuditActor,
   ) => Promise<AdminReplayExecutionResult>;
 };
 
@@ -594,17 +642,17 @@ export function createAdminDebugService(
       getWebhookDebugDetails(webhookEventId, dependencies),
     createWebhookReplayPlan: (webhookEventId) =>
       createWebhookReplayPlan(webhookEventId, dependencies),
-    executeWebhookReplay: (webhookEventId, confirmationToken) =>
-      executeWebhookReplay(webhookEventId, confirmationToken, dependencies),
+    executeWebhookReplay: (webhookEventId, confirmationToken, actor) =>
+      executeWebhookReplay(webhookEventId, confirmationToken, dependencies, actor),
     getReviewDebugDetails: (reviewRunId) => getReviewDebugDetails(reviewRunId, dependencies),
     createReviewReplayPlan: (reviewRunId) => createReviewReplayPlan(reviewRunId, dependencies),
-    executeReviewReplay: (reviewRunId, confirmationToken) =>
-      executeReviewReplay(reviewRunId, confirmationToken, dependencies),
+    executeReviewReplay: (reviewRunId, confirmationToken, actor) =>
+      executeReviewReplay(reviewRunId, confirmationToken, dependencies, actor),
     getPublisherDebugDetails: (reviewRunId) => getPublisherDebugDetails(reviewRunId, dependencies),
     createPublisherReplayPlan: (reviewRunId) =>
       createPublisherReplayPlan(reviewRunId, dependencies),
-    executePublisherReplay: (reviewRunId, confirmationToken) =>
-      executePublisherReplay(reviewRunId, confirmationToken, dependencies),
+    executePublisherReplay: (reviewRunId, confirmationToken, actor) =>
+      executePublisherReplay(reviewRunId, confirmationToken, dependencies, actor),
   };
 }
 
@@ -615,7 +663,14 @@ export async function getWebhookDebugDetails(
 ): Promise<AdminWebhookDebugDetails> {
   const row = await getWebhookEventRow(webhookEventId, dependencies.db);
   const expectedJobKeys = deriveWebhookJobKeys(row);
-  const relatedJobs = await listJobsByKeys(dependencies.db, expectedJobKeys);
+  const [relatedJobs, replayAudits] = await Promise.all([
+    listJobsByKeys(dependencies.db, expectedJobKeys),
+    listReplayAuditLogs(dependencies.db, {
+      actions: ["webhook.requeue_jobs"],
+      resourceType: "webhook_event",
+      resourceId: webhookEventId,
+    }),
+  ]);
   const webhookEvent = toWebhookDebugSummary(row);
   const failures = collectFailures([
     webhookEvent.failure,
@@ -626,6 +681,7 @@ export async function getWebhookDebugDetails(
     webhookEvent,
     expectedJobKeys,
     relatedJobs,
+    replayAudits,
     failures,
   };
 }
@@ -688,6 +744,7 @@ export async function executeWebhookReplay(
   webhookEventId: string,
   confirmationToken: string,
   dependencies: AdminDebugServiceDependencies,
+  actor: AdminReplayAuditActor,
 ): Promise<AdminReplayExecutionResult> {
   const plan = await createWebhookReplayPlan(webhookEventId, dependencies);
   assertConfirmationToken(confirmationToken, plan.confirmationToken);
@@ -696,6 +753,13 @@ export async function executeWebhookReplay(
     action: plan.action,
     confirmationToken,
     jobs: plan.jobs,
+    audit: {
+      actor,
+      resourceType: "webhook_event",
+      resourceId: webhookEventId,
+      orgId: firstDefined(plan.jobs.map((job) => job.orgId)),
+      plan: auditPlanFromWebhookReplayPlan(plan),
+    },
   });
 }
 
@@ -719,6 +783,7 @@ export async function getReviewDebugDetails(
     validatedRows,
     llmRows,
     relatedJobs,
+    replayAudits,
   ] = await Promise.all([
     dependencies.db
       .select()
@@ -759,6 +824,11 @@ export async function getReviewDebugDetails(
       pullRequestNumber: reviewRun.pullRequestNumber,
       headSha: reviewRun.headSha,
     }),
+    listReplayAuditLogs(dependencies.db, {
+      actions: ["review.requeue"],
+      resourceType: "review_run",
+      resourceId: reviewRunId,
+    }),
   ]);
 
   const stageEvents = stageRows.map(toReviewStageEventDebugSummary);
@@ -788,6 +858,7 @@ export async function getReviewDebugDetails(
     validatedFindings: validatedRows.map(toValidatedFindingDebugSummary),
     llmCalls: llmCallSummaries,
     relatedJobs,
+    replayAudits,
     failures,
   };
 }
@@ -846,6 +917,7 @@ export async function executeReviewReplay(
   reviewRunId: string,
   confirmationToken: string,
   dependencies: AdminDebugServiceDependencies,
+  actor: AdminReplayAuditActor,
 ): Promise<AdminReplayExecutionResult> {
   const plan = await createReviewReplayPlan(reviewRunId, dependencies);
   assertConfirmationToken(confirmationToken, plan.confirmationToken);
@@ -854,6 +926,13 @@ export async function executeReviewReplay(
     action: plan.action,
     confirmationToken,
     jobs: [plan.job],
+    audit: {
+      actor,
+      resourceType: "review_run",
+      resourceId: reviewRunId,
+      orgId: plan.job.orgId,
+      plan: auditPlanFromReviewReplayPlan(plan),
+    },
   });
 }
 
@@ -874,27 +953,39 @@ export async function getPublisherDebugDetails(
     .where(eq(publishRuns.reviewRunId, reviewRunId))
     .orderBy(desc(publishRuns.createdAt));
   const publishRunIds = publishRunRows.map((publishRun) => publishRun.publishRunId);
-  const [operationRows, checkRunRows, reviewRows, summaryCommentRows, findingRows, relatedJobs] =
-    await Promise.all([
-      listPublishOperations(dependencies.db, publishRunIds),
-      listPublishedCheckRuns(dependencies.db, publishRunIds),
-      listPublishedReviews(dependencies.db, publishRunIds),
-      listPublishedSummaryComments(dependencies.db, publishRunIds),
-      dependencies.db
-        .select()
-        .from(publishedFindings)
-        .where(eq(publishedFindings.reviewRunId, reviewRunId)),
-      dependencies.db
-        .select()
-        .from(backgroundJobs)
-        .where(
-          and(
-            eq(backgroundJobs.reviewRunId, reviewRunId),
-            eq(backgroundJobs.jobType, JOB_TYPES.PublishReview),
-          ),
-        )
-        .orderBy(desc(backgroundJobs.createdAt)),
-    ]);
+  const [
+    operationRows,
+    checkRunRows,
+    reviewRows,
+    summaryCommentRows,
+    findingRows,
+    relatedJobs,
+    replayAudits,
+  ] = await Promise.all([
+    listPublishOperations(dependencies.db, publishRunIds),
+    listPublishedCheckRuns(dependencies.db, publishRunIds),
+    listPublishedReviews(dependencies.db, publishRunIds),
+    listPublishedSummaryComments(dependencies.db, publishRunIds),
+    dependencies.db
+      .select()
+      .from(publishedFindings)
+      .where(eq(publishedFindings.reviewRunId, reviewRunId)),
+    dependencies.db
+      .select()
+      .from(backgroundJobs)
+      .where(
+        and(
+          eq(backgroundJobs.reviewRunId, reviewRunId),
+          eq(backgroundJobs.jobType, JOB_TYPES.PublishReview),
+        ),
+      )
+      .orderBy(desc(backgroundJobs.createdAt)),
+    listReplayAuditLogs(dependencies.db, {
+      actions: ["publish.review"],
+      resourceType: "review_run",
+      resourceId: reviewRunId,
+    }),
+  ]);
 
   const publishRunSummaries = publishRunRows.map(toPublishRunDebugSummary);
   const operationSummaries = operationRows.map(toPublishOperationDebugSummary);
@@ -930,6 +1021,7 @@ export async function getPublisherDebugDetails(
       findings: findingRows.map(toPublishedFindingDebugOutput),
     },
     relatedJobs: jobSummaries,
+    replayAudits,
     reconciliation,
     failures,
   };
@@ -1239,6 +1331,7 @@ export async function executePublisherReplay(
   reviewRunId: string,
   confirmationToken: string,
   dependencies: PublisherOperationsDependencies,
+  actor: AdminReplayAuditActor,
 ): Promise<AdminReplayExecutionResult> {
   const plan = await createPublisherReplayPlan(reviewRunId, dependencies);
   assertConfirmationToken(confirmationToken, plan.confirmationToken);
@@ -1247,11 +1340,19 @@ export async function executePublisherReplay(
     action: plan.action,
     confirmationToken,
     jobs: [plan.job],
+    audit: {
+      actor,
+      resourceType: "review_run",
+      resourceId: reviewRunId,
+      orgId: plan.job.orgId,
+      plan: auditPlanFromPublisherReplayPlan(plan),
+    },
   });
 }
 
 type WebhookEventRow = typeof webhookEvents.$inferSelect;
 type BackgroundJobRow = typeof backgroundJobs.$inferSelect;
+type AuditLogRow = typeof auditLogs.$inferSelect;
 type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
 type ReviewStageEventRow = typeof reviewRunStageEvents.$inferSelect;
 type ReviewDependencyRow = typeof reviewRunDependencies.$inferSelect;
@@ -1265,6 +1366,8 @@ type PublishedCheckRunRow = typeof publishedCheckRuns.$inferSelect;
 type PublishedReviewRow = typeof publishedReviews.$inferSelect;
 type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
+type HeimdallTransaction = Parameters<Parameters<HeimdallDatabase["transaction"]>[0]>[0];
+type HeimdallDbExecutor = HeimdallDatabase | HeimdallTransaction;
 
 type DerivedWebhookReplayJob = {
   /** Queue that owned the original planned webhook job. */
@@ -1281,6 +1384,19 @@ type DerivedWebhookReplayJob = {
   readonly repoId?: string;
   /** Stable timestamp used in the replay envelope. */
   readonly createdAt: string;
+};
+
+type ReplayAuditInput = {
+  /** Actor that confirmed the replay operation. */
+  readonly actor: AdminReplayAuditActor;
+  /** Resource type affected by the replay. */
+  readonly resourceType: AdminDebugResourceType;
+  /** Resource ID affected by the replay. */
+  readonly resourceId: string;
+  /** Organization associated with the replay when available. */
+  readonly orgId?: string | undefined;
+  /** Replay plan summary that was confirmed. */
+  readonly plan: Record<string, unknown>;
 };
 
 async function getWebhookEventRow(
@@ -1301,7 +1417,7 @@ async function getWebhookEventRow(
 }
 
 async function listJobsByKeys(
-  db: HeimdallDatabase,
+  db: HeimdallDbExecutor,
   jobKeys: readonly string[],
 ): Promise<readonly AdminBackgroundJobDebugSummary[]> {
   if (jobKeys.length === 0) {
@@ -1315,6 +1431,33 @@ async function listJobsByKeys(
     .orderBy(asc(backgroundJobs.createdAt));
 
   return rows.map(toBackgroundJobDebugSummary);
+}
+
+async function listReplayAuditLogs(
+  db: HeimdallDatabase,
+  input: {
+    readonly actions: readonly (WebhookReplayAction | ReviewReplayAction | PublisherReplayAction)[];
+    readonly resourceType: AdminDebugResourceType;
+    readonly resourceId: string;
+  },
+): Promise<readonly AdminReplayAuditSummary[]> {
+  if (input.actions.length === 0) {
+    return [];
+  }
+
+  const rows = await db
+    .select()
+    .from(auditLogs)
+    .where(
+      and(
+        eq(auditLogs.resourceType, input.resourceType),
+        eq(auditLogs.resourceId, input.resourceId),
+        inArray(auditLogs.action, [...input.actions]),
+      ),
+    )
+    .orderBy(desc(auditLogs.occurredAt));
+
+  return rows.map(toReplayAuditSummary);
 }
 
 async function listRelatedReviewJobs(
@@ -1460,6 +1603,20 @@ function toBackgroundJobDebugSummary(row: BackgroundJobRow): AdminBackgroundJobD
     updatedAt: toIso(row.updatedAt),
     payload: row.payload,
     ...(row.status === "failed" || row.status === "dead_lettered" ? { failure } : {}),
+  };
+}
+
+function toReplayAuditSummary(row: AuditLogRow): AdminReplayAuditSummary {
+  return {
+    auditLogId: row.auditLogId,
+    ...(row.orgId ? { orgId: row.orgId } : {}),
+    actorType: row.actorType,
+    ...(row.actorUserId ? { actorUserId: row.actorUserId } : {}),
+    action: row.action,
+    resourceType: row.resourceType,
+    ...(row.resourceId ? { resourceId: row.resourceId } : {}),
+    occurredAt: toIso(row.occurredAt),
+    ...(row.metadata !== null ? { metadata: row.metadata } : {}),
   };
 }
 
@@ -1783,6 +1940,10 @@ function collectFailures(
   return values.filter((value): value is AdminFailureDetail => value !== undefined);
 }
 
+function firstDefined<T>(values: readonly (T | undefined)[]): T | undefined {
+  return values.find((value): value is T => value !== undefined);
+}
+
 function deriveWebhookJobKeys(row: WebhookEventRow): readonly string[] {
   if (row.eventName === "installation" && row.installationId && row.action) {
     return [`github:installation:${row.installationId}:${row.action}`];
@@ -2063,55 +2224,144 @@ async function insertReplayJobs(input: {
   readonly confirmationToken: string;
   /** Replay jobs to insert. */
   readonly jobs: readonly AdminReplayJobPlan[];
+  /** Audit metadata to write with durable replay rows. */
+  readonly audit: ReplayAuditInput;
 }): Promise<AdminReplayExecutionResult> {
-  const insertedJobIds: string[] = [];
-  for (const job of input.jobs) {
-    const [inserted] = await input.db
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: newId("job"),
-        queueName: job.queueName,
-        jobKey: job.replayJobKey,
-        jobType: job.jobType,
-        status: "pending",
-        orgId: job.orgId,
-        repoId: job.repoId,
-        reviewRunId: job.reviewRunId,
-        payload: job.envelope,
-        maxAttempts: job.envelope.maxAttempts,
-        scheduledAt: job.envelope.scheduledFor ? new Date(job.envelope.scheduledFor) : undefined,
-        metadata: {
-          replay: true,
-          replaySource: job.source,
-          ...(job.originalBackgroundJobId
-            ? { originalBackgroundJobId: job.originalBackgroundJobId }
-            : {}),
-          ...(job.originalJobKey ? { originalJobKey: job.originalJobKey } : {}),
-          confirmationToken: input.confirmationToken,
-        },
-      })
-      .onConflictDoNothing()
-      .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
+  return input.db.transaction(async (tx) => {
+    const insertedJobIds: string[] = [];
+    for (const job of input.jobs) {
+      const [inserted] = await tx
+        .insert(backgroundJobs)
+        .values({
+          backgroundJobId: newId("job"),
+          queueName: job.queueName,
+          jobKey: job.replayJobKey,
+          jobType: job.jobType,
+          status: "pending",
+          orgId: job.orgId,
+          repoId: job.repoId,
+          reviewRunId: job.reviewRunId,
+          payload: job.envelope,
+          maxAttempts: job.envelope.maxAttempts,
+          scheduledAt: job.envelope.scheduledFor ? new Date(job.envelope.scheduledFor) : undefined,
+          metadata: {
+            replay: true,
+            replaySource: job.source,
+            ...(job.originalBackgroundJobId
+              ? { originalBackgroundJobId: job.originalBackgroundJobId }
+              : {}),
+            ...(job.originalJobKey ? { originalJobKey: job.originalJobKey } : {}),
+            confirmationToken: input.confirmationToken,
+          },
+        })
+        .onConflictDoNothing()
+        .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
 
-    if (inserted) {
-      insertedJobIds.push(inserted.backgroundJobId);
+      if (inserted) {
+        insertedJobIds.push(inserted.backgroundJobId);
+      }
     }
-  }
 
-  const replayJobs = await listJobsByKeys(
-    input.db,
-    input.jobs.map((job) => job.replayJobKey),
-  );
-  const insertedSet = new Set(insertedJobIds);
-
-  return {
-    action: input.action,
-    confirmationToken: input.confirmationToken,
-    insertedJobIds,
-    existingJobIds: replayJobs
+    const replayJobs = await listJobsByKeys(
+      tx,
+      input.jobs.map((job) => job.replayJobKey),
+    );
+    const insertedSet = new Set(insertedJobIds);
+    const existingJobIds = replayJobs
       .map((job) => job.backgroundJobId)
-      .filter((jobId) => !insertedSet.has(jobId)),
-    replayJobs,
+      .filter((jobId) => !insertedSet.has(jobId));
+    const auditLogId = await insertReplayAuditLog(tx, {
+      ...input.audit,
+      action: input.action,
+      confirmationToken: input.confirmationToken,
+      insertedJobIds,
+      existingJobIds,
+      replayJobs,
+    });
+
+    return {
+      action: input.action,
+      confirmationToken: input.confirmationToken,
+      auditLogId,
+      insertedJobIds,
+      existingJobIds,
+      replayJobs,
+    };
+  });
+}
+
+async function insertReplayAuditLog(
+  db: HeimdallDbExecutor,
+  input: ReplayAuditInput & {
+    readonly action: WebhookReplayAction | ReviewReplayAction | PublisherReplayAction;
+    readonly confirmationToken: string;
+    readonly insertedJobIds: readonly string[];
+    readonly existingJobIds: readonly string[];
+    readonly replayJobs: readonly AdminBackgroundJobDebugSummary[];
+  },
+): Promise<string> {
+  const auditLogId = newId("audit");
+  await db.insert(auditLogs).values({
+    auditLogId,
+    orgId: input.orgId,
+    actorType: input.actor.actorType,
+    actorUserId: input.actor.actorUserId,
+    action: input.action,
+    resourceType: input.resourceType,
+    resourceId: input.resourceId,
+    occurredAt: new Date(),
+    metadata: {
+      actor: {
+        role: input.actor.role,
+        ...(input.actor.displayName ? { displayName: input.actor.displayName } : {}),
+        ...(input.actor.email ? { email: input.actor.email } : {}),
+      },
+      confirmationToken: input.confirmationToken,
+      plan: input.plan,
+      result: {
+        insertedJobIds: input.insertedJobIds,
+        existingJobIds: input.existingJobIds,
+        replayJobIds: input.replayJobs.map((job) => job.backgroundJobId),
+        replayJobKeys: input.replayJobs.map((job) => job.jobKey),
+      },
+    },
+  });
+
+  return auditLogId;
+}
+
+function auditPlanFromWebhookReplayPlan(plan: WebhookReplayPlan): Record<string, unknown> {
+  return {
+    action: plan.action,
+    webhookEventId: plan.webhookEventId,
+    deliveryId: plan.deliveryId,
+    eligibleJobIds: plan.eligibleJobIds,
+    blockedJobIds: plan.blockedJobIds,
+    missingJobKeys: plan.missingJobKeys,
+    replayJobs: plan.jobs.map(toReplayConfirmationJob),
+    failureCodes: plan.failures.map((failure) => failure.code),
+  };
+}
+
+function auditPlanFromReviewReplayPlan(plan: ReviewReplayPlan): Record<string, unknown> {
+  return {
+    action: plan.action,
+    reviewRunId: plan.reviewRunId,
+    currentStatus: plan.currentStatus,
+    payload: plan.payload,
+    replayJobs: [toReplayConfirmationJob(plan.job)],
+    relatedJobIds: plan.relatedJobs.map((job) => job.backgroundJobId),
+    failureCodes: plan.failures.map((failure) => failure.code),
+  };
+}
+
+function auditPlanFromPublisherReplayPlan(plan: PublisherReplayPlan): Record<string, unknown> {
+  return {
+    action: plan.action,
+    payload: plan.payload,
+    dryRun: plan.dryRun,
+    reconciliation: plan.reconciliation,
+    replayJobs: [toReplayConfirmationJob(plan.job)],
   };
 }
 

@@ -4,6 +4,25 @@ import { createApiApp } from "./app";
 
 describe("api app", () => {
   const adminDebugAuth = { enabled: true, token: "debug-secret" };
+  const namedAdminAuth = {
+    enabled: true,
+    users: [
+      {
+        userId: "usr_support",
+        role: "support" as const,
+        token: "support-secret",
+        displayName: "Support User",
+        email: "support@example.com",
+      },
+      {
+        userId: "usr_admin",
+        role: "admin" as const,
+        token: "admin-secret",
+        displayName: "Admin User",
+        email: "admin@example.com",
+      },
+    ],
+  };
 
   it("wires the GitHub webhook route to the handler", async () => {
     const app = createApiApp({
@@ -49,6 +68,7 @@ describe("api app", () => {
           },
           expectedJobKeys: ["github:review:repo_1:7:abc123"],
           relatedJobs: [],
+          replayAudits: [],
           failures: [],
         }),
       }),
@@ -141,17 +161,22 @@ describe("api app", () => {
   });
 
   it("executes confirmed replay routes through the injected service", async () => {
+    let observedActor: unknown;
     const app = createApiApp({
       githubWebhookHandler: noopWebhookHandler(),
       adminDebugAuth,
       adminDebugService: createMockAdminDebugService({
-        executeReviewReplay: async (reviewRunId: string, confirmationToken: string) => ({
-          action: "review.requeue",
-          confirmationToken,
-          insertedJobIds: [`job_${reviewRunId}`],
-          existingJobIds: [],
-          replayJobs: [],
-        }),
+        executeReviewReplay: async (reviewRunId: string, confirmationToken: string, actor) => {
+          observedActor = actor;
+          return {
+            action: "review.requeue",
+            confirmationToken,
+            auditLogId: "audit_1",
+            insertedJobIds: [`job_${reviewRunId}`],
+            existingJobIds: [],
+            replayJobs: [],
+          };
+        },
       }),
     });
 
@@ -167,8 +192,113 @@ describe("api app", () => {
       data: {
         action: "review.requeue",
         confirmationToken: "sha256:abc123",
+        auditLogId: "audit_1",
         insertedJobIds: ["job_rrn_1"],
       },
+    });
+    expect(observedActor).toMatchObject({
+      actorType: "internal_token",
+      actorUserId: "internal_admin_token",
+      role: "admin",
+    });
+  });
+
+  it("identifies named support and admin users through the session route", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      adminDebugAuth: namedAdminAuth,
+      adminDebugService: createMockAdminDebugService({}),
+    });
+
+    const supportResponse = await app.handle(
+      authorizedRequest("http://localhost/admin/session", {}, "support-secret"),
+    );
+    expect(supportResponse.status).toBe(200);
+    await expect(supportResponse.json()).resolves.toMatchObject({
+      data: {
+        actor: {
+          userId: "usr_support",
+          role: "support",
+          email: "support@example.com",
+        },
+        capabilities: {
+          canInspect: true,
+          canPlanReplay: true,
+          canExecuteReplay: false,
+        },
+      },
+    });
+
+    const adminResponse = await app.handle(
+      authorizedRequest("http://localhost/admin/session", {}, "admin-secret"),
+    );
+    expect(adminResponse.status).toBe(200);
+    await expect(adminResponse.json()).resolves.toMatchObject({
+      data: {
+        actor: {
+          userId: "usr_admin",
+          role: "admin",
+        },
+        capabilities: {
+          canExecuteReplay: true,
+        },
+      },
+    });
+  });
+
+  it("allows support users to plan replay but blocks replay execution", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      adminDebugAuth: namedAdminAuth,
+      adminDebugService: createMockAdminDebugService({
+        createWebhookReplayPlan: async (webhookEventId: string) => ({
+          action: "webhook.requeue_jobs",
+          webhookEventId,
+          deliveryId: "delivery-1",
+          eligibleJobIds: [],
+          blockedJobIds: ["job_running"],
+          missingJobKeys: [],
+          jobs: [],
+          relatedJobs: [],
+          failures: [],
+          confirmationToken: "sha256:plan",
+          requiresExplicitConfirmation: true,
+        }),
+        executeWebhookReplay: async () => {
+          throw new Error("Support users must not execute replay.");
+        },
+      }),
+    });
+
+    const planResponse = await app.handle(
+      authorizedRequest(
+        "http://localhost/admin/debug/webhooks/webhook_1/replay-plan",
+        { method: "POST" },
+        "support-secret",
+      ),
+    );
+    expect(planResponse.status).toBe(200);
+    await expect(planResponse.json()).resolves.toMatchObject({
+      data: {
+        blockedJobIds: ["job_running"],
+        confirmationToken: "sha256:plan",
+      },
+    });
+
+    const replayResponse = await app.handle(
+      authorizedRequest(
+        "http://localhost/admin/debug/webhooks/webhook_1/replay",
+        {
+          method: "POST",
+          body: JSON.stringify({ confirmationToken: "sha256:plan" }),
+        },
+        "support-secret",
+      ),
+    );
+
+    expect(replayResponse.status).toBe(403);
+    await expect(replayResponse.json()).resolves.toMatchObject({
+      error: { code: "admin_debug.forbidden" },
     });
   });
 
@@ -254,11 +384,11 @@ function noopWebhookHandler() {
   } as never;
 }
 
-function authorizedRequest(input: string, init: RequestInit = {}): Request {
+function authorizedRequest(input: string, init: RequestInit = {}, token = "debug-secret"): Request {
   return new Request(input, {
     ...init,
     headers: {
-      authorization: "Bearer debug-secret",
+      authorization: `Bearer ${token}`,
       ...init.headers,
     },
   });

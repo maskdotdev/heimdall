@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "@repo/db";
+import { inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
@@ -21,6 +22,13 @@ const testDirectory = fileURLToPath(new URL(".", import.meta.url));
 const bootstrapPath = resolve(testDirectory, "../../db/bootstrap/0000_extensions.sql");
 const migrationPath = resolve(testDirectory, "../../db/migrations/0000_foundation.sql");
 const now = "2026-05-05T12:00:00.000Z";
+const replayActor = {
+  actorType: "admin_user" as const,
+  actorUserId: "usr_admin",
+  role: "admin" as const,
+  displayName: "Admin User",
+  email: "admin@example.com",
+};
 
 describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
   const schemaName = `heimdall_admin_tools_${process.pid}_${Date.now()}`.replace(
@@ -101,8 +109,10 @@ describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
       {
         db,
       },
+      replayActor,
     );
     expect(publisherReplay.insertedJobIds).toHaveLength(1);
+    expect(publisherReplay.auditLogId).toMatch(/^audit_/u);
     expect(publisherReplay.replayJobs[0]).toMatchObject({
       queueName: "publishing",
       jobType: "review.publish.v1",
@@ -116,8 +126,10 @@ describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
       "rrn_admin",
       reviewReplayPlan.confirmationToken,
       { db },
+      replayActor,
     );
     expect(reviewReplay.insertedJobIds).toHaveLength(1);
+    expect(reviewReplay.auditLogId).toMatch(/^audit_/u);
     expect(reviewReplay.replayJobs[0]).toMatchObject({
       queueName: "review",
       jobType: "pr.review.v1",
@@ -137,9 +149,68 @@ describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
       "webhook_admin",
       webhookReplayPlan.confirmationToken,
       { db },
+      replayActor,
     );
     expect(webhookReplay.insertedJobIds).toHaveLength(2);
+    expect(webhookReplay.auditLogId).toMatch(/^audit_/u);
     expect(webhookReplay.replayJobs.map((job) => job.status)).toEqual(["pending", "pending"]);
+
+    const replayAudits = await db.select().from(schema.auditLogs);
+    expect(replayAudits.map((audit) => audit.action).sort()).toEqual([
+      "publish.review",
+      "review.requeue",
+      "webhook.requeue_jobs",
+    ]);
+    const publisherAudit = replayAudits.find((audit) => audit.action === "publish.review");
+    expect(publisherAudit).toMatchObject({
+      actorType: "admin_user",
+      actorUserId: "usr_admin",
+      resourceType: "review_run",
+      resourceId: "rrn_admin",
+    });
+    expect(publisherAudit?.metadata).toMatchObject({
+      actor: {
+        role: "admin",
+        email: "admin@example.com",
+      },
+      confirmationToken: replayPlan.confirmationToken,
+      plan: {
+        dryRun: {
+          reviewRunId: "rrn_admin",
+          mutatesExternalState: false,
+        },
+      },
+      result: {
+        insertedJobIds: publisherReplay.insertedJobIds,
+      },
+    });
+
+    await seedWebhookEvent(sql, {
+      webhookEventId: "webhook_audit_failure",
+      deliveryId: "delivery-audit-failure",
+      headSha: "3333333",
+    });
+    const auditFailurePlan = await createWebhookReplayPlan("webhook_audit_failure", { db });
+    await installAuditFailureTrigger(sql);
+    await expect(
+      executeWebhookReplay(
+        "webhook_audit_failure",
+        auditFailurePlan.confirmationToken,
+        { db },
+        replayActor,
+      ),
+    ).rejects.toThrow(/insert into "audit_logs"/u);
+
+    const rolledBackReplayJobs = await db
+      .select()
+      .from(schema.backgroundJobs)
+      .where(
+        inArray(
+          schema.backgroundJobs.jobKey,
+          auditFailurePlan.jobs.map((job) => job.replayJobKey),
+        ),
+      );
+    expect(rolledBackReplayJobs).toHaveLength(0);
   });
 });
 
@@ -340,7 +411,19 @@ async function insertFinding(
   `;
 }
 
-async function seedWebhookEvent(sql: postgres.Sql): Promise<void> {
+async function seedWebhookEvent(
+  sql: postgres.Sql,
+  input: {
+    readonly webhookEventId?: string;
+    readonly deliveryId?: string;
+    readonly baseSha?: string;
+    readonly headSha?: string;
+  } = {},
+): Promise<void> {
+  const webhookEventId = input.webhookEventId ?? "webhook_admin";
+  const deliveryId = input.deliveryId ?? "delivery-admin";
+  const baseSha = input.baseSha ?? "1111111";
+  const headSha = input.headSha ?? "2222222";
   await sql`
     INSERT INTO webhook_events (
       webhook_event_id,
@@ -358,9 +441,9 @@ async function seedWebhookEvent(sql: postgres.Sql): Promise<void> {
       payload
     )
     VALUES (
-      'webhook_admin',
+      ${webhookEventId},
       'github',
-      'delivery-admin',
+      ${deliveryId},
       'pull_request',
       'synchronize',
       'inst_admin',
@@ -370,9 +453,34 @@ async function seedWebhookEvent(sql: postgres.Sql): Promise<void> {
       ${now},
       'processed',
       'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-      '{"pull_request":{"number":12,"base":{"sha":"1111111"},"head":{"sha":"2222222"}}}'::jsonb
+      ${JSON.stringify({
+        pull_request: {
+          number: 12,
+          base: { sha: baseSha },
+          head: { sha: headSha },
+        },
+      })}::jsonb
     )
   `;
+}
+
+async function installAuditFailureTrigger(sql: postgres.Sql): Promise<void> {
+  await sql.unsafe(`
+    CREATE FUNCTION fail_admin_replay_audit()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      RAISE EXCEPTION 'forced audit failure';
+    END;
+    $$;
+  `);
+  await sql.unsafe(`
+    CREATE TRIGGER fail_admin_replay_audit
+    BEFORE INSERT ON audit_logs
+    FOR EACH ROW
+    EXECUTE FUNCTION fail_admin_replay_audit();
+  `);
 }
 
 async function seedPartialPublishState(sql: postgres.Sql): Promise<void> {
