@@ -1,0 +1,22 @@
+FROM oven/bun:1.3.9
+
+WORKDIR /workspace
+
+RUN bun install --global pnpm@10.33.3 && pnpm --version
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc turbo.json tsconfig.json tsconfig.base.json ./
+COPY apps ./apps
+COPY packages ./packages
+
+RUN pnpm install --frozen-lockfile
+
+ARG VITE_HEIMDALL_API_BASE_URL
+ENV VITE_HEIMDALL_API_BASE_URL=${VITE_HEIMDALL_API_BASE_URL}
+
+RUN pnpm --filter @app/web... build
+
+ENV NODE_ENV=production
+
+EXPOSE 3001
+
+CMD ["pnpm", "--filter", "@app/web", "start"]

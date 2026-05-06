@@ -112,6 +112,8 @@ type PublisherReconciliationIssue = {
 
 /** Publisher debug response consumed by the dashboard. */
 type AdminPublisherDebugDetails = {
+  /** Repository that owns the review run. */
+  readonly repoId: string;
   /** Publish run summaries. */
   readonly publishRuns: readonly unknown[];
   /** Low-level publisher operation summaries. */
@@ -242,6 +244,9 @@ type AdminReplayExecutionResult = {
 /** Inspector kind available in the support console. */
 type InspectorKind = "webhook" | "review" | "publisher";
 
+/** Primary dashboard view. */
+type ViewKind = "inspectors" | "settings" | "audit";
+
 /** API envelope returned by the admin API for successful requests. */
 type ApiEnvelope<T> = {
   /** Response data payload. */
@@ -273,6 +278,8 @@ type AdminSession = {
     readonly displayName?: string | undefined;
     /** Email when available. */
     readonly email?: string | undefined;
+    /** Identity provider that authenticated the actor. */
+    readonly provider?: string | undefined;
   };
   /** Capabilities granted to the actor. */
   readonly capabilities: {
@@ -282,7 +289,156 @@ type AdminSession = {
     readonly canPlanReplay: boolean;
     /** Whether the actor can execute replay. */
     readonly canExecuteReplay: boolean;
+    /** Whether the actor can manage repository settings. */
+    readonly canManageSettings: boolean;
+    /** Whether the actor can view audit history. */
+    readonly canViewAuditHistory: boolean;
   };
+  /** Session-bound CSRF token used for mutations. */
+  readonly csrfToken: string;
+  /** Session expiration timestamp. */
+  readonly expiresAt: string;
+  /** Granular permissions granted to the actor. */
+  readonly permissions: readonly string[];
+  /** Granted organization and repository scopes. */
+  readonly scopes: {
+    /** Organization scope IDs. */
+    readonly orgIds: readonly string[];
+    /** Repository scope IDs. */
+    readonly repoIds: readonly string[];
+  };
+  /** Opaque session ID. */
+  readonly sessionId: string;
+};
+
+/** Repository summary returned by settings APIs. */
+type ControlPlaneRepository = {
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly fullName: string;
+  /** Whether review automation is enabled. */
+  readonly enabled: boolean;
+};
+
+/** Repository settings returned by settings APIs. */
+type ControlPlaneSettings = {
+  /** Review policy. */
+  readonly reviewPolicy: string;
+  /** Minimum severity threshold. */
+  readonly severityThreshold: string;
+  /** Maximum inline comments per review. */
+  readonly maxCommentsPerReview: number;
+  /** Ignored path globs. */
+  readonly ignoredPaths: readonly string[];
+  /** Ignored pull request authors. */
+  readonly ignoredAuthors: readonly string[];
+  /** Ignored pull request labels. */
+  readonly ignoredLabels: readonly string[];
+  /** Required label for reviews when configured. */
+  readonly requireLabel?: string | undefined;
+  /** Whether generated files are skipped. */
+  readonly skipGeneratedFiles: boolean;
+  /** Whether draft pull requests are skipped. */
+  readonly skipDraftPullRequests: boolean;
+  /** Custom instructions for this repository. */
+  readonly customInstructions?: string | undefined;
+};
+
+/** Control-plane settings payload. */
+type ControlPlaneSettingsResponse = {
+  /** Repository being controlled. */
+  readonly repository: ControlPlaneRepository;
+  /** Mutable review settings. */
+  readonly settings: ControlPlaneSettings;
+};
+
+/** Mutable settings form state. */
+type SettingsFormState = {
+  /** Whether the repository is enabled. */
+  repositoryEnabled: boolean;
+  /** Review policy. */
+  reviewPolicy: string;
+  /** Minimum severity threshold. */
+  severityThreshold: string;
+  /** Maximum inline comments per review. */
+  maxCommentsPerReview: string;
+  /** Ignored path globs, one per line. */
+  ignoredPaths: string;
+  /** Ignored authors, one per line. */
+  ignoredAuthors: string;
+  /** Ignored labels, one per line. */
+  ignoredLabels: string;
+  /** Required label. */
+  requireLabel: string;
+  /** Whether generated files are skipped. */
+  skipGeneratedFiles: boolean;
+  /** Whether draft pull requests are skipped. */
+  skipDraftPullRequests: boolean;
+  /** Custom instructions. */
+  customInstructions: string;
+};
+
+/** Mutable settings view state. */
+type SettingsViewState = {
+  /** Repository ID input. */
+  repoId: string;
+  /** Loaded settings payload. */
+  data?: ControlPlaneSettingsResponse | undefined;
+  /** Editable form state. */
+  form?: SettingsFormState | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+  /** Save confirmation message. */
+  saved?: string | undefined;
+};
+
+/** Audit log row returned by the API. */
+type AdminAuditLogSummary = {
+  /** Audit log row ID. */
+  readonly auditLogId: string;
+  /** Organization ID when available. */
+  readonly orgId?: string | undefined;
+  /** Actor category. */
+  readonly actorType: string;
+  /** Actor user ID when available. */
+  readonly actorUserId?: string | undefined;
+  /** Audit action. */
+  readonly action: string;
+  /** Resource type. */
+  readonly resourceType: string;
+  /** Resource ID when available. */
+  readonly resourceId?: string | undefined;
+  /** Event timestamp. */
+  readonly occurredAt: string;
+  /** Event metadata. */
+  readonly metadata?: unknown;
+};
+
+/** Mutable audit history view state. */
+type AuditViewState = {
+  /** Organization filter. */
+  orgId: string;
+  /** Action filter. */
+  action: string;
+  /** Resource type filter. */
+  resourceType: string;
+  /** Resource ID filter. */
+  resourceId: string;
+  /** Actor user ID filter. */
+  actorUserId: string;
+  /** Free-text search. */
+  search: string;
+  /** Loaded audit rows. */
+  rows: readonly AdminAuditLogSummary[];
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
 };
 
 /** Inspector API route builder configuration. */
@@ -334,18 +490,22 @@ type InspectorViewState = {
 
 /** Mutable application state. */
 type AppState = {
+  /** Active primary dashboard view. */
+  activeView: ViewKind;
   /** Active inspector tab. */
   activeKind: InspectorKind;
   /** API base URL. Empty string means same origin. */
   apiBaseUrl: string;
-  /** Bearer token for admin API requests. */
-  token: string;
   /** Authenticated admin session. */
   session?: AdminSession | undefined;
   /** Global authentication error. */
   authError?: string | undefined;
   /** Per-inspector state. */
   inspectors: Record<InspectorKind, InspectorViewState>;
+  /** Settings view state. */
+  settings: SettingsViewState;
+  /** Audit history view state. */
+  audit: AuditViewState;
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -392,13 +552,23 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
 };
 
 const state: AppState = {
+  activeView: "inspectors",
   activeKind: "webhook",
   apiBaseUrl: sessionStorage.getItem("heimdall:admin-api-base-url") ?? apiBaseUrl,
-  token: sessionStorage.getItem("heimdall:admin-token") ?? "",
   inspectors: {
     webhook: { id: "", confirmationTokenInput: "" },
     review: { id: "", confirmationTokenInput: "" },
     publisher: { id: "", confirmationTokenInput: "" },
+  },
+  settings: { repoId: "" },
+  audit: {
+    orgId: "",
+    action: "",
+    resourceType: "",
+    resourceId: "",
+    actorUserId: "",
+    search: "",
+    rows: [],
   },
 };
 
@@ -412,8 +582,15 @@ render();
 /** Handles delegated click events from the dashboard. */
 async function handleClick(event: MouseEvent): Promise<void> {
   const target = event.target instanceof HTMLElement ? event.target : undefined;
-  const element = target?.closest<HTMLElement>("[data-action],[data-tab]");
+  const element = target?.closest<HTMLElement>("[data-action],[data-tab],[data-view]");
   if (!element) {
+    return;
+  }
+
+  const view = element.dataset.view as ViewKind | undefined;
+  if (view && isViewKind(view)) {
+    state.activeView = view;
+    render();
     return;
   }
 
@@ -436,7 +613,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   if (action === "clear-auth") {
-    clearAuth();
+    await clearAuth();
     return;
   }
 
@@ -452,22 +629,38 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "execute-replay") {
     await executeReplay(state.activeKind);
+    return;
+  }
+
+  if (action === "load-settings") {
+    await loadSettings();
+    return;
+  }
+
+  if (action === "save-settings") {
+    await saveSettings();
+    return;
+  }
+
+  if (action === "load-audit") {
+    await loadAuditHistory();
   }
 }
 
 /** Handles delegated input events from the dashboard. */
 function handleInput(event: Event): void {
   const target = event.target;
-  if (!(target instanceof HTMLInputElement)) {
+  if (
+    !(
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    )
+  ) {
     return;
   }
 
   const field = target.dataset.field;
-  if (field === "token") {
-    state.token = target.value;
-    return;
-  }
-
   if (field === "api-base-url") {
     state.apiBaseUrl = target.value;
     return;
@@ -482,6 +675,22 @@ function handleInput(event: Event): void {
 
   if (field === "confirmation-token") {
     currentInspectorState().confirmationTokenInput = target.value;
+    return;
+  }
+
+  if (field === "settings-repo-id") {
+    state.settings.repoId = target.value;
+    state.settings.error = undefined;
+    return;
+  }
+
+  if (field?.startsWith("settings.")) {
+    updateSettingsFormField(field.slice("settings.".length), target);
+    return;
+  }
+
+  if (field?.startsWith("audit.")) {
+    updateAuditField(field.slice("audit.".length), target.value);
   }
 }
 
@@ -491,7 +700,6 @@ async function connectSession(): Promise<void> {
   try {
     const session = await requestAdminData<AdminSession>("/admin/session");
     state.session = session;
-    sessionStorage.setItem("heimdall:admin-token", state.token);
     sessionStorage.setItem("heimdall:admin-api-base-url", state.apiBaseUrl);
   } catch (error) {
     state.session = undefined;
@@ -502,12 +710,18 @@ async function connectSession(): Promise<void> {
 }
 
 /** Clears authentication state from memory and session storage. */
-function clearAuth(): void {
-  state.token = "";
-  state.session = undefined;
+async function clearAuth(): Promise<void> {
   state.authError = undefined;
-  sessionStorage.removeItem("heimdall:admin-token");
-  render();
+  try {
+    if (state.session) {
+      await requestAdminData<{ readonly ok: boolean }>("/admin/auth/logout", { method: "POST" });
+    }
+  } catch (error) {
+    state.authError = errorMessage(error);
+  } finally {
+    state.session = undefined;
+    render();
+  }
 }
 
 /** Loads debug details for the selected inspector. */
@@ -594,18 +808,110 @@ async function executeReplay(kind: InspectorKind): Promise<void> {
   }
 }
 
+/** Loads repository settings into the settings form. */
+async function loadSettings(): Promise<void> {
+  const repoId = state.settings.repoId.trim();
+  if (!repoId) {
+    state.settings.error = "Repository ID is required.";
+    render();
+    return;
+  }
+
+  state.settings.loading = "Loading repository settings";
+  state.settings.error = undefined;
+  state.settings.saved = undefined;
+  try {
+    const data = await requestAdminData<ControlPlaneSettingsResponse>(
+      `/admin/repos/${encodeURIComponent(repoId)}/settings`,
+    );
+    state.settings.data = data;
+    state.settings.form = settingsFormFromResponse(data);
+  } catch (error) {
+    state.settings.error = errorMessage(error);
+  } finally {
+    state.settings.loading = undefined;
+    render();
+  }
+}
+
+/** Saves the current repository settings form. */
+async function saveSettings(): Promise<void> {
+  const repoId = state.settings.repoId.trim();
+  const form = state.settings.form;
+  if (!repoId || !form) {
+    state.settings.error = "Load repository settings before saving.";
+    render();
+    return;
+  }
+
+  state.settings.loading = "Saving repository settings";
+  state.settings.error = undefined;
+  state.settings.saved = undefined;
+  try {
+    const data = await requestAdminData<ControlPlaneSettingsResponse>(
+      `/admin/repos/${encodeURIComponent(repoId)}/settings`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(settingsPatchFromForm(form)),
+      },
+    );
+    state.settings.data = data;
+    state.settings.form = settingsFormFromResponse(data);
+    state.settings.saved = "Settings saved.";
+  } catch (error) {
+    state.settings.error = errorMessage(error);
+  } finally {
+    state.settings.loading = undefined;
+    render();
+  }
+}
+
+/** Loads audit history using the current filters. */
+async function loadAuditHistory(): Promise<void> {
+  state.audit.loading = "Loading audit history";
+  state.audit.error = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "orgId", state.audit.orgId);
+    appendQueryParam(params, "action", state.audit.action);
+    appendQueryParam(params, "resourceType", state.audit.resourceType);
+    appendQueryParam(params, "resourceId", state.audit.resourceId);
+    appendQueryParam(params, "actorUserId", state.audit.actorUserId);
+    appendQueryParam(params, "search", state.audit.search);
+    params.set("limit", "50");
+    const result = await requestAdminData<{ readonly auditLogs: readonly AdminAuditLogSummary[] }>(
+      `/admin/audit-logs?${params.toString()}`,
+    );
+    state.audit.rows = result.auditLogs;
+  } catch (error) {
+    state.audit.error = errorMessage(error);
+  } finally {
+    state.audit.loading = undefined;
+    render();
+  }
+}
+
 /** Requests a typed data payload from the admin API. */
 async function requestAdminData<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const method = init.method ?? "GET";
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  if (!isSafeMethod(method) && state.session?.csrfToken) {
+    headers.set("x-csrf-token", state.session.csrfToken);
+  }
+
   const response = await fetch(adminUrl(path), {
     ...init,
-    headers: {
-      ...(init.body ? { "content-type": "application/json" } : {}),
-      authorization: `Bearer ${state.token}`,
-      ...init.headers,
-    },
+    credentials: "include",
+    headers,
   });
   const body = await response.json().catch(() => undefined);
   if (!response.ok) {
+    if (response.status === 401) {
+      state.session = undefined;
+    }
     throw new Error(apiErrorMessage(body, response.status));
   }
 
@@ -641,14 +947,8 @@ function render(): void {
         ${renderSessionBadge()}
       </header>
       ${renderAuthPanel()}
-      <section class="workspace">
-        <nav class="tabs" aria-label="Inspector views">
-          ${objectValues(inspectorConfigs)
-            .map((config) => renderTab(config))
-            .join("")}
-        </nav>
-        ${renderInspector()}
-      </section>
+      ${renderPrimaryNav()}
+      ${renderActiveView()}
     </div>
   `;
 }
@@ -677,13 +977,266 @@ function renderAuthPanel(): string {
         <span>API base URL</span>
         <input data-field="api-base-url" value="${escapeAttribute(state.apiBaseUrl)}" />
       </label>
-      <label class="token-field">
-        <span>Bearer token</span>
-        <input data-field="token" type="password" value="${escapeAttribute(state.token)}" />
-      </label>
-      <button class="primary" data-action="connect" type="button">Connect</button>
-      <button class="ghost" data-action="clear-auth" type="button">Clear</button>
+      <div class="session-copy">
+        <span>Identity session</span>
+        <strong>${state.session ? "Active" : "No session cookie"}</strong>
+      </div>
+      <button class="primary" data-action="connect" type="button">Refresh</button>
+      <button class="ghost" data-action="clear-auth" type="button">Logout</button>
       ${state.authError ? `<p class="error-line">${escapeHtml(state.authError)}</p>` : ""}
+    </section>
+  `;
+}
+
+/** Renders primary control-plane navigation. */
+function renderPrimaryNav(): string {
+  const views: readonly { readonly kind: ViewKind; readonly label: string }[] = [
+    { kind: "inspectors", label: "Inspectors" },
+    { kind: "settings", label: "Settings" },
+    { kind: "audit", label: "Audit" },
+  ];
+  return `
+    <nav class="primary-nav" aria-label="Control-plane views">
+      ${views
+        .map(
+          (view) => `
+            <button
+              class="tab ${state.activeView === view.kind ? "active" : ""}"
+              data-view="${view.kind}"
+              type="button"
+            >
+              ${escapeHtml(view.label)}
+            </button>
+          `,
+        )
+        .join("")}
+    </nav>
+  `;
+}
+
+/** Renders the active primary control-plane view. */
+function renderActiveView(): string {
+  if (state.activeView === "settings") {
+    return renderSettingsView();
+  }
+  if (state.activeView === "audit") {
+    return renderAuditView();
+  }
+
+  return `
+    <section class="workspace">
+      <nav class="tabs" aria-label="Inspector views">
+        ${objectValues(inspectorConfigs)
+          .map((config) => renderTab(config))
+          .join("")}
+      </nav>
+      ${renderInspector()}
+    </section>
+  `;
+}
+
+/** Renders repository settings controls. */
+function renderSettingsView(): string {
+  const settings = state.settings;
+  const form = settings.form;
+  const canSave = Boolean(state.session?.capabilities.canManageSettings && form);
+  return `
+    <main class="inspector">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Repository</p>
+          <h2>Review Settings</h2>
+        </div>
+        <div class="resource-controls compact-controls">
+          <label>
+            <span>Repository ID</span>
+            <input
+              data-field="settings-repo-id"
+              placeholder="repo_..."
+              value="${escapeAttribute(settings.repoId)}"
+            />
+          </label>
+          <button data-action="load-settings" type="button">Load</button>
+          <button
+            class="primary"
+            data-action="save-settings"
+            type="button"
+            ${canSave ? "" : "disabled"}
+          >
+            Save
+          </button>
+        </div>
+      </section>
+      ${renderSettingsNotice(settings)}
+      ${form ? renderSettingsForm(form, settings.data) : renderEmptyState()}
+    </main>
+  `;
+}
+
+/** Renders settings loading, error, or saved state. */
+function renderSettingsNotice(settings: SettingsViewState): string {
+  if (settings.loading) {
+    return `<p class="notice">${escapeHtml(settings.loading)}</p>`;
+  }
+  if (settings.error) {
+    return `<p class="error-line">${escapeHtml(settings.error)}</p>`;
+  }
+  if (settings.saved) {
+    return `<p class="notice">${escapeHtml(settings.saved)}</p>`;
+  }
+
+  return "";
+}
+
+/** Renders the repository settings form. */
+function renderSettingsForm(
+  form: SettingsFormState,
+  data: ControlPlaneSettingsResponse | undefined,
+): string {
+  return `
+    <section class="panel">
+      ${
+        data
+          ? `
+            <div class="summary-grid">
+              <div class="metric">
+                <span>Repository</span>
+                <strong>${escapeHtml(data.repository.fullName)}</strong>
+              </div>
+              <div class="metric">
+                <span>Organization</span>
+                <strong>${escapeHtml(data.repository.orgId)}</strong>
+              </div>
+              <div class="metric">
+                <span>Automation</span>
+                <strong>${data.repository.enabled ? "Enabled" : "Disabled"}</strong>
+              </div>
+            </div>
+          `
+          : ""
+      }
+      <div class="form-grid">
+        ${renderCheckbox("settings.repositoryEnabled", "Review automation", form.repositoryEnabled)}
+        ${renderSelect("settings.reviewPolicy", "Review policy", form.reviewPolicy, [
+          "disabled",
+          "summary_only",
+          "inline_comments",
+          "inline_comments_and_summary",
+          "check_run_only",
+          "inline_comments_summary_and_check_run",
+        ])}
+        ${renderSelect("settings.severityThreshold", "Severity threshold", form.severityThreshold, [
+          "low",
+          "medium",
+          "high",
+          "critical",
+        ])}
+        <label>
+          <span>Max comments</span>
+          <input
+            data-field="settings.maxCommentsPerReview"
+            min="0"
+            max="50"
+            type="number"
+            value="${escapeAttribute(form.maxCommentsPerReview)}"
+          />
+        </label>
+        <label>
+          <span>Required label</span>
+          <input
+            data-field="settings.requireLabel"
+            placeholder="security-review"
+            value="${escapeAttribute(form.requireLabel)}"
+          />
+        </label>
+        ${renderCheckbox("settings.skipGeneratedFiles", "Skip generated files", form.skipGeneratedFiles)}
+        ${renderCheckbox(
+          "settings.skipDraftPullRequests",
+          "Skip draft pull requests",
+          form.skipDraftPullRequests,
+        )}
+      </div>
+      <div class="form-grid textareas">
+        ${renderTextarea("settings.ignoredPaths", "Ignored paths", form.ignoredPaths)}
+        ${renderTextarea("settings.ignoredAuthors", "Ignored authors", form.ignoredAuthors)}
+        ${renderTextarea("settings.ignoredLabels", "Ignored labels", form.ignoredLabels)}
+      </div>
+      <label>
+        <span>Custom instructions</span>
+        <textarea
+          data-field="settings.customInstructions"
+          rows="8"
+        >${escapeHtml(form.customInstructions)}</textarea>
+      </label>
+    </section>
+  `;
+}
+
+/** Renders an audit history search view. */
+function renderAuditView(): string {
+  const audit = state.audit;
+  return `
+    <main class="inspector">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>Audit Events</h2>
+        </div>
+        <button class="primary" data-action="load-audit" type="button">Search</button>
+      </section>
+      ${audit.loading ? `<p class="notice">${escapeHtml(audit.loading)}</p>` : ""}
+      ${audit.error ? `<p class="error-line">${escapeHtml(audit.error)}</p>` : ""}
+      <section class="panel">
+        <div class="form-grid">
+          ${renderTextInput("audit.orgId", "Organization ID", audit.orgId, "org_...")}
+          ${renderTextInput("audit.search", "Search", audit.search, "request, actor, action")}
+          ${renderTextInput("audit.action", "Action", audit.action, "repo.settings.updated")}
+          ${renderTextInput("audit.resourceType", "Resource type", audit.resourceType, "repository")}
+          ${renderTextInput("audit.resourceId", "Resource ID", audit.resourceId, "repo_...")}
+          ${renderTextInput("audit.actorUserId", "Actor", audit.actorUserId, "oidc:...")}
+        </div>
+      </section>
+      ${renderAuditRows(audit.rows)}
+    </main>
+  `;
+}
+
+/** Renders audit result rows. */
+function renderAuditRows(rows: readonly AdminAuditLogSummary[]): string {
+  if (rows.length === 0) {
+    return renderEmptyState();
+  }
+
+  return `
+    <section class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Actor</th>
+              <th>Action</th>
+              <th>Resource</th>
+              <th>Request</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${formatTime(row.occurredAt)}</td>
+                    <td>${escapeHtml(row.actorUserId ?? row.actorType)}</td>
+                    <td>${escapeHtml(row.action)}</td>
+                    <td>${escapeHtml(row.resourceId ?? row.resourceType)}</td>
+                    <td><code>${escapeHtml(requestIdFromMetadata(row.metadata) ?? "n/a")}</code></td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
     </section>
   `;
 }
@@ -1183,9 +1736,176 @@ function renderJsonBlock(title: string, value: unknown): string {
   `;
 }
 
+/** Renders a text input for forms. */
+function renderTextInput(field: string, label: string, value: string, placeholder: string): string {
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <input
+        data-field="${escapeAttribute(field)}"
+        placeholder="${escapeAttribute(placeholder)}"
+        value="${escapeAttribute(value)}"
+      />
+    </label>
+  `;
+}
+
+/** Renders a checkbox control. */
+function renderCheckbox(field: string, label: string, checked: boolean): string {
+  return `
+    <label class="check-field">
+      <input data-field="${escapeAttribute(field)}" type="checkbox" ${checked ? "checked" : ""} />
+      <span>${escapeHtml(label)}</span>
+    </label>
+  `;
+}
+
+/** Renders a select control. */
+function renderSelect(
+  field: string,
+  label: string,
+  value: string,
+  options: readonly string[],
+): string {
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <select data-field="${escapeAttribute(field)}">
+        ${options
+          .map(
+            (option) => `
+              <option value="${escapeAttribute(option)}" ${option === value ? "selected" : ""}>
+                ${escapeHtml(option)}
+              </option>
+            `,
+          )
+          .join("")}
+      </select>
+    </label>
+  `;
+}
+
+/** Renders a textarea control. */
+function renderTextarea(field: string, label: string, value: string): string {
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <textarea data-field="${escapeAttribute(field)}" rows="7">${escapeHtml(value)}</textarea>
+    </label>
+  `;
+}
+
 /** Returns the active inspector state. */
 function currentInspectorState(): InspectorViewState {
   return state.inspectors[state.activeKind];
+}
+
+/** Updates one settings form field from an input element. */
+function updateSettingsFormField(
+  field: string,
+  target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+): void {
+  const form = state.settings.form;
+  if (!form) {
+    return;
+  }
+
+  if (field === "repositoryEnabled" && target instanceof HTMLInputElement) {
+    form.repositoryEnabled = target.checked;
+    return;
+  }
+  if (field === "skipGeneratedFiles" && target instanceof HTMLInputElement) {
+    form.skipGeneratedFiles = target.checked;
+    return;
+  }
+  if (field === "skipDraftPullRequests" && target instanceof HTMLInputElement) {
+    form.skipDraftPullRequests = target.checked;
+    return;
+  }
+
+  if (field in form) {
+    (form as Record<string, string | boolean>)[field] = target.value;
+  }
+}
+
+/** Updates one audit filter field. */
+function updateAuditField(field: string, value: string): void {
+  if (field in state.audit) {
+    (state.audit as Record<string, string | readonly AdminAuditLogSummary[] | undefined>)[field] =
+      value;
+  }
+}
+
+/** Converts a loaded settings payload into editable form state. */
+function settingsFormFromResponse(data: ControlPlaneSettingsResponse): SettingsFormState {
+  return {
+    repositoryEnabled: data.repository.enabled,
+    reviewPolicy: data.settings.reviewPolicy,
+    severityThreshold: data.settings.severityThreshold,
+    maxCommentsPerReview: String(data.settings.maxCommentsPerReview),
+    ignoredPaths: data.settings.ignoredPaths.join("\n"),
+    ignoredAuthors: data.settings.ignoredAuthors.join("\n"),
+    ignoredLabels: data.settings.ignoredLabels.join("\n"),
+    requireLabel: data.settings.requireLabel ?? "",
+    skipGeneratedFiles: data.settings.skipGeneratedFiles,
+    skipDraftPullRequests: data.settings.skipDraftPullRequests,
+    customInstructions: data.settings.customInstructions ?? "",
+  };
+}
+
+/** Converts the settings form into an API patch payload. */
+function settingsPatchFromForm(form: SettingsFormState): Record<string, unknown> {
+  return {
+    repositoryEnabled: form.repositoryEnabled,
+    reviewPolicy: form.reviewPolicy,
+    severityThreshold: form.severityThreshold,
+    maxCommentsPerReview: boundedNumber(form.maxCommentsPerReview, 0, 50),
+    ignoredPaths: linesFromText(form.ignoredPaths),
+    ignoredAuthors: linesFromText(form.ignoredAuthors),
+    ignoredLabels: linesFromText(form.ignoredLabels),
+    requireLabel: form.requireLabel.trim(),
+    skipGeneratedFiles: form.skipGeneratedFiles,
+    skipDraftPullRequests: form.skipDraftPullRequests,
+    customInstructions: form.customInstructions.trim(),
+  };
+}
+
+/** Parses non-empty lines from textarea input. */
+function linesFromText(value: string): readonly string[] {
+  return value
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/** Parses a bounded integer. */
+function boundedNumber(value: string, minimum: number, maximum: number): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    return minimum;
+  }
+
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+/** Appends a non-empty query parameter. */
+function appendQueryParam(params: URLSearchParams, key: string, value: string): void {
+  const trimmed = value.trim();
+  if (trimmed.length > 0) {
+    params.set(key, trimmed);
+  }
+}
+
+/** Returns whether a request method is safe from CSRF. */
+function isSafeMethod(method: string): boolean {
+  return method === "GET" || method === "HEAD" || method === "OPTIONS";
+}
+
+/** Reads the audit request ID from metadata. */
+function requestIdFromMetadata(metadata: unknown): string | undefined {
+  const record = asRecord(metadata);
+  const requestId = record?.requestId;
+  return typeof requestId === "string" ? requestId : undefined;
 }
 
 /** Returns a CSS class for a durable status. */
@@ -1250,6 +1970,11 @@ function objectValues<T extends Record<string, unknown>>(value: T): T[keyof T][]
 /** Narrows a string to an inspector kind. */
 function isInspectorKind(value: string): value is InspectorKind {
   return value === "webhook" || value === "review" || value === "publisher";
+}
+
+/** Narrows a string to a primary view kind. */
+function isViewKind(value: string): value is ViewKind {
+  return value === "inspectors" || value === "settings" || value === "audit";
 }
 
 /** Narrows unknown values to object records. */

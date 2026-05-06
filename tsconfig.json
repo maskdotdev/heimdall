@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./apps/api" },
+    { "path": "./apps/admin-gateway" },
     { "path": "./apps/web" },
     { "path": "./apps/worker" },
     { "path": "./apps/indexer-cli" },

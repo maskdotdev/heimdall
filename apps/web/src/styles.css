@@ -31,7 +31,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -54,14 +56,26 @@ button:disabled {
   opacity: 0.52;
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
-  min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 0 12px;
   background: #ffffff;
   color: var(--ink);
+}
+
+input,
+select {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+textarea {
+  min-height: 120px;
+  padding: 10px 12px;
+  resize: vertical;
 }
 
 label {
@@ -186,14 +200,23 @@ th {
 
 .auth-panel {
   display: grid;
-  grid-template-columns: minmax(180px, 280px) minmax(220px, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 280px) minmax(180px, 1fr) auto auto;
   align-items: end;
   gap: 12px;
   padding: 14px;
 }
 
-.token-field {
-  min-width: 220px;
+.session-copy {
+  display: grid;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.session-copy span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .primary {
@@ -219,6 +242,13 @@ th {
   margin-top: 18px;
 }
 
+.primary-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
 .tabs {
   display: grid;
   align-content: start;
@@ -236,6 +266,10 @@ th {
   border-color: var(--ink);
   background: var(--ink);
   color: #ffffff;
+}
+
+.primary-nav .tab {
+  width: auto;
 }
 
 .inspector {
@@ -259,6 +293,35 @@ th {
   align-items: end;
   gap: 10px;
   min-width: min(100%, 700px);
+}
+
+.compact-controls {
+  grid-template-columns: minmax(220px, 420px) auto auto;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.form-grid.textareas {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #ffffff;
+}
+
+.check-field input {
+  width: auto;
 }
 
 .notice,

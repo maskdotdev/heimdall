@@ -53,6 +53,17 @@ export class RepositoryRepository {
     return row ? toRepository(row) : undefined;
   }
 
+  /** Updates whether a repository is enabled for automated review. */
+  public async updateRepositoryEnabled(repoId: string, enabled: boolean): Promise<Repository> {
+    const [row] = await this.db
+      .update(repositories)
+      .set({ enabled, updatedAt: new Date() })
+      .where(eq(repositories.repoId, repoId))
+      .returning();
+
+    return toRepository(requireReturnedRow(row));
+  }
+
   /** Inserts or updates mutable repository settings. */
   public async upsertSettings(settings: RepositorySettings): Promise<RepositorySettings> {
     const [row] = await this.db

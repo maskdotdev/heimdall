@@ -2,14 +2,11 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
-    "types": ["node"],
-    "declaration": true,
-    "declarationMap": true,
-    "emitDeclarationOnly": false,
     "outDir": "dist",
     "rootDir": "src",
     "tsBuildInfoFile": "./.tsbuildinfo/build.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"]
+  "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"],
+  "references": [{ "path": "../../packages/security/tsconfig.build.json" }]
 }

@@ -13,6 +13,7 @@ describe("runtime config", () => {
       databaseUrl: "postgres://postgres:postgres@localhost:5432/heimdall",
       redisUrl: "redis://localhost:6379",
       logLevel: "info",
+      adminEnabled: false,
     });
   });
 
@@ -26,6 +27,12 @@ describe("runtime config", () => {
         GITHUB_APP_ID: "123",
         GITHUB_WEBHOOK_SECRET: "secret",
         OBJECT_STORAGE_BUCKET: "heimdall-artifacts",
+        HEIMDALL_ADMIN_ENABLED: "true",
+        HEIMDALL_ADMIN_ROUTE_EXPOSURE: "public",
+        HEIMDALL_ADMIN_IDENTITY_PROVIDER: "oidc",
+        HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET: "assertion-secret-with-at-least-32-chars",
+        HEIMDALL_ADMIN_SESSION_SECRET: "session-secret-with-at-least-32-chars",
+        HEIMDALL_ADMIN_ALLOWED_ORIGINS: "https://admin.example.com",
       }),
     ).toMatchObject({
       nodeEnv: "production",
@@ -33,7 +40,21 @@ describe("runtime config", () => {
       githubAppId: "123",
       githubWebhookSecret: "secret",
       objectStorageBucket: "heimdall-artifacts",
+      adminEnabled: true,
+      adminRouteExposure: "public",
+      adminIdentityProvider: "oidc",
+      adminAllowedOrigins: ["https://admin.example.com"],
     });
+  });
+
+  it("fails closed when admin routes are enabled without provider configuration", () => {
+    expect(() =>
+      loadRuntimeConfig({
+        DATABASE_URL: "postgres://postgres:postgres@localhost:5432/heimdall",
+        REDIS_URL: "redis://localhost:6379",
+        HEIMDALL_ADMIN_ENABLED: "true",
+      }),
+    ).toThrow(ConfigValidationError);
   });
 
   it("rejects missing required values", () => {

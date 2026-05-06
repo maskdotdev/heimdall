@@ -1,5 +1,5 @@
 {
-  "name": "@app/api",
+  "name": "@app/admin-gateway",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,19 +14,12 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
-    "@repo/admin-tools": "workspace:*",
-    "@repo/config": "workspace:*",
-    "@repo/contracts": "workspace:*",
-    "@repo/db": "workspace:*",
-    "@repo/queue": "workspace:*",
     "@repo/security": "workspace:*",
-    "@repo/webhook-ingestion": "workspace:*",
-    "@repo/observability": "workspace:*",
-    "drizzle-orm": "catalog:",
-    "elysia": "catalog:"
+    "@sinclair/typebox": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

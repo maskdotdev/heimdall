@@ -68,40 +68,61 @@ pnpm infra:up
 pnpm infra:down
 ```
 
-## Admin Debug API
+## Admin Control Plane
 
-Admin-debug routes are disabled by default. Enable them only on trusted internal deployments.
+Admin routes are disabled by default and fail closed unless identity, session, CORS, and exposure
+settings are configured. The API accepts signed identity assertions from an upstream OIDC, SAML, or
+GitHub organization gateway, then mints secure cookie sessions with CSRF tokens.
 
 ```bash
-HEIMDALL_ADMIN_DEBUG_ENABLED=true
-HEIMDALL_ADMIN_USERS='[
-  {
-    "userId": "usr_support_local",
-    "role": "support",
-    "token": "<strong support token>",
-    "email": "support@example.com",
-    "displayName": "Support User"
-  },
-  {
-    "userId": "usr_admin_local",
-    "role": "admin",
-    "token": "<strong admin token>",
-    "email": "admin@example.com",
-    "displayName": "Admin User"
-  }
-]'
+HEIMDALL_ADMIN_ENABLED=true
+HEIMDALL_ADMIN_ROUTE_EXPOSURE=internal
+HEIMDALL_ADMIN_IDENTITY_PROVIDER=oidc
+HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET="<32+ character assertion secret>"
+HEIMDALL_ADMIN_SESSION_SECRET="<32+ character session secret>"
+HEIMDALL_ADMIN_ALLOWED_ORIGINS="https://admin.example.com"
 ```
 
-Send one configured token with `Authorization: Bearer <token>`. Support users can inspect webhook,
-review, and publisher state and create replay plans. Admin users can also execute confirmed replay.
-Replay execution writes an `audit_logs` row with the actor, confirmation token, replay plan, and
-inserted durable job IDs.
+The first trusted gateway implementation lives in `@app/admin-gateway`. It uses GitHub OAuth,
+requires active membership in `HEIMDALL_ADMIN_GITHUB_ORG`, restricts admitted logins unless
+`HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=true`, maps configured `admin.*` permissions and
+org/repo scopes, and returns signed Heimdall assertion headers from `/heimdall/assertion`.
 
-`HEIMDALL_ADMIN_DEBUG_TOKEN` remains available as a compatibility fallback and maps to an admin
-actor. Prefer `HEIMDALL_ADMIN_USERS` for operator workflows.
+Control-plane permissions are granular: `admin.inspect`, `admin.replay.plan`,
+`admin.replay.execute`, `admin.settings.manage`, and `admin.audit.view`. Actors are scoped by
+organization and repository IDs from the identity assertion.
 
-Run the web dashboard with `pnpm dev:web`. In development, the Vite server proxies `/admin` routes
-to `http://localhost:3000`.
+The dashboard supports replay inspection, repository review settings, repository enablement, and
+searchable audit history. Replay execution and settings changes write `audit_logs` rows with actor
+identity, request IDs, session IDs, and before/after mutation data where applicable.
+
+Run the web dashboard with `pnpm dev:web`. In development, configure `VITE_HEIMDALL_API_BASE_URL`
+or proxy `/admin` routes to `http://localhost:3000`. See
+`docs/runbooks/admin-control-plane.md` for release gates and emergency operations.
+
+Live control-plane smoke gates require a deployed identity gateway that returns signed admin
+assertions. Use `HEIMDALL_ADMIN_SMOKE_ASSERTION_URL` for staging proof; the smoke gates do not mint
+assertions from `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET`. For the GitHub gateway, authenticate in
+the browser first, then pass the gateway session cookie through `HEIMDALL_ADMIN_SMOKE_GATEWAY_COOKIE`.
+Run `pnpm preflight:control-plane:staging` before the smoke and dashboard proof commands to validate
+deployed URLs, CORS, the dashboard API bundle configuration, write acknowledgements, and gateway/API
+auth configuration.
+Run `pnpm proof:control-plane:staging` with `HEIMDALL_CONTROL_PLANE_MANUAL_DRILL_EVIDENCE` and
+`HEIMDALL_CONTROL_PLANE_ROLLBACK_NOTES` set to execute the full proof sequence and write a JSON
+evidence record with top-level actor, scope, gateway, and audit summaries.
+
+For local development, run the localhost-only dev gateway when you do not need real GitHub auth:
+
+```bash
+pnpm smoke:control-plane:api
+pnpm dev:web
+pnpm dev:admin-idp
+pnpm smoke:control-plane:local
+```
+
+The dev gateway signs assertions with the local
+`HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET`. It binds to `127.0.0.1` by default and refuses to run
+with `NODE_ENV=production`.
 
 ## Live Publisher Smoke
 

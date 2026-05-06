@@ -7,7 +7,16 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["apps/**", "packages/**", "scripts/**", "*.json", "*.jsonc", "*.ts", "*.tsx"]
+    "includes": [
+      "apps/**",
+      "packages/**",
+      "scripts/**",
+      "test/**",
+      "*.json",
+      "*.jsonc",
+      "*.ts",
+      "*.tsx"
+    ]
   },
   "formatter": {
     "enabled": true,

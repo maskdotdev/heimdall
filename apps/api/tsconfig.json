@@ -13,6 +13,7 @@
     { "path": "../../packages/config/tsconfig.build.json" },
     { "path": "../../packages/db/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
+    { "path": "../../packages/security/tsconfig.build.json" },
     { "path": "../../packages/webhook-ingestion/tsconfig.build.json" }
   ]
 }

@@ -54,9 +54,9 @@ tracked milestone.
 
 - Latest completed milestone: guarded live PR review smoke verified webhook-to-publish completion
   against development PR `maskdotdev/heimdall#2`.
-- Latest implementation milestone: authenticated support/admin workflow on top of admin-debug API,
-  including webhook/review/publisher dashboard inspectors, role-gated replay execution, and
-  audited replay decisions with final durable job IDs.
+- Latest implementation milestone: production-shaped admin control plane with signed IdP-backed
+  sessions, scoped permissions, CSRF/CORS protections, settings APIs/UI, audit history search, and
+  release-gate runbook/scripts.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
@@ -72,5 +72,5 @@ tracked milestone.
 
 ## Recommended Next Goal
 
-Harden the admin workflow for production identity providers, deployment controls, and broader
-control-plane settings.
+Run the admin control-plane staging smoke against the next staging deployment and connect the
+trusted OIDC/SAML/GitHub org gateway that emits signed admin identity assertions.

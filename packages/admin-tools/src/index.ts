@@ -224,11 +224,19 @@ export type AdminReplayExecutionResult = {
 /** Authenticated support/admin actor that requested a replay operation. */
 export type AdminReplayAuditActor = {
   /** Actor category stored in the audit log. */
-  readonly actorType: "admin_user" | "internal_token";
+  readonly actorType: "admin_user" | "idp_user" | "internal_token";
   /** Stable user or token principal ID stored in the audit log. */
   readonly actorUserId: string;
   /** Access role granted to the actor. */
   readonly role: "support" | "admin";
+  /** Request ID that authorized this replay decision. */
+  readonly requestId?: string;
+  /** Session ID that authorized this replay decision. */
+  readonly sessionId?: string;
+  /** Identity provider that authenticated the actor when available. */
+  readonly provider?: string;
+  /** Granular permissions granted to the actor when available. */
+  readonly permissions?: readonly string[];
   /** Display name shown in operator views when available. */
   readonly displayName?: string;
   /** Primary email shown in operator views when available. */
@@ -577,6 +585,8 @@ export type AdminPublisherOutputDebugSummary = {
 export type AdminPublisherDebugDetails = {
   /** Review run being inspected. */
   readonly reviewRunId: string;
+  /** Repository that owns the review run. */
+  readonly repoId: string;
   /** Publish runs for the review run. */
   readonly publishRuns: readonly AdminPublishRunDebugSummary[];
   /** Low-level publish operations for the publish runs. */
@@ -1012,6 +1022,7 @@ export async function getPublisherDebugDetails(
 
   return {
     reviewRunId,
+    repoId: reviewRun.repoId,
     publishRuns: publishRunSummaries,
     operations: operationSummaries,
     outputs: {
@@ -2313,9 +2324,14 @@ async function insertReplayAuditLog(
     metadata: {
       actor: {
         role: input.actor.role,
+        ...(input.actor.requestId ? { requestId: input.actor.requestId } : {}),
+        ...(input.actor.sessionId ? { sessionId: input.actor.sessionId } : {}),
+        ...(input.actor.provider ? { provider: input.actor.provider } : {}),
+        ...(input.actor.permissions ? { permissions: input.actor.permissions } : {}),
         ...(input.actor.displayName ? { displayName: input.actor.displayName } : {}),
         ...(input.actor.email ? { email: input.actor.email } : {}),
       },
+      ...(input.actor.requestId ? { requestId: input.actor.requestId } : {}),
       confirmationToken: input.confirmationToken,
       plan: input.plan,
       result: {

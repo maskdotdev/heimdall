@@ -77,6 +77,12 @@ importers:
       '@biomejs/biome':
         specifier: 'catalog:'
         version: 2.4.14
+      '@repo/config':
+        specifier: workspace:*
+        version: link:packages/config
+      '@repo/security':
+        specifier: workspace:*
+        version: link:packages/security
       '@types/bun':
         specifier: 'catalog:'
         version: 1.3.13
@@ -86,6 +92,28 @@ importers:
       turbo:
         specifier: 'catalog:'
         version: 2.9.9
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.5(@types/node@25.6.0)(vite@8.0.10(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1)(tsx@4.21.0))
+
+  apps/admin-gateway:
+    dependencies:
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../../packages/security
+      '@sinclair/typebox':
+        specifier: 'catalog:'
+        version: 0.34.49
+    devDependencies:
+      '@types/bun':
+        specifier: 'catalog:'
+        version: 1.3.13
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.6.0
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
@@ -113,9 +141,15 @@ importers:
       '@repo/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       '@repo/webhook-ingestion':
         specifier: workspace:*
         version: link:../../packages/webhook-ingestion
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.2(bun-types@1.3.13)(postgres@3.4.9)
       elysia:
         specifier: 'catalog:'
         version: 1.4.28(@sinclair/typebox@0.34.49)(@types/bun@1.3.13)(exact-mirror@1.0.0)(file-type@22.0.1)(openapi-types@12.1.3)(typescript@6.0.3)
