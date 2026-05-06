@@ -756,6 +756,7 @@ export async function executeWebhookReplay(
   dependencies: AdminDebugServiceDependencies,
   actor: AdminReplayAuditActor,
 ): Promise<AdminReplayExecutionResult> {
+  const row = await getWebhookEventRow(webhookEventId, dependencies.db);
   const plan = await createWebhookReplayPlan(webhookEventId, dependencies);
   assertConfirmationToken(confirmationToken, plan.confirmationToken);
   return insertReplayJobs({
@@ -767,7 +768,7 @@ export async function executeWebhookReplay(
       actor,
       resourceType: "webhook_event",
       resourceId: webhookEventId,
-      orgId: firstDefined(plan.jobs.map((job) => job.orgId)),
+      orgId: firstDefined(plan.jobs.map((job) => job.orgId)) ?? row.orgId ?? undefined,
       plan: auditPlanFromWebhookReplayPlan(plan),
     },
   });

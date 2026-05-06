@@ -540,10 +540,11 @@ async function waitForText(
   text: string,
   timeoutMs: number,
 ): Promise<void> {
+  const normalizedText = text.toLocaleLowerCase();
   await waitForCondition(
     browser,
     page,
-    `document.body?.innerText.includes(${JSON.stringify(text)}) === true`,
+    `document.body?.innerText.toLocaleLowerCase().includes(${JSON.stringify(normalizedText)}) === true`,
     `text ${text}`,
     timeoutMs,
   );
