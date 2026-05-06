@@ -22,6 +22,12 @@ import {
   RepositoryRepository,
 } from "@repo/db";
 import {
+  type AdminControlPlaneTelemetryEventInput,
+  createNoopObservabilitySink,
+  type ObservabilitySink,
+  tryRecordAdminControlPlaneTelemetryEvent,
+} from "@repo/observability";
+import {
   type AdminActor,
   type AdminIdentityProvider,
   type AdminPermission,
@@ -203,6 +209,19 @@ type AdminAuditEventInput = {
   readonly metadata?: Record<string, unknown> | undefined;
 };
 
+/** Admin telemetry input before absent optional fields are removed. */
+type AdminTelemetryRequestEventInput = Omit<
+  AdminControlPlaneTelemetryEventInput,
+  "actorUserId" | "orgId" | "repoId" | "route"
+> & {
+  /** Stable actor ID when known. */
+  readonly actorUserId?: string | undefined;
+  /** Organization scope when known. */
+  readonly orgId?: string | undefined;
+  /** Repository scope when known. */
+  readonly repoId?: string | undefined;
+};
+
 /** Service surface for control-plane settings and audit APIs. */
 export type AdminControlPlaneService = {
   /** Gets repository control-plane settings. */
@@ -249,6 +268,8 @@ export type CreateApiAppOptions = {
   readonly adminControlPlaneService?: AdminControlPlaneService;
   /** Admin control-plane authentication override for tests or custom composition. */
   readonly adminControlPlaneAuth?: AdminControlPlaneAuthOptions;
+  /** Admin control-plane observability sink for structured telemetry. */
+  readonly adminObservabilitySink?: ObservabilitySink;
 };
 
 /** Creates the Heimdall API app. */
@@ -270,13 +291,22 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
     options.adminControlPlaneService ??
     createAdminControlPlaneService({ db: getDatabaseClient().db });
   const adminAuth = resolveAdminControlPlaneAuth(options.adminControlPlaneAuth);
+  const observabilitySink = options.adminObservabilitySink ?? createNoopObservabilitySink();
 
   return new Elysia()
     .get("/healthz", () => ({ ok: true, service: "api" }))
-    .options("/admin/*", ({ request, set }) => handleAdminPreflight(request, set, adminAuth))
+    .options("/admin/*", ({ request, set }) =>
+      handleAdminPreflight(request, set, adminAuth, observabilitySink),
+    )
     .post("/admin/auth/login", async ({ request, set }) => {
       const requestId = requestIdFromRequest(request);
-      const configResponse = guardAdminConfiguration(request, set, adminAuth, requestId);
+      const configResponse = guardAdminConfiguration(
+        request,
+        set,
+        adminAuth,
+        requestId,
+        observabilitySink,
+      );
       if (configResponse) {
         return configResponse;
       }
@@ -308,17 +338,36 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           resourceType: "admin_session",
           sessionId: sessionWrite.session.sessionId,
         });
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: actor.actorUserId,
+          attributes: {
+            auditLogId: loginAudit.auditLogId,
+            provider: actor.provider,
+          },
+          name: "admin.auth.success",
+          orgId: primaryActorOrgId(actor),
+          requestId,
+          statusCode: 200,
+        });
         setAdminResponseHeaders(request, set, adminAuth, requestId, sessionWrite.cookie);
 
         return {
           data: { ...publicAdminSession(sessionWrite.session), auditLogId: loginAudit.auditLogId },
         };
       } catch (error) {
-        return handleAdminAuthError(error, set);
+        const response = handleAdminAuthError(error, set);
+        recordAdminAccessDenied(
+          observabilitySink,
+          request,
+          requestId,
+          response.error.code,
+          statusCodeFromSet(set, 401),
+        );
+        return response;
       }
     })
     .post("/admin/auth/logout", async ({ request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth);
+      const guardResult = guardAdminSession(request, set, adminAuth, observabilitySink);
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -345,11 +394,22 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         guardResult.requestId,
         requireValue(adminAuth.sessionManager).clear(),
       );
+      recordAdminTelemetry(observabilitySink, request, {
+        actorUserId: guardResult.actor.actorUserId,
+        attributes: {
+          auditLogId: logoutAudit.auditLogId,
+          provider: guardResult.actor.provider,
+        },
+        name: "admin.session.revoked",
+        orgId: primaryActorOrgId(guardResult.actor),
+        requestId: guardResult.requestId,
+        statusCode: 200,
+      });
 
       return { data: { auditLogId: logoutAudit.auditLogId, ok: true } };
     })
     .get("/admin/session", ({ request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth);
+      const guardResult = guardAdminSession(request, set, adminAuth, observabilitySink);
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -359,7 +419,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       return { data: publicAdminSession(rotated.session) };
     })
     .get("/admin/debug/webhooks/:webhookEventId", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.inspect");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -378,7 +444,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .post("/admin/debug/webhooks/:webhookEventId/replay-plan", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.replay.plan");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.plan",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -409,7 +481,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .post("/admin/debug/webhooks/:webhookEventId/replay", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.replay.execute");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.execute",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -444,19 +522,38 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           return authorizationResponse;
         }
 
-        return {
-          data: await getAdminDebugService().executeWebhookReplay(
-            params.webhookEventId,
-            confirmationToken,
-            replayAuditActor(guardResult),
-          ),
-        };
+        const replay = await getAdminDebugService().executeWebhookReplay(
+          params.webhookEventId,
+          confirmationToken,
+          replayAuditActor(guardResult),
+        );
+        const scope = plan.jobs[0] ?? fallbackDetails?.webhookEvent;
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: guardResult.actor.actorUserId,
+          attributes: {
+            replayKind: "webhook",
+            resourceId: params.webhookEventId,
+          },
+          name: "admin.replay.dispatched",
+          orgId: scope?.orgId,
+          repoId: scope?.repoId,
+          requestId: guardResult.requestId,
+          statusCode: 200,
+        });
+
+        return { data: replay };
       } catch (error) {
         return handleAdminDebugError(error, set);
       }
     })
     .get("/admin/debug/reviews/:reviewRunId", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.inspect");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -475,7 +572,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .post("/admin/debug/reviews/:reviewRunId/replay-plan", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.replay.plan");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.plan",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -494,7 +597,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .post("/admin/debug/reviews/:reviewRunId/replay", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.replay.execute");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.execute",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -517,19 +626,37 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           return authorizationResponse;
         }
 
-        return {
-          data: await getAdminDebugService().executeReviewReplay(
-            params.reviewRunId,
-            confirmationToken,
-            replayAuditActor(guardResult),
-          ),
-        };
+        const replay = await getAdminDebugService().executeReviewReplay(
+          params.reviewRunId,
+          confirmationToken,
+          replayAuditActor(guardResult),
+        );
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: guardResult.actor.actorUserId,
+          attributes: {
+            replayKind: "review",
+            resourceId: params.reviewRunId,
+          },
+          name: "admin.replay.dispatched",
+          orgId: plan.job.orgId,
+          repoId: plan.job.repoId,
+          requestId: guardResult.requestId,
+          statusCode: 200,
+        });
+
+        return { data: replay };
       } catch (error) {
         return handleAdminDebugError(error, set);
       }
     })
     .get("/admin/debug/publisher/:reviewRunId", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.inspect");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -558,7 +685,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .post("/admin/debug/publisher/:reviewRunId/replay-plan", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.replay.plan");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.plan",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -577,7 +710,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .post("/admin/debug/publisher/:reviewRunId/replay", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.replay.execute");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.execute",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -600,19 +739,37 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           return authorizationResponse;
         }
 
-        return {
-          data: await getAdminDebugService().executePublisherReplay(
-            params.reviewRunId,
-            confirmationToken,
-            replayAuditActor(guardResult),
-          ),
-        };
+        const replay = await getAdminDebugService().executePublisherReplay(
+          params.reviewRunId,
+          confirmationToken,
+          replayAuditActor(guardResult),
+        );
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: guardResult.actor.actorUserId,
+          attributes: {
+            replayKind: "publisher",
+            resourceId: params.reviewRunId,
+          },
+          name: "admin.replay.dispatched",
+          orgId: plan.job.orgId,
+          repoId: plan.job.repoId,
+          requestId: guardResult.requestId,
+          statusCode: 200,
+        });
+
+        return { data: replay };
       } catch (error) {
         return handleAdminDebugError(error, set);
       }
     })
     .get("/admin/repos/:repoId/settings", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.inspect");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -631,7 +788,13 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }
     })
     .patch("/admin/repos/:repoId/settings", async ({ params, request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.settings.manage");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.settings.manage",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -663,23 +826,41 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           return authorizationResponse;
         }
 
-        return {
-          data: await getAdminControlPlaneService().updateRepositorySettings(
-            params.repoId,
-            parsed.value,
-            {
-              actor: guardResult.actor,
-              requestId: guardResult.requestId,
-              sessionId: guardResult.session.sessionId,
-            },
-          ),
-        };
+        const settings = await getAdminControlPlaneService().updateRepositorySettings(
+          params.repoId,
+          parsed.value,
+          {
+            actor: guardResult.actor,
+            requestId: guardResult.requestId,
+            sessionId: guardResult.session.sessionId,
+          },
+        );
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: guardResult.actor.actorUserId,
+          attributes: {
+            repositoryEnabled: settings.repository.enabled,
+            severityThreshold: settings.settings.severityThreshold,
+          },
+          name: "admin.settings.updated",
+          orgId: settings.repository.orgId,
+          repoId: settings.repository.repoId,
+          requestId: guardResult.requestId,
+          statusCode: 200,
+        });
+
+        return { data: settings };
       } catch (error) {
         return handleAdminControlPlaneError(error, set);
       }
     })
     .get("/admin/audit-logs", async ({ request, set }) => {
-      const guardResult = guardAdminSession(request, set, adminAuth, "admin.audit.view");
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.audit.view",
+      );
       if ("response" in guardResult) {
         return guardResult.response;
       }
@@ -1017,9 +1198,10 @@ function handleAdminPreflight(
   request: Request,
   set: AdminResponseSet,
   auth: ResolvedAdminControlPlaneAuthOptions,
+  observabilitySink: ObservabilitySink,
 ): AdminErrorResponse | undefined {
   const requestId = requestIdFromRequest(request);
-  const guardResponse = guardAdminConfiguration(request, set, auth, requestId);
+  const guardResponse = guardAdminConfiguration(request, set, auth, requestId, observabilitySink);
   if (guardResponse) {
     return guardResponse;
   }
@@ -1034,10 +1216,12 @@ function guardAdminConfiguration(
   set: AdminResponseSet,
   auth: ResolvedAdminControlPlaneAuthOptions,
   requestId: string,
+  observabilitySink: ObservabilitySink,
 ): AdminErrorResponse | undefined {
   setAdminResponseHeaders(request, set, auth, requestId);
   if (!auth.enabled || auth.routeExposure === "disabled") {
     set.status = 404;
+    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.disabled", 404);
     return {
       error: {
         code: "admin.disabled",
@@ -1047,6 +1231,7 @@ function guardAdminConfiguration(
   }
   if (auth.configurationError) {
     set.status = 503;
+    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.misconfigured", 503);
     return {
       error: {
         code: "admin.misconfigured",
@@ -1058,6 +1243,7 @@ function guardAdminConfiguration(
     const headerValue = request.headers.get(requireValue(auth.internalHeaderName));
     if (headerValue !== auth.internalHeaderValue) {
       set.status = 404;
+      recordAdminAccessDenied(observabilitySink, request, requestId, "admin.not_exposed", 404);
       return {
         error: {
           code: "admin.not_exposed",
@@ -1073,6 +1259,9 @@ function guardAdminConfiguration(
     (origin && !auth.allowedOrigins.includes(origin))
   ) {
     set.status = 403;
+    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.cors_forbidden", 403, {
+      ...(origin ? { origin } : {}),
+    });
     return {
       error: {
         code: "admin.cors_forbidden",
@@ -1089,10 +1278,11 @@ function guardAdminSession(
   request: Request,
   set: AdminResponseSet,
   auth: ResolvedAdminControlPlaneAuthOptions,
+  observabilitySink: ObservabilitySink,
   permission?: AdminPermission,
 ): AdminRequestContext | { readonly response: AdminErrorResponse } {
   const requestId = requestIdFromRequest(request);
-  const configResponse = guardAdminConfiguration(request, set, auth, requestId);
+  const configResponse = guardAdminConfiguration(request, set, auth, requestId, observabilitySink);
   if (configResponse) {
     return { response: configResponse };
   }
@@ -1100,6 +1290,7 @@ function guardAdminSession(
   const session = requireValue(auth.sessionManager).read(request.headers.get("cookie"));
   if (!session) {
     set.status = 401;
+    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.unauthorized", 401);
     return {
       response: {
         error: {
@@ -1115,6 +1306,7 @@ function guardAdminSession(
     !verifyCsrfToken(session, request.headers.get("x-csrf-token"))
   ) {
     set.status = 403;
+    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.csrf_forbidden", 403);
     return {
       response: {
         error: {
@@ -1127,6 +1319,10 @@ function guardAdminSession(
 
   if (permission && !actorHasPermission(session.actor, permission)) {
     set.status = 403;
+    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.forbidden", 403, {
+      actorUserId: session.actor.actorUserId,
+      permission,
+    });
     return {
       response: {
         error: {
@@ -1409,6 +1605,53 @@ function adminInvalidConfirmationResponse() {
       message: "Replay requests require a JSON confirmationToken.",
     },
   };
+}
+
+/** Records one admin control-plane telemetry event for the current request. */
+function recordAdminTelemetry(
+  observabilitySink: ObservabilitySink,
+  request: Request,
+  event: AdminTelemetryRequestEventInput,
+): void {
+  const { actorUserId, orgId, repoId, ...baseEvent } = event;
+  tryRecordAdminControlPlaneTelemetryEvent(observabilitySink, {
+    ...baseEvent,
+    ...(actorUserId ? { actorUserId } : {}),
+    ...(orgId ? { orgId } : {}),
+    ...(repoId ? { repoId } : {}),
+    route: routeFromRequest(request),
+  });
+}
+
+/** Records a denied admin access event for alerting and audit correlation. */
+function recordAdminAccessDenied(
+  observabilitySink: ObservabilitySink,
+  request: Request,
+  requestId: string,
+  code: string,
+  statusCode: number,
+  attributes: Record<string, string | number | boolean> = {},
+): void {
+  recordAdminTelemetry(observabilitySink, request, {
+    attributes: {
+      code,
+      method: request.method,
+      ...attributes,
+    },
+    name: "admin.access.denied",
+    requestId,
+    statusCode,
+  });
+}
+
+/** Returns a numeric status code from an Elysia set object. */
+function statusCodeFromSet(set: AdminStatusSet, fallback: number): number {
+  return typeof set.status === "number" ? set.status : fallback;
+}
+
+/** Returns the path component of a request URL. */
+function routeFromRequest(request: Request): string {
+  return new URL(request.url).pathname;
 }
 
 /** Returns a request ID from a header or generates one. */

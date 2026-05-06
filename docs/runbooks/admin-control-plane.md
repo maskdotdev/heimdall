@@ -133,6 +133,7 @@ Run these gates before enabling or changing the admin control plane in productio
 
    ```sh
    pnpm env:check
+   pnpm audit:control-plane:deployment
    ```
 
 2. Run the auth and authorization integration tests:
@@ -365,8 +366,9 @@ create equivalent alerts before moving to a formal infrastructure target.
 | API health | `GET <API_URL>/healthz` returns `{ "ok": true, "service": "api" }` | Two consecutive failures or any 5xx during rollout |
 | Gateway health | `GET <GATEWAY_URL>/healthz` returns `{ "ok": true, "service": "admin-gateway" }` | Two consecutive failures or any 5xx during rollout |
 | Dashboard health | `GET <WEB_URL>/` returns the dashboard shell built with the production API URL | 4xx/5xx or missing production API URL in the bundle |
-| Auth failures | Count API `admin_auth.*`, `admin.unauthorized`, `admin.cors_forbidden`, `admin.csrf_forbidden`, and gateway `admin_gateway.*` rejection codes in logs | More than 5 failures in 10 minutes after excluding a planned negative test |
-| Replay audit visibility | Search `audit_logs` for `webhook.requeue_jobs`, `review.requeue`, and `publish.review` after any replay dispatch | Replay dispatch returns without a matching audit row |
+| Auth failures | Count API `admin.access.denied` telemetry by `attributes.code` and gateway `admin_gateway.*` rejection codes in logs | More than 5 failures in 10 minutes after excluding a planned negative test |
+| Replay audit visibility | Search `audit_logs` for `webhook.requeue_jobs`, `review.requeue`, and `publish.review` after any `admin.replay.dispatched` event | Replay dispatch returns without a matching audit row |
+| Settings audit visibility | Search `audit_logs` for `repo.settings.updated` after any `admin.settings.updated` event | Settings update returns without a matching audit row |
 | Admin action volume | Count `audit_logs` by action each hour | Zero rows after a known manual drill, or more than 3 settings/replay mutations outside a release or incident |
 | Emergency disable | API admin routes return 404 after `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled` deploy | Disable cannot complete and verify within 10 minutes |
 
@@ -391,12 +393,15 @@ limit 20;
 Run the local production-readiness gate after updating the release evidence or this runbook:
 
 ```sh
+pnpm audit:control-plane:deployment
 pnpm readiness:control-plane:production
 ```
 
-The gate verifies that the committed staging proof passed, includes actor, scope, audit, command,
-and rollback evidence, and that this runbook covers rollout, hardening, rotation, monitoring,
-rollback, emergency disable, and the persisted replay audit action names.
+The deployment audit verifies that the Railway production manifest includes all required services,
+release gates, environment variable names, rollback checks, and alert coverage. The readiness gate
+verifies that the committed staging proof passed, includes actor, scope, audit, command, and
+rollback evidence, and that this runbook covers rollout, hardening, rotation, monitoring, rollback,
+emergency disable, and the persisted replay audit action names.
 
 ### Emergency Disable Path
 

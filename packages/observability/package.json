@@ -20,7 +20,8 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
-    "@repo/config": "workspace:*"
+    "@repo/config": "workspace:*",
+    "@sinclair/typebox": "catalog:"
   },
   "devDependencies": {
     "typescript": "catalog:",

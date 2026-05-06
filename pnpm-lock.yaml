@@ -608,6 +608,9 @@ importers:
       '@repo/config':
         specifier: workspace:*
         version: link:../config
+      '@sinclair/typebox':
+        specifier: 'catalog:'
+        version: 0.34.49
     devDependencies:
       typescript:
         specifier: 'catalog:'

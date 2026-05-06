@@ -8,6 +8,7 @@ import type {
   RepositorySettings,
   UpdateRepositoryControlPlaneSettingsRequest,
 } from "@repo/contracts";
+import { createMemoryObservabilitySink } from "@repo/observability";
 import { signAdminIdentityAssertion } from "@repo/security";
 import { describe, expect, it } from "vitest";
 import { type AdminControlPlaneService, createApiApp } from "./app";
@@ -137,9 +138,11 @@ describe("api app", () => {
   });
 
   it("rejects disallowed CORS origins for admin routes", async () => {
+    const observabilitySink = createMemoryObservabilitySink();
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({}),
+      adminObservabilitySink: observabilitySink,
       githubWebhookHandler: noopWebhookHandler(),
     });
 
@@ -155,6 +158,17 @@ describe("api app", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "admin.cors_forbidden" },
     });
+    expect(observabilitySink.events()).toMatchObject([
+      {
+        attributes: {
+          code: "admin.cors_forbidden",
+          origin: "https://evil.example",
+        },
+        name: "admin.access.denied",
+        route: "/admin/auth/login",
+        statusCode: 403,
+      },
+    ]);
   });
 
   it("rejects missing origins for admin mutations", async () => {
@@ -354,6 +368,7 @@ describe("api app", () => {
   });
 
   it("updates repository settings through the control-plane service", async () => {
+    const observabilitySink = createMemoryObservabilitySink();
     let observedPatch: UpdateRepositoryControlPlaneSettingsRequest | undefined;
     const app = createApiApp({
       adminControlPlaneAuth: auth,
@@ -369,6 +384,7 @@ describe("api app", () => {
           };
         },
       }),
+      adminObservabilitySink: observabilitySink,
       githubWebhookHandler: noopWebhookHandler(),
     });
     const login = await loginSession(app, {
@@ -398,6 +414,9 @@ describe("api app", () => {
         settings: { severityThreshold: "high" },
       },
     });
+    expect(observabilitySink.events().map((event) => event.name)).toContain(
+      "admin.settings.updated",
+    );
   });
 
   it("serves searchable audit history only to scoped audit viewers", async () => {
