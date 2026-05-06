@@ -243,10 +243,7 @@ export async function publishReviewRun(
       .set({
         status: "failed",
         completedAt: now(),
-        error: {
-          message: error instanceof Error ? error.message : String(error),
-          retryable: true,
-        },
+        error: serializePublisherError(error, "publisher.failed"),
       })
       .where(eq(publishRuns.idempotencyKey, idempotencyKey));
     throw error;
@@ -346,6 +343,7 @@ async function publishInlineComments(input: PublishInlineCommentsInput): Promise
     await insertPublishOperation(input.db, input.publishRunId, "review.inline_comments", {
       status: "failed",
       responseHash: hashJson({ message: error instanceof Error ? error.message : String(error) }),
+      error: serializePublisherError(error, "publisher.inline_comments_failed"),
     });
 
     return {
@@ -559,6 +557,7 @@ async function insertPublishOperation(
     readonly status: string;
     readonly requestHash?: string;
     readonly responseHash?: string;
+    readonly error?: Record<string, unknown>;
   },
 ): Promise<void> {
   await db.insert(publishOperations).values({
@@ -568,7 +567,28 @@ async function insertPublishOperation(
     status: input.status,
     requestHash: input.requestHash,
     responseHash: input.responseHash,
+    error: input.error,
   });
+}
+
+function serializePublisherError(error: unknown, code: string): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      code,
+      message: error.message,
+      retryable: true,
+      details: {
+        name: error.name,
+        ...(error.stack ? { stack: error.stack } : {}),
+      },
+    };
+  }
+
+  return {
+    code,
+    message: String(error),
+    retryable: true,
+  };
 }
 
 function stableId(prefix: string, parts: readonly unknown[]): string {

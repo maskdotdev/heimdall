@@ -68,6 +68,18 @@ pnpm infra:up
 pnpm infra:down
 ```
 
+## Admin Debug API
+
+Admin-debug routes are disabled by default. Enable them only on trusted internal deployments.
+
+```bash
+HEIMDALL_ADMIN_DEBUG_ENABLED=true
+HEIMDALL_ADMIN_DEBUG_TOKEN=<strong internal token>
+```
+
+Send the token with `Authorization: Bearer <token>`. The routes expose webhook, review, publisher,
+failure, and replay details.
+
 ## Live Publisher Smoke
 
 Run the GitHub publisher smoke test only against a development GitHub App installation and a

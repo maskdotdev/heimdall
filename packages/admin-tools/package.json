@@ -26,6 +26,7 @@
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
     "@repo/github": "workspace:*",
+    "@repo/queue": "workspace:*",
     "@repo/publisher": "workspace:*",
     "drizzle-orm": "catalog:"
   },

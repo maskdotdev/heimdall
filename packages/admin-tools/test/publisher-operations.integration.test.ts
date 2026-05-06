@@ -5,7 +5,16 @@ import * as schema from "@repo/db";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
-import { createPublisherReplayPlan, reconcilePublisherRun, renderPublisherDryRun } from "../src";
+import {
+  createPublisherReplayPlan,
+  createReviewReplayPlan,
+  createWebhookReplayPlan,
+  executePublisherReplay,
+  executeReviewReplay,
+  executeWebhookReplay,
+  reconcilePublisherRun,
+  renderPublisherDryRun,
+} from "../src";
 
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 const testDirectory = fileURLToPath(new URL(".", import.meta.url));
@@ -34,6 +43,7 @@ describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
       (await readFile(migrationPath, "utf8")).replaceAll('"public".', `"${schemaName}".`),
     );
     await seedReview(sql);
+    await seedWebhookEvent(sql);
 
     const dryRun = await renderPublisherDryRun("rrn_admin", { db });
 
@@ -76,6 +86,7 @@ describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
     const replayPlan = await createPublisherReplayPlan("rrn_admin", { db });
     expect(replayPlan).toMatchObject({
       action: "publish.review",
+      queueName: "publishing",
       payload: {
         reviewRunId: "rrn_admin",
         repoId: "repo_admin",
@@ -84,6 +95,51 @@ describe.runIf(integrationDatabaseUrl)("publisher operational controls", () => {
       requiresExplicitConfirmation: true,
     });
     expect(replayPlan.confirmationToken).toMatch(/^sha256:/u);
+    const publisherReplay = await executePublisherReplay(
+      "rrn_admin",
+      replayPlan.confirmationToken,
+      {
+        db,
+      },
+    );
+    expect(publisherReplay.insertedJobIds).toHaveLength(1);
+    expect(publisherReplay.replayJobs[0]).toMatchObject({
+      queueName: "publishing",
+      jobType: "review.publish.v1",
+      jobKey: replayPlan.jobKey,
+      status: "pending",
+      reviewRunId: "rrn_admin",
+    });
+
+    const reviewReplayPlan = await createReviewReplayPlan("rrn_admin", { db });
+    const reviewReplay = await executeReviewReplay(
+      "rrn_admin",
+      reviewReplayPlan.confirmationToken,
+      { db },
+    );
+    expect(reviewReplay.insertedJobIds).toHaveLength(1);
+    expect(reviewReplay.replayJobs[0]).toMatchObject({
+      queueName: "review",
+      jobType: "pr.review.v1",
+      jobKey: reviewReplayPlan.jobKey,
+      status: "pending",
+      reviewRunId: "rrn_admin",
+    });
+
+    const webhookReplayPlan = await createWebhookReplayPlan("webhook_admin", { db });
+    expect(webhookReplayPlan.missingJobKeys).toEqual([
+      "github:index:repo_admin:2222222",
+      "github:review:repo_admin:12:2222222",
+    ]);
+    expect(webhookReplayPlan.jobs).toHaveLength(2);
+    expect(webhookReplayPlan.jobs.map((job) => job.source)).toEqual(["missing_job", "missing_job"]);
+    const webhookReplay = await executeWebhookReplay(
+      "webhook_admin",
+      webhookReplayPlan.confirmationToken,
+      { db },
+    );
+    expect(webhookReplay.insertedJobIds).toHaveLength(2);
+    expect(webhookReplay.replayJobs.map((job) => job.status)).toEqual(["pending", "pending"]);
   });
 });
 
@@ -280,6 +336,41 @@ async function insertFinding(
       '{"validatedAt":"2026-05-05T12:00:00.000Z","validatorVersion":"0.1.0","reasons":[]}'::jsonb,
       ${rank},
       ${`fp_${findingId}`}
+    )
+  `;
+}
+
+async function seedWebhookEvent(sql: postgres.Sql): Promise<void> {
+  await sql`
+    INSERT INTO webhook_events (
+      webhook_event_id,
+      provider,
+      delivery_id,
+      event_name,
+      action,
+      installation_id,
+      org_id,
+      repo_id,
+      received_at,
+      processed_at,
+      status,
+      payload_hash,
+      payload
+    )
+    VALUES (
+      'webhook_admin',
+      'github',
+      'delivery-admin',
+      'pull_request',
+      'synchronize',
+      'inst_admin',
+      'org_admin',
+      'repo_admin',
+      ${now},
+      ${now},
+      'processed',
+      'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      '{"pull_request":{"number":12,"base":{"sha":"1111111"},"head":{"sha":"2222222"}}}'::jsonb
     )
   `;
 }

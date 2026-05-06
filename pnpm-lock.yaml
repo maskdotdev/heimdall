@@ -95,6 +95,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@repo/admin-tools':
+        specifier: workspace:*
+        version: link:../../packages/admin-tools
       '@repo/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -283,6 +286,9 @@ importers:
       '@repo/publisher':
         specifier: workspace:*
         version: link:../publisher
+      '@repo/queue':
+        specifier: workspace:*
+        version: link:../queue
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.2(bun-types@1.3.13)(postgres@3.4.9)
