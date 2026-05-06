@@ -18,7 +18,7 @@ tracked milestone.
 | Phase | Status | Evidence | Notes |
 | --- | --- | --- | --- |
 | #0 Core contracts and shared types | Partial | `packages/contracts`, `b9b4635` | Enough contracts exist for current DB, webhook, and queue work. Continue expanding as later phases need new boundary types. |
-| #1 Monorepo and build system | Partial | `package.json`, `pnpm-workspace.yaml`, `turbo.json`, `b9b4635` | Workspace, TypeScript, Biome, Vitest, Turbo, and boundary checks are active. CI status still needs confirmation. |
+| #1 Monorepo and build system | Partial | `package.json`, `pnpm-workspace.yaml`, `turbo.json`, `.github/workflows/ci.yml` | Workspace, TypeScript, Biome, Vitest, Turbo, boundary checks, and a GitHub Actions CI gate are active. Broader release automation remains. |
 | #2 Database layer | Partial | `packages/db`, `drizzle.config.ts`, `packages/db/migrations/0000_foundation.sql`, `b9b4635` | Drizzle schema, generated migration, bootstrap extensions, client, and repository helpers exist. More repository methods and live DB verification remain. |
 | #3 GitHub App integration | Partial | `packages/github`, `408f7bd` | Provider surface, installation token caching, repo discovery, PR snapshot fetching, clone auth, publishing primitives, inline review dedupe, summary-comment dedupe, check-run create/update, fake provider coverage, and typed error mapping exist. Remaining phase criteria: rate-limit observation and manual dev-app runbook. |
 | #4 Webhook ingestion | Done | `packages/webhook-ingestion`, `apps/api/src/app.ts`, `b9b4635` | Handles GitHub installation, repository, and pull request webhooks with signature verification, persistence, idempotency, and job planning. |
@@ -47,8 +47,8 @@ tracked milestone.
 | #27 Security and compliance layer | Partial | `packages/security`, `packages/db/src/schema/tables.ts` | Package and audit schema support exist. Full security/compliance workflows remain. |
 | #28 Usage and billing | Partial | `packages/db/src/schema/tables.ts` | Usage event schema exists. Billing and usage ledger implementation remain. |
 | #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts`, `scripts/control-plane-production-readiness.ts`, `docs/runbooks/admin-control-plane.md`, `docs/evidence/admin-control-plane-staging-proof.json` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, operator dashboard views, Railway staging proof, production readiness runbook, and production-readiness gate exist. Broader production admin workflows remain. |
-| #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/`, `scripts/validate-production-deployment.ts` | Local infra exists, and the initial Railway production deployment manifest plus deployment audit gate are codified. CI wiring and provider-managed rollout automation remain. |
-| #31 Testing and evaluation strategy | Partial | `pnpm check`, package tests | Unit tests and optional integration tests exist for new work. Cross-system release gates remain. |
+| #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/`, `scripts/validate-production-deployment.ts`, `.github/workflows/ci.yml` | Local infra exists, and the initial Railway production deployment manifest plus deployment audit gate are codified and wired into CI. Provider-managed rollout automation remains. |
+| #31 Testing and evaluation strategy | Partial | `pnpm check`, `pnpm ci:control-plane:release`, package tests | Unit tests, optional integration tests, and CI release gates exist for new work. Evaluation harness coverage remains. |
 
 ## Current Completion Notes
 
@@ -70,6 +70,9 @@ tracked milestone.
   rollback checks, and alert coverage. `pnpm audit:control-plane:deployment` validates that
   manifest against the root scripts, and the API emits structured admin control-plane telemetry to
   the configured observability sink.
+- Latest CI milestone: `.github/workflows/ci.yml` runs `pnpm ci:control-plane:release` on pull
+  requests and pushes to `main`, covering the production deployment audit, production-readiness
+  gate, typecheck, lint, tests, workspace boundary checks, and build.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
@@ -85,5 +88,5 @@ tracked milestone.
 
 ## Recommended Next Goal
 
-Wire the production deployment audit and production-readiness gates into CI/deployment automation,
-then promote the Railway manifest through a controlled production release ticket.
+Promote the Railway manifest through a controlled production release ticket, then add provider-side
+deployment automation for the API, dashboard, admin gateway, and worker services.

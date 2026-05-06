@@ -60,6 +60,7 @@ packages/admin-tools
 ```bash
 pnpm dev
 pnpm check
+pnpm ci:control-plane:release
 pnpm build
 pnpm typecheck
 pnpm lint
@@ -202,3 +203,6 @@ Use `@repo/*` imports for package boundaries. Do not deep-import across package 
 folders.
 
 `pnpm check` runs typecheck, lint, tests, and the workspace boundary checker.
+`pnpm ci:control-plane:release` runs the production deployment audit, production-readiness gate,
+`pnpm check`, and `pnpm build`; GitHub Actions runs that command on pull requests and pushes to
+`main`.
