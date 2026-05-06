@@ -447,6 +447,126 @@ describe("api app", () => {
     });
   });
 
+  it("serves repository rules only to scoped inspectors", async () => {
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        listRepositoryRules: async (repoId) => [
+          {
+            repoRuleId: "rule_1",
+            orgId: "org_1",
+            repoId,
+            scope: "path",
+            ruleType: "suppress",
+            body: "Skip generated files.",
+            isEnabled: true,
+            createdAt: "2026-05-05T12:00:00.000Z",
+            updatedAt: "2026-05-05T12:30:00.000Z",
+          },
+        ],
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect"],
+      providerSubject: "usr_support",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/admin/repos/repo_1/rules", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        rules: [{ body: "Skip generated files.", repoRuleId: "rule_1" }],
+      },
+    });
+  });
+
+  it("serves scoped repository and review discovery without pasted IDs", async () => {
+    const repositoryQueries: unknown[] = [];
+    const reviewQueries: unknown[] = [];
+    const auditQueries: unknown[] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        listAuditLogs: async (query) => {
+          auditQueries.push(query);
+          return [auditLog("repo.settings.updated")];
+        },
+        listRepositories: async (query) => {
+          repositoryQueries.push(query);
+          return [
+            {
+              ...repositoryFixture,
+              latestReviewRunId: "rrn_1",
+              latestReviewStatus: "completed",
+              latestReviewUpdatedAt: "2026-05-05T12:30:00.000Z",
+            },
+          ];
+        },
+        listReviewRuns: async (query) => {
+          reviewQueries.push(query);
+          return [reviewRunSummaryFixture];
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect", "admin.audit.view"],
+      providerSubject: "usr_support",
+    });
+
+    const overviewResponse = await app.handle(
+      new Request("http://localhost/admin/overview?limit=12", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+    const repositoriesResponse = await app.handle(
+      new Request("http://localhost/admin/repos?search=heimdall", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+    const reviewsResponse = await app.handle(
+      new Request("http://localhost/admin/reviews?repoId=repo_1&status=completed", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+
+    expect(overviewResponse.status).toBe(200);
+    await expect(overviewResponse.json()).resolves.toMatchObject({
+      data: {
+        recentAuditLogs: [{ action: "repo.settings.updated" }],
+        recentReviews: [{ reviewRunId: "rrn_1", repoFullName: "octo-org/heimdall" }],
+        repositories: [{ fullName: "octo-org/heimdall", latestReviewRunId: "rrn_1" }],
+      },
+    });
+    expect(repositoriesResponse.status).toBe(200);
+    await expect(repositoriesResponse.json()).resolves.toMatchObject({
+      data: {
+        repositories: [{ repoId: "repo_1" }],
+      },
+    });
+    expect(reviewsResponse.status).toBe(200);
+    await expect(reviewsResponse.json()).resolves.toMatchObject({
+      data: {
+        reviews: [{ reviewRunId: "rrn_1" }],
+      },
+    });
+    expect(repositoryQueries).toContainEqual(
+      expect.objectContaining({ orgIds: ["org_1"], search: "heimdall" }),
+    );
+    expect(reviewQueries).toContainEqual(
+      expect.objectContaining({ orgIds: ["org_1"], repoId: "repo_1", status: "completed" }),
+    );
+    expect(auditQueries).toContainEqual(expect.objectContaining({ orgId: "org_1" }));
+  });
+
   it("scope-checks publisher debug details by review repository even without publish jobs", async () => {
     const app = createApiApp({
       adminControlPlaneAuth: auth,
@@ -658,6 +778,9 @@ function createMockControlPlaneService(
       repository: repositoryFixture,
       settings: settingsFixture,
     }),
+    listRepositories: async () => [repositoryFixture],
+    listRepositoryRules: async () => [],
+    listReviewRuns: async () => [reviewRunSummaryFixture],
     listAuditLogs: async () => [],
     recordAuditEvent: async (event) => auditLog(event.action),
     updateRepositorySettings: async () => ({
@@ -737,3 +860,28 @@ const settingsFixture = {
   createdAt: "2026-05-05T12:00:00.000Z",
   updatedAt: "2026-05-05T12:00:00.000Z",
 } satisfies RepositorySettings;
+
+/** Review history fixture used by discovery route tests. */
+const reviewRunSummaryFixture = {
+  reviewRunId: "rrn_1",
+  repoId: "repo_1",
+  orgId: "org_1",
+  repoFullName: "octo-org/heimdall",
+  pullRequestNumber: 7,
+  pullRequestTitle: "Tighten review dashboard",
+  authorLogin: "octocat",
+  changedFileCount: 4,
+  trigger: "pull_request_opened",
+  status: "completed",
+  baseSha: "0123456789abcdef0123456789abcdef01234567",
+  headSha: "89abcdef0123456789abcdef0123456789abcdef",
+  summary: "Review completed.",
+  counts: {
+    candidateFindings: 2,
+    validatedFindings: 1,
+    publishedFindings: 1,
+    rejectedFindings: 1,
+  },
+  createdAt: "2026-05-05T12:00:00.000Z",
+  updatedAt: "2026-05-05T12:30:00.000Z",
+};

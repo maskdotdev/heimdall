@@ -65,13 +65,25 @@ type AdminWebhookDebugDetails = {
 type AdminReviewDebugDetails = {
   /** Review run summary. */
   readonly reviewRun: {
+    /** Review run ID. */
+    readonly reviewRunId?: string;
+    /** Repository ID that owns this review. */
+    readonly repoId?: string;
     /** Current review status. */
     readonly status: string;
     /** Provider pull request number. */
     readonly pullRequestNumber: number;
+    /** Review summary when available. */
+    readonly summary?: string;
+    /** Persisted finding counts. */
+    readonly counts?: AdminReviewFindingCounts;
   };
   /** Pull request snapshot summary when available. */
   readonly snapshot?: {
+    /** Pull request title. */
+    readonly title?: string;
+    /** Pull request author login. */
+    readonly authorLogin?: string;
     /** Head SHA. */
     readonly headSha: string;
     /** Base SHA. */
@@ -90,16 +102,128 @@ type AdminReviewDebugDetails = {
     /** ISO event timestamp. */
     readonly occurredAt: string;
   }[];
+  /** Durable dependencies attached to the review run. */
+  readonly dependencies?: readonly AdminReviewDependencySummary[];
+  /** Review artifacts attached to the review run. */
+  readonly artifacts?: readonly AdminReviewArtifactSummary[];
   /** Candidate finding summaries. */
-  readonly candidateFindings: readonly unknown[];
+  readonly candidateFindings: readonly AdminCandidateFindingSummary[];
   /** Validated finding summaries. */
-  readonly validatedFindings: readonly unknown[];
+  readonly validatedFindings: readonly AdminValidatedFindingSummary[];
+  /** LLM call summaries linked to the review run. */
+  readonly llmCalls?: readonly AdminLlmCallSummary[];
   /** Related durable jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
   /** Audited replay decisions. */
   readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Structured failures. */
   readonly failures: readonly AdminFailureDetail[];
+};
+
+/** Finding counts attached to one review run. */
+type AdminReviewFindingCounts = {
+  /** Candidate findings emitted before validation. */
+  readonly candidateFindings: number;
+  /** Findings accepted by validation. */
+  readonly validatedFindings: number;
+  /** Findings published to the provider. */
+  readonly publishedFindings: number;
+  /** Findings rejected by validation. */
+  readonly rejectedFindings: number;
+};
+
+/** Durable dependency summary shown on review inspectors. */
+type AdminReviewDependencySummary = {
+  /** Dependency type. */
+  readonly dependencyType: string;
+  /** Dependency row ID. */
+  readonly dependencyId: string;
+};
+
+/** Review artifact summary shown on review inspectors. */
+type AdminReviewArtifactSummary = {
+  /** Artifact row ID. */
+  readonly reviewArtifactId: string;
+  /** Artifact kind. */
+  readonly kind: string;
+  /** Artifact display name. */
+  readonly name: string;
+  /** Artifact URI. */
+  readonly uri: string;
+  /** Artifact byte size. */
+  readonly sizeBytes: number;
+  /** Artifact creation timestamp. */
+  readonly createdAt: string;
+};
+
+/** Candidate finding summary shown on review inspectors. */
+type AdminCandidateFindingSummary = {
+  /** Finding ID. */
+  readonly findingId: string;
+  /** Finding source. */
+  readonly source: string;
+  /** Source pass or tool name. */
+  readonly sourceName: string;
+  /** Finding category. */
+  readonly category: string;
+  /** Finding severity. */
+  readonly severity: string;
+  /** Finding title. */
+  readonly title: string;
+  /** Finding location. */
+  readonly location: unknown;
+  /** Finding confidence. */
+  readonly confidence: number;
+  /** Finding fingerprint. */
+  readonly fingerprint: string;
+  /** Candidate creation timestamp. */
+  readonly createdAt: string;
+};
+
+/** Validated finding summary shown on review inspectors. */
+type AdminValidatedFindingSummary = {
+  /** Finding ID. */
+  readonly findingId: string;
+  /** Candidate finding ID. */
+  readonly candidateFindingId: string;
+  /** Validation decision. */
+  readonly decision: string;
+  /** Finding category. */
+  readonly category: string;
+  /** Finding severity. */
+  readonly severity: string;
+  /** Finding title. */
+  readonly title: string;
+  /** Finding location. */
+  readonly location: unknown;
+  /** Finding rank when publishable. */
+  readonly rank?: number;
+  /** Finding fingerprint. */
+  readonly fingerprint: string;
+  /** Validation payload. */
+  readonly validation: unknown;
+};
+
+/** LLM call summary shown on review inspectors. */
+type AdminLlmCallSummary = {
+  /** LLM call row ID. */
+  readonly llmCallId: string;
+  /** Provider used by the call. */
+  readonly provider: string;
+  /** Model used by the call. */
+  readonly model: string;
+  /** Call purpose. */
+  readonly purpose: string;
+  /** Call status. */
+  readonly status: string;
+  /** Input token count. */
+  readonly inputTokens: number;
+  /** Output token count. */
+  readonly outputTokens: number;
+  /** Cost in micros. */
+  readonly costMicros: number;
+  /** Start timestamp. */
+  readonly startedAt: string;
 };
 
 /** Publisher reconciliation issue shown in dashboard state. */
@@ -245,7 +369,7 @@ type AdminReplayExecutionResult = {
 type InspectorKind = "webhook" | "review" | "publisher";
 
 /** Primary dashboard view. */
-type ViewKind = "inspectors" | "settings" | "audit";
+type ViewKind = "overview" | "inspectors" | "settings" | "audit";
 
 /** API envelope returned by the admin API for successful requests. */
 type ApiEnvelope<T> = {
@@ -323,6 +447,72 @@ type ControlPlaneRepository = {
   readonly enabled: boolean;
 };
 
+/** Repository discovery row returned by admin overview routes. */
+type AdminRepositorySummary = ControlPlaneRepository & {
+  /** Repository visibility. */
+  readonly visibility: string;
+  /** Default branch when known. */
+  readonly defaultBranch?: string;
+  /** Repository update timestamp. */
+  readonly updatedAt: string;
+  /** Latest review run ID when available. */
+  readonly latestReviewRunId?: string;
+  /** Latest review status when available. */
+  readonly latestReviewStatus?: string;
+  /** Latest review update timestamp when available. */
+  readonly latestReviewUpdatedAt?: string;
+};
+
+/** Review history row returned by admin overview routes. */
+type AdminReviewRunSummary = {
+  /** Review run ID. */
+  readonly reviewRunId: string;
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Provider pull request number. */
+  readonly pullRequestNumber: number;
+  /** Pull request title when available. */
+  readonly pullRequestTitle?: string;
+  /** Pull request author when available. */
+  readonly authorLogin?: string;
+  /** Changed file count when available. */
+  readonly changedFileCount?: number;
+  /** Review trigger. */
+  readonly trigger: string;
+  /** Review status. */
+  readonly status: string;
+  /** Base commit SHA. */
+  readonly baseSha: string;
+  /** Head commit SHA. */
+  readonly headSha: string;
+  /** Review summary when available. */
+  readonly summary?: string;
+  /** Finding counts. */
+  readonly counts: AdminReviewFindingCounts;
+  /** Creation timestamp. */
+  readonly createdAt: string;
+  /** Update timestamp. */
+  readonly updatedAt: string;
+  /** Start timestamp when available. */
+  readonly startedAt?: string;
+  /** Completion timestamp when available. */
+  readonly completedAt?: string;
+};
+
+/** Dashboard overview response. */
+type AdminDashboardOverview = {
+  /** Scoped repositories available to the actor. */
+  readonly repositories: readonly AdminRepositorySummary[];
+  /** Recent review runs available to the actor. */
+  readonly recentReviews: readonly AdminReviewRunSummary[];
+  /** Recent audit entries when the actor has audit access. */
+  readonly recentAuditLogs: readonly AdminAuditLogSummary[];
+};
+
 /** Repository settings returned by settings APIs. */
 type ControlPlaneSettings = {
   /** Review policy. */
@@ -355,6 +545,28 @@ type ControlPlaneSettingsResponse = {
   readonly settings: ControlPlaneSettings;
 };
 
+/** Repository or organization rule row shown by repository settings UX. */
+type AdminRepoRuleSummary = {
+  /** Rule row ID. */
+  readonly repoRuleId: string;
+  /** Organization ID that owns the rule. */
+  readonly orgId: string;
+  /** Repository ID when the rule is repository-scoped. */
+  readonly repoId?: string;
+  /** Rule scope label. */
+  readonly scope: string;
+  /** Rule type label. */
+  readonly ruleType: string;
+  /** Rule body or instruction. */
+  readonly body: string;
+  /** Whether the rule currently applies. */
+  readonly isEnabled: boolean;
+  /** Rule creation timestamp. */
+  readonly createdAt: string;
+  /** Rule update timestamp. */
+  readonly updatedAt: string;
+};
+
 /** Mutable settings form state. */
 type SettingsFormState = {
   /** Whether the repository is enabled. */
@@ -381,6 +593,28 @@ type SettingsFormState = {
   customInstructions: string;
 };
 
+/** Mutable overview view state. */
+type OverviewViewState = {
+  /** Repository search text. */
+  repositorySearch: string;
+  /** Repository filter applied to review history. */
+  reviewRepoId: string;
+  /** Review status filter. */
+  reviewStatus: string;
+  /** Review search text. */
+  reviewSearch: string;
+  /** Loaded repositories. */
+  repositories: readonly AdminRepositorySummary[];
+  /** Loaded recent or filtered reviews. */
+  reviews: readonly AdminReviewRunSummary[];
+  /** Loaded recent audit entries. */
+  auditLogs: readonly AdminAuditLogSummary[];
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+};
+
 /** Mutable settings view state. */
 type SettingsViewState = {
   /** Repository ID input. */
@@ -389,6 +623,8 @@ type SettingsViewState = {
   data?: ControlPlaneSettingsResponse | undefined;
   /** Editable form state. */
   form?: SettingsFormState | undefined;
+  /** Rules that currently affect the loaded repository. */
+  rules: readonly AdminRepoRuleSummary[];
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -502,6 +738,8 @@ type AppState = {
   authError?: string | undefined;
   /** Per-inspector state. */
   inspectors: Record<InspectorKind, InspectorViewState>;
+  /** Overview view state. */
+  overview: OverviewViewState;
   /** Settings view state. */
   settings: SettingsViewState;
   /** Audit history view state. */
@@ -552,7 +790,7 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
 };
 
 const state: AppState = {
-  activeView: "inspectors",
+  activeView: "overview",
   activeKind: "webhook",
   apiBaseUrl: sessionStorage.getItem("heimdall:admin-api-base-url") ?? apiBaseUrl,
   inspectors: {
@@ -560,7 +798,16 @@ const state: AppState = {
     review: { id: "", confirmationTokenInput: "" },
     publisher: { id: "", confirmationTokenInput: "" },
   },
-  settings: { repoId: "" },
+  overview: {
+    repositorySearch: "",
+    reviewRepoId: "",
+    reviewStatus: "",
+    reviewSearch: "",
+    repositories: [],
+    reviews: [],
+    auditLogs: [],
+  },
+  settings: { repoId: "", rules: [] },
   audit: {
     orgId: "",
     action: "",
@@ -591,6 +838,9 @@ async function handleClick(event: MouseEvent): Promise<void> {
   if (view && isViewKind(view)) {
     state.activeView = view;
     render();
+    if (view === "overview" && state.session && state.overview.repositories.length === 0) {
+      await loadOverview();
+    }
     return;
   }
 
@@ -619,6 +869,74 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "load-details") {
     await loadDetails(state.activeKind);
+    return;
+  }
+
+  if (action === "load-overview") {
+    await loadOverview();
+    return;
+  }
+
+  if (action === "search-repositories") {
+    await loadRepositories();
+    return;
+  }
+
+  if (action === "search-reviews") {
+    await loadReviewHistory();
+    return;
+  }
+
+  if (action === "clear-review-filter") {
+    state.overview.reviewRepoId = "";
+    await loadReviewHistory();
+    return;
+  }
+
+  if (action === "open-settings") {
+    await openRepositorySettings(requiredDatasetValue(element, "repoId"));
+    return;
+  }
+
+  if (action === "filter-reviews-repo") {
+    state.activeView = "overview";
+    state.overview.reviewRepoId = requiredDatasetValue(element, "repoId");
+    await loadReviewHistory();
+    return;
+  }
+
+  if (action === "open-repository-audit") {
+    await openAuditSearch({
+      resourceId: requiredDatasetValue(element, "repoId"),
+      resourceType: "repository",
+    });
+    return;
+  }
+
+  if (action === "open-review-inspector") {
+    await openInspector("review", requiredDatasetValue(element, "reviewRunId"));
+    return;
+  }
+
+  if (action === "open-publisher-inspector") {
+    await openInspector("publisher", requiredDatasetValue(element, "reviewRunId"));
+    return;
+  }
+
+  if (action === "open-review-audit") {
+    await openAuditSearch({
+      resourceId: requiredDatasetValue(element, "reviewRunId"),
+      search: requiredDatasetValue(element, "reviewRunId"),
+    });
+    return;
+  }
+
+  if (action === "open-audit-row") {
+    await openAuditSearch({
+      resourceId: element.dataset.resourceId,
+      resourceType: element.dataset.resourceType,
+      search: element.dataset.search,
+    });
     return;
   }
 
@@ -678,6 +996,11 @@ function handleInput(event: Event): void {
     return;
   }
 
+  if (field?.startsWith("overview.")) {
+    updateOverviewField(field.slice("overview.".length), target.value);
+    return;
+  }
+
   if (field === "settings-repo-id") {
     state.settings.repoId = target.value;
     state.settings.error = undefined;
@@ -701,6 +1024,7 @@ async function connectSession(): Promise<void> {
     const session = await requestAdminData<AdminSession>("/admin/session");
     state.session = session;
     sessionStorage.setItem("heimdall:admin-api-base-url", state.apiBaseUrl);
+    await loadOverview();
   } catch (error) {
     state.session = undefined;
     state.authError = errorMessage(error);
@@ -808,6 +1132,96 @@ async function executeReplay(kind: InspectorKind): Promise<void> {
   }
 }
 
+/** Loads the dashboard overview for repository and review discovery. */
+async function loadOverview(): Promise<void> {
+  state.overview.loading = "Loading dashboard overview";
+  state.overview.error = undefined;
+  try {
+    const data = await requestAdminData<AdminDashboardOverview>("/admin/overview?limit=12");
+    state.overview.repositories = data.repositories;
+    state.overview.reviews = data.recentReviews;
+    state.overview.auditLogs = data.recentAuditLogs;
+  } catch (error) {
+    state.overview.error = errorMessage(error);
+  } finally {
+    state.overview.loading = undefined;
+    render();
+  }
+}
+
+/** Searches repositories available to the current admin actor. */
+async function loadRepositories(): Promise<void> {
+  state.overview.loading = "Searching repositories";
+  state.overview.error = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "search", state.overview.repositorySearch);
+    params.set("limit", "50");
+    const data = await requestAdminData<{
+      readonly repositories: readonly AdminRepositorySummary[];
+    }>(`/admin/repos?${params.toString()}`);
+    state.overview.repositories = data.repositories;
+  } catch (error) {
+    state.overview.error = errorMessage(error);
+  } finally {
+    state.overview.loading = undefined;
+    render();
+  }
+}
+
+/** Searches review history available to the current admin actor. */
+async function loadReviewHistory(): Promise<void> {
+  state.overview.loading = "Loading review history";
+  state.overview.error = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "repoId", state.overview.reviewRepoId);
+    appendQueryParam(params, "status", state.overview.reviewStatus);
+    appendQueryParam(params, "search", state.overview.reviewSearch);
+    params.set("limit", "50");
+    const data = await requestAdminData<{ readonly reviews: readonly AdminReviewRunSummary[] }>(
+      `/admin/reviews?${params.toString()}`,
+    );
+    state.overview.reviews = data.reviews;
+  } catch (error) {
+    state.overview.error = errorMessage(error);
+  } finally {
+    state.overview.loading = undefined;
+    render();
+  }
+}
+
+/** Opens repository settings for a discovered repository. */
+async function openRepositorySettings(repoId: string): Promise<void> {
+  state.activeView = "settings";
+  state.settings.repoId = repoId;
+  await loadSettings();
+}
+
+/** Opens one inspector with a discovered resource ID. */
+async function openInspector(kind: InspectorKind, resourceId: string): Promise<void> {
+  state.activeView = "inspectors";
+  state.activeKind = kind;
+  state.inspectors[kind].id = resourceId;
+  await loadDetails(kind);
+}
+
+/** Opens audit history with prefilled filters. */
+async function openAuditSearch(input: {
+  /** Resource type filter. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID filter. */
+  readonly resourceId?: string | undefined;
+  /** Search text. */
+  readonly search?: string | undefined;
+}): Promise<void> {
+  state.activeView = "audit";
+  state.audit.resourceType = input.resourceType ?? "";
+  state.audit.resourceId = input.resourceId ?? "";
+  state.audit.search = input.search ?? "";
+  await loadAuditHistory();
+}
+
 /** Loads repository settings into the settings form. */
 async function loadSettings(): Promise<void> {
   const repoId = state.settings.repoId.trim();
@@ -821,11 +1235,17 @@ async function loadSettings(): Promise<void> {
   state.settings.error = undefined;
   state.settings.saved = undefined;
   try {
-    const data = await requestAdminData<ControlPlaneSettingsResponse>(
-      `/admin/repos/${encodeURIComponent(repoId)}/settings`,
-    );
+    const [data, rulesData] = await Promise.all([
+      requestAdminData<ControlPlaneSettingsResponse>(
+        `/admin/repos/${encodeURIComponent(repoId)}/settings`,
+      ),
+      requestAdminData<{ readonly rules: readonly AdminRepoRuleSummary[] }>(
+        `/admin/repos/${encodeURIComponent(repoId)}/rules`,
+      ),
+    ]);
     state.settings.data = data;
     state.settings.form = settingsFormFromResponse(data);
+    state.settings.rules = rulesData.rules;
   } catch (error) {
     state.settings.error = errorMessage(error);
   } finally {
@@ -991,6 +1411,7 @@ function renderAuthPanel(): string {
 /** Renders primary control-plane navigation. */
 function renderPrimaryNav(): string {
   const views: readonly { readonly kind: ViewKind; readonly label: string }[] = [
+    { kind: "overview", label: "Overview" },
     { kind: "inspectors", label: "Inspectors" },
     { kind: "settings", label: "Settings" },
     { kind: "audit", label: "Audit" },
@@ -1016,6 +1437,9 @@ function renderPrimaryNav(): string {
 
 /** Renders the active primary control-plane view. */
 function renderActiveView(): string {
+  if (state.activeView === "overview") {
+    return renderOverviewView();
+  }
   if (state.activeView === "settings") {
     return renderSettingsView();
   }
@@ -1032,6 +1456,275 @@ function renderActiveView(): string {
       </nav>
       ${renderInspector()}
     </section>
+  `;
+}
+
+/** Renders the dashboard overview with discovery and activity. */
+function renderOverviewView(): string {
+  const overview = state.overview;
+  return `
+    <main class="inspector overview-view">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Dashboard</p>
+          <h2>Control Overview</h2>
+        </div>
+        <button class="primary" data-action="load-overview" type="button">Refresh</button>
+      </section>
+      ${renderOverviewNotice(overview)}
+      <section class="overview-grid">
+        ${renderRepositoryDiscovery(overview)}
+        ${renderReviewHistoryDiscovery(overview)}
+      </section>
+      ${renderRecentActivity(overview.auditLogs)}
+    </main>
+  `;
+}
+
+/** Renders overview loading and error state. */
+function renderOverviewNotice(overview: OverviewViewState): string {
+  if (overview.loading) {
+    return `<p class="notice">${escapeHtml(overview.loading)}</p>`;
+  }
+  if (overview.error) {
+    return `<p class="error-line">${escapeHtml(overview.error)}</p>`;
+  }
+  if (!state.session) {
+    return `<p class="notice">Refresh the identity session to load repositories and reviews.</p>`;
+  }
+
+  return "";
+}
+
+/** Renders repository discovery cards. */
+function renderRepositoryDiscovery(overview: OverviewViewState): string {
+  return `
+    <section class="panel discovery-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Repositories</p>
+          <h3>Repository Discovery</h3>
+        </div>
+        <div class="inline-controls">
+          <label>
+            <span>Search</span>
+            <input
+              data-field="overview.repositorySearch"
+              placeholder="owner/name"
+              value="${escapeAttribute(overview.repositorySearch)}"
+            />
+          </label>
+          <button data-action="search-repositories" type="button">Search</button>
+        </div>
+      </div>
+      ${
+        overview.repositories.length === 0
+          ? `<p class="inline-empty">No repositories loaded.</p>`
+          : `<div class="repo-list">${overview.repositories.map(renderRepositoryCard).join("")}</div>`
+      }
+    </section>
+  `;
+}
+
+/** Renders one repository discovery card. */
+function renderRepositoryCard(repository: AdminRepositorySummary): string {
+  return `
+    <article class="repo-card">
+      <div>
+        <div class="repo-title">
+          <strong>${escapeHtml(repository.fullName)}</strong>
+          <span class="status ${repository.enabled ? "ok" : "muted"}">
+            ${repository.enabled ? "enabled" : "disabled"}
+          </span>
+        </div>
+        <p class="muted-text">
+          ${escapeHtml(repository.visibility)}
+          ${repository.defaultBranch ? ` / ${escapeHtml(repository.defaultBranch)}` : ""}
+        </p>
+        ${
+          repository.latestReviewRunId
+            ? `<p class="muted-text">
+                Latest review ${escapeHtml(repository.latestReviewRunId)}
+                ${repository.latestReviewStatus ? ` / ${escapeHtml(repository.latestReviewStatus)}` : ""}
+              </p>`
+            : `<p class="muted-text">No review runs found.</p>`
+        }
+      </div>
+      <div class="card-actions">
+        <button data-action="open-settings" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
+          Settings
+        </button>
+        <button data-action="filter-reviews-repo" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
+          Reviews
+        </button>
+        <button data-action="open-repository-audit" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
+          Audit
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+/** Renders review history search and rows. */
+function renderReviewHistoryDiscovery(overview: OverviewViewState): string {
+  return `
+    <section class="panel discovery-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Reviews</p>
+          <h3>Review History</h3>
+        </div>
+        <button data-action="search-reviews" type="button">Refresh</button>
+      </div>
+      <div class="form-grid compact-form">
+        ${renderTextInput("overview.reviewSearch", "Search", overview.reviewSearch, "PR title, author, #")}
+        ${renderTextInput("overview.reviewRepoId", "Repository filter", overview.reviewRepoId, "selected repository")}
+        ${renderReviewStatusSelect(overview.reviewStatus)}
+      </div>
+      ${
+        overview.reviewRepoId
+          ? `<button class="ghost" data-action="clear-review-filter" type="button">Clear repository filter</button>`
+          : ""
+      }
+      ${renderReviewRows(overview.reviews)}
+    </section>
+  `;
+}
+
+/** Renders the review status filter. */
+function renderReviewStatusSelect(value: string): string {
+  const statuses = ["", "queued", "reviewing", "completed", "failed", "cancelled"];
+  return `
+    <label>
+      <span>Status</span>
+      <select data-field="overview.reviewStatus">
+        ${statuses
+          .map(
+            (status) => `
+              <option value="${escapeAttribute(status)}" ${status === value ? "selected" : ""}>
+                ${escapeHtml(status || "Any")}
+              </option>
+            `,
+          )
+          .join("")}
+      </select>
+    </label>
+  `;
+}
+
+/** Renders review history rows. */
+function renderReviewRows(rows: readonly AdminReviewRunSummary[]): string {
+  if (rows.length === 0) {
+    return `<p class="inline-empty">No review history loaded.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Review</th>
+            <th>Status</th>
+            <th>Findings</th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(renderReviewRow).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders one review history row. */
+function renderReviewRow(review: AdminReviewRunSummary): string {
+  return `
+    <tr>
+      <td>
+        <strong>${escapeHtml(review.repoFullName)} #${review.pullRequestNumber}</strong>
+        <p class="muted-text">${escapeHtml(review.pullRequestTitle ?? review.summary ?? review.reviewRunId)}</p>
+        <code>${escapeHtml(formatSha(review.headSha))}</code>
+      </td>
+      <td><span class="status ${statusClass(review.status)}">${escapeHtml(review.status)}</span></td>
+      <td>
+        ${review.counts.validatedFindings} validated /
+        ${review.counts.publishedFindings} published
+      </td>
+      <td>${formatTime(review.updatedAt)}</td>
+      <td>
+        <div class="row-actions">
+          <button data-action="open-review-inspector" data-review-run-id="${escapeAttribute(review.reviewRunId)}" type="button">
+            Inspect
+          </button>
+          <button data-action="open-publisher-inspector" data-review-run-id="${escapeAttribute(review.reviewRunId)}" type="button">
+            Publisher
+          </button>
+          <button data-action="open-review-audit" data-review-run-id="${escapeAttribute(review.reviewRunId)}" type="button">
+            Audit
+          </button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+/** Renders recent audit activity from the overview. */
+function renderRecentActivity(rows: readonly AdminAuditLogSummary[]): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Activity</p>
+          <h3>Recent Audit Entries</h3>
+        </div>
+        <button data-view="audit" type="button">Open audit search</button>
+      </div>
+      ${
+        rows.length === 0
+          ? `<p class="inline-empty">No recent audit entries loaded.</p>`
+          : renderAuditActivityRows(rows)
+      }
+    </section>
+  `;
+}
+
+/** Renders recent audit rows in a compact table. */
+function renderAuditActivityRows(rows: readonly AdminAuditLogSummary[]): string {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Open</th></tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (row) => `
+                <tr>
+                  <td>${formatTime(row.occurredAt)}</td>
+                  <td>${escapeHtml(row.actorUserId ?? row.actorType)}</td>
+                  <td>${escapeHtml(row.action)}</td>
+                  <td>${escapeHtml(row.resourceId ?? row.resourceType)}</td>
+                  <td>
+                    <button
+                      data-action="open-audit-row"
+                      data-resource-id="${escapeAttribute(row.resourceId ?? "")}"
+                      data-resource-type="${escapeAttribute(row.resourceType)}"
+                      data-search="${escapeAttribute(row.action)}"
+                      type="button"
+                    >
+                      Filter
+                    </button>
+                  </td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -1068,7 +1761,7 @@ function renderSettingsView(): string {
         </div>
       </section>
       ${renderSettingsNotice(settings)}
-      ${form ? renderSettingsForm(form, settings.data) : renderEmptyState()}
+      ${form ? renderSettingsForm(form, settings.data, settings.rules) : renderEmptyState()}
     </main>
   `;
 }
@@ -1092,6 +1785,7 @@ function renderSettingsNotice(settings: SettingsViewState): string {
 function renderSettingsForm(
   form: SettingsFormState,
   data: ControlPlaneSettingsResponse | undefined,
+  rules: readonly AdminRepoRuleSummary[],
 ): string {
   return `
     <section class="panel">
@@ -1168,7 +1862,60 @@ function renderSettingsForm(
           rows="8"
         >${escapeHtml(form.customInstructions)}</textarea>
       </label>
+      ${renderRepositoryRules(rules)}
     </section>
+  `;
+}
+
+/** Renders repository rules that affect the loaded repository. */
+function renderRepositoryRules(rules: readonly AdminRepoRuleSummary[]): string {
+  return `
+    <section class="settings-subsection">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Rules</p>
+          <h3>Effective Rules</h3>
+        </div>
+        <span class="status muted">${rules.length} rule${rules.length === 1 ? "" : "s"}</span>
+      </div>
+      ${
+        rules.length === 0
+          ? `<p class="inline-empty">No repository or organization rules found.</p>`
+          : renderRepositoryRuleRows(rules)
+      }
+    </section>
+  `;
+}
+
+/** Renders repository rule rows. */
+function renderRepositoryRuleRows(rules: readonly AdminRepoRuleSummary[]): string {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>State</th><th>Scope</th><th>Type</th><th>Body</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          ${rules
+            .map(
+              (rule) => `
+                <tr>
+                  <td>
+                    <span class="status ${rule.isEnabled ? "ok" : "muted"}">
+                      ${rule.isEnabled ? "enabled" : "disabled"}
+                    </span>
+                  </td>
+                  <td>${escapeHtml(rule.repoId ? "repository" : "organization")}</td>
+                  <td>${escapeHtml(`${rule.scope}:${rule.ruleType}`)}</td>
+                  <td>${escapeHtml(rule.body)}</td>
+                  <td>${formatTime(rule.updatedAt)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -1296,11 +2043,11 @@ function renderInspectorNotice(inspector: InspectorViewState): string {
 }
 
 /** Renders the empty inspector state. */
-function renderEmptyState(): string {
+function renderEmptyState(message = "No inspector data loaded."): string {
   return `
     <section class="empty-state">
       <div class="empty-mark"></div>
-      <p>No inspector data loaded.</p>
+      <p>${escapeHtml(message)}</p>
     </section>
   `;
 }
@@ -1349,6 +2096,11 @@ function renderReviewDetails(details: AdminReviewDebugDetails): string {
       ${renderTimeline(details.stageEvents)}
       ${renderSnapshot(details)}
     </section>
+    ${renderCandidateFindings(details.candidateFindings)}
+    ${renderValidatedFindings(details.validatedFindings)}
+    ${renderReviewArtifacts(details.artifacts ?? [])}
+    ${renderReviewDependencies(details.dependencies ?? [])}
+    ${renderLlmCalls(details.llmCalls ?? [])}
     ${renderFailures(details.failures)}
     ${renderJobs(details.relatedJobs)}
     ${renderAudits(details.replayAudits)}
@@ -1451,6 +2203,173 @@ function renderSnapshot(details: AdminReviewDebugDetails): string {
         <div><dt>Files</dt><dd>${snapshot.changedFileCount}</dd></div>
         <div><dt>Diff hash</dt><dd>${escapeHtml(snapshot.diffHash)}</dd></div>
       </dl>
+    </section>
+  `;
+}
+
+/** Renders candidate finding summaries for a review. */
+function renderCandidateFindings(findings: readonly AdminCandidateFindingSummary[]): string {
+  if (findings.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Candidate Findings</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Finding</th><th>Severity</th><th>Source</th><th>Location</th><th>Confidence</th></tr>
+          </thead>
+          <tbody>
+            ${findings
+              .map(
+                (finding) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(finding.title)}</strong>
+                      <p class="muted-text"><code>${escapeHtml(finding.findingId)}</code></p>
+                    </td>
+                    <td>${escapeHtml(finding.severity)}</td>
+                    <td>${escapeHtml(`${finding.source}:${finding.sourceName}`)}</td>
+                    <td>${escapeHtml(locationLabel(finding.location))}</td>
+                    <td>${Math.round(finding.confidence * 100)}%</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders validated finding summaries for a review. */
+function renderValidatedFindings(findings: readonly AdminValidatedFindingSummary[]): string {
+  if (findings.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Validated Findings</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Finding</th><th>Decision</th><th>Severity</th><th>Location</th><th>Validation</th></tr>
+          </thead>
+          <tbody>
+            ${findings
+              .map(
+                (finding) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(finding.title)}</strong>
+                      <p class="muted-text"><code>${escapeHtml(finding.findingId)}</code></p>
+                    </td>
+                    <td><span class="status ${finding.decision === "publish" ? "ok" : "muted"}">${escapeHtml(finding.decision)}</span></td>
+                    <td>${escapeHtml(finding.severity)}</td>
+                    <td>${escapeHtml(locationLabel(finding.location))}</td>
+                    <td>${escapeHtml(validationReasons(finding.validation))}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders review artifact summaries. */
+function renderReviewArtifacts(artifacts: readonly AdminReviewArtifactSummary[]): string {
+  if (artifacts.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Artifacts</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Kind</th><th>Size</th><th>URI</th><th>Created</th></tr>
+          </thead>
+          <tbody>
+            ${artifacts
+              .map(
+                (artifact) => `
+                  <tr>
+                    <td>${escapeHtml(artifact.name)}</td>
+                    <td>${escapeHtml(artifact.kind)}</td>
+                    <td>${formatBytes(artifact.sizeBytes)}</td>
+                    <td><code>${escapeHtml(artifact.uri)}</code></td>
+                    <td>${formatTime(artifact.createdAt)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders durable dependencies attached to a review. */
+function renderReviewDependencies(dependencies: readonly AdminReviewDependencySummary[]): string {
+  if (dependencies.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Dependencies</h3>
+      <div class="key-list">
+        ${dependencies
+          .map(
+            (dependency) =>
+              `<code>${escapeHtml(`${dependency.dependencyType}:${dependency.dependencyId}`)}</code>`,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+/** Renders LLM call summaries linked to a review. */
+function renderLlmCalls(calls: readonly AdminLlmCallSummary[]): string {
+  if (calls.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Model Calls</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Status</th><th>Purpose</th><th>Model</th><th>Tokens</th><th>Cost</th></tr>
+          </thead>
+          <tbody>
+            ${calls
+              .map(
+                (call) => `
+                  <tr>
+                    <td><span class="status ${statusClass(call.status)}">${escapeHtml(call.status)}</span></td>
+                    <td>${escapeHtml(call.purpose)}</td>
+                    <td>${escapeHtml(`${call.provider}/${call.model}`)}</td>
+                    <td>${call.inputTokens + call.outputTokens}</td>
+                    <td>${formatMicros(call.costMicros)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
     </section>
   `;
 }
@@ -1800,6 +2719,22 @@ function currentInspectorState(): InspectorViewState {
   return state.inspectors[state.activeKind];
 }
 
+/** Updates one overview filter field. */
+function updateOverviewField(field: string, value: string): void {
+  if (field in state.overview) {
+    (
+      state.overview as Record<
+        string,
+        | string
+        | readonly AdminRepositorySummary[]
+        | readonly AdminReviewRunSummary[]
+        | readonly AdminAuditLogSummary[]
+        | undefined
+      >
+    )[field] = value;
+  }
+}
+
 /** Updates one settings form field from an input element. */
 function updateSettingsFormField(
   field: string,
@@ -1896,6 +2831,16 @@ function appendQueryParam(params: URLSearchParams, key: string, value: string): 
   }
 }
 
+/** Reads a required data attribute from a delegated action element. */
+function requiredDatasetValue(element: HTMLElement, key: string): string {
+  const value = element.dataset[key];
+  if (!value) {
+    throw new Error(`Missing data-${key} for dashboard action.`);
+  }
+
+  return value;
+}
+
 /** Returns whether a request method is safe from CSRF. */
 function isSafeMethod(method: string): boolean {
   return method === "GET" || method === "HEAD" || method === "OPTIONS";
@@ -1934,12 +2879,52 @@ function insertedJobSummary(metadata: unknown): string {
   return insertedJobIds.filter((value): value is string => typeof value === "string").join(", ");
 }
 
+/** Returns a compact finding location label from an unknown location payload. */
+function locationLabel(location: unknown): string {
+  const record = asRecord(location);
+  const path = typeof record?.path === "string" ? record.path : "unknown path";
+  const line = typeof record?.line === "number" ? record.line : undefined;
+  return line ? `${path}:${line}` : path;
+}
+
+/** Returns validation reason text from an unknown validation payload. */
+function validationReasons(validation: unknown): string {
+  const reasons = asRecord(validation)?.reasons;
+  if (!Array.isArray(reasons)) {
+    return "";
+  }
+
+  return reasons.filter((reason): reason is string => typeof reason === "string").join(", ");
+}
+
+/** Formats a byte count for compact tables. */
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Formats micro currency units for compact tables. */
+function formatMicros(value: number): string {
+  return `$${(value / 1_000_000).toFixed(4)}`;
+}
+
 /** Formats an ISO timestamp for dashboard display. */
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+/** Formats a commit SHA for compact tables. */
+function formatSha(value: string): string {
+  return value.length > 12 ? value.slice(0, 12) : value;
 }
 
 /** Returns the message for an unknown error. */
@@ -1974,7 +2959,9 @@ function isInspectorKind(value: string): value is InspectorKind {
 
 /** Narrows a string to a primary view kind. */
 function isViewKind(value: string): value is ViewKind {
-  return value === "inspectors" || value === "settings" || value === "audit";
+  return (
+    value === "overview" || value === "inspectors" || value === "settings" || value === "audit"
+  );
 }
 
 /** Narrows unknown values to object records. */

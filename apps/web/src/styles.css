@@ -519,6 +519,90 @@ th {
   background: #ffffff;
 }
 
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.82fr) minmax(420px, 1.18fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.discovery-panel {
+  align-content: start;
+}
+
+.inline-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 280px) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.compact-form {
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) minmax(130px, 0.5fr);
+}
+
+.settings-subsection {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.repo-list {
+  display: grid;
+  gap: 10px;
+}
+
+.repo-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.repo-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.repo-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-actions,
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.card-actions {
+  justify-content: flex-end;
+}
+
+.row-actions {
+  min-width: 260px;
+}
+
+.inline-empty {
+  min-height: 76px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 24px;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
 .status {
   display: inline-flex;
   align-items: center;
@@ -563,8 +647,22 @@ th {
   .auth-panel,
   .workspace,
   .resource-controls,
+  .overview-grid,
+  .inline-controls,
+  .compact-form,
+  .repo-card,
   .split,
   .confirmation {
     grid-template-columns: 1fr;
+  }
+
+  .card-actions,
+  .row-actions {
+    justify-content: stretch;
+  }
+
+  .card-actions button,
+  .row-actions button {
+    flex: 1 1 120px;
   }
 }

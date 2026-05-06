@@ -19,7 +19,11 @@ import {
   createDatabaseClient,
   type DatabaseClient,
   type HeimdallDatabase,
+  pullRequestSnapshots,
   RepositoryRepository,
+  repoRules,
+  repositories,
+  reviewRuns,
 } from "@repo/db";
 import {
   type AdminControlPlaneTelemetryEventInput,
@@ -49,7 +53,7 @@ import {
   WebhookAuthenticationError,
   WebhookPayloadError,
 } from "@repo/webhook-ingestion";
-import { and, desc, eq, ilike, or, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, isNull, or, type SQL, sql } from "drizzle-orm";
 import { Elysia } from "elysia";
 
 /** Authentication settings for admin control-plane routes. */
@@ -149,6 +153,128 @@ type AdminControlPlaneSettings = {
   readonly settings: RepositorySettings;
 };
 
+/** Repository discovery row returned by admin overview and repository list routes. */
+type AdminRepositorySummary = Repository & {
+  /** Latest review run ID for this repository when available. */
+  readonly latestReviewRunId?: string | undefined;
+  /** Latest review status for this repository when available. */
+  readonly latestReviewStatus?: string | undefined;
+  /** Latest review update timestamp for this repository when available. */
+  readonly latestReviewUpdatedAt?: string | undefined;
+};
+
+/** Finding counts attached to one review run. */
+type AdminReviewFindingCounts = {
+  /** Candidate findings emitted before validation. */
+  readonly candidateFindings: number;
+  /** Findings accepted by validation. */
+  readonly validatedFindings: number;
+  /** Findings published to the provider. */
+  readonly publishedFindings: number;
+  /** Findings rejected by validation. */
+  readonly rejectedFindings: number;
+};
+
+/** Review history row returned by admin overview and review list routes. */
+type AdminReviewRunSummary = {
+  /** Review run ID. */
+  readonly reviewRunId: string;
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Provider pull request number. */
+  readonly pullRequestNumber: number;
+  /** Pull request title when a snapshot is available. */
+  readonly pullRequestTitle?: string | undefined;
+  /** Pull request author when a snapshot is available. */
+  readonly authorLogin?: string | undefined;
+  /** Changed file count when a snapshot is available. */
+  readonly changedFileCount?: number | undefined;
+  /** Review trigger. */
+  readonly trigger: string;
+  /** Review run status. */
+  readonly status: string;
+  /** Base commit SHA. */
+  readonly baseSha: string;
+  /** Head commit SHA. */
+  readonly headSha: string;
+  /** Review summary when available. */
+  readonly summary?: string | undefined;
+  /** Finding counts persisted on the review run. */
+  readonly counts: AdminReviewFindingCounts;
+  /** ISO timestamp when the review run was created. */
+  readonly createdAt: string;
+  /** ISO timestamp when the review run was last updated. */
+  readonly updatedAt: string;
+  /** ISO timestamp when review work started. */
+  readonly startedAt?: string | undefined;
+  /** ISO timestamp when review work completed. */
+  readonly completedAt?: string | undefined;
+};
+
+/** Query options for review history discovery. */
+type AdminReviewRunListQuery = {
+  /** Organization IDs allowed by the caller scope. Use "*" for all organizations. */
+  readonly orgIds?: readonly string[] | undefined;
+  /** Repository IDs allowed by the caller scope. Use "*" for all repositories. */
+  readonly repoIds?: readonly string[] | undefined;
+  /** Repository filter. */
+  readonly repoId?: string | undefined;
+  /** Review status filter. */
+  readonly status?: string | undefined;
+  /** Free-text search over repository, PR number, and PR title. */
+  readonly search?: string | undefined;
+  /** Maximum rows to return. */
+  readonly limit?: number | undefined;
+};
+
+/** Query options for repository discovery. */
+type AdminRepositoryListQuery = {
+  /** Organization IDs allowed by the caller scope. Use "*" for all organizations. */
+  readonly orgIds?: readonly string[] | undefined;
+  /** Repository IDs allowed by the caller scope. Use "*" for all repositories. */
+  readonly repoIds?: readonly string[] | undefined;
+  /** Free-text search over repository identity fields. */
+  readonly search?: string | undefined;
+  /** Maximum rows to return. */
+  readonly limit?: number | undefined;
+};
+
+/** Repository or organization rule row shown by repository settings UX. */
+type AdminRepoRuleSummary = {
+  /** Rule row ID. */
+  readonly repoRuleId: string;
+  /** Organization ID that owns the rule. */
+  readonly orgId: string;
+  /** Repository ID when the rule is repository-scoped. */
+  readonly repoId?: string | undefined;
+  /** Rule scope label. */
+  readonly scope: string;
+  /** Rule type label. */
+  readonly ruleType: string;
+  /** Rule body or instruction. */
+  readonly body: string;
+  /** Whether the rule currently applies. */
+  readonly isEnabled: boolean;
+  /** Rule creation timestamp. */
+  readonly createdAt: string;
+  /** Rule update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Dashboard overview payload returned after session refresh. */
+type AdminDashboardOverview = {
+  /** Scoped repositories available to the actor. */
+  readonly repositories: readonly AdminRepositorySummary[];
+  /** Recent review runs available to the actor. */
+  readonly recentReviews: readonly AdminReviewRunSummary[];
+  /** Recent audit entries when the actor has audit access. */
+  readonly recentAuditLogs: readonly AdminAuditLogSummary[];
+};
+
 /** Query options for audit history search. */
 type AdminAuditLogQuery = {
   /** Organization filter. */
@@ -224,6 +350,16 @@ type AdminTelemetryRequestEventInput = Omit<
 
 /** Service surface for control-plane settings and audit APIs. */
 export type AdminControlPlaneService = {
+  /** Lists repositories visible to an admin actor scope. */
+  readonly listRepositories: (
+    query: AdminRepositoryListQuery,
+  ) => Promise<readonly AdminRepositorySummary[]>;
+  /** Lists review runs visible to an admin actor scope. */
+  readonly listReviewRuns: (
+    query: AdminReviewRunListQuery,
+  ) => Promise<readonly AdminReviewRunSummary[]>;
+  /** Lists org and repository rules that affect one repository. */
+  readonly listRepositoryRules: (repoId: string) => Promise<readonly AdminRepoRuleSummary[]>;
   /** Gets repository control-plane settings. */
   readonly getRepositorySettings: (repoId: string) => Promise<AdminControlPlaneSettings>;
   /** Updates repository control-plane settings and writes an audit log in the same transaction. */
@@ -762,6 +898,117 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         return handleAdminDebugError(error, set);
       }
     })
+    .get("/admin/overview", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const url = new URL(request.url);
+      const limit = listLimitFromUrl(url);
+      const service = getAdminControlPlaneService();
+      const repositoryQuery = scopedRepositoryListQuery(url, guardResult.actor, limit);
+      const auditQuery = actorHasPermission(guardResult.actor, "admin.audit.view")
+        ? overviewAuditQueryForActor(guardResult.actor, limit)
+        : undefined;
+      const [repositories, recentReviews, recentAuditLogs] = await Promise.all([
+        service.listRepositories(repositoryQuery),
+        service.listReviewRuns(scopedReviewRunListQuery(url, guardResult.actor, limit)),
+        auditQuery ? service.listAuditLogs(auditQuery) : Promise.resolve([]),
+      ]);
+
+      return {
+        data: {
+          repositories,
+          recentAuditLogs,
+          recentReviews,
+        } satisfies AdminDashboardOverview,
+      };
+    })
+    .get("/admin/repos", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const url = new URL(request.url);
+      const repositories = await getAdminControlPlaneService().listRepositories(
+        scopedRepositoryListQuery(url, guardResult.actor, listLimitFromUrl(url)),
+      );
+
+      return { data: { repositories } };
+    })
+    .get("/admin/reviews", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const url = new URL(request.url);
+      const query = scopedReviewRunListQuery(url, guardResult.actor, listLimitFromUrl(url));
+      if (query.repoId) {
+        const authorizationResponse = await guardRepoIdScopedAccess(
+          guardResult.actor,
+          query.repoId,
+          set,
+          getAdminControlPlaneService(),
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+      }
+
+      const reviews = await getAdminControlPlaneService().listReviewRuns(query);
+      return { data: { reviews } };
+    })
+    .get("/admin/repos/:repoId/rules", async ({ params, request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().getRepositorySettings(params.repoId);
+        const authorizationResponse = guardScopedAccess(
+          guardResult.actor,
+          settings.repository.orgId,
+          settings.repository.repoId,
+          set,
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const rules = await getAdminControlPlaneService().listRepositoryRules(params.repoId);
+        return { data: { rules } };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
     .get("/admin/repos/:repoId/settings", async ({ params, request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -906,11 +1153,390 @@ function createAdminControlPlaneService(dependencies: {
 }): AdminControlPlaneService {
   return {
     getRepositorySettings: (repoId) => getRepositorySettings(dependencies.db, repoId),
+    listRepositories: (query) => listRepositories(dependencies.db, query),
     listAuditLogs: (query) => listAuditLogs(dependencies.db, query),
+    listRepositoryRules: (repoId) => listRepositoryRules(dependencies.db, repoId),
+    listReviewRuns: (query) => listReviewRuns(dependencies.db, query),
     recordAuditEvent: (event) => insertAuditLog(dependencies.db, event),
     updateRepositorySettings: (repoId, patch, audit) =>
       updateRepositorySettings(dependencies.db, repoId, patch, audit),
   };
+}
+
+/** Lists repositories with latest-review hints for the admin dashboard. */
+async function listRepositories(
+  db: HeimdallDatabase,
+  query: AdminRepositoryListQuery,
+): Promise<readonly AdminRepositorySummary[]> {
+  const conditions = repositoryListConditions(query);
+  const rows = await db
+    .select({
+      cloneUrl: repositories.cloneUrl,
+      createdAt: repositories.createdAt,
+      defaultBranch: repositories.defaultBranch,
+      enabled: repositories.enabled,
+      fullName: repositories.fullName,
+      installationId: repositories.installationId,
+      isArchived: repositories.isArchived,
+      isFork: repositories.isFork,
+      metadata: repositories.metadata,
+      name: repositories.name,
+      orgId: repositories.orgId,
+      owner: repositories.owner,
+      provider: repositories.provider,
+      providerRepoId: repositories.providerRepoId,
+      repoId: repositories.repoId,
+      updatedAt: repositories.updatedAt,
+      visibility: repositories.visibility,
+    })
+    .from(repositories)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(repositories.updatedAt))
+    .limit(boundedListLimit(query.limit));
+  const latestReviews = await Promise.all(
+    rows.map((repository) => latestReviewForRepository(db, repository.repoId)),
+  );
+
+  return rows.map((repository, index) => {
+    const latestReview = latestReviews[index];
+    return {
+      ...toAdminRepositorySummary(repository),
+      ...(latestReview
+        ? {
+            latestReviewRunId: latestReview.reviewRunId,
+            latestReviewStatus: latestReview.status,
+            latestReviewUpdatedAt: latestReview.updatedAt.toISOString(),
+          }
+        : {}),
+    };
+  });
+}
+
+/** Gets the latest review row for one repository. */
+async function latestReviewForRepository(
+  db: HeimdallDatabase,
+  repoId: string,
+): Promise<
+  | {
+      /** Review run ID. */
+      readonly reviewRunId: string;
+      /** Current review status. */
+      readonly status: string;
+      /** Last update timestamp. */
+      readonly updatedAt: Date;
+    }
+  | undefined
+> {
+  const [row] = await db
+    .select({
+      reviewRunId: reviewRuns.reviewRunId,
+      status: reviewRuns.status,
+      updatedAt: reviewRuns.updatedAt,
+    })
+    .from(reviewRuns)
+    .where(eq(reviewRuns.repoId, repoId))
+    .orderBy(desc(reviewRuns.updatedAt))
+    .limit(1);
+
+  return row;
+}
+
+/** Builds SQL predicates for repository discovery. */
+function repositoryListConditions(query: AdminRepositoryListQuery): SQL[] {
+  const conditions: SQL[] = [];
+  const scopedConditions = scopedRepositoryConditions(query);
+  if (scopedConditions) {
+    conditions.push(scopedConditions);
+  }
+
+  const search = query.search?.trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const searchCondition = or(
+      ilike(repositories.fullName, pattern),
+      ilike(repositories.owner, pattern),
+      ilike(repositories.name, pattern),
+      ilike(repositories.providerRepoId, pattern),
+    );
+    if (searchCondition) {
+      conditions.push(searchCondition);
+    }
+  }
+
+  return conditions;
+}
+
+/** Builds a repository discovery scope predicate. */
+function scopedRepositoryConditions(query: AdminRepositoryListQuery): SQL | undefined {
+  const orgIds = query.orgIds ?? [];
+  const repoIds = query.repoIds ?? [];
+  const hasExplicitScope = query.orgIds !== undefined || query.repoIds !== undefined;
+  if (orgIds.includes("*") || repoIds.includes("*")) {
+    return undefined;
+  }
+
+  const conditions: SQL[] = [];
+  if (orgIds.length > 0) {
+    conditions.push(inArray(repositories.orgId, [...orgIds]));
+  }
+  if (repoIds.length > 0) {
+    conditions.push(inArray(repositories.repoId, [...repoIds]));
+  }
+  if (conditions.length === 0) {
+    return hasExplicitScope ? sql`false` : undefined;
+  }
+
+  const [condition] = conditions;
+  return conditions.length === 1 ? (condition ?? sql`false`) : or(...conditions);
+}
+
+/** Converts a repository row into a dashboard repository summary. */
+function toAdminRepositorySummary(row: {
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Installation ID. */
+  readonly installationId: string;
+  /** Git provider. */
+  readonly provider: string;
+  /** Provider repository ID. */
+  readonly providerRepoId: string;
+  /** Repository owner. */
+  readonly owner: string;
+  /** Repository name. */
+  readonly name: string;
+  /** Repository full name. */
+  readonly fullName: string;
+  /** Default branch. */
+  readonly defaultBranch: string | null;
+  /** Clone URL. */
+  readonly cloneUrl: string | null;
+  /** Repository visibility. */
+  readonly visibility: string;
+  /** Whether the repository is archived. */
+  readonly isArchived: boolean;
+  /** Whether the repository is a fork. */
+  readonly isFork: boolean;
+  /** Whether review automation is enabled. */
+  readonly enabled: boolean;
+  /** Creation timestamp. */
+  readonly createdAt: Date;
+  /** Update timestamp. */
+  readonly updatedAt: Date;
+  /** Repository metadata. */
+  readonly metadata: unknown;
+}): AdminRepositorySummary {
+  const metadata = asOptionalRecord(row.metadata);
+  return {
+    repoId: row.repoId,
+    orgId: row.orgId,
+    installationId: row.installationId,
+    provider: row.provider as Repository["provider"],
+    providerRepoId: row.providerRepoId,
+    owner: row.owner,
+    name: row.name,
+    fullName: row.fullName,
+    ...(row.defaultBranch ? { defaultBranch: row.defaultBranch } : {}),
+    ...(row.cloneUrl ? { cloneUrl: row.cloneUrl } : {}),
+    visibility: row.visibility as Repository["visibility"],
+    isArchived: row.isArchived,
+    isFork: row.isFork,
+    enabled: row.enabled,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    ...(metadata ? { metadata } : {}),
+  };
+}
+
+/** Lists recent review runs with repository and pull-request context. */
+async function listReviewRuns(
+  db: HeimdallDatabase,
+  query: AdminReviewRunListQuery,
+): Promise<readonly AdminReviewRunSummary[]> {
+  const conditions = reviewRunListConditions(query);
+  const rows = await db
+    .select({
+      authorLogin: pullRequestSnapshots.authorLogin,
+      baseSha: reviewRuns.baseSha,
+      changedFileCount: pullRequestSnapshots.changedFileCount,
+      completedAt: reviewRuns.completedAt,
+      counts: reviewRuns.counts,
+      createdAt: reviewRuns.createdAt,
+      headSha: reviewRuns.headSha,
+      orgId: repositories.orgId,
+      pullRequestNumber: reviewRuns.pullRequestNumber,
+      pullRequestTitle: pullRequestSnapshots.title,
+      repoFullName: repositories.fullName,
+      repoId: reviewRuns.repoId,
+      reviewRunId: reviewRuns.reviewRunId,
+      startedAt: reviewRuns.startedAt,
+      status: reviewRuns.status,
+      summary: reviewRuns.summary,
+      trigger: reviewRuns.trigger,
+      updatedAt: reviewRuns.updatedAt,
+    })
+    .from(reviewRuns)
+    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+    .leftJoin(
+      pullRequestSnapshots,
+      eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
+    )
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(reviewRuns.updatedAt))
+    .limit(boundedListLimit(query.limit));
+
+  return rows.map(toAdminReviewRunSummary);
+}
+
+/** Builds SQL predicates for review history discovery. */
+function reviewRunListConditions(query: AdminReviewRunListQuery): SQL[] {
+  const conditions: SQL[] = [];
+  const scopedConditions = scopedReviewRunRepositoryConditions(query);
+  if (scopedConditions) {
+    conditions.push(scopedConditions);
+  }
+  if (query.repoId) {
+    conditions.push(eq(reviewRuns.repoId, query.repoId));
+  }
+  if (query.status) {
+    conditions.push(eq(reviewRuns.status, query.status));
+  }
+
+  const search = query.search?.trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const prNumber = Number(search);
+    const searchCondition = or(
+      ilike(repositories.fullName, pattern),
+      ilike(pullRequestSnapshots.title, pattern),
+      ilike(pullRequestSnapshots.authorLogin, pattern),
+      Number.isSafeInteger(prNumber) ? eq(reviewRuns.pullRequestNumber, prNumber) : undefined,
+    );
+    if (searchCondition) {
+      conditions.push(searchCondition);
+    }
+  }
+
+  return conditions;
+}
+
+/** Builds a repository scope predicate for review history. */
+function scopedReviewRunRepositoryConditions(query: AdminReviewRunListQuery): SQL | undefined {
+  const orgIds = query.orgIds ?? [];
+  const repoIds = query.repoIds ?? [];
+  const hasExplicitScope = query.orgIds !== undefined || query.repoIds !== undefined;
+  if (orgIds.includes("*") || repoIds.includes("*")) {
+    return undefined;
+  }
+
+  const conditions: SQL[] = [];
+  if (orgIds.length > 0) {
+    conditions.push(inArray(repositories.orgId, [...orgIds]));
+  }
+  if (repoIds.length > 0) {
+    conditions.push(inArray(reviewRuns.repoId, [...repoIds]));
+  }
+  if (conditions.length === 0) {
+    return hasExplicitScope ? sql`false` : undefined;
+  }
+
+  const [condition] = conditions;
+  return conditions.length === 1 ? (condition ?? sql`false`) : or(...conditions);
+}
+
+/** Converts a joined review history row into a dashboard DTO. */
+function toAdminReviewRunSummary(row: {
+  /** Review run ID. */
+  readonly reviewRunId: string;
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Pull request number. */
+  readonly pullRequestNumber: number;
+  /** Pull request title from the snapshot. */
+  readonly pullRequestTitle: string | null;
+  /** Pull request author from the snapshot. */
+  readonly authorLogin: string | null;
+  /** Changed file count from the snapshot. */
+  readonly changedFileCount: number | null;
+  /** Review trigger. */
+  readonly trigger: string;
+  /** Review status. */
+  readonly status: string;
+  /** Base commit SHA. */
+  readonly baseSha: string;
+  /** Head commit SHA. */
+  readonly headSha: string;
+  /** Review summary. */
+  readonly summary: string | null;
+  /** Persisted finding counts. */
+  readonly counts: unknown;
+  /** Creation timestamp. */
+  readonly createdAt: Date;
+  /** Update timestamp. */
+  readonly updatedAt: Date;
+  /** Start timestamp. */
+  readonly startedAt: Date | null;
+  /** Completion timestamp. */
+  readonly completedAt: Date | null;
+}): AdminReviewRunSummary {
+  return {
+    reviewRunId: row.reviewRunId,
+    repoId: row.repoId,
+    orgId: row.orgId,
+    repoFullName: row.repoFullName,
+    pullRequestNumber: row.pullRequestNumber,
+    ...(row.pullRequestTitle ? { pullRequestTitle: row.pullRequestTitle } : {}),
+    ...(row.authorLogin ? { authorLogin: row.authorLogin } : {}),
+    ...(row.changedFileCount !== null ? { changedFileCount: row.changedFileCount } : {}),
+    trigger: row.trigger,
+    status: row.status,
+    baseSha: row.baseSha,
+    headSha: row.headSha,
+    ...(row.summary ? { summary: row.summary } : {}),
+    counts: reviewCountsFromUnknown(row.counts),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    ...(row.startedAt ? { startedAt: row.startedAt.toISOString() } : {}),
+    ...(row.completedAt ? { completedAt: row.completedAt.toISOString() } : {}),
+  };
+}
+
+/** Parses persisted review counts into dashboard-safe defaults. */
+function reviewCountsFromUnknown(value: unknown): AdminReviewFindingCounts {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+  return {
+    candidateFindings: numberFromRecord(record, "candidateFindings"),
+    validatedFindings: numberFromRecord(record, "validatedFindings"),
+    publishedFindings: numberFromRecord(record, "publishedFindings"),
+    rejectedFindings: numberFromRecord(record, "rejectedFindings"),
+  };
+}
+
+/** Reads a finite number from an unknown record field. */
+function numberFromRecord(value: object | undefined, key: string): number {
+  const field = (value as Record<string, unknown> | undefined)?.[key];
+  return typeof field === "number" && Number.isFinite(field) ? field : 0;
+}
+
+/** Returns an object record only when the unknown value is object-like. */
+function asOptionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Returns a safe list limit. */
+function boundedListLimit(limit: number | undefined): number {
+  if (!limit || !Number.isSafeInteger(limit)) {
+    return 50;
+  }
+
+  return Math.min(100, Math.max(1, limit));
 }
 
 /** Gets repository settings, falling back to default settings when the row is absent. */
@@ -930,6 +1556,46 @@ async function getRepositorySettings(
       (await repositoryRepository.getSettings(repoId)) ??
       defaultRepositorySettings(repoId, repository.updatedAt),
   };
+}
+
+/** Lists organization and repository rules that can affect a repository. */
+async function listRepositoryRules(
+  db: HeimdallDatabase,
+  repoId: string,
+): Promise<readonly AdminRepoRuleSummary[]> {
+  const settings = await getRepositorySettings(db, repoId);
+  const rows = await db
+    .select({
+      body: repoRules.body,
+      createdAt: repoRules.createdAt,
+      isEnabled: repoRules.isEnabled,
+      orgId: repoRules.orgId,
+      repoId: repoRules.repoId,
+      repoRuleId: repoRules.repoRuleId,
+      ruleType: repoRules.ruleType,
+      scope: repoRules.scope,
+      updatedAt: repoRules.updatedAt,
+    })
+    .from(repoRules)
+    .where(
+      or(
+        eq(repoRules.repoId, repoId),
+        and(eq(repoRules.orgId, settings.repository.orgId), isNull(repoRules.repoId)),
+      ),
+    )
+    .orderBy(desc(repoRules.updatedAt));
+
+  return rows.map((row) => ({
+    repoRuleId: row.repoRuleId,
+    orgId: row.orgId,
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    scope: row.scope,
+    ruleType: row.ruleType,
+    body: row.body,
+    isEnabled: row.isEnabled,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  }));
 }
 
 /** Updates repository settings and appends a before/after audit record atomically. */
@@ -1657,6 +2323,54 @@ function routeFromRequest(request: Request): string {
 /** Returns a request ID from a header or generates one. */
 function requestIdFromRequest(request: Request): string {
   return request.headers.get("x-request-id") ?? `req_${randomUUID()}`;
+}
+
+/** Converts a URL and actor scope into a repository discovery query. */
+function scopedRepositoryListQuery(
+  url: URL,
+  actor: AdminActor,
+  limit: number,
+): AdminRepositoryListQuery {
+  return {
+    limit,
+    orgIds: actor.orgIds,
+    repoIds: actor.repoIds,
+    search: optionalQueryString(url, "search"),
+  };
+}
+
+/** Converts a URL and actor scope into a review history query. */
+function scopedReviewRunListQuery(
+  url: URL,
+  actor: AdminActor,
+  limit: number,
+): AdminReviewRunListQuery {
+  return {
+    limit,
+    orgIds: actor.orgIds,
+    repoId: optionalQueryString(url, "repoId"),
+    repoIds: actor.repoIds,
+    search: optionalQueryString(url, "search"),
+    status: optionalQueryString(url, "status"),
+  };
+}
+
+/** Builds a recent-audit query for dashboard overview when scope permits it. */
+function overviewAuditQueryForActor(
+  actor: AdminActor,
+  limit: number,
+): AdminAuditLogQuery | undefined {
+  if (actor.orgIds.includes("*")) {
+    return { limit };
+  }
+
+  const orgId = actor.orgIds.find((candidate) => candidate !== "*");
+  return orgId ? { limit, orgId } : undefined;
+}
+
+/** Reads a bounded list limit from a URL. */
+function listLimitFromUrl(url: URL): number {
+  return boundedLimit(url.searchParams.get("limit"));
 }
 
 /** Converts a URL into a bounded audit query. */
