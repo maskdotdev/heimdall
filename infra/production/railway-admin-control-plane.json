@@ -114,7 +114,10 @@
       "name": "dashboard",
       "package": "@app/web",
       "railwayConfig": "infra/railway/dashboard.railway.json",
-      "requiredEnv": ["VITE_HEIMDALL_API_BASE_URL"]
+      "requiredEnv": [
+        "VITE_HEIMDALL_API_BASE_URL",
+        "VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL"
+      ]
     },
     {
       "dockerfile": "infra/staging/Dockerfile.admin-gateway",

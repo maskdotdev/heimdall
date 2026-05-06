@@ -200,7 +200,7 @@ th {
 
 .auth-panel {
   display: grid;
-  grid-template-columns: minmax(180px, 280px) minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) minmax(160px, 220px) repeat(4, auto);
   align-items: end;
   gap: 12px;
   padding: 14px;
@@ -210,6 +210,7 @@ th {
   display: grid;
   gap: 6px;
   min-height: 40px;
+  min-width: 0;
 }
 
 .session-copy span {
@@ -217,6 +218,10 @@ th {
   font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.session-copy strong {
+  overflow-wrap: anywhere;
 }
 
 .primary {

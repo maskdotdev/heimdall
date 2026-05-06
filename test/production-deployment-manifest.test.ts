@@ -141,7 +141,7 @@ function validManifest() {
       ),
       service(
         "dashboard",
-        ["VITE_HEIMDALL_API_BASE_URL"],
+        ["VITE_HEIMDALL_API_BASE_URL", "VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL"],
         "infra/staging/Dockerfile.web",
         "infra/railway/dashboard.railway.json",
       ),

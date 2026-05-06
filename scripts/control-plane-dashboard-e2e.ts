@@ -1,8 +1,7 @@
 import { Buffer } from "node:buffer";
-import {
-  type AdminIdentityRequestHeaders,
-  readGatewayIdentityAssertion,
-} from "./admin-smoke-identity";
+
+/** Default signed admin API session cookie name. */
+const ADMIN_SESSION_COOKIE_NAME = "heimdall_admin_session";
 
 /** Dashboard gate environment. */
 type DashboardGateEnvironment = {
@@ -10,6 +9,8 @@ type DashboardGateEnvironment = {
   readonly webUrl: string;
   /** Deployed API URL. */
   readonly apiUrl: string;
+  /** Deployed admin gateway URL. */
+  readonly gatewayUrl: string;
   /** Browser-level Chrome DevTools Protocol WebSocket endpoint. */
   readonly browserWsEndpoint: string;
   /** Organization scope used by settings and audit checks. */
@@ -20,8 +21,6 @@ type DashboardGateEnvironment = {
   readonly replayKind: ReplayKind;
   /** Replay resource ID used by the replay drill. */
   readonly replayId: string;
-  /** Provider subject requested from the identity gateway. */
-  readonly providerSubject: string;
   /** Whether the script may write repository settings. */
   readonly allowSettingsWrite: boolean;
   /** Whether the script may dispatch a replay. */
@@ -70,9 +69,9 @@ type DashboardSession = {
   };
 };
 
-/** Login response used to seed the browser with a secure session cookie. */
+/** Browser-produced login result used for audit verification. */
 type LoginResult = {
-  /** Cookie header value returned by the API. */
+  /** Cookie header value read from Chrome after dashboard login. */
   readonly cookie: string;
   /** Authenticated session payload. */
   readonly session: DashboardSession;
@@ -142,18 +141,18 @@ type RuntimeEvaluateResult = {
   };
 };
 
-/** Result returned by Network.setCookie. */
-type NetworkSetCookieResult = {
-  /** Whether Chrome accepted the cookie. */
-  readonly success?: unknown;
+/** Result returned by Network.getCookies. */
+type NetworkGetCookiesResult = {
+  /** Browser cookies visible to the supplied URL list. */
+  readonly cookies?: readonly NetworkCookie[] | undefined;
 };
 
-/** Parsed cookie pair from a Set-Cookie header. */
-type ParsedCookie = {
+/** Browser cookie returned by Network.getCookies. */
+type NetworkCookie = {
   /** Cookie name. */
-  readonly name: string;
+  readonly name?: unknown;
   /** Cookie value. */
-  readonly value: string;
+  readonly value?: unknown;
 };
 
 /** Minimal audit row returned by admin audit search. */
@@ -256,23 +255,16 @@ class CdpClient {
 async function main(): Promise<void> {
   const env = readEnvironment();
   requireWriteAcknowledgements(env);
-  const identity = await readGatewayIdentityAssertion({
-    orgId: env.orgId,
-    providerSubject: env.providerSubject,
-    purpose: "control-plane-dashboard-e2e",
-    repoId: env.repoId,
-  });
-  const login = await loginAdmin(env, identity.headers);
-  assertSessionCapabilities(login.session);
-  const loginAudit = await latestAuditLog(env, login.cookie, {
-    action: "admin.session.created",
-    actorUserId: login.session.actor.userId,
-  });
-
   const browser = await CdpClient.connect(env.browserWsEndpoint);
   try {
     const page = await createBrowserPage(browser);
-    await seedDashboardSession(browser, page, env, login.cookie);
+    await openDashboard(browser, page, env);
+    const login = await runDashboardBrowserLogin(browser, page, env);
+    assertSessionCapabilities(login.session);
+    const loginAudit = await latestAuditLog(env, login.cookie, {
+      action: "admin.session.created",
+      actorUserId: login.session.actor.userId,
+    });
     await runDashboardDrill(browser, page, env);
     const replayAudit = await latestAuditLog(env, login.cookie, {
       action: replayAuditAction(env.replayKind),
@@ -300,7 +292,7 @@ async function main(): Promise<void> {
             replay: replayAudit.auditLogId,
             settings: settingsAudit.auditLogId,
           },
-          gatewayUrl: identity.source,
+          gatewayUrl: new URL(env.gatewayUrl).origin,
           orgIds: login.session.scopes?.orgIds ?? [env.orgId],
           provider: login.session.actor.provider,
           repoIds: login.session.scopes?.repoIds ?? [env.repoId],
@@ -317,29 +309,6 @@ async function main(): Promise<void> {
   } finally {
     browser.close();
   }
-}
-
-/** Logs into the staging API with a gateway-issued identity assertion. */
-async function loginAdmin(
-  env: DashboardGateEnvironment,
-  identityHeaders: AdminIdentityRequestHeaders,
-): Promise<LoginResult> {
-  const response = await fetch(new URL("/admin/auth/login", env.apiUrl), {
-    method: "POST",
-    headers: {
-      ...identityHeaders,
-      origin: new URL(env.webUrl).origin,
-    },
-  });
-  const cookie = response.headers.get("set-cookie")?.split(";")[0];
-  const body = await response.json().catch(() => undefined);
-  if (!response.ok || !cookie) {
-    throw new Error(
-      `Admin dashboard login failed with HTTP ${response.status}: ${JSON.stringify(body)}`,
-    );
-  }
-
-  return { cookie, session: (body as ApiEnvelope<DashboardSession>).data };
 }
 
 /** Creates a new browser page and attaches a flattened CDP session. */
@@ -360,40 +329,74 @@ async function createBrowserPage(browser: CdpClient): Promise<BrowserPage> {
   return { targetId, sessionId };
 }
 
-/** Seeds the dashboard browser page with the API URL and authenticated API cookie. */
-async function seedDashboardSession(
+/** Opens the dashboard with API and gateway configuration available before app startup. */
+async function openDashboard(
   browser: CdpClient,
   page: BrowserPage,
   env: DashboardGateEnvironment,
-  cookieHeader: string,
 ): Promise<void> {
-  const cookie = parseCookie(cookieHeader);
-  const setCookieResult = await browser.call<NetworkSetCookieResult>(
-    "Network.setCookie",
-    {
-      httpOnly: true,
-      name: cookie.name,
-      path: "/admin",
-      sameSite: "None",
-      secure: new URL(env.apiUrl).protocol === "https:",
-      url: env.apiUrl,
-      value: cookie.value,
-    },
-    page.sessionId,
-  );
-  if (setCookieResult.success !== true) {
-    throw new Error("Chrome rejected the admin session cookie.");
-  }
-
   await browser.call(
     "Page.addScriptToEvaluateOnNewDocument",
     {
-      source: `sessionStorage.setItem("heimdall:admin-api-base-url", ${JSON.stringify(env.apiUrl)});`,
+      source: [
+        `sessionStorage.setItem("heimdall:admin-api-base-url", ${JSON.stringify(env.apiUrl)});`,
+        `sessionStorage.setItem("heimdall:admin-gateway-base-url", ${JSON.stringify(
+          env.gatewayUrl,
+        )});`,
+      ].join("\n"),
     },
     page.sessionId,
   );
   await browser.call("Page.navigate", { url: env.webUrl }, page.sessionId);
   await waitForSelector(browser, page, "#app .shell", 20_000);
+}
+
+/** Runs the dashboard login controls and returns the resulting API session. */
+async function runDashboardBrowserLogin(
+  browser: CdpClient,
+  page: BrowserPage,
+  env: DashboardGateEnvironment,
+): Promise<LoginResult> {
+  await clickSelectorAllowingNavigation(browser, page, "[data-action='login-github']");
+  await waitForTextAcrossNavigation(browser, page, "Active", 180_000);
+  await assertNoDashboardErrors(browser, page);
+
+  const cookie = await readAdminSessionCookie(browser, page, env);
+  const session = await readAdminSession(env, cookie);
+  return { cookie, session };
+}
+
+/** Reads the API admin session cookie that the dashboard login created in Chrome. */
+async function readAdminSessionCookie(
+  browser: CdpClient,
+  page: BrowserPage,
+  env: DashboardGateEnvironment,
+): Promise<string> {
+  const result = await browser.call<NetworkGetCookiesResult>(
+    "Network.getCookies",
+    { urls: [env.apiUrl] },
+    page.sessionId,
+  );
+  const cookie = result.cookies?.find((candidate) => candidate.name === ADMIN_SESSION_COOKIE_NAME);
+  if (typeof cookie?.value !== "string" || cookie.value.length === 0) {
+    throw new Error(`Chrome did not contain the ${ADMIN_SESSION_COOKIE_NAME} API session cookie.`);
+  }
+
+  return `${ADMIN_SESSION_COOKIE_NAME}=${cookie.value}`;
+}
+
+/** Reads the authenticated admin session through the API for E2E assertions and audit filters. */
+async function readAdminSession(
+  env: DashboardGateEnvironment,
+  cookie: string,
+): Promise<DashboardSession> {
+  const response = await fetch(new URL("/admin/session", env.apiUrl), { headers: { cookie } });
+  const body = (await response.json().catch(() => undefined)) as unknown;
+  if (!response.ok) {
+    throw new Error(`/admin/session failed with HTTP ${response.status}: ${JSON.stringify(body)}`);
+  }
+
+  return (body as ApiEnvelope<DashboardSession>).data;
 }
 
 /** Runs the dashboard UI workflows that prove session, CSRF, CORS, settings, replay, and audit. */
@@ -402,7 +405,6 @@ async function runDashboardDrill(
   page: BrowserPage,
   env: DashboardGateEnvironment,
 ): Promise<void> {
-  await clickSelector(browser, page, "[data-action='connect']");
   await waitForText(browser, page, "Active", 20_000);
   await assertNoDashboardErrors(browser, page);
 
@@ -492,6 +494,21 @@ async function clickSelector(
   );
 }
 
+/** Clicks an element while tolerating the execution-context loss caused by immediate navigation. */
+async function clickSelectorAllowingNavigation(
+  browser: CdpClient,
+  page: BrowserPage,
+  selector: string,
+): Promise<void> {
+  try {
+    await clickSelector(browser, page, selector);
+  } catch (error) {
+    if (!isExpectedNavigationError(error)) {
+      throw error;
+    }
+  }
+}
+
 /** Sets an input-like element value and dispatches an input event. */
 async function setInputValue(
   browser: CdpClient,
@@ -548,6 +565,35 @@ async function waitForText(
     `text ${text}`,
     timeoutMs,
   );
+}
+
+/** Waits for text while allowing the page to navigate through GitHub OAuth and back. */
+async function waitForTextAcrossNavigation(
+  browser: CdpClient,
+  page: BrowserPage,
+  text: string,
+  timeoutMs: number,
+): Promise<void> {
+  const normalizedText = text.toLocaleLowerCase();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    try {
+      const found = await evaluate<boolean>(
+        browser,
+        page,
+        `document.body?.innerText.toLocaleLowerCase().includes(${JSON.stringify(normalizedText)}) === true`,
+      );
+      if (found) {
+        return;
+      }
+    } catch {
+      // Navigation can briefly destroy the execution context during OAuth redirects.
+    }
+
+    await delay(250);
+  }
+
+  throw new Error(`Timed out waiting for text ${text}.`);
 }
 
 /** Waits until inspector details load or an error line appears. */
@@ -721,7 +767,7 @@ function requireWriteAcknowledgements(env: DashboardGateEnvironment): void {
 function readEnvironment(): DashboardGateEnvironment {
   const env = requiredEnvironment([
     "API_URL",
-    "HEIMDALL_ADMIN_SMOKE_ASSERTION_URL",
+    "HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL",
     "HEIMDALL_ADMIN_SMOKE_ORG_ID",
     "HEIMDALL_ADMIN_SMOKE_REPO_ID",
     "HEIMDALL_DASHBOARD_E2E_BROWSER_WS",
@@ -732,8 +778,8 @@ function readEnvironment(): DashboardGateEnvironment {
   const allowLocalTarget = process.env.HEIMDALL_ADMIN_SMOKE_ALLOW_LOCAL_TARGET === "true";
   assertNonLocalProofTarget("API_URL", env.API_URL, allowLocalTarget);
   assertNonLocalProofTarget(
-    "HEIMDALL_ADMIN_SMOKE_ASSERTION_URL",
-    env.HEIMDALL_ADMIN_SMOKE_ASSERTION_URL,
+    "HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL",
+    env.HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL,
     allowLocalTarget,
   );
   assertNonLocalProofTarget("WEB_URL", env.WEB_URL, allowLocalTarget);
@@ -743,8 +789,8 @@ function readEnvironment(): DashboardGateEnvironment {
     allowSettingsWrite: process.env.HEIMDALL_DASHBOARD_E2E_ALLOW_SETTINGS_WRITE === "true",
     apiUrl: env.API_URL,
     browserWsEndpoint: env.HEIMDALL_DASHBOARD_E2E_BROWSER_WS,
+    gatewayUrl: env.HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL,
     orgId: env.HEIMDALL_ADMIN_SMOKE_ORG_ID,
-    providerSubject: process.env.HEIMDALL_ADMIN_SMOKE_PROVIDER_SUBJECT ?? "dashboard-e2e",
     repoId: env.HEIMDALL_ADMIN_SMOKE_REPO_ID,
     replayId: env.HEIMDALL_DASHBOARD_E2E_REPLAY_ID,
     replayKind: replayKindFromEnv(env.HEIMDALL_DASHBOARD_E2E_REPLAY_KIND),
@@ -821,20 +867,6 @@ function isLocalHostname(hostname: string): boolean {
   );
 }
 
-/** Parses the first cookie pair from a Set-Cookie header. */
-function parseCookie(header: string): ParsedCookie {
-  const [pair] = header.split(";");
-  const separatorIndex = pair?.indexOf("=") ?? -1;
-  if (!pair || separatorIndex <= 0) {
-    throw new Error(`Invalid Set-Cookie header: ${header}`);
-  }
-
-  return {
-    name: pair.slice(0, separatorIndex),
-    value: pair.slice(separatorIndex + 1),
-  };
-}
-
 /** Waits for a browser WebSocket to open. */
 function waitForSocketOpen(socket: WebSocket, endpoint: string): Promise<void> {
   if (socket.readyState === WebSocket.OPEN) {
@@ -863,6 +895,11 @@ function waitForSocketOpen(socket: WebSocket, endpoint: string): Promise<void> {
     socket.addEventListener("open", onOpen);
     socket.addEventListener("error", onError);
   });
+}
+
+/** Waits for a fixed number of milliseconds. */
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 /** Converts WebSocket message data to text. */
@@ -894,6 +931,17 @@ function cdpErrorMessage(error: NonNullable<CdpMessage["error"]>): string {
   const code = typeof error.code === "number" ? ` ${error.code}` : "";
   const message = typeof error.message === "string" ? error.message : "Unknown CDP error";
   return `CDP error${code}: ${message}`;
+}
+
+/** Returns whether a CDP error is expected during an OAuth navigation. */
+function isExpectedNavigationError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /Cannot find context|Execution context was destroyed|Inspected target navigated|Target closed/u.test(
+    error.message,
+  );
 }
 
 /** Converts Runtime.evaluate exception details to a message. */

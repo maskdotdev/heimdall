@@ -94,7 +94,7 @@ export async function main(): Promise<void> {
     checkJsonHealth(new URL("/healthz", env.apiUrl), "api", "api health"),
     checkJsonHealth(new URL("/healthz", env.assertionUrl), "admin-gateway", "gateway health"),
     checkWeb(env.webUrl),
-    checkDashboardApiConfiguration(env.webUrl, env.apiUrl),
+    checkDashboardApiConfiguration(env.webUrl, env.apiUrl, env.gatewayPublicUrl),
     checkCorsPreflight({
       name: "api admin cors",
       origin: urls.web.origin,
@@ -398,6 +398,7 @@ async function checkWeb(webUrl: string): Promise<PreflightCheck> {
 export async function checkDashboardApiConfiguration(
   webUrl: string,
   apiUrl: string,
+  gatewayUrl = "",
 ): Promise<PreflightCheck> {
   const dashboardUrl = new URL(webUrl);
   const response = await fetch(dashboardUrl, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
@@ -409,15 +410,27 @@ export async function checkDashboardApiConfiguration(
   const assetUrls = extractDashboardAssetUrls(html, dashboardUrl);
   const bundles = await Promise.all(assetUrls.map((assetUrl) => fetchDashboardAsset(assetUrl)));
   const expectedApiBaseUrl = apiUrl.replace(/\/$/u, "");
+  const expectedGatewayBaseUrl = gatewayUrl.replace(/\/$/u, "");
   const containsApiUrl = [html, ...bundles].some((body) => body.includes(expectedApiBaseUrl));
   if (!containsApiUrl) {
     throw new Error(
       `dashboard bundle does not contain API_URL ${expectedApiBaseUrl}. Rebuild the dashboard with VITE_HEIMDALL_API_BASE_URL set to the staging API URL.`,
     );
   }
+  const containsGatewayUrl =
+    expectedGatewayBaseUrl.length === 0 ||
+    [html, ...bundles].some((body) => body.includes(expectedGatewayBaseUrl));
+  if (!containsGatewayUrl) {
+    throw new Error(
+      `dashboard bundle does not contain GATEWAY_URL ${expectedGatewayBaseUrl}. Rebuild the dashboard with VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL set to the staging gateway URL.`,
+    );
+  }
 
   return {
-    detail: `${dashboardUrl.origin} bundle references ${expectedApiBaseUrl}`,
+    detail:
+      expectedGatewayBaseUrl.length > 0
+        ? `${dashboardUrl.origin} bundle references ${expectedApiBaseUrl} and ${expectedGatewayBaseUrl}`
+        : `${dashboardUrl.origin} bundle references ${expectedApiBaseUrl}`,
     name: "dashboard API configuration",
   };
 }

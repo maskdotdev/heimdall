@@ -6,8 +6,9 @@ audit review.
 The staging proof scripts source `.env.smoke.local` before they run. For staging, copy
 `.env.smoke.example` or export equivalent values, then replace every local dev value with deployed
 staging values. The proof environment must include the deployed `API_URL`, deployed `WEB_URL`,
-gateway assertion URL, authenticated gateway session cookie, org and repo scope IDs, dashboard CDP
-browser URL, replay target, API admin configuration, gateway public/dashboard/session/CORS
+gateway public URL, gateway assertion URL, authenticated gateway session cookie for smoke checks,
+org and repo scope IDs, dashboard CDP browser URL, replay target, API admin configuration,
+gateway public/dashboard/session/CORS
 configuration, GitHub organization, GitHub OAuth credentials, manual drill evidence, and rollback
 notes. Keep `HEIMDALL_ADMIN_SMOKE_ALLOW_LOCAL_TARGET` unset or `false` for staging proof commands.
 
@@ -34,7 +35,7 @@ For the Railway production rollout, use three independently deployable services:
 | --- | --- | --- |
 | `@app/api` | Owns admin sessions, CSRF checks, scoped authorization, mutations, and audit writes | Set `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`, then redeploy |
 | `@app/admin-gateway` | Owns GitHub OAuth, org membership verification, login allowlist admission, and signed assertions | Remove allowed logins or rotate `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET`, then redeploy |
-| `@app/web` | Serves the operator dashboard bundle built with the production API URL | Roll back to the previous Railway revision or disable access at the edge |
+| `@app/web` | Serves the operator dashboard bundle built with the production API and gateway URLs | Roll back to the previous Railway revision or disable access at the edge |
 
 ## Production Rollout Plan
 
@@ -149,11 +150,12 @@ Run these gates before enabling or changing the admin control plane in productio
 3. Build and check the dashboard bundle:
 
    ```sh
+   VITE_HEIMDALL_API_BASE_URL=https://api.example.com \
+   VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL=https://idp-gateway.example.com \
    pnpm --filter @app/web build
    WEB_URL=https://admin.example.com \
    API_URL=https://api.example.com \
-   HEIMDALL_ADMIN_SMOKE_ASSERTION_URL=https://idp-gateway.example.com/heimdall/assertion \
-   HEIMDALL_ADMIN_SMOKE_GATEWAY_COOKIE='heimdall_admin_gateway_session=...' \
+   HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL=https://idp-gateway.example.com \
    HEIMDALL_ADMIN_SMOKE_ORG_ID=org_staging \
    HEIMDALL_ADMIN_SMOKE_REPO_ID=repo_staging \
    HEIMDALL_DASHBOARD_E2E_BROWSER_WS=ws://127.0.0.1:9222/devtools/browser/... \
@@ -169,6 +171,7 @@ Run these gates before enabling or changing the admin control plane in productio
    ```sh
    WEB_URL=https://admin.staging.example.com \
    API_URL=https://api.staging.example.com \
+   HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL=https://idp-gateway.staging.example.com \
    HEIMDALL_ADMIN_SMOKE_ASSERTION_URL=https://idp-gateway.staging.example.com/heimdall/assertion \
    HEIMDALL_ADMIN_SMOKE_GATEWAY_COOKIE='heimdall_admin_gateway_session=...' \
    HEIMDALL_ADMIN_SMOKE_ORG_ID=org_staging \
@@ -182,7 +185,7 @@ Run these gates before enabling or changing the admin control plane in productio
    ```
 
    The preflight probes API and gateway health, validates credentialed CORS, verifies that the
-   dashboard bundle references the configured `API_URL`, and uses the supplied gateway cookie to
+   dashboard bundle references the configured `API_URL` and gateway URL, and uses the supplied gateway cookie to
    request one signed assertion for the configured org/repo scope. It verifies that assertion with
    the shared API assertion secret and fails unless the assertion uses `github_org`, matches the
    configured GitHub organization, includes the requested org/repo scope, and grants all dashboard
@@ -243,9 +246,10 @@ Run these gates before enabling or changing the admin control plane in productio
 The smoke scripts must receive assertions from the deployed identity gateway. Do not give these
 scripts `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET`; local assertion minting does not prove the
 gateway integration. For the GitHub gateway, authenticate through `/auth/github/start`, copy the
-gateway session cookie, and pass it through `HEIMDALL_ADMIN_SMOKE_GATEWAY_COOKIE`. The smoke and
-dashboard proof clients send `WEB_URL` as the request `Origin` for credentialed gateway and API
-requests; set `HEIMDALL_ADMIN_SMOKE_ORIGIN` only when that origin must differ from `WEB_URL`. For a
+gateway session cookie, and pass it through `HEIMDALL_ADMIN_SMOKE_GATEWAY_COOKIE` for smoke and
+preflight assertion checks. The smoke clients and dashboard browser requests send `WEB_URL` as the
+request `Origin` for credentialed gateway and API requests; set `HEIMDALL_ADMIN_SMOKE_ORIGIN` only
+when that origin must differ from `WEB_URL`. For a
 manually retrieved gateway assertion, set
 `HEIMDALL_ADMIN_SMOKE_ALLOW_SUPPLIED_ASSERTION=true` with the three
 `HEIMDALL_ADMIN_SMOKE_IDP_*` values.
@@ -257,9 +261,11 @@ logout. The dashboard E2E prints the same identity context plus replay and setti
 Add both JSON outputs to the release record.
 
 Before running `pnpm e2e:dashboard`, launch Chrome with remote debugging enabled and pass the
-browser-level WebSocket URL through `HEIMDALL_DASHBOARD_E2E_BROWSER_WS`. The E2E drill logs in with
-a gateway-issued assertion, refreshes the dashboard session, plans and dispatches a replay, saves
-the current repository settings, searches audit history, logs out, and prints JSON evidence.
+browser-level WebSocket URL through `HEIMDALL_DASHBOARD_E2E_BROWSER_WS`. The E2E drill opens the
+dashboard, starts the GitHub gateway login from the browser, lets the dashboard exchange the
+gateway assertion for an API session, refreshes the dashboard session, plans and dispatches a
+replay, saves the current repository settings, searches audit history, logs out, and prints JSON
+evidence.
 
 ## Local Development Gateway
 
@@ -304,6 +310,8 @@ Set these variables before enabling admin routes:
 | `HEIMDALL_ADMIN_SESSION_SECRET` | A distinct 32+ character session signing secret |
 | `HEIMDALL_ADMIN_ALLOWED_ORIGINS` | Comma-separated dashboard origins |
 | `HEIMDALL_ADMIN_GITHUB_ORG` | Required when `HEIMDALL_ADMIN_IDENTITY_PROVIDER=github_org` |
+| `VITE_HEIMDALL_API_BASE_URL` | Admin API origin built into the dashboard bundle |
+| `VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL` | Admin gateway origin built into the dashboard bundle |
 
 For internal exposure, also set `HEIMDALL_ADMIN_INTERNAL_HEADER_NAME` and
 `HEIMDALL_ADMIN_INTERNAL_HEADER_VALUE`. The trusted proxy must inject this header and block clients

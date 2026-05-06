@@ -120,18 +120,32 @@ describe("control-plane staging preflight", () => {
     ).toThrow(/HEIMDALL_ADMIN_GATEWAY_PERMISSIONS must include admin.replay.plan/);
   });
 
-  it("verifies that the dashboard bundle references the configured API URL", async () => {
+  it("verifies that the dashboard bundle references the configured API and gateway URLs", async () => {
     const server = await createDashboardServer(
-      'const apiBaseUrl = "https://api.staging.example.com";',
+      [
+        'const apiBaseUrl = "https://api.staging.example.com";',
+        'const gatewayBaseUrl = "https://gateway.staging.example.com";',
+      ].join("\n"),
     );
 
     try {
       await expect(
-        checkDashboardApiConfiguration(server.url, "https://api.staging.example.com"),
+        checkDashboardApiConfiguration(
+          server.url,
+          "https://api.staging.example.com",
+          "https://gateway.staging.example.com",
+        ),
       ).resolves.toMatchObject({ name: "dashboard API configuration" });
       await expect(
         checkDashboardApiConfiguration(server.url, "https://other-api.staging.example.com"),
       ).rejects.toThrow(/dashboard bundle does not contain API_URL/);
+      await expect(
+        checkDashboardApiConfiguration(
+          server.url,
+          "https://api.staging.example.com",
+          "https://other-gateway.staging.example.com",
+        ),
+      ).rejects.toThrow(/dashboard bundle does not contain GATEWAY_URL/);
     } finally {
       await server.close();
     }

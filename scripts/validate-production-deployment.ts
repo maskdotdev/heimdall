@@ -50,6 +50,12 @@ const REQUIRED_API_ENV = [
   "WEB_URL",
 ];
 
+/** Required dashboard build-time environment variables for production login. */
+const REQUIRED_DASHBOARD_ENV = [
+  "VITE_HEIMDALL_API_BASE_URL",
+  "VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL",
+];
+
 /** Required admin gateway environment variables for production OAuth. */
 const REQUIRED_GATEWAY_ENV = [
   "GITHUB_CLIENT_ID",
@@ -132,6 +138,7 @@ export function productionDeploymentIssues(
 ): readonly string[] {
   const services = serviceRecords(input.manifest);
   const apiService = serviceByName(services, "api");
+  const dashboardService = serviceByName(services, "dashboard");
   const gatewayService = serviceByName(services, "admin-gateway");
   const scripts = recordField(input.packageJson, "scripts");
 
@@ -148,6 +155,9 @@ export function productionDeploymentIssues(
     ...REQUIRED_API_ENV.filter((envName) => !requiredEnv(apiService).includes(envName)).map(
       (envName) => `api requiredEnv must include ${envName}`,
     ),
+    ...REQUIRED_DASHBOARD_ENV.filter(
+      (envName) => !requiredEnv(dashboardService).includes(envName),
+    ).map((envName) => `dashboard requiredEnv must include ${envName}`),
     ...REQUIRED_GATEWAY_ENV.filter((envName) => !requiredEnv(gatewayService).includes(envName)).map(
       (envName) => `admin-gateway requiredEnv must include ${envName}`,
     ),

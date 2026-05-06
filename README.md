@@ -98,7 +98,10 @@ searchable audit history. Replay execution and settings changes write `audit_log
 identity, request IDs, session IDs, and before/after mutation data where applicable.
 
 Run the web dashboard with `pnpm dev:web`. In development, configure `VITE_HEIMDALL_API_BASE_URL`
-or proxy `/admin` routes to `http://localhost:3000`. See
+and `VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL`, or proxy `/admin` routes to `http://localhost:3000`
+and gateway routes to the admin gateway. The dashboard login flow starts GitHub OAuth through the
+gateway, requests a signed assertion from `/heimdall/assertion`, posts it to `/admin/auth/login`,
+then refreshes `/admin/session` and loads the overview. See
 `docs/runbooks/admin-control-plane.md` for release gates and emergency operations.
 
 Live control-plane smoke gates require a deployed identity gateway that returns signed admin

@@ -388,6 +388,23 @@ type ApiErrorEnvelope = {
   };
 };
 
+/** Header names accepted by the admin API for trusted identity assertions. */
+const ADMIN_IDENTITY_HEADER_NAMES = {
+  assertion: "x-heimdall-idp-assertion",
+  signature: "x-heimdall-idp-signature",
+  timestamp: "x-heimdall-idp-timestamp",
+} as const;
+
+/** Gateway-issued identity assertion headers accepted by the admin API. */
+type AdminIdentityRequestHeaders = {
+  /** Base64url-encoded identity assertion emitted by the trusted gateway. */
+  readonly [ADMIN_IDENTITY_HEADER_NAMES.assertion]: string;
+  /** Assertion signature emitted by the trusted gateway. */
+  readonly [ADMIN_IDENTITY_HEADER_NAMES.signature]: string;
+  /** Assertion timestamp emitted by the trusted gateway. */
+  readonly [ADMIN_IDENTITY_HEADER_NAMES.timestamp]: string;
+};
+
 /** Authenticated admin session returned by the API. */
 type AdminSession = {
   /** Authenticated actor. */
@@ -732,8 +749,12 @@ type AppState = {
   activeKind: InspectorKind;
   /** API base URL. Empty string means same origin. */
   apiBaseUrl: string;
+  /** Admin gateway base URL. Empty string means same origin. */
+  gatewayBaseUrl: string;
   /** Authenticated admin session. */
   session?: AdminSession | undefined;
+  /** Current authentication loading label. */
+  authLoading?: string | undefined;
   /** Global authentication error. */
   authError?: string | undefined;
   /** Per-inspector state. */
@@ -755,6 +776,10 @@ if (!appRoot) {
 const app = appRoot;
 
 const apiBaseUrl = import.meta.env.VITE_HEIMDALL_API_BASE_URL ?? "";
+const gatewayBaseUrl = import.meta.env.VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL ?? "";
+const API_BASE_URL_STORAGE_KEY = "heimdall:admin-api-base-url";
+const GATEWAY_BASE_URL_STORAGE_KEY = "heimdall:admin-gateway-base-url";
+const PENDING_GATEWAY_LOGIN_STORAGE_KEY = "heimdall:pending-admin-gateway-login";
 
 const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
   webhook: {
@@ -792,7 +817,8 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
 const state: AppState = {
   activeView: "overview",
   activeKind: "webhook",
-  apiBaseUrl: sessionStorage.getItem("heimdall:admin-api-base-url") ?? apiBaseUrl,
+  apiBaseUrl: sessionStorage.getItem(API_BASE_URL_STORAGE_KEY) ?? apiBaseUrl,
+  gatewayBaseUrl: sessionStorage.getItem(GATEWAY_BASE_URL_STORAGE_KEY) ?? gatewayBaseUrl,
   inspectors: {
     webhook: { id: "", confirmationTokenInput: "" },
     review: { id: "", confirmationTokenInput: "" },
@@ -825,6 +851,7 @@ app.addEventListener("click", (event) => {
 app.addEventListener("input", handleInput);
 
 render();
+void completePendingGatewayLogin();
 
 /** Handles delegated click events from the dashboard. */
 async function handleClick(event: MouseEvent): Promise<void> {
@@ -857,8 +884,18 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   event.preventDefault();
-  if (action === "connect") {
-    await connectSession();
+  if (action === "login-github") {
+    startGitHubLogin();
+    return;
+  }
+
+  if (action === "connect-admin-session") {
+    await connectAdminSession();
+    return;
+  }
+
+  if (action === "refresh-session") {
+    await refreshAdminSession();
     return;
   }
 
@@ -984,6 +1021,11 @@ function handleInput(event: Event): void {
     return;
   }
 
+  if (field === "gateway-base-url") {
+    state.gatewayBaseUrl = target.value;
+    return;
+  }
+
   if (field === "resource-id") {
     const inspector = currentInspectorState();
     inspector.id = target.value;
@@ -1017,18 +1059,63 @@ function handleInput(event: Event): void {
   }
 }
 
-/** Authenticates against the admin API and stores the current session. */
-async function connectSession(): Promise<void> {
+/** Continues the GitHub login return path when OAuth redirected back to the dashboard. */
+async function completePendingGatewayLogin(): Promise<void> {
+  if (sessionStorage.getItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY) !== "true") {
+    return;
+  }
+
+  await connectAdminSession();
+}
+
+/** Starts the GitHub OAuth login flow through the configured admin gateway. */
+function startGitHubLogin(): void {
   state.authError = undefined;
+  persistLoginConfig();
+  sessionStorage.setItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY, "true");
+  window.location.assign(githubLoginStartUrl());
+}
+
+/** Connects the dashboard to the admin API using a gateway-issued identity assertion. */
+async function connectAdminSession(): Promise<void> {
+  state.authError = undefined;
+  state.authLoading = "Connecting admin session";
+  render();
   try {
+    persistLoginConfig();
+    const assertion = await requestGatewayAssertion();
+    await requestAdminData<AdminSession>("/admin/auth/login", {
+      headers: identityAssertionHeaders(assertion),
+      method: "POST",
+    });
     const session = await requestAdminData<AdminSession>("/admin/session");
     state.session = session;
-    sessionStorage.setItem("heimdall:admin-api-base-url", state.apiBaseUrl);
+    sessionStorage.removeItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY);
     await loadOverview();
   } catch (error) {
     state.session = undefined;
     state.authError = errorMessage(error);
   } finally {
+    state.authLoading = undefined;
+    render();
+  }
+}
+
+/** Refreshes the current API session cookie and reloads the overview. */
+async function refreshAdminSession(): Promise<void> {
+  state.authError = undefined;
+  state.authLoading = "Refreshing admin session";
+  render();
+  try {
+    persistLoginConfig();
+    const session = await requestAdminData<AdminSession>("/admin/session");
+    state.session = session;
+    await loadOverview();
+  } catch (error) {
+    state.session = undefined;
+    state.authError = errorMessage(error);
+  } finally {
+    state.authLoading = undefined;
     render();
   }
 }
@@ -1036,6 +1123,8 @@ async function connectSession(): Promise<void> {
 /** Clears authentication state from memory and session storage. */
 async function clearAuth(): Promise<void> {
   state.authError = undefined;
+  state.authLoading = "Logging out";
+  render();
   try {
     if (state.session) {
       await requestAdminData<{ readonly ok: boolean }>("/admin/auth/logout", { method: "POST" });
@@ -1043,7 +1132,9 @@ async function clearAuth(): Promise<void> {
   } catch (error) {
     state.authError = errorMessage(error);
   } finally {
+    sessionStorage.removeItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY);
     state.session = undefined;
+    state.authLoading = undefined;
     render();
   }
 }
@@ -1338,10 +1429,108 @@ async function requestAdminData<T>(path: string, init: RequestInit = {}): Promis
   return (body as ApiEnvelope<T>).data;
 }
 
+/** Requests a signed identity assertion from the configured admin gateway. */
+async function requestGatewayAssertion(): Promise<AdminIdentityRequestHeaders> {
+  const response = await fetch(gatewayAssertionUrl(), {
+    body: JSON.stringify({ purpose: "dashboard-login" }),
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+  const body = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(body, response.status));
+  }
+
+  return identityAssertionFromGatewayBody(body);
+}
+
 /** Returns a complete admin API URL for a route path. */
 function adminUrl(path: string): string {
   const baseUrl = state.apiBaseUrl.trim().replace(/\/$/u, "");
   return `${baseUrl}${path}`;
+}
+
+/** Returns the GitHub OAuth start URL for the configured admin gateway. */
+function githubLoginStartUrl(): string {
+  const url = new URL("/auth/github/start", gatewayBaseOriginUrl());
+  url.searchParams.set("returnTo", window.location.href);
+  return url.toString();
+}
+
+/** Returns the signed assertion endpoint URL for the configured admin gateway. */
+function gatewayAssertionUrl(): string {
+  const configured = state.gatewayBaseUrl.trim();
+  if (configured.length === 0) {
+    return "/heimdall/assertion";
+  }
+
+  const url = new URL(configured, window.location.origin);
+  if (url.pathname.endsWith("/assertion")) {
+    return url.toString();
+  }
+
+  return new URL("/heimdall/assertion", url).toString();
+}
+
+/** Returns the gateway origin used by the OAuth start endpoint. */
+function gatewayBaseOriginUrl(): string {
+  const configured = state.gatewayBaseUrl.trim();
+  if (configured.length === 0) {
+    return window.location.origin;
+  }
+
+  return new URL(configured, window.location.origin).origin;
+}
+
+/** Persists login endpoint configuration for redirects and browser reloads. */
+function persistLoginConfig(): void {
+  sessionStorage.setItem(API_BASE_URL_STORAGE_KEY, state.apiBaseUrl);
+  sessionStorage.setItem(GATEWAY_BASE_URL_STORAGE_KEY, state.gatewayBaseUrl);
+}
+
+/** Converts a gateway assertion tuple into API login headers. */
+function identityAssertionHeaders(assertion: AdminIdentityRequestHeaders): Headers {
+  const headers = new Headers();
+  headers.set(
+    ADMIN_IDENTITY_HEADER_NAMES.assertion,
+    assertion[ADMIN_IDENTITY_HEADER_NAMES.assertion],
+  );
+  headers.set(
+    ADMIN_IDENTITY_HEADER_NAMES.signature,
+    assertion[ADMIN_IDENTITY_HEADER_NAMES.signature],
+  );
+  headers.set(
+    ADMIN_IDENTITY_HEADER_NAMES.timestamp,
+    assertion[ADMIN_IDENTITY_HEADER_NAMES.timestamp],
+  );
+  return headers;
+}
+
+/** Parses a gateway assertion response into API login headers. */
+function identityAssertionFromGatewayBody(body: unknown): AdminIdentityRequestHeaders {
+  const record = asRecord(body);
+  const headerRecord = asRecord(record?.headers);
+  const encodedAssertion =
+    stringField(record, "encodedAssertion") ??
+    stringField(record, "assertion") ??
+    stringField(headerRecord, ADMIN_IDENTITY_HEADER_NAMES.assertion);
+  const signature =
+    stringField(record, "signature") ??
+    stringField(headerRecord, ADMIN_IDENTITY_HEADER_NAMES.signature);
+  const timestamp =
+    stringField(record, "timestamp") ??
+    stringField(headerRecord, ADMIN_IDENTITY_HEADER_NAMES.timestamp);
+
+  if (!encodedAssertion || !signature || !timestamp) {
+    throw new Error("Admin gateway response did not include a complete identity assertion.");
+  }
+
+  return {
+    [ADMIN_IDENTITY_HEADER_NAMES.assertion]: encodedAssertion,
+    [ADMIN_IDENTITY_HEADER_NAMES.signature]: signature,
+    [ADMIN_IDENTITY_HEADER_NAMES.timestamp]: timestamp,
+  };
 }
 
 /** Extracts a useful API error message from an unknown response body. */
@@ -1391,18 +1580,28 @@ function renderSessionBadge(): string {
 
 /** Renders the authentication controls. */
 function renderAuthPanel(): string {
+  const disabled = state.authLoading ? "disabled" : "";
+  const sessionLabel = state.authLoading ?? (state.session ? "Active" : "No session cookie");
   return `
     <section class="auth-panel">
       <label>
-        <span>API base URL</span>
+        <span>API URL</span>
         <input data-field="api-base-url" value="${escapeAttribute(state.apiBaseUrl)}" />
+      </label>
+      <label>
+        <span>Gateway URL</span>
+        <input data-field="gateway-base-url" value="${escapeAttribute(state.gatewayBaseUrl)}" />
       </label>
       <div class="session-copy">
         <span>Identity session</span>
-        <strong>${state.session ? "Active" : "No session cookie"}</strong>
+        <strong>${escapeHtml(sessionLabel)}</strong>
       </div>
-      <button class="primary" data-action="connect" type="button">Refresh</button>
-      <button class="ghost" data-action="clear-auth" type="button">Logout</button>
+      <button data-action="login-github" type="button" ${disabled}>Login with GitHub</button>
+      <button class="primary" data-action="connect-admin-session" type="button" ${disabled}>
+        Connect admin session
+      </button>
+      <button class="ghost" data-action="refresh-session" type="button" ${disabled}>Refresh</button>
+      <button class="ghost" data-action="clear-auth" type="button" ${disabled}>Logout</button>
       ${state.authError ? `<p class="error-line">${escapeHtml(state.authError)}</p>` : ""}
     </section>
   `;
@@ -2969,6 +3168,15 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** Reads a string field from an unknown object record. */
+function stringField(
+  record: Record<string, unknown> | undefined,
+  field: string,
+): string | undefined {
+  const value = record?.[field];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /** Narrows inspector details to webhook details. */

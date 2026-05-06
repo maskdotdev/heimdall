@@ -9,6 +9,7 @@ docker build -f infra/staging/Dockerfile.api -t heimdall-api:staging .
 docker build -f infra/staging/Dockerfile.admin-gateway -t heimdall-admin-gateway:staging .
 docker build \
   --build-arg VITE_HEIMDALL_API_BASE_URL=https://api.staging.example.com \
+  --build-arg VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL=https://gateway.staging.example.com \
   -f infra/staging/Dockerfile.web \
   -t heimdall-web:staging \
   .
@@ -42,10 +43,12 @@ Run these commands from the repository root with `.env.smoke.local` populated fr
 manual drill, and rollback evidence values. The package scripts load `.env.smoke.local`
 automatically and fail closed when required staging values are missing or point at localhost.
 
-The preflight fails if the dashboard bundle does not contain the configured `API_URL`, or if the
-gateway-issued assertion does not verify against the API assertion secret, GitHub organization,
-requested org/repo scope, and required dashboard proof permissions. Rebuild the web image with
-`--build-arg VITE_HEIMDALL_API_BASE_URL=<staging API URL>` for each staging API origin change.
+The preflight fails if the dashboard bundle does not contain the configured `API_URL` and gateway
+URL, or if the gateway-issued assertion does not verify against the API assertion secret, GitHub
+organization, requested org/repo scope, and required dashboard proof permissions. Rebuild the web
+image with `--build-arg VITE_HEIMDALL_API_BASE_URL=<staging API URL>` and
+`--build-arg VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL=<staging gateway URL>` for each staging login
+origin change.
 
 Before pushing images, run local container probes with staging-like environment values:
 
