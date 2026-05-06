@@ -47,7 +47,7 @@ tracked milestone.
 | #27 Security and compliance layer | Partial | `packages/security`, `packages/db/src/schema/tables.ts` | Package and audit schema support exist. Full security/compliance workflows remain. |
 | #28 Usage and billing | Partial | `packages/db/src/schema/tables.ts` | Usage event schema exists. Billing and usage ledger implementation remain. |
 | #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts`, `scripts/control-plane-production-readiness.ts`, `docs/runbooks/admin-control-plane.md`, `docs/evidence/admin-control-plane-staging-proof.json` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, operator dashboard views, Railway staging proof, production readiness runbook, and production-readiness gate exist. Broader production admin workflows remain. |
-| #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/`, `scripts/validate-production-deployment.ts`, `.github/workflows/ci.yml` | Local infra exists, and the initial Railway production deployment manifest plus deployment audit gate are codified and wired into CI. Provider-managed rollout automation remains. |
+| #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/`, `scripts/validate-production-deployment.ts`, `.github/workflows/ci.yml` | Local infra exists, and the initial Railway production deployment manifest, Railway config-as-code files, and deployment audit gate are codified and wired into CI. Provider-managed rollout execution remains. |
 | #31 Testing and evaluation strategy | Partial | `pnpm check`, `pnpm ci:control-plane:release`, package tests | Unit tests, optional integration tests, and CI release gates exist for new work. Evaluation harness coverage remains. |
 
 ## Current Completion Notes
@@ -73,6 +73,10 @@ tracked milestone.
 - Latest CI milestone: `.github/workflows/ci.yml` runs `pnpm ci:control-plane:release` on pull
   requests and pushes to `main`, covering the production deployment audit, production-readiness
   gate, typecheck, lint, tests, workspace boundary checks, and build.
+- Latest release-control milestone: `.github/ISSUE_TEMPLATE/admin-control-plane-production-release.md`
+  and `docs/releases/admin-control-plane-production-release.md` define the controlled production
+  release ticket, and `infra/railway/*.railway.json` codifies Railway build/deploy settings for
+  the API, dashboard, admin gateway, and worker services.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
@@ -88,5 +92,5 @@ tracked milestone.
 
 ## Recommended Next Goal
 
-Promote the Railway manifest through a controlled production release ticket, then add provider-side
-deployment automation for the API, dashboard, admin gateway, and worker services.
+Execute the controlled Railway production release, then add post-release production monitoring
+dashboards and issue-level follow-up tracking for remaining product phases.

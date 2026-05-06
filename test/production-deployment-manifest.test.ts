@@ -68,6 +68,16 @@ describe("production deployment manifest", () => {
       expect.arrayContaining(["service dockerfile infra/staging/Dockerfile.api must exist"]),
     );
   });
+
+  it("rejects missing Railway config-as-code files when file existence is supplied", () => {
+    const input = productionDeploymentInput({
+      fileExists: (path) => !path.endsWith(".railway.json"),
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining(["railway config infra/railway/api.railway.json must exist"]),
+    );
+  });
 });
 
 /** Creates production deployment audit input with optional overrides. */
@@ -127,8 +137,14 @@ function validManifest() {
           "WEB_URL",
         ],
         "infra/staging/Dockerfile.api",
+        "infra/railway/api.railway.json",
       ),
-      service("dashboard", ["VITE_HEIMDALL_API_BASE_URL"], "infra/staging/Dockerfile.web"),
+      service(
+        "dashboard",
+        ["VITE_HEIMDALL_API_BASE_URL"],
+        "infra/staging/Dockerfile.web",
+        "infra/railway/dashboard.railway.json",
+      ),
       service(
         "admin-gateway",
         [
@@ -144,8 +160,14 @@ function validManifest() {
           "HEIMDALL_ADMIN_GITHUB_ORG",
         ],
         "infra/staging/Dockerfile.admin-gateway",
+        "infra/railway/admin-gateway.railway.json",
       ),
-      service("worker", ["DATABASE_URL", "REDIS_URL"], "infra/staging/Dockerfile.worker"),
+      service(
+        "worker",
+        ["DATABASE_URL", "REDIS_URL"],
+        "infra/staging/Dockerfile.worker",
+        "infra/railway/worker.railway.json",
+      ),
       service("postgres", ["DATABASE_URL"]),
       service("redis", ["REDIS_URL"]),
     ],
@@ -177,12 +199,18 @@ function gate(command: string) {
 }
 
 /** Creates a service fixture. */
-function service(name: string, requiredEnv: readonly string[], dockerfile?: string) {
+function service(
+  name: string,
+  requiredEnv: readonly string[],
+  dockerfile?: string,
+  railwayConfig?: string,
+) {
   return {
     ...(dockerfile ? { dockerfile } : {}),
     healthCheck: "/healthz",
     name,
     package: name,
+    ...(railwayConfig ? { railwayConfig } : {}),
     requiredEnv,
   };
 }

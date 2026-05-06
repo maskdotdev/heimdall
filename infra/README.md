@@ -14,6 +14,16 @@ deployment for the admin control plane. It lists the API, dashboard, admin gatew
 Postgres, and Redis services; required non-secret environment variable names; release gates;
 rollback checks; and alert coverage.
 
+The deployable Railway services use config-as-code files under `infra/railway/`. In each Railway
+service, set the custom config path to the corresponding absolute repository path:
+
+| Service | Railway config path |
+| --- | --- |
+| API | `/infra/railway/api.railway.json` |
+| Dashboard | `/infra/railway/dashboard.railway.json` |
+| Admin gateway | `/infra/railway/admin-gateway.railway.json` |
+| Worker | `/infra/railway/worker.railway.json` |
+
 Run this audit before promoting or changing the production admin control plane:
 
 ```sh

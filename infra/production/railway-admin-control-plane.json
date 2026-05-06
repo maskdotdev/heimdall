@@ -93,6 +93,7 @@
       "healthCheck": "/healthz",
       "name": "api",
       "package": "@app/api",
+      "railwayConfig": "infra/railway/api.railway.json",
       "requiredEnv": [
         "DATABASE_URL",
         "REDIS_URL",
@@ -112,6 +113,7 @@
       "healthCheck": "/",
       "name": "dashboard",
       "package": "@app/web",
+      "railwayConfig": "infra/railway/dashboard.railway.json",
       "requiredEnv": ["VITE_HEIMDALL_API_BASE_URL"]
     },
     {
@@ -119,6 +121,7 @@
       "healthCheck": "/healthz",
       "name": "admin-gateway",
       "package": "@app/admin-gateway",
+      "railwayConfig": "infra/railway/admin-gateway.railway.json",
       "requiredEnv": [
         "GITHUB_CLIENT_ID",
         "GITHUB_CLIENT_SECRET",
@@ -137,6 +140,7 @@
       "healthCheck": "worker heartbeat log",
       "name": "worker",
       "package": "@app/worker",
+      "railwayConfig": "infra/railway/worker.railway.json",
       "requiredEnv": [
         "DATABASE_URL",
         "REDIS_URL",

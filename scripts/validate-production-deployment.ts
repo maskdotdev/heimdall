@@ -19,6 +19,9 @@ const REQUIRED_ALERT_IDS = [
   "admin_emergency_disable",
 ];
 
+/** Services that must use Railway config-as-code. */
+const REQUIRED_RAILWAY_CONFIG_SERVICES = ["api", "dashboard", "admin-gateway", "worker"];
+
 /** Required workspace scripts that back the production release gates. */
 const REQUIRED_PACKAGE_SCRIPTS = [
   "check",
@@ -158,6 +161,7 @@ export function productionDeploymentIssues(
       (alertId) => `observability alert ${alertId} is required`,
     ),
     ...missingDockerfileIssues(input),
+    ...missingRailwayConfigIssues(input),
     requiredStringArray(recordField(input.manifest, "rollback"), "commands").length === 0
       ? "rollback commands are required"
       : undefined,
@@ -165,6 +169,23 @@ export function productionDeploymentIssues(
       ? "rollback checks are required"
       : undefined,
   ].filter((issue): issue is string => typeof issue === "string");
+}
+
+/** Returns issues for required Railway config-as-code files that do not exist. */
+function missingRailwayConfigIssues(input: ProductionDeploymentAuditInput): readonly string[] {
+  const services = serviceRecords(input.manifest);
+  return REQUIRED_RAILWAY_CONFIG_SERVICES.flatMap((serviceName) => {
+    const service = serviceByName(services, serviceName);
+    const railwayConfig = stringField(service, "railwayConfig");
+    if (!railwayConfig) {
+      return [`${serviceName} railwayConfig is required`];
+    }
+    if (input.fileExists && !input.fileExists(railwayConfig)) {
+      return [`railway config ${railwayConfig} must exist`];
+    }
+
+    return [];
+  });
 }
 
 /** Returns issues for service Dockerfiles that do not exist. */
