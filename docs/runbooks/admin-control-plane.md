@@ -11,6 +11,120 @@ browser URL, replay target, API admin configuration, gateway public/dashboard/se
 configuration, GitHub organization, GitHub OAuth credentials, manual drill evidence, and rollback
 notes. Keep `HEIMDALL_ADMIN_SMOKE_ALLOW_LOCAL_TARGET` unset or `false` for staging proof commands.
 
+## Production Deployment Decision
+
+Use Railway for the first production admin control-plane rollout. The staging proof already passed
+on Railway with the API, dashboard, and GitHub org gateway split into separate services, so Railway
+is the lowest-risk production target for this stage.
+
+Treat Railway as a time-boxed production host, not the final infrastructure architecture. Move to a
+more formal target, such as ECS, Kubernetes, or another IaC-managed container platform, before any of
+these conditions apply:
+
+- Admin routes must be private-network only instead of public with strict GitHub org auth and CORS.
+- Compliance work requires managed secret rotation history, change approvals, or environment
+  promotion records outside Railway.
+- The product needs multi-region routing, private service discovery, or central observability
+  collectors.
+- The team cannot complete rollback from the Railway dashboard and CLI within the release window.
+
+For the Railway production rollout, use three independently deployable services:
+
+| Service | Production role | Emergency disable action |
+| --- | --- | --- |
+| `@app/api` | Owns admin sessions, CSRF checks, scoped authorization, mutations, and audit writes | Set `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`, then redeploy |
+| `@app/admin-gateway` | Owns GitHub OAuth, org membership verification, login allowlist admission, and signed assertions | Remove allowed logins or rotate `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET`, then redeploy |
+| `@app/web` | Serves the operator dashboard bundle built with the production API URL | Roll back to the previous Railway revision or disable access at the edge |
+
+## Production Rollout Plan
+
+Record one release ticket before rollout. The ticket must name these owner roles and link to the
+evidence from every gate:
+
+| Owner role | Accountable for | Required evidence |
+| --- | --- | --- |
+| Release owner | Coordinates the rollout, decides go/no-go, and owns the release ticket | Completed gate checklist and go/no-go decision |
+| Gateway owner | GitHub OAuth app, org allowlist, gateway session policy, and assertion signing | OAuth settings screenshot or export, gateway env diff, and login/assertion proof |
+| API/dashboard owner | API admin env, dashboard build, admin sessions, CORS, and dashboard drill | `pnpm check`, preflight output, dashboard proof output, and audit log IDs |
+| Operations owner | Railway deploys, health checks, monitoring, and rollback | Deploy revisions, health output, alert checks, and rollback command notes |
+| Security owner | Secret handling, access review, and emergency disable approval | Secret rotation record and allowlist review |
+
+### Enablement Order
+
+1. Freeze the staging proof evidence and confirm that `pnpm proof:control-plane:staging` passed
+   against the current API, dashboard, and gateway revisions.
+2. Create a dedicated production GitHub OAuth app for the admin gateway. Configure only the exact
+   callback URL `https://<gateway-production-origin>/auth/github/callback`.
+3. Generate four distinct production secrets: `HEIMDALL_ADMIN_SESSION_SECRET`,
+   `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET`, `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET`, and the
+   GitHub OAuth client secret.
+4. Deploy the API, dashboard, and gateway to Railway with admin access still disabled on the API:
+   `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`.
+5. Verify health for the API, dashboard, and gateway. Verify that admin API routes return 404 while
+   disabled.
+6. Configure the gateway with `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=false`, an explicit
+   `HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS` list, strict `HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS`,
+   production org/repo scope, and only the required `admin.*` permissions.
+7. Authenticate one release operator through `/auth/github/start`, then request one assertion from
+   `/heimdall/assertion` with the production dashboard origin. Confirm denied requests for a
+   missing origin, an unlisted origin, and an unallowlisted GitHub login.
+8. Enable the API with `HEIMDALL_ADMIN_ENABLED=true`,
+   `HEIMDALL_ADMIN_IDENTITY_PROVIDER=github_org`, the matching assertion secret, and strict
+   `HEIMDALL_ADMIN_ALLOWED_ORIGINS`. Use `HEIMDALL_ADMIN_ROUTE_EXPOSURE=public` for the initial
+   Railway rollout. Use `internal` only when a trusted proxy injects and strips the configured
+   internal header.
+9. Run the release gates in this runbook against production URLs. The proof scripts keep
+   "staging" in their names, but they validate deployed HTTPS targets and can be used as production
+   promotion gates when pointed at production.
+10. Complete the manual dashboard drill on a safe production target. Do not dispatch a replay unless
+    the release ticket identifies the exact replay resource and confirms that duplicate processing
+    is acceptable.
+11. Keep the release owner, operations owner, and security owner online for the first hour after
+    enablement.
+
+### Acceptance Gates
+
+All gates must pass before the release owner marks the rollout complete:
+
+| Gate | Acceptance criteria |
+| --- | --- |
+| Repository verification | `pnpm check` passes on the release commit |
+| Staging proof | `pnpm proof:control-plane:staging` passes with committed or attached evidence |
+| Production health | API `/healthz`, gateway `/healthz`, and dashboard root return healthy responses from production |
+| Gateway auth | Allowlisted active GitHub org member can login and request a signed assertion; unallowlisted login cannot |
+| Origin controls | API and gateway accept only the production dashboard origin and reject wildcard, missing, or unrelated origins |
+| Session policy | API and gateway cookies are `HttpOnly`, `Secure`, bounded to 8 hours or less, and use the documented SameSite policy |
+| Audit visibility | Login, logout, settings, and any replay drill produce searchable `audit_logs` rows with actor, request, and session IDs |
+| Rollback readiness | Operations owner can name the exact Railway revisions and env changes used for emergency disable |
+
+### Go/No-Go Criteria
+
+Go only when every acceptance gate passes, all owner roles are assigned, rollback is rehearsed, and
+the release ticket includes the production env diff with secret values redacted.
+
+Do not go, or stop the rollout immediately, when any of these conditions exists:
+
+- `HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS` or `HEIMDALL_ADMIN_ALLOWED_ORIGINS` contains `*`.
+- `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=true` without explicit security owner approval.
+- The GitHub OAuth app allows a callback origin other than the production gateway origin.
+- Any admin mutation does not produce an audit row.
+- API or gateway health fails during rollout.
+- Gateway or API auth failures spike above the baseline during the first hour.
+- The operations owner cannot disable admin access and verify 404 responses within 10 minutes.
+
+## Gateway Hardening Checklist
+
+Use this checklist for production and for every gateway configuration change:
+
+| Area | Required production behavior |
+| --- | --- |
+| Org allowlist | Require active membership in `HEIMDALL_ADMIN_GITHUB_ORG` and keep `HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS` explicit. Leave `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=false` unless the GitHub org is itself the admin access group and the security owner approves it. |
+| Scope grants | Grant only the required `HEIMDALL_ADMIN_GATEWAY_ORG_IDS`, optional `HEIMDALL_ADMIN_GATEWAY_REPO_IDS`, and `admin.*` permissions for the release. Avoid `*` scopes unless the release ticket documents why global access is required. |
+| Session policy | Gateway sessions use signed, `HttpOnly`, `Secure`, `SameSite=Lax` cookies with `HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS<=28800`. OAuth state uses `SameSite=Lax` and `HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS<=900`. API admin sessions use signed, `HttpOnly`, `Secure` cookies with CSRF on unsafe methods. |
+| OAuth app settings | Use a dedicated production GitHub OAuth app. Configure only the production gateway callback URL, request `read:org`, disable signup in the authorization request, and store the client secret only in the deployment secret store. |
+| Origin checks | Set exact HTTPS dashboard origins in both `HEIMDALL_ADMIN_ALLOWED_ORIGINS` and `HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS`. Do not use wildcard origins. Verify credentialed CORS with the preflight command before and after changes. |
+| Failure modes | Disabled admin routes return 404. Misconfigured API auth returns 503. Missing or expired sessions return 401. Origin, CSRF, scope, and login denials return 403. GitHub token or API validation failures return 502. Logs must include error codes but not secrets, OAuth codes, assertion payloads, or cookies. |
+
 ## Production Release Gates
 
 Run these gates before enabling or changing the admin control plane in production:
@@ -167,11 +281,11 @@ This local smoke proves API login, session cookies, CSRF-protected logout, and a
 through the assertion contract. It does not replace the staging gate because the local gateway does
 not verify real identity-provider membership.
 
-7. Run the repository-wide check before handoff:
+Run the repository-wide check before handoff:
 
-   ```sh
-   pnpm check
-   ```
+```sh
+pnpm check
+```
 
 ## Required Production Settings
 
@@ -200,9 +314,12 @@ Deploy `@app/admin-gateway` with these variables:
 | `HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL` | Public gateway origin, such as `https://idp-gateway.staging.example.com` |
 | `HEIMDALL_ADMIN_GATEWAY_DASHBOARD_URL` | Dashboard URL to open after GitHub login |
 | `HEIMDALL_ADMIN_GATEWAY_GITHUB_CLIENT_ID` / `HEIMDALL_ADMIN_GATEWAY_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials. The gateway also accepts `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` as fallbacks |
+| `HEIMDALL_ADMIN_GATEWAY_GITHUB_SCOPES` | Must include `read:org` |
 | `HEIMDALL_ADMIN_GITHUB_ORG` | GitHub organization login required for access |
 | `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET` | Same 32+ character secret configured on the API |
 | `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET` | Distinct 32+ character gateway session secret |
+| `HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS` | `28800` or less |
+| `HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS` | `900` or less |
 | `HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS` | Dashboard origins allowed to call `/heimdall/assertion` |
 | `HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist |
 | `HEIMDALL_ADMIN_GATEWAY_ORG_IDS` | Heimdall organization scope IDs granted in assertions |
@@ -211,6 +328,99 @@ Deploy `@app/admin-gateway` with these variables:
 
 Leave `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=false` unless the GitHub organization is already
 the exact admin access group. The gateway fails closed without an allowlist or that explicit opt-in.
+
+## Secret Rotation Procedure
+
+Rotate one secret at a time unless there is an active incident. Record the old secret name, new
+secret name, owner, deployment revision, verification output, and rollback decision in the release
+ticket. Never paste secret values into the ticket, logs, chat, or command history.
+
+General rotation steps:
+
+1. Confirm the operations owner can roll back the API, dashboard, and gateway Railway revisions.
+2. Generate a new 32+ character random value in the deployment secret store.
+3. Update only the affected service environment variables.
+4. Redeploy the affected service.
+5. Verify health, login, assertion issuance when relevant, CORS, and audit visibility.
+6. Remove or revoke the old secret after verification.
+
+| Secret | Rotation procedure | Expected user impact | Verification |
+| --- | --- | --- | --- |
+| `HEIMDALL_ADMIN_SESSION_SECRET` | Update the API secret and redeploy `@app/api`. Existing API admin sessions become invalid. | Operators must refresh the dashboard session and log in again. | Login succeeds through the gateway, `/admin/auth/session` returns the new session, logout writes an audit row, and old cookies return 401. |
+| `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET` | This secret is shared by the gateway and API and has no dual-secret window. Disable admin routes or schedule a short maintenance window, update the gateway and API to the same new value, redeploy both, then re-enable admin routes. | Assertions minted before the cutover fail after the API deploy. Operators must request a new assertion and API session. | `pnpm preflight:control-plane:staging` passes against the target URLs, assertion timestamps are current, and invalid old assertions fail with `admin_auth.invalid_signature`. |
+| `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET` | Update the gateway secret and redeploy `@app/admin-gateway`. | Operators must repeat GitHub OAuth login because gateway session cookies become invalid. API sessions remain valid until they expire, but operators need a new gateway session for refresh. | `/heimdall/assertion` returns 401 for the old gateway cookie, then succeeds after a new GitHub login. |
+| GitHub OAuth client secret | Generate or rotate the client secret in the GitHub OAuth app, update `HEIMDALL_ADMIN_GATEWAY_GITHUB_CLIENT_SECRET`, and redeploy the gateway. Revoke the old secret after login verification. | New OAuth callbacks fail during a bad deploy. Existing gateway and API sessions continue until expiration. | `/auth/github/start` redirects to GitHub, callback completes, gateway sets a new session cookie, and no `admin_gateway.github_token_exchange_failed` errors appear. |
+
+During an incident, prefer emergency disable before rotation. Set
+`HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled` on the API, redeploy,
+verify admin routes return 404, then rotate affected secrets.
+
+## Monitoring and Rollback Checks
+
+Railway logging is sufficient for the initial production rollout, but the operations owner must
+create equivalent alerts before moving to a formal infrastructure target.
+
+| Signal | Check | Alert condition |
+| --- | --- | --- |
+| API health | `GET <API_URL>/healthz` returns `{ "ok": true, "service": "api" }` | Two consecutive failures or any 5xx during rollout |
+| Gateway health | `GET <GATEWAY_URL>/healthz` returns `{ "ok": true, "service": "admin-gateway" }` | Two consecutive failures or any 5xx during rollout |
+| Dashboard health | `GET <WEB_URL>/` returns the dashboard shell built with the production API URL | 4xx/5xx or missing production API URL in the bundle |
+| Auth failures | Count API `admin_auth.*`, `admin.unauthorized`, `admin.cors_forbidden`, `admin.csrf_forbidden`, and gateway `admin_gateway.*` rejection codes in logs | More than 5 failures in 10 minutes after excluding a planned negative test |
+| Replay audit visibility | Search `audit_logs` for `webhook.requeue_jobs`, `review.requeue`, and `publish.review` after any replay dispatch | Replay dispatch returns without a matching audit row |
+| Admin action volume | Count `audit_logs` by action each hour | Zero rows after a known manual drill, or more than 3 settings/replay mutations outside a release or incident |
+| Emergency disable | API admin routes return 404 after `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled` deploy | Disable cannot complete and verify within 10 minutes |
+
+Use these SQL checks when direct database access is available:
+
+```sql
+select action, count(*) as events
+from audit_logs
+where occurred_at >= now() - interval '1 hour'
+group by action
+order by events desc;
+```
+
+```sql
+select audit_log_id, action, actor_user_id, resource_type, resource_id, occurred_at
+from audit_logs
+where action in ('webhook.requeue_jobs', 'review.requeue', 'publish.review')
+order by occurred_at desc
+limit 20;
+```
+
+Run the local production-readiness gate after updating the release evidence or this runbook:
+
+```sh
+pnpm readiness:control-plane:production
+```
+
+The gate verifies that the committed staging proof passed, includes actor, scope, audit, command,
+and rollback evidence, and that this runbook covers rollout, hardening, rotation, monitoring,
+rollback, emergency disable, and the persisted replay audit action names.
+
+### Emergency Disable Path
+
+1. Set `HEIMDALL_ADMIN_ENABLED=false` on `@app/api`, or set
+   `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`.
+2. Redeploy the API service.
+3. Verify `/admin/auth/session`, `/admin/audit-logs`, and replay/settings routes return 404.
+4. Remove `HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS` or rotate
+   `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET` on `@app/admin-gateway`.
+5. Redeploy the gateway and verify `/heimdall/assertion` returns 401 for previous gateway cookies.
+6. Roll back the dashboard or gateway Railway revision if the incident came from a bad deploy.
+7. Record the disable time, verification output, affected users, and follow-up owner in the
+   incident record.
+
+### Rollback Checks
+
+After any rollback or emergency disable:
+
+- API and worker non-admin routes still pass their health checks.
+- Admin API routes return 404 when disabled.
+- The gateway no longer issues assertions for removed logins or old gateway cookies.
+- New admin audit rows stop after disable, except for expected login/logout attempts during
+  verification.
+- The incident record includes the Railway revision restored or the env values changed.
 
 ## Emergency Replay
 

@@ -39,6 +39,7 @@
     "smoke:control-plane:local": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; API_URL=${API_URL:-http://localhost:3000} HEIMDALL_ADMIN_SMOKE_ASSERTION_URL=${HEIMDALL_ADMIN_SMOKE_ASSERTION_URL:-http://127.0.0.1:4317/assertion} HEIMDALL_ADMIN_SMOKE_ORG_ID=${HEIMDALL_ADMIN_SMOKE_ORG_ID:-org_local} HEIMDALL_ADMIN_SMOKE_REPO_ID=${HEIMDALL_ADMIN_SMOKE_REPO_ID:-repo_local} HEIMDALL_ADMIN_SMOKE_ALLOW_LOCAL_TARGET=true bun run scripts/control-plane-staging-smoke.ts",
     "preflight:control-plane:staging": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/control-plane-staging-preflight.ts",
     "proof:control-plane:staging": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/control-plane-staging-proof.ts",
+    "readiness:control-plane:production": "bun run scripts/control-plane-production-readiness.ts",
     "smoke:control-plane:staging": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/control-plane-staging-smoke.ts",
     "e2e:dashboard": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/control-plane-dashboard-e2e.ts",
     "workspace:print": "bun run scripts/print-workspace.ts",

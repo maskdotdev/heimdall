@@ -15,6 +15,12 @@ const GITHUB_API_VERSION = "2022-11-28";
 /** Default OAuth scopes required to verify a private GitHub organization membership. */
 const DEFAULT_GITHUB_OAUTH_SCOPES = ["read:org"] as const;
 
+/** Maximum allowed gateway session lifetime for production-ready deployments. */
+const MAX_GATEWAY_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
+
+/** Maximum allowed GitHub OAuth state lifetime for production-ready deployments. */
+const MAX_OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60;
+
 /** Request body accepted by the signed assertion endpoint. */
 const AssertionRequestBodySchema = Type.Object(
   {
@@ -747,6 +753,9 @@ function validateGatewayConfig(config: GitHubAdminGatewayConfig): GitHubAdminGat
   if (config.nodeEnv === "production" && publicUrl.protocol !== "https:") {
     throw new Error("HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL must use https in production.");
   }
+  if (config.nodeEnv === "production" && dashboardUrl.protocol !== "https:") {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_DASHBOARD_URL must use https in production.");
+  }
   if (config.nodeEnv === "production" && !config.secureCookies) {
     throw new Error("Production admin gateway sessions require secure cookies.");
   }
@@ -773,12 +782,28 @@ function validateGatewayConfig(config: GitHubAdminGatewayConfig): GitHubAdminGat
       "Set HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS or HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=true.",
     );
   }
+  if (!config.oauthScopes.includes("read:org")) {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_GITHUB_SCOPES must include read:org.");
+  }
+  if (
+    config.sessionMaxAgeSeconds <= 0 ||
+    config.sessionMaxAgeSeconds > MAX_GATEWAY_SESSION_MAX_AGE_SECONDS
+  ) {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS must be between 1 and 28800.");
+  }
+  if (
+    config.oauthStateMaxAgeSeconds <= 0 ||
+    config.oauthStateMaxAgeSeconds > MAX_OAUTH_STATE_MAX_AGE_SECONDS
+  ) {
+    throw new Error(
+      "HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS must be between 1 and 900.",
+    );
+  }
 
   return {
     ...config,
     allowedGithubLogins: normalizeGithubLogins(config.allowedGithubLogins),
-    allowedOrigins:
-      config.allowedOrigins.length > 0 ? config.allowedOrigins : [dashboardUrl.origin],
+    allowedOrigins: normalizeAllowedOrigins(config.allowedOrigins, dashboardUrl, config.nodeEnv),
     githubOrg: config.githubOrg.trim(),
     publicUrl: publicUrl.toString().replace(/\/$/u, ""),
   };
@@ -1060,6 +1085,40 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   }
 
   return parsed;
+}
+
+/** Normalizes and validates origins allowed to make credentialed gateway requests. */
+function normalizeAllowedOrigins(
+  allowedOrigins: readonly string[],
+  dashboardUrl: URL,
+  nodeEnv: string,
+): readonly string[] {
+  const origins = allowedOrigins.length > 0 ? allowedOrigins : [dashboardUrl.origin];
+  return [...new Set(origins.map((origin) => normalizeAllowedOrigin(origin, nodeEnv)))];
+}
+
+/** Converts one configured origin to its canonical browser origin. */
+function normalizeAllowedOrigin(origin: string, nodeEnv: string): string {
+  const trimmed = origin.trim();
+  if (trimmed === "*" || trimmed.length === 0) {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must not include wildcard origins.");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must contain valid origins.");
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must use http or https origins.");
+  }
+  if (nodeEnv === "production" && parsed.protocol !== "https:") {
+    throw new Error("HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must use https in production.");
+  }
+
+  return parsed.origin;
 }
 
 /** Normalizes GitHub login strings for allowlist comparisons. */

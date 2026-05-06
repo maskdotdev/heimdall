@@ -198,6 +198,61 @@ describe("GitHub admin gateway", () => {
       error: { code: "admin_gateway.cors_forbidden" },
     });
   });
+
+  it("normalizes configured allowed origins before request checks", () => {
+    const gateway = createGitHubAdminGateway({
+      ...baseConfig(),
+      allowedOrigins: ["https://admin.test/settings"],
+    });
+
+    expect(gateway.config.allowedOrigins).toEqual(["https://admin.test"]);
+  });
+
+  it("rejects unsafe production gateway configuration", () => {
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        allowedOrigins: ["*"],
+      }),
+    ).toThrow(/HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must not include wildcard origins/);
+
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        allowedOrigins: ["http://admin.test"],
+        nodeEnv: "production",
+      }),
+    ).toThrow(/HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must use https in production/);
+
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        dashboardUrl: "http://admin.test",
+        nodeEnv: "production",
+      }),
+    ).toThrow(/HEIMDALL_ADMIN_GATEWAY_DASHBOARD_URL must use https in production/);
+
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        oauthScopes: ["user:email"],
+      }),
+    ).toThrow(/HEIMDALL_ADMIN_GATEWAY_GITHUB_SCOPES must include read:org/);
+
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        sessionMaxAgeSeconds: 28_801,
+      }),
+    ).toThrow(/HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS must be between 1 and 28800/);
+
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        oauthStateMaxAgeSeconds: 901,
+      }),
+    ).toThrow(/HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS must be between 1 and 900/);
+  });
 });
 
 /** Returns a baseline valid gateway config for tests. */

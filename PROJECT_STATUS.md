@@ -46,7 +46,7 @@ tracked milestone.
 | #26 Evaluation harness | Not started | `packages/evaluation` | Package exists, but harness implementation has not started. |
 | #27 Security and compliance layer | Partial | `packages/security`, `packages/db/src/schema/tables.ts` | Package and audit schema support exist. Full security/compliance workflows remain. |
 | #28 Usage and billing | Partial | `packages/db/src/schema/tables.ts` | Usage event schema exists. Billing and usage ledger implementation remain. |
-| #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts`, `docs/evidence/admin-control-plane-staging-proof.json` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, operator dashboard views, and Railway staging control-plane proof exist. Broader production admin workflows remain. |
+| #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts`, `scripts/control-plane-production-readiness.ts`, `docs/runbooks/admin-control-plane.md`, `docs/evidence/admin-control-plane-staging-proof.json` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, operator dashboard views, Railway staging proof, production readiness runbook, and production-readiness gate exist. Broader production admin workflows remain. |
 | #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/` | Local infra exists. Production deployment is not implemented. |
 | #31 Testing and evaluation strategy | Partial | `pnpm check`, package tests | Unit tests and optional integration tests exist for new work. Cross-system release gates remain. |
 
@@ -60,6 +60,11 @@ tracked milestone.
 - Latest staging verification: `pnpm proof:control-plane:staging` passed against Railway API,
   dashboard, and gateway services on 2026-05-06. Evidence is recorded in
   `docs/evidence/admin-control-plane-staging-proof.json`.
+- Latest admin production-readiness milestone: `docs/runbooks/admin-control-plane.md` now defines
+  the Railway-first production deployment decision, rollout owners, enablement order, acceptance
+  gates, go/no-go criteria, gateway hardening checklist, secret rotation procedure, monitoring
+  checks, and emergency disable path. `pnpm readiness:control-plane:production` validates the
+  committed staging proof and runbook coverage before production handoff.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
@@ -75,6 +80,6 @@ tracked milestone.
 
 ## Recommended Next Goal
 
-Move from staging proof to production-readiness work: define the production admin rollout plan,
-secret rotation procedure, gateway hardening checklist, and monitoring/rollback checks for the
-admin control plane.
+Implement the next formal infrastructure and observability slice: codify production deploys outside
+manual Railway configuration, add structured metrics and alerts for the admin control plane, and
+wire release evidence into CI or deployment automation.
