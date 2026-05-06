@@ -46,7 +46,7 @@ tracked milestone.
 | #26 Evaluation harness | Not started | `packages/evaluation` | Package exists, but harness implementation has not started. |
 | #27 Security and compliance layer | Partial | `packages/security`, `packages/db/src/schema/tables.ts` | Package and audit schema support exist. Full security/compliance workflows remain. |
 | #28 Usage and billing | Partial | `packages/db/src/schema/tables.ts` | Usage event schema exists. Billing and usage ledger implementation remain. |
-| #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, and operator dashboard views exist. Broader production control-plane auth and admin workflows remain. |
+| #29 Admin and internal tooling | Partial | `packages/admin-tools`, `apps/api/src/app.ts`, `apps/web/src/main.ts`, `docs/evidence/admin-control-plane-staging-proof.json` | Publisher dry-run, reconciliation reports, admin-debug inspectors for webhook/review/publisher state, structured failure normalization, replay plans, confirmed durable replay dispatch, named support/admin access, replay audit logging, operator dashboard views, and Railway staging control-plane proof exist. Broader production admin workflows remain. |
 | #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/` | Local infra exists. Production deployment is not implemented. |
 | #31 Testing and evaluation strategy | Partial | `pnpm check`, package tests | Unit tests and optional integration tests exist for new work. Cross-system release gates remain. |
 
@@ -54,9 +54,12 @@ tracked milestone.
 
 - Latest completed milestone: guarded live PR review smoke verified webhook-to-publish completion
   against development PR `maskdotdev/heimdall#2`.
-- Latest implementation milestone: production-shaped admin control plane with signed IdP-backed
-  sessions, scoped permissions, CSRF/CORS protections, settings APIs/UI, audit history search, and
-  release-gate runbook/scripts.
+- Latest implementation milestone: Railway staging admin control-plane proof completed with signed
+  IdP-backed sessions, scoped permissions, CSRF/CORS protections, settings APIs/UI, audit history
+  search, replay execution, rollback notes, and committed evidence.
+- Latest staging verification: `pnpm proof:control-plane:staging` passed against Railway API,
+  dashboard, and gateway services on 2026-05-06. Evidence is recorded in
+  `docs/evidence/admin-control-plane-staging-proof.json`.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
@@ -72,5 +75,6 @@ tracked milestone.
 
 ## Recommended Next Goal
 
-Run the admin control-plane staging smoke against the next staging deployment and connect the
-trusted OIDC/SAML/GitHub org gateway that emits signed admin identity assertions.
+Move from staging proof to production-readiness work: define the production admin rollout plan,
+secret rotation procedure, gateway hardening checklist, and monitoring/rollback checks for the
+admin control plane.
