@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "turbo dev",
     "dev:api": "turbo dev --filter=@app/api",
+    "dev:marketing": "turbo dev --filter=@app/marketing",
     "dev:web": "turbo dev --filter=@app/web",
     "dev:worker": "turbo dev --filter=@app/worker",
     "build": "turbo build",
@@ -28,6 +29,10 @@
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "infra:reset": "docker compose down -v && docker compose up -d",
+    "infra:prepare": "pnpm infra:up && pnpm --filter @repo/admin-tools infra:db:prepare",
+    "smoke:api": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/review_agent} REDIS_URL=${REDIS_URL:-redis://localhost:6379} GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-local-smoke-secret} pnpm --filter @app/api dev",
+    "smoke:worker": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/review_agent} REDIS_URL=${REDIS_URL:-redis://localhost:6379} GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-local-smoke-secret} HEIMDALL_REVIEW_SMOKE_FINDING=true pnpm --filter @app/worker dev",
+    "smoke:review:github": "pnpm --filter @repo/admin-tools smoke:review:github",
     "workspace:print": "bun run scripts/print-workspace.ts",
     "env:check": "bun run scripts/validate-env.ts"
   },

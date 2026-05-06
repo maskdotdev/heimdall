@@ -156,7 +156,7 @@ describe("GitHubAppProvider", () => {
           base: { ref: "main", sha: "abcdef1", repo: repositoryPayload },
           head: { ref: "feature", sha: "1234567" },
           merge_commit_sha: "7654321",
-          additions: 3,
+          additions: 2,
           deletions: 1,
           changed_files: 1,
         }),
@@ -167,10 +167,16 @@ describe("GitHubAppProvider", () => {
           {
             filename: "src/index.ts",
             status: "modified",
-            additions: 3,
+            additions: 2,
             deletions: 1,
-            changes: 4,
-            patch: "@@ -1 +1 @@",
+            changes: 3,
+            patch: [
+              "@@ -1,2 +1,4 @@",
+              " export const oldValue = 1;",
+              "-export const removed = true;",
+              "+export const value = 2;",
+              "+export const smoke = true;",
+            ].join("\n"),
           },
         ]),
       },
@@ -203,9 +209,23 @@ describe("GitHubAppProvider", () => {
         {
           path: "src/index.ts",
           language: "typescript",
-          additions: 3,
+          additions: 2,
           deletions: 1,
           isBinary: false,
+          hunks: [
+            {
+              oldStart: 1,
+              oldLines: 2,
+              newStart: 1,
+              newLines: 4,
+              lines: [
+                { kind: "context", oldLine: 1, newLine: 1 },
+                { kind: "deletion", oldLine: 2 },
+                { kind: "addition", newLine: 2 },
+                { kind: "addition", newLine: 3 },
+              ],
+            },
+          ],
         },
       ],
       diffHash: "sha256:1bf4fcc26d8874b8c276b08749bf22799ae398f9f1681bb02d3dd828cef8df3e",
@@ -220,15 +240,29 @@ describe("GitHubAppProvider", () => {
       annotationLevel: "warning" as const,
       message: `message ${index}`,
     }));
+    let reviewCommentListRequests = 0;
     const fetcher = createMockFetch([
       tokenRoute,
       {
-        match: (url) => url.includes("/repos/acme/api/pulls/7/comments?per_page=100&page=1"),
+        match: (url) =>
+          url.includes("/repos/acme/api/pulls/7/comments?per_page=100&page=1") &&
+          reviewCommentListRequests++ === 0,
         response: jsonResponse([]),
       },
       {
         match: (url) => url.endsWith("/repos/acme/api/pulls/7/reviews"),
-        response: jsonResponse({ id: 12, comments: [{ id: 13 }] }),
+        response: jsonResponse({ id: 12 }),
+      },
+      {
+        match: (url) => url.includes("/repos/acme/api/pulls/7/comments?per_page=100&page=1"),
+        response: jsonResponse([
+          {
+            id: 13,
+            body: `Finding\n\n${dedupeMarker("Finding", "rev_1", "fnd_1")}`,
+            user: { login: "heimdall[bot]" },
+            html_url: "https://github.com/acme/api/pull/7#discussion_r13",
+          },
+        ]),
       },
       {
         match: (url) => url.includes("/repos/acme/api/issues/7/comments?per_page=100&page=1"),
@@ -272,9 +306,15 @@ describe("GitHubAppProvider", () => {
         reviewRunId: "rev_1",
         headSha: "abcdef1",
         body: "Summary",
-        comments: [{ path: "src/index.ts", line: 3, side: "RIGHT", body: "Finding" }],
+        comments: [
+          { path: "src/index.ts", line: 3, side: "RIGHT", body: "Finding", findingId: "fnd_1" },
+        ],
       }),
-    ).resolves.toMatchObject({ providerReviewId: "12", commentIds: ["13"] });
+    ).resolves.toMatchObject({
+      providerReviewId: "12",
+      commentIds: ["13"],
+      commentIdsByFindingId: { fnd_1: "13" },
+    });
     await expect(
       provider.publishSummaryComment({ ...ref, reviewRunId: "rev_1", body: "Done" }),
     ).resolves.toMatchObject({ providerCommentId: "14" });
@@ -337,7 +377,7 @@ describe("GitHubAppProvider", () => {
         ],
       }),
     ).resolves.toMatchObject({
-      providerReviewId: expect.stringMatching(/^review_[a-f0-9]{32}$/u),
+      providerReviewId: expect.stringMatching(/^review_[A-Za-z0-9_-]{26}$/u),
       commentIds: ["13"],
       commentIdsByFindingId: { fnd_1: "13" },
     });

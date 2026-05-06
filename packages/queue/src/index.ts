@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { loadRuntimeConfig } from "@repo/config";
 import {
   type JobEnvelope,
@@ -400,12 +401,12 @@ export class BullMqQueueProducer implements QueueProducer {
     this.connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
   }
 
-  /** Enqueues a job intent with the job idempotency key as BullMQ job ID. */
+  /** Enqueues a job intent with a BullMQ-safe hash of the durable idempotency key. */
   public async enqueue(intent: QueueJobIntent): Promise<void> {
     const queue = this.getQueue(intent.queueName);
 
     await queue.add(intent.envelope.jobType, intent.envelope, {
-      jobId: intent.envelope.idempotencyKey,
+      jobId: bullMqJobIdForIdempotencyKey(intent.envelope.idempotencyKey),
       attempts: intent.envelope.maxAttempts,
       removeOnComplete: false,
       removeOnFail: false,
@@ -428,6 +429,11 @@ export class BullMqQueueProducer implements QueueProducer {
     this.queues.set(queueName, queue);
     return queue;
   }
+}
+
+/** Converts a durable idempotency key into a BullMQ-safe custom job ID. */
+export function bullMqJobIdForIdempotencyKey(idempotencyKey: string): string {
+  return `heimdall_${createHash("sha256").update(idempotencyKey).digest("base64url")}`;
 }
 
 /** Enqueues pending durable jobs into BullMQ and marks accepted rows queued. */

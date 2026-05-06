@@ -13,6 +13,7 @@
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/db/tsconfig.build.json" },
     { "path": "../../packages/github/tsconfig.build.json" },
+    { "path": "../../packages/llm-gateway/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
     { "path": "../../packages/publisher/tsconfig.build.json" },
     { "path": "../../packages/repo-sync/tsconfig.build.json" }

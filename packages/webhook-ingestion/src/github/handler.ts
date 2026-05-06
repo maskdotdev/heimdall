@@ -14,6 +14,7 @@ import {
   readGitHubWebhookHeaders,
   verifyGitHubWebhookSignature,
 } from "@repo/github";
+import { eq } from "drizzle-orm";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
 import {
@@ -114,6 +115,34 @@ export class GitHubWebhookHandler {
         typeof normalized.payload.action === "string" ? normalized.payload.action : undefined;
       const status = supportedEvents.has(normalized.headers.eventName) ? "processed" : "ignored";
       const primaryRepo = normalized.repositories[0]?.repository;
+
+      const [existingWebhookRow] = await tx
+        .select({ webhookEventId: webhookEvents.webhookEventId })
+        .from(webhookEvents)
+        .where(eq(webhookEvents.webhookEventId, webhookEventId))
+        .limit(1);
+
+      if (existingWebhookRow) {
+        return {
+          status: "duplicate" as const,
+          deliveryId: normalized.headers.deliveryId,
+          webhookEventId,
+          jobs: [],
+        };
+      }
+
+      if (normalized.installation) {
+        await persistInstallation(tx, normalized.payload, normalized.installation);
+      }
+
+      for (const repository of normalized.repositories) {
+        await persistRepository(tx, repository);
+      }
+
+      if (normalized.pullRequest) {
+        await persistPullRequest(tx, normalized.pullRequest);
+      }
+
       const [webhookRow] = await tx
         .insert(webhookEvents)
         .values({
@@ -141,18 +170,6 @@ export class GitHubWebhookHandler {
           webhookEventId,
           jobs: [],
         };
-      }
-
-      if (normalized.installation) {
-        await persistInstallation(tx, normalized.payload, normalized.installation);
-      }
-
-      for (const repository of normalized.repositories) {
-        await persistRepository(tx, repository);
-      }
-
-      if (normalized.pullRequest) {
-        await persistPullRequest(tx, normalized.pullRequest);
       }
 
       const jobs = planGitHubWebhookJobs({

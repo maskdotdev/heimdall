@@ -58,6 +58,9 @@ describe("validateAndRankCandidateFindings", () => {
     });
 
     expect(findings.filter((finding) => finding.decision === "publish")).toHaveLength(1);
+    for (const finding of findings) {
+      expect(finding.findingId).toMatch(/^fnd_[A-Za-z0-9_-]+$/u);
+    }
     const duplicateFinding = findings.find(
       (finding) => finding.candidateFindingId === "fnd_DUPLICATE",
     );

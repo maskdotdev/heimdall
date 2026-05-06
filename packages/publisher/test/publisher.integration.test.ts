@@ -31,7 +31,9 @@ describe.runIf(integrationDatabaseUrl)("publisher integration", () => {
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
-    await sql.unsafe(await readFile(migrationPath, "utf8"));
+    await sql.unsafe(
+      (await readFile(migrationPath, "utf8")).replaceAll('"public".', `"${schemaName}".`),
+    );
     await seedReview(sql, "rrn_publish", "2222222");
 
     const provider = createPublisherFakeProvider({
@@ -89,6 +91,8 @@ describe.runIf(integrationDatabaseUrl)("publisher integration", () => {
 });
 
 async function seedReview(sql: postgres.Sql, reviewRunId: string, headSha: string): Promise<void> {
+  const snapshotId = `prs_${headSha}`;
+
   await sql`
     INSERT INTO orgs (org_id, name, slug)
     VALUES ('org_test', 'Test Org', 'test-org')
@@ -158,7 +162,7 @@ async function seedReview(sql: postgres.Sql, reviewRunId: string, headSha: strin
       fetched_at
     )
     VALUES (
-      ${`prs_${reviewRunId}`},
+      ${snapshotId},
       'pull_request_snapshot.v1',
       'github',
       'repo_test',
@@ -181,6 +185,7 @@ async function seedReview(sql: postgres.Sql, reviewRunId: string, headSha: strin
       1,
       ${now}
     )
+    ON CONFLICT DO NOTHING
   `;
   await sql`
     INSERT INTO review_runs (
@@ -200,7 +205,7 @@ async function seedReview(sql: postgres.Sql, reviewRunId: string, headSha: strin
       ${reviewRunId},
       'review_run.v1',
       'repo_test',
-      ${`prs_${reviewRunId}`},
+      ${snapshotId},
       7,
       '1111111',
       ${headSha},
@@ -260,7 +265,7 @@ async function seedReview(sql: postgres.Sql, reviewRunId: string, headSha: strin
       fingerprint
     )
     VALUES (
-      ${`vf_${reviewRunId}`},
+      ${`fnd_validated_${reviewRunId}`},
       ${`fnd_${reviewRunId}`},
       ${reviewRunId},
       'publish',

@@ -15,12 +15,23 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
+    "infra:db:prepare": "bun run src/prepare-local-infra.ts",
+    "smoke:publisher:github": "bun run src/live-github-publisher-smoke.ts",
+    "smoke:review:github": "bun run src/live-github-pr-review-smoke.ts",
     "lint": "biome check .",
     "format": "biome format --write .",
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@repo/contracts": "workspace:*",
+    "@repo/db": "workspace:*",
+    "@repo/github": "workspace:*",
+    "@repo/publisher": "workspace:*",
+    "drizzle-orm": "catalog:"
+  },
   "devDependencies": {
+    "@types/node": "catalog:",
+    "postgres": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

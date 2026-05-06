@@ -20,6 +20,7 @@ coverage/
 .env.*
 !.env.example
 !.env.test.example
+!.env.smoke.example
 *.pem
 *.key
 
@@ -30,6 +31,8 @@ logs/
 # local artifacts
 .tmp/
 tmp/
+.heimdall/
+**/.heimdall/
 /artifacts/
 repo-cache/
 worktrees/

@@ -92,7 +92,7 @@ describe.runIf(integrationDatabaseUrl)("foundation migration integration", () =>
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(bootstrap);
-    await sql.unsafe(migration);
+    await sql.unsafe(migration.replaceAll('"public".', `"${schemaName}".`));
 
     await sql`
       INSERT INTO orgs (org_id, name, slug)
@@ -210,7 +210,7 @@ describe.runIf(integrationDatabaseUrl)("foundation migration integration", () =>
         'repo_test',
         'idx_test',
         'text-embedding-3-small',
-        '[' || repeat('0,', 1535) || '0]',
+        ('[' || repeat('0,', 1535) || '0]')::vector,
         'hash'
       )
     `;

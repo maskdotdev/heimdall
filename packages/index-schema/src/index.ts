@@ -1,9 +1,15 @@
-import { type Static, Type } from "@sinclair/typebox";
+import { FormatRegistry, type Static, Type } from "@sinclair/typebox";
 
 export const packageName = "@repo/index-schema" as const;
 
 export const INDEX_ARTIFACT_SCHEMA_VERSION = "index_artifact.v1" as const;
 export const INDEX_RECORD_SCHEMA_VERSION = "index_record.v1" as const;
+
+const DATE_TIME_FORMAT = "date-time";
+
+if (!FormatRegistry.Has(DATE_TIME_FORMAT)) {
+  FormatRegistry.Set(DATE_TIME_FORMAT, (value) => !Number.isNaN(Date.parse(value)));
+}
 
 export const RepoPathSchema = Type.String({
   minLength: 1,

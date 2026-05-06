@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validateIndexArtifact } from "@repo/indexer-driver";
 import { describe, expect, it } from "vitest";
 import { indexTypeScriptRepository } from "../src/index";
 
@@ -41,5 +42,6 @@ describe("indexTypeScriptRepository", () => {
     expect(
       artifact.records.some((record) => record.type === "edge" && record.kind === "calls"),
     ).toBe(true);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 });

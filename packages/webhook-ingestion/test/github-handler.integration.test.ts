@@ -28,7 +28,9 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
-    await sql.unsafe(await readFile(migrationPath, "utf8"));
+    await sql.unsafe(
+      (await readFile(migrationPath, "utf8")).replaceAll('"public".', `"${schemaName}".`),
+    );
 
     const rawBody = new TextEncoder().encode(JSON.stringify(pullRequestPayload));
     const signature = computeGitHubWebhookSignature("secret", rawBody);

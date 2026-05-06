@@ -8,7 +8,10 @@ import {
   type IndexRepoCommitJobPayload,
   JOB_TYPES,
   type JobPayload,
+  type LLMFindingOutput,
+  LLMFindingOutputSchema,
   type PublishReviewJobPayload,
+  parseWithSchema,
   type ReviewPullRequestJobPayload,
   type SyncInstallationJobPayload,
 } from "@repo/contracts";
@@ -27,6 +30,7 @@ import {
 } from "@repo/github";
 import { importIndexArtifact } from "@repo/index-importer";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
+import type { LLMGateway } from "@repo/llm-gateway";
 import { publishReviewRun } from "@repo/publisher";
 import {
   BullMqQueueProducer,
@@ -59,6 +63,8 @@ export type CreateWorkerHandlersOptions = {
   readonly db: HeimdallDatabase;
   /** Git provider used by repo sync handlers. */
   readonly gitProvider: GitProvider;
+  /** Optional model gateway used by review jobs. */
+  readonly llmGateway?: LLMGateway;
   /** Optional parent directory for repo-sync workspaces. */
   readonly workspaceRoot?: string;
   /** Durable directory used to store imported index artifacts before workspace cleanup. */
@@ -138,6 +144,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       await runPullRequestReview(payload, {
         db: options.db,
         gitProvider: options.gitProvider,
+        ...(options.llmGateway ? { llmGateway: options.llmGateway } : {}),
         ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       });
     },
@@ -168,11 +175,16 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     appId: config.githubAppId,
     privateKey: githubPrivateKey,
   });
+  const llmGateway =
+    process.env.HEIMDALL_REVIEW_SMOKE_FINDING === "true"
+      ? createWorkerReviewSmokeGateway()
+      : undefined;
   const processor = createDurableJobProcessor({
     store,
     handlers: createWorkerHandlers({
       db: databaseClient.db,
       gitProvider,
+      ...(llmGateway ? { llmGateway } : {}),
       ...(process.env.REPO_SYNC_WORKSPACE_ROOT
         ? { workspaceRoot: process.env.REPO_SYNC_WORKSPACE_ROOT }
         : {}),
@@ -207,6 +219,141 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       await workerConnection.quit();
       await databaseClient.close();
     },
+  };
+}
+
+/** Creates a deterministic smoke-only gateway for live PR review smoke runs. */
+export function createWorkerReviewSmokeGateway(): LLMGateway {
+  return {
+    generateObject: async (input) =>
+      parseWithSchema(input.schemaName, input.schema, createSmokeFindingOutput(input.prompt)),
+    generateReviewFindings: async (input) =>
+      parseWithSchema(
+        "LLMFindingOutput",
+        LLMFindingOutputSchema,
+        createSmokeFindingOutput(input.prompt),
+      ),
+  };
+}
+
+type SmokePromptFile = {
+  /** Repository path for the changed file. */
+  readonly path: string;
+  /** GitHub file status from the prompt snapshot. */
+  readonly status?: string;
+  /** Whether the prompt marks the file as generated. */
+  readonly isGenerated?: boolean;
+  /** Parsed diff hunks for the file. */
+  readonly hunks: readonly {
+    /** Parsed hunk lines from the prompt. */
+    readonly lines: readonly {
+      /** Diff line kind, such as addition or context. */
+      readonly kind?: string;
+      /** 1-based line number on the new side of the diff. */
+      readonly newLine?: number;
+    }[];
+  }[];
+};
+
+/** Creates a smoke finding output anchored to the first added diff line. */
+function createSmokeFindingOutput(prompt: string): LLMFindingOutput {
+  const file = firstSmokeReviewableFile(prompt);
+  if (!file) {
+    return { findings: [] };
+  }
+
+  return {
+    findings: [
+      {
+        path: file.path,
+        line: file.line,
+        severity: "low",
+        category: "maintainability",
+        title: "Live PR review smoke test",
+        body: "This controlled finding proves the guarded live PR review smoke reached the publisher.",
+        evidence: ["The smoke worker gateway selected an added diff line from the live PR."],
+        confidence: 1,
+      },
+    ],
+  };
+}
+
+function firstSmokeReviewableFile(
+  prompt: string,
+): { readonly path: string; readonly line: number } | undefined {
+  const parsed = parseSmokePrompt(prompt);
+  const files = Array.isArray(parsed.changedFiles) ? parsed.changedFiles : [];
+
+  for (const value of files) {
+    const file = parseSmokePromptFile(value);
+    if (!file || file.status === "deleted" || file.isGenerated === true) {
+      continue;
+    }
+
+    for (const hunk of file.hunks) {
+      const line = hunk.lines.find((candidate) => candidate.kind === "addition")?.newLine;
+      if (line) {
+        return { path: file.path, line };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/** Parses the review prompt JSON object used by the smoke gateway. */
+function parseSmokePrompt(prompt: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(prompt) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Parses one changed-file entry from the smoke review prompt. */
+function parseSmokePromptFile(value: unknown): SmokePromptFile | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (typeof record.path !== "string") {
+    return undefined;
+  }
+
+  return {
+    path: record.path,
+    ...(typeof record.status === "string" ? { status: record.status } : {}),
+    ...(typeof record.isGenerated === "boolean" ? { isGenerated: record.isGenerated } : {}),
+    hunks: Array.isArray(record.hunks) ? record.hunks.map(parseSmokePromptHunk) : [],
+  };
+}
+
+/** Parses one hunk entry from the smoke review prompt. */
+function parseSmokePromptHunk(value: unknown): SmokePromptFile["hunks"][number] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { lines: [] };
+  }
+
+  const record = value as Record<string, unknown>;
+  return {
+    lines: Array.isArray(record.lines) ? record.lines.map(parseSmokePromptLine) : [],
+  };
+}
+
+/** Parses one hunk line entry from the smoke review prompt. */
+function parseSmokePromptLine(value: unknown): SmokePromptFile["hunks"][number]["lines"][number] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const record = value as Record<string, unknown>;
+  return {
+    ...(typeof record.kind === "string" ? { kind: record.kind } : {}),
+    ...(typeof record.newLine === "number" ? { newLine: record.newLine } : {}),
   };
 }
 

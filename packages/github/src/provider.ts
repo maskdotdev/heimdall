@@ -1,5 +1,12 @@
 import { createHash, createSign } from "node:crypto";
-import type { ChangedFile, CodeLanguage, PullRequestSnapshot, Repository } from "@repo/contracts";
+import type {
+  ChangedFile,
+  CodeLanguage,
+  DiffHunk,
+  DiffLine,
+  PullRequestSnapshot,
+  Repository,
+} from "@repo/contracts";
 import {
   GitHubInstallationSuspendedError,
   GitHubNotFoundError,
@@ -70,8 +77,8 @@ const sha256 = (value: string | Uint8Array): string =>
 const stableId = (prefix: string, parts: readonly (number | string | undefined)[]): string =>
   `${prefix}_${createHash("sha256")
     .update(parts.filter((part): part is number | string => part !== undefined).join(":"))
-    .digest("hex")
-    .slice(0, 32)}`;
+    .digest("base64url")
+    .slice(0, 26)}`;
 
 const asRecord = (value: unknown, name: string): JsonRecord => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -458,31 +465,26 @@ export class GitHubAppProvider implements GitProvider {
     const providerReviewId = asString(review, "id");
     const returnedComments = Array.isArray(review.comments) ? review.comments : [];
 
-    const returnedCommentIds = returnedComments
+    const responseCommentIds = returnedComments
       .map((comment) => optionalRecord(comment)?.id)
       .filter((id): id is string | number => typeof id === "string" || typeof id === "number")
       .map(String);
+    const refreshedComments = await this.fetchExistingReviewComments(input);
     const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
       requestedComments,
-      existingComments,
+      refreshedComments,
     );
-    for (const [index, comment] of comments.entries()) {
-      const commentId = returnedCommentIds[index];
-      if (comment.findingId && commentId) {
-        commentIdsByFindingId[comment.findingId] = commentId;
-      }
-    }
     const existingCommentIds = requestedComments
       .map(
         (comment) =>
-          existingComments.find((existingComment) => existingComment.body.includes(comment.marker))
+          refreshedComments.find((existingComment) => existingComment.body.includes(comment.marker))
             ?.providerCommentId,
       )
       .filter((commentId): commentId is string => Boolean(commentId));
 
     return {
       providerReviewId,
-      commentIds: [...existingCommentIds, ...returnedCommentIds],
+      commentIds: [...new Set([...existingCommentIds, ...responseCommentIds])],
       commentIdsByFindingId,
     };
   }
@@ -821,7 +823,7 @@ export class GitHubAppProvider implements GitProvider {
       isGenerated: isGeneratedPath(path),
       isTest: isTestPath(path),
       ...withOptional("patch", patch),
-      hunks: [],
+      hunks: patch ? parsePatchHunks(path, patch) : [],
     };
   }
 
@@ -910,6 +912,125 @@ const toGitHubAnnotation = (annotation: CheckRunAnnotation): JsonRecord => ({
   message: annotation.message,
   title: annotation.title,
 });
+
+/** Parses GitHub's unified diff patch fragment into reviewable hunk anchors. */
+function parsePatchHunks(path: string, patch: string): DiffHunk[] {
+  const hunks: DiffHunk[] = [];
+  let currentHunk: MutableDiffHunk | undefined;
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const line of patch.split("\n")) {
+    const header = parseHunkHeader(line);
+    if (header) {
+      currentHunk = {
+        hunkId: stableId("hunk", [path, hunks.length, line]),
+        header: line,
+        oldStart: header.oldStart,
+        oldLines: header.oldLines,
+        newStart: header.newStart,
+        newLines: header.newLines,
+        lines: [],
+      };
+      hunks.push(currentHunk);
+      oldLine = header.oldStart;
+      newLine = header.newStart;
+      continue;
+    }
+
+    if (!currentHunk || line.startsWith("\\ No newline")) {
+      continue;
+    }
+
+    const parsedLine = parsePatchLine(line, oldLine, newLine);
+    if (!parsedLine) {
+      continue;
+    }
+
+    currentHunk.lines.push(parsedLine.line);
+    oldLine = parsedLine.nextOldLine;
+    newLine = parsedLine.nextNewLine;
+  }
+
+  return hunks;
+}
+
+type MutableDiffHunk = Omit<DiffHunk, "lines"> & {
+  /** Mutable line collection used while parsing a hunk. */
+  readonly lines: DiffLine[];
+};
+
+/** Parsed numeric values from a unified diff hunk header. */
+type ParsedHunkHeader = {
+  /** First old-side line covered by the hunk. */
+  readonly oldStart: number;
+  /** Number of old-side lines covered by the hunk. */
+  readonly oldLines: number;
+  /** First new-side line covered by the hunk. */
+  readonly newStart: number;
+  /** Number of new-side lines covered by the hunk. */
+  readonly newLines: number;
+};
+
+/** Parses a unified diff hunk header. */
+function parseHunkHeader(line: string): ParsedHunkHeader | undefined {
+  const match =
+    /^@@ -(?<oldStart>\d+)(?:,(?<oldLines>\d+))? \+(?<newStart>\d+)(?:,(?<newLines>\d+))? @@/u.exec(
+      line,
+    );
+  if (!match?.groups) {
+    return undefined;
+  }
+
+  return {
+    oldStart: Number(match.groups.oldStart),
+    oldLines: Number(match.groups.oldLines ?? 1),
+    newStart: Number(match.groups.newStart),
+    newLines: Number(match.groups.newLines ?? 1),
+  };
+}
+
+/** Parses one line from a unified diff hunk and advances old and new line counters. */
+function parsePatchLine(
+  line: string,
+  oldLine: number,
+  newLine: number,
+):
+  | {
+      readonly line: DiffLine;
+      readonly nextOldLine: number;
+      readonly nextNewLine: number;
+    }
+  | undefined {
+  const marker = line[0];
+  const content = line.slice(1);
+
+  if (marker === "+") {
+    return {
+      line: { kind: "addition", content, newLine },
+      nextOldLine: oldLine,
+      nextNewLine: newLine + 1,
+    };
+  }
+
+  if (marker === "-") {
+    return {
+      line: { kind: "deletion", content, oldLine },
+      nextOldLine: oldLine + 1,
+      nextNewLine: newLine,
+    };
+  }
+
+  if (marker === " ") {
+    return {
+      line: { kind: "context", content, oldLine, newLine },
+      nextOldLine: oldLine + 1,
+      nextNewLine: newLine + 1,
+    };
+  }
+
+  return undefined;
+}
 
 const parseRetryAfter = (response: Response): number | undefined => {
   const retryAfter = response.headers.get("retry-after");

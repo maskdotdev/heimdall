@@ -37,7 +37,7 @@ tracked milestone.
 | #17 LLM gateway | Partial | `packages/llm-gateway` | Schema-validating structured-output gateway and deterministic static adapter exist for review findings. Real provider adapters, call persistence, cost tracking, retries, and prompt/version management remain. |
 | #18 Review passes | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts` | `@repo/review-engine` exports a typed `ReviewPass` boundary, deterministic boundary pass, and LLM-backed review pass that consumes retrieval context. More specialized retrieval/tool/static-analysis passes remain. |
 | #19 Finding validation, dedupe, and ranking | Partial | `packages/review-engine`, `packages/review-orchestrator/src/index.ts`, `packages/db` | Candidate findings now flow through deterministic anchor validation, severity/category gates, basic repo-rule suppression, duplicate suppression, budget limiting, and ranking before persistence. Semantic dedupe, memory suppression, repo settings integration, and validation event traces remain. |
-| #20 Publisher | Partial | `packages/publisher`, `apps/worker/src/index.ts`, `packages/db/src/schema/tables.ts` | Completed review output enqueues `review.publish.v1`; the worker handles publish jobs; `@repo/publisher` protects against stale heads, creates or updates check runs, publishes inline comments, falls back to deduped summary comments, and reconciles durable publish state. Broader operational replay and live GitHub smoke coverage remain. |
+| #20 Publisher | Partial | `packages/publisher`, `apps/worker/src/index.ts`, `packages/db/src/schema/tables.ts`, `packages/admin-tools/src/live-github-publisher-smoke.ts`, `packages/admin-tools/src/live-github-pr-review-smoke.ts` | Completed review output enqueues `review.publish.v1`; the worker handles publish jobs; `@repo/publisher` protects against stale heads, creates or updates check runs, publishes inline comments, falls back to deduped summary comments, and records durable publish state. Guarded live GitHub App smoke runners exist and have published to a development PR. Remaining phase criteria include dashboard/debug visibility and broader structured failure handling. |
 | #21 Feedback and memory system | Not started | `packages/memory` | Package exists, but memory implementation has not started. |
 | #22 Repo rules and configuration | Partial | `packages/db/src/schema/tables.ts` | DB tables exist. Rule evaluation and API/dashboard flows remain. |
 | #23 Static analysis integration | Deferred | `phases/23-static-analysis-integration-implementation-spec.md` | Deferred until core review flow exists. |
@@ -46,19 +46,30 @@ tracked milestone.
 | #26 Evaluation harness | Not started | `packages/evaluation` | Package exists, but harness implementation has not started. |
 | #27 Security and compliance layer | Partial | `packages/security`, `packages/db/src/schema/tables.ts` | Package and audit schema support exist. Full security/compliance workflows remain. |
 | #28 Usage and billing | Partial | `packages/db/src/schema/tables.ts` | Usage event schema exists. Billing and usage ledger implementation remain. |
-| #29 Admin and internal tooling | Not started | `packages/admin-tools` | Package exists, but admin tooling implementation has not started. |
+| #29 Admin and internal tooling | Partial | `packages/admin-tools` | Publisher dry-run, reconciliation reports, explicit replay plans, and a guarded live GitHub publisher smoke command exist. Broader admin UI/API tooling remains. |
 | #30 Deployment and infrastructure | Partial | `compose.yaml`, `infra/` | Local infra exists. Production deployment is not implemented. |
 | #31 Testing and evaluation strategy | Partial | `pnpm check`, package tests | Unit tests and optional integration tests exist for new work. Cross-system release gates remain. |
 
 ## Current Completion Notes
 
-- Latest completed milestone: `#4 Webhook ingestion`, commit `b9b4635`.
-- Latest implementation milestone: publisher/live PR output path with inline comments,
-  summary-comment fallback/dedupe, stale-head protection, reconciliation, and fake provider coverage.
-- Latest verification: full `pnpm check` passed for the publisher/live PR output path.
+- Latest completed milestone: guarded live PR review smoke verified webhook-to-publish completion
+  against development PR `maskdotdev/heimdall#2`.
+- Latest implementation milestone: publisher operational controls, live publisher smoke, and
+  live PR review smoke with repeatable local infra setup.
+- Latest verification: `pnpm smoke:review:github` completed with webhook event
+  `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
+  `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,
+  review job `job_377e5f0745174069a6321293f9a9a15b`, publish job
+  `job_YJTOV7tFDcWYwVONgniCMsiz_H`, publish run `pub_YfHdVTUtRQd5vBILPuOvebn0_A`,
+  check run `74535779228`, review `4232636849`, and comment `4384492583`.
+- The latest live PR review smoke completed with indexed retrieval through index version
+  `idx_4yuBX7BUkvP2mSkbb0OsjWisDz`.
 - Optional live integration tests require `HEIMDALL_DB_TEST_URL` and `HEIMDALL_REDIS_TEST_URL`.
+  The live publisher smoke command also requires development GitHub App credentials and
+  `HEIMDALL_GITHUB_SMOKE_ALLOW_WRITE=true`.
 - Drizzle schema files are the source of truth for DB structure. Do not manually edit generated migration SQL.
 
 ## Recommended Next Goal
 
-Run live GitHub smoke coverage for the publisher path and continue operational replay controls.
+Add dashboard or admin-debug visibility for webhook, review, and publisher state, including
+structured failure details for live smoke and replay workflows.

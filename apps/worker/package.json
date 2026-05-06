@@ -21,6 +21,7 @@
     "@repo/github": "workspace:*",
     "@repo/index-importer": "workspace:*",
     "@repo/indexer-ts": "workspace:*",
+    "@repo/llm-gateway": "workspace:*",
     "@repo/observability": "workspace:*",
     "@repo/queue": "workspace:*",
     "@repo/publisher": "workspace:*",

@@ -6,6 +6,7 @@ import type {
 } from "@repo/contracts";
 import {
   type HeimdallDatabase,
+  providerInstallations,
   publishedCheckRuns,
   publishedFindings,
   publishedReviews,
@@ -466,9 +467,14 @@ async function loadGitHubRepositoryRef(
       repo: repositories.name,
       providerRepoId: repositories.providerRepoId,
       installationId: repositories.installationId,
+      providerInstallationId: providerInstallations.providerInstallationId,
       provider: repositories.provider,
     })
     .from(repositories)
+    .innerJoin(
+      providerInstallations,
+      eq(providerInstallations.installationId, repositories.installationId),
+    )
     .where(and(eq(repositories.repoId, repoId), eq(repositories.provider, "github")))
     .limit(1);
 
@@ -479,6 +485,7 @@ async function loadGitHubRepositoryRef(
   return {
     provider: "github",
     installationId: repository.installationId,
+    providerInstallationId: repository.providerInstallationId,
     owner: repository.owner,
     repo: repository.repo,
     providerRepoId: repository.providerRepoId,

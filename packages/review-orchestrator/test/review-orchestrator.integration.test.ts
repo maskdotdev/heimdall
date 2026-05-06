@@ -29,7 +29,9 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
-    await sql.unsafe(await readFile(migrationPath, "utf8"));
+    await sql.unsafe(
+      (await readFile(migrationPath, "utf8")).replaceAll('"public".', `"${schemaName}".`),
+    );
     await seedRepository(sql);
 
     const result = await runPullRequestReview(

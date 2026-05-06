@@ -1,0 +1,62 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 1060 180"
+  role="img"
+  aria-labelledby="heimdall-logo-title heimdall-logo-description"
+>
+  <title id="heimdall-logo-title">Heimdall</title>
+  <desc id="heimdall-logo-description">A gold horned shield mark with the Heimdall wordmark.</desc>
+  <defs>
+    <linearGradient id="heimdall-gold" x1="116" x2="220" y1="14" y2="166" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4d063" />
+      <stop offset="0.42" stop-color="#c89d3d" />
+      <stop offset="0.72" stop-color="#f0c34e" />
+      <stop offset="1" stop-color="#9d741e" />
+    </linearGradient>
+    <linearGradient id="heimdall-gold-dark" x1="86" x2="242" y1="10" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d7a83d" />
+      <stop offset="0.55" stop-color="#b88629" />
+      <stop offset="1" stop-color="#f2c958" />
+    </linearGradient>
+  </defs>
+
+  <g fill="none" fill-rule="evenodd">
+    <g transform="translate(42 12)">
+      <path
+        fill="url(#heimdall-gold-dark)"
+        d="M80 148C42 115 25 81 29 48c2-18 10-34 24-48-9 25-9 48 1 68 8 17 20 30 37 39v-31C72 61 62 43 60 21 77 55 98 82 125 103l-20 10-6 45-9-14V96L53 59c18 36 35 59 52 70l-7 31-18-12Z"
+      />
+      <path
+        fill="url(#heimdall-gold-dark)"
+        d="M200 148c38-33 55-67 51-100-2-18-10-34-24-48 9 25 9 48-1 68-8 17-20 30-37 39v-31c19-15 29-33 31-55-17 34-38 61-65 82l20 10 6 45 9-14V96l37-37c-18 36-35 59-52 70l7 31 18-12Z"
+      />
+      <path
+        fill="url(#heimdall-gold)"
+        d="M92 68c15-11 31-17 48-17s33 6 48 17l-8 28-40 18-40-18-8-28Z"
+      />
+      <path fill="#fffaf0" d="m92 116 48 22 48-22v16l-48 23-48-23z" opacity=".92" />
+      <path
+        fill="#fffaf0"
+        d="M111 107h17v57l-20-38 3-19Zm41 0h17l3 19-20 38v-57Z"
+        opacity=".92"
+      />
+      <path
+        fill="#fffaf0"
+        d="M91 82v17L34 42c10 21 26 43 48 66l-1 18C51 101 31 72 20 38l71 44Zm98 0v17l57-57c-10 21-26 43-48 66l1 18c30-25 50-54 61-88l-71 44Z"
+        opacity=".92"
+      />
+    </g>
+
+    <g fill="#f3efe6" transform="translate(306 72)">
+      <path d="M0 0h14v32h47V0h14v76H61V44H14v32H0V0Z" />
+      <path d="M116 0h68v12h-54v20h49v12h-49v20h55v12h-69V0Z" />
+      <path d="M228 0h14v76h-14V0Z" />
+      <path d="M286 0h15l31 45 31-45h15v76h-14V22l-28 40h-8l-28-40v54h-14V0Z" />
+    </g>
+    <g fill="#f3efe6" transform="translate(306 72)">
+      <path d="M430 0h32c24 0 41 16 41 38s-17 38-41 38h-32V44h-24l24-12V0Zm14 12v52h18c16 0 27-10 27-26s-11-26-27-26h-18Z" />
+      <path d="M576 0h14l36 76h-15l-8-18h-40l-8 18h-15L576 0Zm22 46-15-32-15 32h30Z" />
+      <path d="M666 0h14v64h47v12h-61V0Z" />
+    </g>
+  </g>
+</svg>

@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   BullMqQueueProducer,
+  bullMqJobIdForIdempotencyKey,
   createDurableJobProcessor,
   type DurableJob,
   dispatchPendingJobs,
@@ -176,7 +177,7 @@ describeRedis("BullMQ producer integration", () => {
     });
     await producer.close();
 
-    const job = await queue.getJob(envelope.idempotencyKey);
+    const job = await queue.getJob(bullMqJobIdForIdempotencyKey(envelope.idempotencyKey));
     expect(job?.name).toBe(JOB_TYPES.SyncInstallation);
     expect(job?.data).toMatchObject({ idempotencyKey: envelope.idempotencyKey });
   });

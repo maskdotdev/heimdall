@@ -16,6 +16,7 @@
     { "path": "../../packages/github/tsconfig.build.json" },
     { "path": "../../packages/index-importer/tsconfig.build.json" },
     { "path": "../../packages/indexer-ts/tsconfig.build.json" },
+    { "path": "../../packages/llm-gateway/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
     { "path": "../../packages/publisher/tsconfig.build.json" },
     { "path": "../../packages/review-orchestrator/tsconfig.build.json" },

@@ -368,7 +368,7 @@ function toValidatedFinding(
   reasons: readonly FindingRejectionReason[],
 ): ValidatedFinding {
   return {
-    findingId: stableId("vfnd", [finding.findingId, "validation.v2"]),
+    findingId: stableId("fnd", [finding.findingId, "validation.v2"]),
     candidateFindingId: finding.findingId,
     reviewRunId: finding.reviewRunId,
     decision,
