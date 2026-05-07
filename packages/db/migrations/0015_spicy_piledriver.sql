@@ -1,0 +1,1 @@
+ALTER TABLE "repository_settings" ADD COLUMN "sandbox_policy" jsonb;

@@ -44,6 +44,41 @@ export const PublishModeSchema = Type.Union([
 ]);
 export type PublishMode = Static<typeof PublishModeSchema>;
 
+/** Sandbox runner kinds that repository settings can request. */
+export const SandboxRunnerSettingSchema = Type.Union([
+  Type.Literal("docker"),
+  Type.Literal("gvisor"),
+  Type.Literal("microvm"),
+]);
+export type SandboxRunnerSetting = Static<typeof SandboxRunnerSettingSchema>;
+
+/** Minimum sandbox runner setting for forked pull requests. */
+export const SandboxForkRunnerSettingSchema = Type.Union([
+  SandboxRunnerSettingSchema,
+  Type.Literal("disabled"),
+]);
+export type SandboxForkRunnerSetting = Static<typeof SandboxForkRunnerSettingSchema>;
+
+/** Optional repository-level sandbox policy overrides. */
+export const RepositorySandboxSettingsSchema = Type.Object(
+  {
+    enabled: Type.Optional(Type.Boolean()),
+    defaultRunner: Type.Optional(SandboxRunnerSettingSchema),
+    minimumRunnerForForks: Type.Optional(SandboxForkRunnerSettingSchema),
+    allowNetwork: Type.Optional(Type.Boolean()),
+    allowDependencyInstall: Type.Optional(Type.Boolean()),
+    allowCustomCommands: Type.Optional(Type.Boolean()),
+    maxTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
+    maxMemoryBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 8_589_934_592 })),
+    maxCpuCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
+    maxOutputBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: 100_000_000 })),
+    maxArtifactBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: 250_000_000 })),
+  },
+  { additionalProperties: false },
+);
+/** Optional repository-level sandbox policy overrides. */
+export type RepositorySandboxSettings = Static<typeof RepositorySandboxSettingsSchema>;
+
 export const RepositorySettingsSchema = Type.Object(
   {
     repoId: RepoIdSchema,
@@ -58,6 +93,7 @@ export const RepositorySettingsSchema = Type.Object(
     skipDraftPullRequests: Type.Boolean(),
     enabledLanguages: Type.Optional(Type.Array(CodeLanguageSchema)),
     customInstructions: Type.Optional(Type.String({ maxLength: 12000 })),
+    sandboxPolicy: Type.Optional(RepositorySandboxSettingsSchema),
     createdAt: IsoDateTimeSchema,
     updatedAt: IsoDateTimeSchema,
   },

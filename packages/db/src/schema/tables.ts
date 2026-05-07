@@ -215,6 +215,7 @@ export const repositorySettings = pgTable("repository_settings", {
   skipDraftPullRequests: boolean("skip_draft_pull_requests").notNull().default(true),
   enabledLanguages: jsonb("enabled_languages"),
   customInstructions: text("custom_instructions"),
+  sandboxPolicy: jsonb("sandbox_policy"),
   ...timestamps,
 });
 

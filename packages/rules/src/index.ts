@@ -635,7 +635,10 @@ export function buildReviewPolicySnapshot(
     });
   }
 
-  const sandbox = compileSandboxPolicy(input.sandboxPolicyOverrides ?? {}, warnings);
+  const sandbox = compileSandboxPolicy(
+    { ...(settings.sandboxPolicy ?? {}), ...(input.sandboxPolicyOverrides ?? {}) },
+    warnings,
+  );
   const effectivePolicy = parseEffectiveReviewPolicy({
     schemaVersion: "effective_review_policy.v1",
     compilerVersion: RULES_ENGINE_VERSION,

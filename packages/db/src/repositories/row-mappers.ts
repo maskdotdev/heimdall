@@ -86,6 +86,7 @@ export const toRepositorySettings = (row: {
   skipDraftPullRequests: boolean;
   enabledLanguages: unknown;
   customInstructions: string | null;
+  sandboxPolicy: unknown;
   createdAt: Date;
   updatedAt: Date;
 }): RepositorySettings =>
@@ -107,6 +108,12 @@ export const toRepositorySettings = (row: {
         : (row.enabledLanguages as RepositorySettings["enabledLanguages"]),
     ),
     ...withOptional("customInstructions", optionalString(row.customInstructions)),
+    ...withOptional(
+      "sandboxPolicy",
+      row.sandboxPolicy === null
+        ? undefined
+        : (row.sandboxPolicy as RepositorySettings["sandboxPolicy"]),
+    ),
     createdAt: toIso(row.createdAt),
     updatedAt: toIso(row.updatedAt),
   });

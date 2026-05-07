@@ -1498,6 +1498,31 @@ type ControlPlaneSettings = {
   readonly skipDraftPullRequests: boolean;
   /** Custom instructions for this repository. */
   readonly customInstructions?: string | undefined;
+  /** Optional repository-level sandbox policy overrides. */
+  readonly sandboxPolicy?: {
+    /** Whether sandbox execution is enabled. */
+    readonly enabled?: boolean | undefined;
+    /** Default sandbox runner kind. */
+    readonly defaultRunner?: string | undefined;
+    /** Minimum runner required for forked pull requests. */
+    readonly minimumRunnerForForks?: string | undefined;
+    /** Whether sandbox network access is requested. */
+    readonly allowNetwork?: boolean | undefined;
+    /** Whether dependency installation is requested. */
+    readonly allowDependencyInstall?: boolean | undefined;
+    /** Whether custom commands are requested. */
+    readonly allowCustomCommands?: boolean | undefined;
+    /** Maximum sandbox command timeout. */
+    readonly maxTimeoutMs?: number | undefined;
+    /** Maximum sandbox memory. */
+    readonly maxMemoryBytes?: number | undefined;
+    /** Maximum sandbox CPU count. */
+    readonly maxCpuCount?: number | undefined;
+    /** Maximum captured output. */
+    readonly maxOutputBytes?: number | undefined;
+    /** Maximum collected artifact bytes. */
+    readonly maxArtifactBytes?: number | undefined;
+  };
 };
 
 /** Control-plane settings payload. */

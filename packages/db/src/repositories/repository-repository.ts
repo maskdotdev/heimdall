@@ -87,6 +87,7 @@ export class RepositoryRepository {
           skipDraftPullRequests: settings.skipDraftPullRequests,
           enabledLanguages: settings.enabledLanguages,
           customInstructions: settings.customInstructions,
+          sandboxPolicy: settings.sandboxPolicy,
           updatedAt: new Date(settings.updatedAt),
         },
       })

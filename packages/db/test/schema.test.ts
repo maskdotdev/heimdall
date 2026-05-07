@@ -32,6 +32,7 @@ import {
   replayRuns,
   replayStageRuns,
   repositories,
+  repositorySettings,
   reviewArtifacts,
   sandboxArtifacts,
   sandboxPolicyDecisions,
@@ -66,6 +67,10 @@ const memoryCandidatesMigrationPath = resolve(
   "../migrations/0013_glossy_proemial_gods.sql",
 );
 const sandboxRunsMigrationPath = resolve(testDirectory, "../migrations/0014_polite_mesmero.sql");
+const sandboxRepositorySettingsMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0015_spicy_piledriver.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -76,6 +81,7 @@ describe("database schema foundation", () => {
   it("defines the Phase 2 persistence surfaces", () => {
     expect(webhookEvents.webhookEventId.name).toBe("webhook_event_id");
     expect(users.userId.name).toBe("user_id");
+    expect(repositorySettings.sandboxPolicy.name).toBe("sandbox_policy");
     expect(userProviderAccounts.userProviderAccountId.name).toBe("user_provider_account_id");
     expect(orgMemberships.role.name).toBe("role");
     expect(userSessions.sessionHash.name).toBe("session_hash");
@@ -134,6 +140,10 @@ describe("database schema foundation", () => {
     const publishPlansMigration = await readFile(publishPlansMigrationPath, "utf8");
     const memoryCandidatesMigration = await readFile(memoryCandidatesMigrationPath, "utf8");
     const sandboxRunsMigration = await readFile(sandboxRunsMigrationPath, "utf8");
+    const sandboxRepositorySettingsMigration = await readFile(
+      sandboxRepositorySettingsMigrationPath,
+      "utf8",
+    );
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -175,6 +185,9 @@ describe("database schema foundation", () => {
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_runs"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_artifacts"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_policy_decisions"');
+    expect(sandboxRepositorySettingsMigration).toContain(
+      'ALTER TABLE "repository_settings" ADD COLUMN "sandbox_policy" jsonb',
+    );
   });
 });
 

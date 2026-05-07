@@ -95,6 +95,30 @@ describe("buildReviewPolicySnapshot", () => {
     ]);
   });
 
+  it("compiles sandbox policy from repository settings", () => {
+    const settings: RepositorySettings = {
+      ...createDefaultRepositorySettings(ids.repoId, now),
+      sandboxPolicy: {
+        defaultRunner: "gvisor",
+        maxMemoryBytes: 2_147_483_648,
+        minimumRunnerForForks: "microvm",
+      },
+    };
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      settings,
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+
+    expect(result.snapshot.effectivePolicy.sandbox).toMatchObject({
+      defaultRunner: "gvisor",
+      maxMemoryBytes: 2_147_483_648,
+      minimumRunnerForForks: "microvm",
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
   it("captures active rule versions and compiled instructions", () => {
     const rule = createRuleFixture({
       effect: "context",

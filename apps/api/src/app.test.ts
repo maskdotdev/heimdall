@@ -533,7 +533,11 @@ describe("api app", () => {
     );
     const previewResponse = await app.handle(
       new Request("http://localhost/api/v1/repositories/repo_1/policy-preview", {
-        body: JSON.stringify({ maxCommentsPerReview: 4, reviewPolicy: "summary_only" }),
+        body: JSON.stringify({
+          maxCommentsPerReview: 4,
+          reviewPolicy: "summary_only",
+          sandboxPolicy: { defaultRunner: "gvisor", maxTimeoutMs: 90_000 },
+        }),
         headers: productHeaders,
         method: "POST",
       }),
@@ -593,7 +597,11 @@ describe("api app", () => {
     expect(testResponse.status).toBe(200);
     expect(updateResponse.status).toBe(200);
     expect(deleteResponse.status).toBe(200);
-    expect(observedPatch).toEqual({ maxCommentsPerReview: 4, reviewPolicy: "summary_only" });
+    expect(observedPatch).toEqual({
+      maxCommentsPerReview: 4,
+      reviewPolicy: "summary_only",
+      sandboxPolicy: { defaultRunner: "gvisor", maxTimeoutMs: 90_000 },
+    });
     expect(calls).toEqual([
       "create:context:Public API guidance",
       "test:src/generated/client.ts",
@@ -605,7 +613,7 @@ describe("api app", () => {
     });
     await expect(previewResponse.json()).resolves.toMatchObject({
       data: {
-        effectivePolicy: { reviewPolicy: "summary_only" },
+        effectivePolicy: { reviewPolicy: "summary_only", sandbox: { defaultRunner: "gvisor" } },
         policyHash: "sha256:product-preview",
       },
     });
