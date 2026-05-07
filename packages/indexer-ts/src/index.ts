@@ -106,11 +106,12 @@ export async function indexTypeScriptRepository(input: {
   const languages = new Set<CodeLanguage>();
 
   for (const path of paths) {
-    const content = await readFile(join(input.workspacePath, path), "utf8");
-    if (shouldSkipSourceFile(path, content)) {
+    const rawContent = await readFile(join(input.workspacePath, path), "utf8");
+    if (shouldSkipSourceFile(path, rawContent)) {
       continue;
     }
 
+    const content = normalizeSourceText(rawContent);
     const language = languageForPath(path);
     const file = fileRecord(input.repoId, input.commitSha, path, language, content);
     const sourceFile = ts.createSourceFile(
@@ -198,6 +199,11 @@ async function findSourceFiles(root: string, directory = ""): Promise<string[]> 
   );
 
   return files.flat().sort();
+}
+
+/** Normalizes source text for deterministic parsing, ranges, chunks, and hashes. */
+function normalizeSourceText(content: string): string {
+  return content.replace(/\r\n?/g, "\n");
 }
 
 function fileRecord(

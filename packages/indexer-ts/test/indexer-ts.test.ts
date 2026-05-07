@@ -93,6 +93,27 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("normalizes CRLF source text before emitting chunks", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await writeFile(
+      join(workspacePath, "crlf.ts"),
+      ["export function load() {", "  return true;", "}"].join("\r\n"),
+    );
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const chunkTexts = artifact.records.flatMap((record) =>
+      record.type === "chunk" ? [record.text] : [],
+    );
+    expect(chunkTexts.length).toBeGreaterThan(0);
+    expect(chunkTexts.every((text) => !text.includes("\r"))).toBe(true);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("skips symlinked source files before resolving them", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     const outsidePath = join(await mkdtemp(join(tmpdir(), "heimdall-indexer-outside-")), "leak.ts");
