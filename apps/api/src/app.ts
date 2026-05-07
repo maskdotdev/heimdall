@@ -56,6 +56,7 @@ import {
   type ReviewPullRequestJobPayload,
   type SyncInstallationJobPayload,
   safeParseWithSchema,
+  type UpdateMemoryJobPayload,
   type UpdateRepoRuleRequest,
   UpdateRepoRuleRequestSchema,
   type UpdateRepositoryControlPlaneSettingsRequest,
@@ -8738,12 +8739,21 @@ async function recordFindingOutcome(
     const outcome = toAdminReviewFindingOutcomeSummary(
       inserted ?? (await getExistingFindingOutcome(transactionDb, findingOutcomeId)),
     );
+    const memoryUpdateJob = await enqueueFindingOutcomeMemoryUpdate(
+      transactionDb,
+      finding,
+      outcome,
+      request,
+    );
     const audit = await insertAuditLog(transactionDb, {
       actor: request.actor,
       action: "finding.outcome.recorded",
       metadata: {
         findingOutcomeId: outcome.findingOutcomeId,
         idempotencyKey: request.idempotencyKey,
+        memoryUpdateBackgroundJobId: memoryUpdateJob.backgroundJobId,
+        memoryUpdateJobKey: memoryUpdateJob.jobKey,
+        memoryUpdateJobStatus: memoryUpdateJob.status,
         outcome: request.outcome,
         repoId: finding.repoId,
         source: request.source,
@@ -8921,6 +8931,64 @@ async function getExistingFindingOutcome(
     .limit(1);
 
   return requireReturnedRow(row);
+}
+
+/** Enqueues memory candidate processing for one recorded finding outcome. */
+async function enqueueFindingOutcomeMemoryUpdate(
+  db: HeimdallDatabase,
+  finding: AdminReviewFindingSummary,
+  outcome: AdminReviewFindingOutcomeSummary,
+  request: AdminFindingOutcomeRecordRequest,
+): Promise<Omit<AdminRepositoryJobRunSummary, "auditLogId">> {
+  const timestamp = new Date().toISOString();
+  const jobKey = ["api", "memory", "finding_outcome", finding.findingId, outcome.findingOutcomeId]
+    .filter((part) => part.length > 0)
+    .join(":");
+  const payload: UpdateMemoryJobPayload = {
+    findingId: finding.findingId,
+    outcomeId: outcome.findingOutcomeId,
+    reason: "finding_outcome",
+    repoId: finding.repoId,
+  };
+  const envelope: JobEnvelope<UpdateMemoryJobPayload> = {
+    attempt: 0,
+    createdAt: timestamp,
+    idempotencyKey: jobKey,
+    jobId: stablePrefixedId("job", ["memory_update", jobKey]),
+    jobType: JOB_TYPES.UpdateMemory,
+    maxAttempts: 3,
+    payload,
+    schemaVersion: "job_envelope.v1",
+  };
+
+  const [inserted] = await db
+    .insert(backgroundJobs)
+    .values({
+      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+      jobKey,
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      metadata: {
+        outcome: outcome.outcome,
+        outcomeId: outcome.findingOutcomeId,
+        requestId: request.requestId,
+        source: "finding_outcome",
+      },
+      orgId: finding.orgId,
+      payload: envelope,
+      queueName: QUEUE_NAMES.memory,
+      repoId: finding.repoId,
+      reviewRunId: finding.reviewRunId,
+      status: "pending",
+    })
+    .onConflictDoNothing()
+    .returning({
+      backgroundJobId: backgroundJobs.backgroundJobId,
+      jobKey: backgroundJobs.jobKey,
+      status: backgroundJobs.status,
+    });
+
+  return inserted ?? getExistingBackgroundJob(db, QUEUE_NAMES.memory, jobKey);
 }
 
 /** Lists memory facts that apply to one repository. */

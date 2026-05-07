@@ -27,13 +27,18 @@ import {
   parseWithSchema,
   type ReviewPullRequestJobPayload,
   type SyncInstallationJobPayload,
+  type UpdateMemoryJobPayload,
 } from "@repo/contracts";
 import {
   billingProviderRequests,
   createDatabaseClient,
+  findingOutcomes,
   type HeimdallDatabase,
+  memoryCandidates,
   providerInstallations,
+  publishedFindings,
   repositories,
+  validatedFindings,
 } from "@repo/db";
 import { createEmbeddingProviderFromEnvironment, embedChunkBatch } from "@repo/embedding";
 import {
@@ -451,6 +456,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.publishThrottle ? { publishThrottle: options.publishThrottle } : {}),
       });
     },
+    [JOB_TYPES.UpdateMemory]: async (envelope) => {
+      const payload = asUpdateMemoryPayload(envelope.payload);
+      await updateMemoryFromFindingOutcome(options.db, payload);
+    },
     [JOB_TYPES.BillingReconcile]: async (envelope) => {
       const payload = asBillingReconcilePayload(envelope.payload);
       if (options.billingReconciler) {
@@ -520,6 +529,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     QUEUE_NAMES.indexing,
     QUEUE_NAMES.embedding,
     QUEUE_NAMES.review,
+    QUEUE_NAMES.memory,
     QUEUE_NAMES.publishing,
     QUEUE_NAMES.billing,
   ].map((queueName) => new Worker(queueName, processor, { connection: workerConnection }));
@@ -873,6 +883,145 @@ export async function loadGitHubRepositoryRef(
   };
 }
 
+/** Processes a memory update job that was produced by a finding outcome. */
+async function updateMemoryFromFindingOutcome(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+): Promise<void> {
+  if (payload.reason !== "finding_outcome" || !payload.outcomeId || !payload.findingId) {
+    return;
+  }
+
+  const [outcome] = await db
+    .select()
+    .from(findingOutcomes)
+    .where(eq(findingOutcomes.findingOutcomeId, payload.outcomeId))
+    .limit(1);
+  if (!outcome || outcome.outcome !== "rejected") {
+    return;
+  }
+
+  const [finding] = await db
+    .select({
+      body: validatedFindings.body,
+      category: validatedFindings.category,
+      confidence: validatedFindings.confidence,
+      findingId: validatedFindings.findingId,
+      fingerprint: validatedFindings.fingerprint,
+      location: validatedFindings.location,
+      reviewRunId: validatedFindings.reviewRunId,
+      severity: validatedFindings.severity,
+      title: validatedFindings.title,
+    })
+    .from(validatedFindings)
+    .where(eq(validatedFindings.findingId, payload.findingId))
+    .limit(1);
+  if (!finding) {
+    return;
+  }
+
+  const publishedFindingId =
+    outcome.publishedFindingId ??
+    (await findPublishedFindingIdForValidatedFinding(db, finding.findingId));
+  await db
+    .insert(memoryCandidates)
+    .values(
+      memoryCandidateFromRejectedFindingOutcome({
+        finding,
+        outcome,
+        publishedFindingId,
+      }),
+    )
+    .onConflictDoNothing();
+}
+
+/** Finds the provider-published finding row for one validated finding when it exists. */
+async function findPublishedFindingIdForValidatedFinding(
+  db: HeimdallDatabase,
+  findingId: string,
+): Promise<string | undefined> {
+  const [published] = await db
+    .select({ findingId: publishedFindings.findingId })
+    .from(publishedFindings)
+    .where(eq(publishedFindings.validatedFindingId, findingId))
+    .limit(1);
+
+  return published?.findingId;
+}
+
+/** Builds a pending suppression candidate from a rejected finding outcome. */
+function memoryCandidateFromRejectedFindingOutcome(input: {
+  /** Finding that was marked as false positive. */
+  readonly finding: {
+    readonly body: string;
+    readonly category: string;
+    readonly confidence: number;
+    readonly findingId: string;
+    readonly fingerprint: string;
+    readonly location: unknown;
+    readonly reviewRunId: string;
+    readonly severity: string;
+    readonly title: string;
+  };
+  /** Outcome row that triggered the memory update. */
+  readonly outcome: typeof findingOutcomes.$inferSelect;
+  /** Published finding row ID when available. */
+  readonly publishedFindingId?: string | undefined;
+}): typeof memoryCandidates.$inferInsert {
+  const path = pathFromFindingLocation(input.finding.location);
+  return {
+    candidateKind: "suppress_similar_finding",
+    confidence: Math.max(0.5, Math.min(0.95, input.finding.confidence)),
+    memoryCandidateId: stableWorkerId("mcand", ["finding_outcome", input.outcome.findingOutcomeId]),
+    metadata: {
+      category: input.finding.category,
+      findingId: input.finding.findingId,
+      outcome: input.outcome.outcome,
+      outcomeId: input.outcome.findingOutcomeId,
+      outcomeSource: input.outcome.source,
+      ...(path ? { path } : {}),
+      reviewRunId: input.finding.reviewRunId,
+      severity: input.finding.severity,
+      title: input.finding.title,
+    },
+    orgId: input.outcome.orgId,
+    proposedAppliesTo: {
+      categories: [input.finding.category],
+      findingFingerprints: [input.finding.fingerprint],
+      ...(path ? { pathGlobs: [path] } : {}),
+      titlePatterns: [input.finding.title],
+    },
+    proposedContent: `Suppress similar findings: ${input.finding.title}`,
+    proposedScope: {
+      findingFingerprints: [input.finding.fingerprint],
+      level: "finding_fingerprint",
+      orgId: input.outcome.orgId,
+      repoId: input.outcome.repoId,
+    },
+    repoId: input.outcome.repoId,
+    ...(input.publishedFindingId ? { sourceFindingId: input.publishedFindingId } : {}),
+    sourceKind: "dashboard",
+    status: "pending",
+    trustLevel: input.outcome.source === "user_action" ? "admin" : "system",
+  };
+}
+
+/** Reads a repository path from a finding location payload when present. */
+function pathFromFindingLocation(location: unknown): string | undefined {
+  if (!location || typeof location !== "object" || Array.isArray(location)) {
+    return undefined;
+  }
+
+  const path = (location as Record<string, unknown>).path;
+  return typeof path === "string" && path.length > 0 ? path : undefined;
+}
+
+/** Returns a stable ID for worker-created rows. */
+function stableWorkerId(prefix: string, parts: readonly unknown[]): string {
+  const digest = createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 24);
+  return `${prefix}_${digest}`;
+}
+
 function asSyncInstallationPayload(payload: JobPayload): SyncInstallationJobPayload {
   if (!("reason" in payload) || !("provider" in payload) || "commitSha" in payload) {
     throw new Error("Job payload is not a sync installation payload.");
@@ -927,6 +1076,14 @@ function asPublishReviewPayload(payload: JobPayload): PublishReviewJobPayload {
   }
 
   return payload as PublishReviewJobPayload;
+}
+
+function asUpdateMemoryPayload(payload: JobPayload): UpdateMemoryJobPayload {
+  if (!("repoId" in payload) || !("reason" in payload) || "headSha" in payload) {
+    throw new Error("Job payload is not an update memory payload.");
+  }
+
+  return payload as UpdateMemoryJobPayload;
 }
 
 function asBillingReconcilePayload(payload: JobPayload): BillingReconcileJobPayload {

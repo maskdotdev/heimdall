@@ -72,6 +72,89 @@ describe("createWorkerHandlers", () => {
 
     expect(payloads).toEqual([validBillingReconcileJobPayloadFixture]);
   });
+
+  it("creates pending memory candidates from rejected finding outcome jobs", async () => {
+    const selectRows: unknown[][] = [
+      [
+        {
+          candidateFindingId: "cf_1",
+          createdAt: new Date("2026-05-07T12:00:00.000Z"),
+          findingOutcomeId: "out_1",
+          metadata: {},
+          occurredAt: new Date("2026-05-07T12:00:00.000Z"),
+          orgId: "org_1",
+          outcome: "rejected",
+          publishedFindingId: "pub_1",
+          repoId: "repo_1",
+          source: "user_action",
+        },
+      ],
+      [
+        {
+          body: "This pattern is intentional.",
+          category: "correctness",
+          confidence: 0.91,
+          findingId: "vf_1",
+          fingerprint: "fp_1",
+          location: { path: "src/auth.ts" },
+          reviewRunId: "rrn_1",
+          severity: "medium",
+          title: "Auth validation is missing here",
+        },
+      ],
+    ];
+    const insertedCandidates: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedCandidates.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => selectRows.shift() ?? [],
+          }),
+        }),
+      }),
+    };
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.UpdateMemory]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "memory:finding_outcome:vf_1:out_1",
+      jobId: "job_memory_update",
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      payload: {
+        findingId: "vf_1",
+        outcomeId: "out_1",
+        reason: "finding_outcome",
+        repoId: "repo_1",
+      },
+      schemaVersion: "job_envelope.v1",
+    });
+
+    expect(insertedCandidates).toEqual([
+      expect.objectContaining({
+        candidateKind: "suppress_similar_finding",
+        confidence: 0.91,
+        orgId: "org_1",
+        repoId: "repo_1",
+        sourceFindingId: "pub_1",
+        sourceKind: "dashboard",
+        status: "pending",
+        trustLevel: "admin",
+      }),
+    ]);
+  });
 });
 
 describe("createRedisPublishThrottle", () => {
