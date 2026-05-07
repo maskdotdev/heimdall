@@ -850,6 +850,12 @@ type AdminRequestContext = {
   readonly traceContext: TelemetryTraceContext;
   /** Request ID propagated into audit logs. */
   readonly requestId: string;
+  /** HTTP method for security-event and audit correlation. */
+  readonly method: string;
+  /** Request route path for security-event and audit correlation. */
+  readonly route: string;
+  /** Sink that records normalized security events for this request. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
   /** Request-scoped support-session ID for privileged raw artifact handling. */
   readonly supportSessionId?: string;
 };
@@ -862,6 +868,10 @@ type ProductRequestContext = {
   readonly traceContext: TelemetryTraceContext;
   /** Request ID propagated into response headers. */
   readonly requestId: string;
+  /** HTTP method for security-event and audit correlation. */
+  readonly method: string;
+  /** Request route path for security-event and audit correlation. */
+  readonly route: string;
 };
 
 /** Authenticated request context for customer-facing `/api/v1` resource routes. */
@@ -883,6 +893,10 @@ type ApiV1RequestContext =
       readonly traceContext: TelemetryTraceContext;
       /** Request ID propagated into audit logs and response headers. */
       readonly requestId: string;
+      /** HTTP method for security-event and audit correlation. */
+      readonly method: string;
+      /** Request route path for security-event and audit correlation. */
+      readonly route: string;
     };
 
 /** Repository settings response used by the control-plane API and dashboard. */
@@ -13516,7 +13530,10 @@ function guardAdminSession(
 
   return {
     actor: session.actor,
+    method: request.method,
     requestId,
+    route: routeFromRequest(request),
+    securityEventSink: auth.securityEventSink,
     session,
     traceContext: traceContextFromRequest(request, requestId),
     ...(supportSessionId ? { supportSessionId } : {}),
@@ -13574,7 +13591,9 @@ async function guardProductSession(
   }
 
   return {
+    method: request.method,
     requestId,
+    route: routeFromRequest(request),
     session,
     traceContext: traceContextFromRequest(request, requestId),
   };
@@ -13599,8 +13618,10 @@ async function guardApiV1Session(
       return {
         actor: productControlPlaneActor(productGuard.session),
         kind: "product",
+        method: productGuard.method,
         productActor: productGuard.session.actor,
         requestId: productGuard.requestId,
+        route: productGuard.route,
         session: productGuard.session,
         traceContext: productGuard.traceContext,
       };
@@ -13655,7 +13676,11 @@ function guardApiV1ScopedAccess(
   set: AdminStatusSet,
 ): AdminErrorResponse | undefined {
   if (context.kind === "admin") {
-    return guardScopedAccess(context.actor, orgId, repoId, set);
+    const response = guardScopedAccess(context.actor, orgId, repoId, set);
+    if (response) {
+      recordAdminScopeForbiddenSecurityEvent(context, orgId, repoId, productPermission);
+    }
+    return response;
   }
   if (!orgId) {
     set.status = 403;
@@ -13693,7 +13718,11 @@ async function guardApiV1MaybeRepoScopedAccess(
   service: AdminControlPlaneService,
 ): Promise<AdminErrorResponse | undefined> {
   if (context.kind === "admin") {
-    return guardMaybeRepoScopedAccess(context.actor, repoId, orgId, set, service);
+    const response = await guardMaybeRepoScopedAccess(context.actor, repoId, orgId, set, service);
+    if (response) {
+      recordAdminScopeForbiddenSecurityEvent(context, orgId, repoId, productPermission);
+    }
+    return response;
   }
   if (!repoId) {
     return guardApiV1ScopedAccess(context, orgId, undefined, productPermission, set);
@@ -13707,6 +13736,39 @@ async function guardApiV1MaybeRepoScopedAccess(
     productPermission,
     set,
   );
+}
+
+/** Records a cross-tenant security event for denied admin `/api/v1` scope checks. */
+function recordAdminScopeForbiddenSecurityEvent(
+  context: Extract<ApiV1RequestContext, { readonly kind: "admin" }>,
+  orgId: string | undefined,
+  repoId: string | undefined,
+  requiredPermission: ProductPermission,
+): void {
+  if (!context.securityEventSink) {
+    return;
+  }
+
+  try {
+    recordSecurityEvent(context.securityEventSink, {
+      actorId: context.actor.actorUserId,
+      metadata: {
+        denialReason: "admin.scope_forbidden",
+        method: context.method,
+        requestId: context.requestId,
+        requiredPermission,
+        route: context.route,
+      },
+      orgId,
+      repoId,
+      resourceId: repoId ?? orgId,
+      resourceType: repoId ? "repository" : orgId ? "organization" : "admin_scope",
+      source: "api",
+      type: "cross_tenant_access_attempt",
+    });
+  } catch {
+    // Security event sinks must never change the request outcome.
+  }
 }
 
 /** Reads and validates the optional request-scoped support-session ID. */

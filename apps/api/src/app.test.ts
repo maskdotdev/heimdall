@@ -2067,11 +2067,13 @@ describe("api app", () => {
   });
 
   it("blocks cross-scope API v1 organization detail", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({
         getOrganization: async () => organizationFixture({ orgId: "org_1" }),
       }),
+      adminSecurityEventSink: securityEventSink,
       githubWebhookHandler: noopWebhookHandler(),
     });
     const login = await loginSession(app, {
@@ -2090,6 +2092,23 @@ describe("api app", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "admin.scope_forbidden" },
     });
+    expect(securityEventSink.events()).toEqual([
+      expect.objectContaining({
+        actorId: "oidc:usr_support",
+        metadata: expect.objectContaining({
+          denialReason: "admin.scope_forbidden",
+          method: "GET",
+          requiredPermission: "org:view",
+          route: "/api/v1/orgs/org_1",
+        }),
+        orgId: "org_1",
+        resourceId: "org_1",
+        resourceType: "organization",
+        severity: "critical",
+        source: "api",
+        type: "cross_tenant_access_attempt",
+      }),
+    ]);
   });
 
   it("serves scoped API v1 installations through signed sessions", async () => {
