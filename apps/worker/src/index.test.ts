@@ -21,6 +21,7 @@ import {
   createWorkerEmbeddingProviderFromEnvironment,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
+  createWorkerLlmBudgetFromEnvironment,
   createWorkerLlmGatewayFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
@@ -170,6 +171,18 @@ describe("resolveWorkerEmbeddingApiKey", () => {
 });
 
 describe("createWorkerLlmGatewayFromEnvironment", () => {
+  it("creates an optional LLM budget from worker environment", () => {
+    expect(
+      createWorkerLlmBudgetFromEnvironment({
+        HEIMDALL_LLM_MAX_PROMPT_CHARS: "100",
+        HEIMDALL_LLM_MAX_TOTAL_INPUT_CHARS: "200",
+      }),
+    ).toEqual({
+      maxPromptChars: 100,
+      maxTotalInputChars: 200,
+    });
+  });
+
   it("keeps the review LLM disabled by default", async () => {
     await expect(createWorkerLlmGatewayFromEnvironment({})).resolves.toBeUndefined();
   });
@@ -210,6 +223,37 @@ describe("createWorkerLlmGatewayFromEnvironment", () => {
       response_format: { type: "json_object" },
       store: false,
     });
+  });
+
+  it("enforces configured LLM input budgets before provider calls", async () => {
+    const calls: RecordedLlmFetchCall[] = [];
+    const gateway = await createWorkerLlmGatewayFromEnvironment(
+      {
+        HEIMDALL_LLM_MAX_PROMPT_CHARS: "3",
+        LLM_PROVIDER: "openai",
+        OPENAI_API_KEY: "sk-test-openai-key",
+        OPENAI_MODEL: "gpt-test",
+      },
+      {
+        fetch: async (url, init) => {
+          calls.push({ ...(init ? { init } : {}), url: String(url) });
+          return llmChatCompletionResponse({ findings: [] });
+        },
+      },
+    );
+    if (!gateway) {
+      throw new Error("Expected configured worker LLM gateway.");
+    }
+
+    await expect(gateway.generateReviewFindings({ prompt: "1234" })).rejects.toMatchObject({
+      code: "budget_exceeded",
+      details: {
+        maxPromptChars: 3,
+        promptChars: 4,
+      },
+      retryable: false,
+    });
+    expect(calls).toEqual([]);
   });
 
   it("keeps the smoke gateway as an explicit mode", async () => {

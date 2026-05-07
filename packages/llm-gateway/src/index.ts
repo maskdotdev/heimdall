@@ -11,6 +11,13 @@ import {
 import { redactPromptSecrets } from "@repo/security";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
+/** Stable prompt version for review finding generation. */
+export const REVIEW_FINDINGS_PROMPT_VERSION = "review-findings.v1";
+
+/** System prompt used for schema-valid review finding generation. */
+export const REVIEW_FINDINGS_SYSTEM_PROMPT =
+  "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.";
+
 /** Task names supported by the gateway MVP. */
 export type LLMTask = "review.findings";
 
@@ -37,8 +44,20 @@ export type LLMGatewayRetryPolicy = {
   readonly retryableErrorCodes: readonly LLMErrorCode[];
 };
 
+/** Product-safe input budget enforced before provider execution. */
+export type LLMGatewayBudgetPolicy = {
+  /** Maximum user prompt characters allowed for one request. */
+  readonly maxPromptChars?: number;
+  /** Maximum system prompt characters allowed for one request. */
+  readonly maxSystemChars?: number;
+  /** Maximum combined system and user prompt characters allowed for one request. */
+  readonly maxTotalInputChars?: number;
+};
+
 /** Options used to create a schema-validating gateway. */
 export type CreateLLMGatewayOptions = {
+  /** Optional product-safe input budget enforced before provider calls. */
+  readonly budget?: LLMGatewayBudgetPolicy;
   /** Default low-cardinality model profile label used when metadata does not provide one. */
   readonly defaultModelProfile?: string;
   /** Optional metric recorder for product-safe aggregate LLM telemetry. */
@@ -421,6 +440,7 @@ export function createLLMGateway(
   provider: LLMProvider,
   options: CreateLLMGatewayOptions = {},
 ): LLMGateway {
+  const budget = normalizeBudgetPolicy(options.budget);
   const retryPolicy = normalizeRetryPolicy(options.retryPolicy);
   const generateObject = async <TSchemaValue extends TSchema>(
     input: GenerateObjectInput<TSchemaValue>,
@@ -429,6 +449,7 @@ export function createLLMGateway(
       options.redactPrompts === false ? input : redactGenerateObjectPrompt(input);
     const telemetry = startLLMCallTelemetry(provider, providerInput, options);
     try {
+      enforceBudgetPolicy(providerInput, budget, provider.id);
       const output = await executeProviderObject(provider, providerInput, retryPolicy, {
         onRetry: (error) => recordLLMRetryMetric(options.metrics, telemetry, error),
       });
@@ -448,10 +469,12 @@ export function createLLMGateway(
         task: "review.findings",
         schema: LLMFindingOutputSchema,
         schemaName: "LLMFindingOutput",
-        system:
-          "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.",
+        system: REVIEW_FINDINGS_SYSTEM_PROMPT,
         prompt: input.prompt,
-        ...(input.metadata ? { metadata: input.metadata } : {}),
+        metadata: {
+          ...(input.metadata ?? {}),
+          promptVersion: REVIEW_FINDINGS_PROMPT_VERSION,
+        },
       }),
   };
 }
@@ -569,6 +592,73 @@ const DEFAULT_RETRY_POLICY: LLMGatewayRetryPolicy = {
   maxAttempts: 2,
   retryableErrorCodes: DEFAULT_RETRYABLE_ERROR_CODES,
 };
+
+/** Normalizes budget settings so non-positive limits are ignored. */
+function normalizeBudgetPolicy(
+  budget: LLMGatewayBudgetPolicy | undefined,
+): LLMGatewayBudgetPolicy | undefined {
+  const maxPromptChars = optionalPositiveNumber(budget?.maxPromptChars);
+  const maxSystemChars = optionalPositiveNumber(budget?.maxSystemChars);
+  const maxTotalInputChars = optionalPositiveNumber(budget?.maxTotalInputChars);
+
+  if (!maxPromptChars && !maxSystemChars && !maxTotalInputChars) {
+    return undefined;
+  }
+
+  return {
+    ...(maxPromptChars ? { maxPromptChars } : {}),
+    ...(maxSystemChars ? { maxSystemChars } : {}),
+    ...(maxTotalInputChars ? { maxTotalInputChars } : {}),
+  };
+}
+
+/** Enforces product-safe input size budgets before any provider call is made. */
+function enforceBudgetPolicy<TSchemaValue extends TSchema>(
+  input: GenerateObjectInput<TSchemaValue>,
+  budget: LLMGatewayBudgetPolicy | undefined,
+  provider: string | undefined,
+): void {
+  if (!budget) {
+    return;
+  }
+
+  const promptChars = input.prompt.length;
+  const systemChars = input.system.length;
+  const totalInputChars = promptChars + systemChars;
+  const violations: string[] = [];
+
+  if (budget.maxPromptChars !== undefined && promptChars > budget.maxPromptChars) {
+    violations.push("max_prompt_chars");
+  }
+  if (budget.maxSystemChars !== undefined && systemChars > budget.maxSystemChars) {
+    violations.push("max_system_chars");
+  }
+  if (budget.maxTotalInputChars !== undefined && totalInputChars > budget.maxTotalInputChars) {
+    violations.push("max_total_input_chars");
+  }
+  if (violations.length === 0) {
+    return;
+  }
+
+  throw new LLMGatewayError("LLM request exceeded the configured input budget.", {
+    code: "budget_exceeded",
+    details: {
+      ...(budget.maxPromptChars !== undefined ? { maxPromptChars: budget.maxPromptChars } : {}),
+      ...(budget.maxSystemChars !== undefined ? { maxSystemChars: budget.maxSystemChars } : {}),
+      ...(budget.maxTotalInputChars !== undefined
+        ? { maxTotalInputChars: budget.maxTotalInputChars }
+        : {}),
+      promptChars,
+      schemaName: input.schemaName,
+      systemChars,
+      totalInputChars,
+      violations,
+    },
+    ...(provider ? { provider } : {}),
+    retryable: false,
+    task: input.task,
+  });
+}
 
 function normalizeRetryPolicy(
   retryPolicy: Partial<LLMGatewayRetryPolicy> | undefined,

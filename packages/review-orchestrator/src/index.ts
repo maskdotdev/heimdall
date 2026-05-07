@@ -31,7 +31,12 @@ import {
   repositories,
 } from "@repo/db";
 import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
-import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
+import {
+  createStaticLLMGateway,
+  type LLMGateway,
+  REVIEW_FINDINGS_PROMPT_VERSION,
+  REVIEW_FINDINGS_SYSTEM_PROMPT,
+} from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import {
   OBSERVABILITY_SPAN_NAMES,
@@ -2567,7 +2572,13 @@ function createUsageRecordingLlmGateway(input: {
     generateReviewFindings: async (request) => {
       const callSequence = nextSequence();
       const startedAt = input.now().toISOString();
-      const redactedRequest = redactReviewFindingPrompt(request);
+      const redactedRequest = redactReviewFindingPrompt({
+        ...request,
+        metadata: {
+          ...(request.metadata ?? {}),
+          promptVersion: REVIEW_FINDINGS_PROMPT_VERSION,
+        },
+      });
       const output = await input.gateway.generateReviewFindings(redactedRequest);
       const completedAt = input.now().toISOString();
       await recordLlmUsage({
@@ -2578,8 +2589,7 @@ function createUsageRecordingLlmGateway(input: {
         prompt: redactedRequest.prompt,
         sequence: callSequence,
         startedAt,
-        system:
-          "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.",
+        system: REVIEW_FINDINGS_SYSTEM_PROMPT,
         task: "review.findings",
       });
       return output;
@@ -2651,6 +2661,7 @@ async function recordLlmUsage(input: {
 }): Promise<void> {
   const promptHash = sha256(`${input.system}\n\n${input.prompt}`);
   const responseHash = sha256(JSON.stringify(input.output) ?? "");
+  const promptVersion = stringMetadataValue(input.metadata, "promptVersion") ?? "unversioned";
   const estimate = estimateLlmTokenUsage({
     system: input.system,
     prompt: input.prompt,
@@ -2682,6 +2693,7 @@ async function recordLlmUsage(input: {
       metadata: {
         cachedInputTokens: estimate.cachedInputTokens,
         latencyMs,
+        promptVersion,
         rateCardId: estimate.rateCardId,
         sequence: input.sequence,
         task: input.task,
@@ -2708,11 +2720,21 @@ async function recordLlmUsage(input: {
       outputTokens: estimate.outputTokens,
       provider: estimate.provider,
       promptHash,
+      promptVersion,
       rateCardId: estimate.rateCardId,
       responseHash,
       task: input.task,
     },
   });
+}
+
+/** Returns a string metadata value by key when present. */
+function stringMetadataValue(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function withOptionalWorkspaceRoot<T extends GitHubRepositoryRef & { readonly commitSha: string }>(

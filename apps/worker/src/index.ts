@@ -80,6 +80,7 @@ import {
   createLLMGateway,
   createOpenAIChatCompletionsProvider,
   type LLMGateway,
+  type LLMGatewayBudgetPolicy,
   type LLMProvider,
   type OpenAIChatCompletionsFetch,
 } from "@repo/llm-gateway";
@@ -901,6 +902,7 @@ export async function createWorkerLlmGatewayFromEnvironment(
     optionalPositiveInteger(env.HEIMDALL_LLM_TIMEOUT_MS) ??
     optionalPositiveInteger(env.LLM_PROVIDER_TIMEOUT_MS) ??
     optionalPositiveInteger(env.OPENAI_TIMEOUT_MS);
+  const budget = createWorkerLlmBudgetFromEnvironment(env);
 
   return createLLMGateway(
     createOpenAIChatCompletionsProvider({
@@ -911,11 +913,37 @@ export async function createWorkerLlmGatewayFromEnvironment(
       ...(timeoutMs ? { timeoutMs } : {}),
     }),
     {
+      ...(budget ? { budget } : {}),
       defaultModelProfile: modelProfile,
       ...(options.metrics ? { metrics: options.metrics } : {}),
       ...(options.traces ? { traces: options.traces } : {}),
     },
   );
+}
+
+/** Creates the optional worker LLM input budget from environment configuration. */
+export function createWorkerLlmBudgetFromEnvironment(
+  env: WorkerLlmGatewayEnvironment,
+): LLMGatewayBudgetPolicy | undefined {
+  const maxPromptChars =
+    optionalPositiveInteger(env.HEIMDALL_LLM_MAX_PROMPT_CHARS) ??
+    optionalPositiveInteger(env.LLM_MAX_PROMPT_CHARS);
+  const maxSystemChars =
+    optionalPositiveInteger(env.HEIMDALL_LLM_MAX_SYSTEM_CHARS) ??
+    optionalPositiveInteger(env.LLM_MAX_SYSTEM_CHARS);
+  const maxTotalInputChars =
+    optionalPositiveInteger(env.HEIMDALL_LLM_MAX_TOTAL_INPUT_CHARS) ??
+    optionalPositiveInteger(env.LLM_MAX_TOTAL_INPUT_CHARS);
+
+  if (!maxPromptChars && !maxSystemChars && !maxTotalInputChars) {
+    return undefined;
+  }
+
+  return {
+    ...(maxPromptChars ? { maxPromptChars } : {}),
+    ...(maxSystemChars ? { maxSystemChars } : {}),
+    ...(maxTotalInputChars ? { maxTotalInputChars } : {}),
+  };
 }
 
 /** Creates the worker embedding provider selected by environment configuration. */

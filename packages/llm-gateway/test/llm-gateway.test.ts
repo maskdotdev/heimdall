@@ -15,6 +15,8 @@ import {
   LLMGatewayError,
   type LLMProvider,
   type OpenAIChatCompletionsFetch,
+  REVIEW_FINDINGS_PROMPT_VERSION,
+  REVIEW_FINDINGS_SYSTEM_PROMPT,
 } from "../src/index";
 
 type RecordedMetric = {
@@ -171,6 +173,40 @@ describe("createLLMGateway", () => {
     });
   });
 
+  it("attaches stable review-finding prompt version metadata", async () => {
+    const providerInputs: {
+      readonly metadata?: Readonly<Record<string, unknown>>;
+      readonly system: string;
+    }[] = [];
+    const gateway = createLLMGateway({
+      id: "capture",
+      generateObject: async (input) => {
+        providerInputs.push({
+          ...(input.metadata ? { metadata: input.metadata } : {}),
+          system: input.system,
+        });
+        return { findings: [] };
+      },
+    });
+
+    await expect(
+      gateway.generateReviewFindings({
+        metadata: { caller: "review-engine" },
+        prompt: "{}",
+      }),
+    ).resolves.toEqual({ findings: [] });
+
+    expect(providerInputs).toEqual([
+      {
+        metadata: {
+          caller: "review-engine",
+          promptVersion: REVIEW_FINDINGS_PROMPT_VERSION,
+        },
+        system: REVIEW_FINDINGS_SYSTEM_PROMPT,
+      },
+    ]);
+  });
+
   it("redacts secret-looking prompt content before provider calls", async () => {
     const providerPrompts: string[] = [];
     const providerMetadata: unknown[] = [];
@@ -220,6 +256,32 @@ describe("createLLMGateway", () => {
       promptRedacted: true,
       promptRedactionKinds: expect.arrayContaining(["github_token", "openai_api_key"]),
     });
+  });
+
+  it("rejects over-budget prompts before provider calls", async () => {
+    let providerCallCount = 0;
+    const gateway = createLLMGateway(
+      {
+        id: "capture",
+        generateObject: async () => {
+          providerCallCount += 1;
+          return { findings: [] };
+        },
+      },
+      { budget: { maxPromptChars: 3 } },
+    );
+
+    await expect(gateway.generateReviewFindings({ prompt: "1234" })).rejects.toMatchObject({
+      code: "budget_exceeded",
+      details: {
+        maxPromptChars: 3,
+        promptChars: 4,
+        violations: ["max_prompt_chars"],
+      },
+      provider: "capture",
+      retryable: false,
+    });
+    expect(providerCallCount).toBe(0);
   });
 
   it("calls OpenAI-compatible Chat Completions with JSON mode", async () => {
