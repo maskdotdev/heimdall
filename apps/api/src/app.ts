@@ -1715,6 +1715,8 @@ type AdminDashboardOverview = {
   readonly recentReviews: readonly AdminReviewRunSummary[];
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
+  /** Product-safe runtime readiness summary for dashboard visibility. */
+  readonly runtimeHealth: ApiHealthResponse;
 };
 
 /** Query options for audit history search. */
@@ -5453,10 +5455,11 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       const auditQuery = actorHasPermission(guardResult.actor, "admin.audit.view")
         ? overviewAuditQueryForActor(guardResult.actor, limit)
         : undefined;
-      const [repositories, recentReviews, recentAuditLogs] = await Promise.all([
+      const [repositories, recentReviews, recentAuditLogs, runtimeHealth] = await Promise.all([
         service.listRepositories(repositoryQuery),
         service.listReviewRuns(scopedReviewRunListQuery(url, guardResult.actor, limit)),
         auditQuery ? service.listAuditLogs(auditQuery) : Promise.resolve([]),
+        readinessCheck().then(createApiHealthResponse),
       ]);
 
       return {
@@ -5464,6 +5467,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           repositories,
           recentAuditLogs,
           recentReviews,
+          runtimeHealth,
         } satisfies AdminDashboardOverview,
       };
     })

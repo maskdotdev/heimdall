@@ -1398,6 +1398,33 @@ type AdminFindingSuppressionSummary = {
   readonly auditLogId: string;
 };
 
+/** API health status returned by readiness probes. */
+type ApiHealthStatus = "fail" | "pass";
+
+/** One API readiness check shown in the operator overview. */
+type ApiHealthCheck = {
+  /** Stable subsystem name. */
+  readonly name: string;
+  /** Product-safe health status. */
+  readonly status: ApiHealthStatus;
+  /** Optional product-safe check detail. */
+  readonly message?: string;
+};
+
+/** Product-safe API readiness summary shown in the operator overview. */
+type ApiHealthResponse = {
+  /** Individual readiness checks. */
+  readonly checks: readonly ApiHealthCheck[];
+  /** Whether all checks passed. */
+  readonly ok: boolean;
+  /** Service identifier. */
+  readonly service: "api";
+  /** Aggregate readiness status. */
+  readonly status: ApiHealthStatus;
+  /** ISO timestamp for the health response. */
+  readonly timestamp: string;
+};
+
 /** Dashboard overview response. */
 type AdminDashboardOverview = {
   /** Scoped repositories available to the actor. */
@@ -1406,6 +1433,8 @@ type AdminDashboardOverview = {
   readonly recentReviews: readonly AdminReviewRunSummary[];
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
+  /** Product-safe API readiness summary. */
+  readonly runtimeHealth: ApiHealthResponse;
 };
 
 /** Product GitHub App setup returned by the public onboarding API. */
@@ -1999,6 +2028,8 @@ type OverviewViewState = {
   reviews: readonly AdminReviewRunSummary[];
   /** Loaded recent audit entries. */
   auditLogs: readonly AdminAuditLogSummary[];
+  /** Latest product-safe runtime health returned by the overview endpoint. */
+  runtimeHealth?: ApiHealthResponse | undefined;
   /** Whether the overview route has returned at least once in this session. */
   loaded: boolean;
   /** Whether repository discovery has returned at least once in this session. */
@@ -4711,6 +4742,7 @@ async function loadOverview(): Promise<void> {
     state.overview.repositories = data.repositories;
     state.overview.reviews = data.recentReviews;
     state.overview.auditLogs = data.recentAuditLogs;
+    state.overview.runtimeHealth = data.runtimeHealth;
     state.overview.loaded = true;
     state.overview.repositoriesLoaded = true;
     state.overview.reviewsLoaded = true;
@@ -7040,6 +7072,7 @@ function renderOverviewView(): string {
       </section>
       ${renderOverviewNotice(overview)}
       ${renderOverviewStats(stats)}
+      ${renderRuntimeHealthPanel(overview.runtimeHealth)}
       <section class="overview-grid">
         ${renderRepositoryDiscovery(overview)}
         ${renderReviewHistoryDiscovery(overview)}
@@ -7092,6 +7125,46 @@ function renderOverviewStats(stats: OverviewStats): string {
       ${renderMetric("Failed", String(stats.failedReviews), stats.failedReviews > 0)}
       ${renderMetric("Findings", `${stats.publishedFindings} published`)}
     </section>
+  `;
+}
+
+/** Renders product-safe API readiness checks on the operator overview. */
+function renderRuntimeHealthPanel(runtimeHealth: ApiHealthResponse | undefined): string {
+  if (!runtimeHealth) {
+    return "";
+  }
+
+  return `
+    <section class="panel runtime-health-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Runtime</p>
+          <h3>API Health</h3>
+        </div>
+        <span class="status ${runtimeHealth.ok ? "ok" : "bad"}">
+          ${runtimeHealth.ok ? "ready" : "degraded"}
+        </span>
+      </div>
+      <div class="setup-list">
+        ${runtimeHealth.checks.map(renderRuntimeHealthCheck).join("")}
+      </div>
+      <p class="muted-text">Updated ${formatTime(runtimeHealth.timestamp)}</p>
+    </section>
+  `;
+}
+
+/** Renders one API readiness check row. */
+function renderRuntimeHealthCheck(check: ApiHealthCheck): string {
+  return `
+    <div class="setup-row">
+      <span class="status ${check.status === "pass" ? "ok" : "bad"}">
+        ${escapeHtml(check.status)}
+      </span>
+      <div>
+        <strong>${escapeHtml(check.name)}</strong>
+        ${check.message ? `<code>${escapeHtml(check.message)}</code>` : ""}
+      </div>
+    </div>
   `;
 }
 

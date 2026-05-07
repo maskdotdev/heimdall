@@ -4963,6 +4963,10 @@ describe("api app", () => {
         },
       }),
       githubWebhookHandler: noopWebhookHandler(),
+      readinessCheck: async () => [
+        { name: "config", status: "pass" },
+        { name: "postgres", status: "pass" },
+      ],
     });
     const login = await loginSession(app, {
       orgIds: ["org_1"],
@@ -4992,6 +4996,15 @@ describe("api app", () => {
         recentAuditLogs: [{ action: "repo.settings.updated" }],
         recentReviews: [{ reviewRunId: "rrn_1", repoFullName: "octo-org/heimdall" }],
         repositories: [{ fullName: "octo-org/heimdall", latestReviewRunId: "rrn_1" }],
+        runtimeHealth: {
+          checks: [
+            { name: "config", status: "pass" },
+            { name: "postgres", status: "pass" },
+          ],
+          ok: true,
+          service: "api",
+          status: "pass",
+        },
       },
     });
     expect(repositoriesResponse.status).toBe(200);
