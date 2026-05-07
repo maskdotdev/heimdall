@@ -9,17 +9,21 @@
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"],
   "references": [
+    { "path": "../../packages/artifacts/tsconfig.build.json" },
     { "path": "../../packages/config/tsconfig.build.json" },
+    { "path": "../../packages/billing/tsconfig.build.json" },
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/db/tsconfig.build.json" },
     { "path": "../../packages/embedding/tsconfig.build.json" },
     { "path": "../../packages/github/tsconfig.build.json" },
     { "path": "../../packages/index-importer/tsconfig.build.json" },
+    { "path": "../../packages/indexer-driver/tsconfig.build.json" },
     { "path": "../../packages/indexer-ts/tsconfig.build.json" },
     { "path": "../../packages/llm-gateway/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
     { "path": "../../packages/publisher/tsconfig.build.json" },
     { "path": "../../packages/review-orchestrator/tsconfig.build.json" },
-    { "path": "../../packages/repo-sync/tsconfig.build.json" }
+    { "path": "../../packages/repo-sync/tsconfig.build.json" },
+    { "path": "../../packages/usage/tsconfig.build.json" }
   ]
 }

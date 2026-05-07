@@ -1,9 +1,22 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  createReviewArtifactPayloadStoreFromEnvironment,
+  InlineReviewArtifactPayloadStore,
+  type ReviewArtifactPayloadStore,
+} from "@repo/artifacts";
+import {
+  type BillingProvider,
+  type BillingProviderRequestLogger,
+  type BillingProviderRequestLogInput,
+  FakeBillingProvider,
+  StripeBillingProvider,
+} from "@repo/billing";
 import { loadRuntimeConfig } from "@repo/config";
 import {
+  type BillingReconcileJobPayload,
   type EmbeddingBatchJobPayload,
   type IndexRepoCommitJobPayload,
   JOB_TYPES,
@@ -16,19 +29,28 @@ import {
   type SyncInstallationJobPayload,
 } from "@repo/contracts";
 import {
+  billingProviderRequests,
   createDatabaseClient,
   type HeimdallDatabase,
   providerInstallations,
   repositories,
 } from "@repo/db";
-import { createHashEmbeddingProvider, embedChunkBatch } from "@repo/embedding";
+import { createEmbeddingProviderFromEnvironment, embedChunkBatch } from "@repo/embedding";
 import {
   createGitHubProvider,
   type GitHubInstallationRef,
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
-import { importIndexArtifact } from "@repo/index-importer";
+import { importIndexArtifact, importIndexArtifactFromUri } from "@repo/index-importer";
+import {
+  assertIndexerSupportsCurrentArtifactSchema,
+  type CodeIndexerDriver,
+  createCliIndexerDriver,
+  createRemoteIndexerDriver,
+  type IndexerCapabilities,
+  withIndexerTimeout,
+} from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 import type { LLMGateway } from "@repo/llm-gateway";
 import { publishReviewRun } from "@repo/publisher";
@@ -42,12 +64,15 @@ import {
 } from "@repo/queue";
 import { syncRepositoryWorkspace } from "@repo/repo-sync";
 import { runPullRequestReview } from "@repo/review-orchestrator";
+import { reconcileBillingState } from "@repo/usage";
 import { Worker } from "bullmq";
 import { and, eq } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
 const DEFAULT_INDEX_ARTIFACT_ROOT = ".heimdall/index-artifacts";
+/** Default maximum time allowed for one indexer run. */
+const DEFAULT_INDEXER_TIMEOUT_MS = 120_000;
 
 /** GitHub installation row shape required by worker handlers. */
 type GitHubInstallationRuntimeRef = GitHubInstallationRef & {
@@ -61,15 +86,28 @@ type GitHubInstallationRuntimeRef = GitHubInstallationRef & {
 export type CreateWorkerHandlersOptions = {
   /** Database used to resolve durable job payload IDs. */
   readonly db: HeimdallDatabase;
+  /** Optional billing provider used by billing reconciliation jobs. */
+  readonly billingProvider?: BillingProvider;
+  /** Optional test hook for billing reconciliation jobs. */
+  readonly billingReconciler?: (payload: BillingReconcileJobPayload) => Promise<void>;
   /** Git provider used by repo sync handlers. */
   readonly gitProvider: GitProvider;
   /** Optional model gateway used by review jobs. */
   readonly llmGateway?: LLMGateway;
+  /** Optional review artifact payload store used by review orchestration. */
+  readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
   /** Optional parent directory for repo-sync workspaces. */
   readonly workspaceRoot?: string;
   /** Durable directory used to store imported index artifacts before workspace cleanup. */
   readonly indexArtifactRoot?: string;
+  /** Optional indexer driver selected by runtime configuration or tests. */
+  readonly indexerDriver?: CodeIndexerDriver;
+  /** Maximum time allowed for one indexer run. */
+  readonly indexerTimeoutMs?: number;
 };
+
+/** Environment values used to select the worker indexer driver. */
+export type WorkerIndexerDriverEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** Runtime handle returned by the worker process bootstrap. */
 export type WorkerRuntime = {
@@ -105,7 +143,12 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         { gitProvider: options.gitProvider },
       );
       try {
-        const driver = createTypeScriptIndexerDriver();
+        const driver = withIndexerTimeout(
+          options.indexerDriver ?? createTypeScriptIndexerDriver(),
+          {
+            timeoutMs: options.indexerTimeoutMs ?? DEFAULT_INDEXER_TIMEOUT_MS,
+          },
+        );
         const result = await driver.indexRepository({
           repoId: payload.repoId,
           commitSha: payload.commitSha,
@@ -118,15 +161,23 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           throw new Error(`${result.error.code}: ${result.error.message}`);
         }
 
-        const artifactUri = await persistIndexArtifact(
-          result.artifact,
-          options.indexArtifactRoot ?? DEFAULT_INDEX_ARTIFACT_ROOT,
-        );
-        await importIndexArtifact(result.artifact, {
-          db: options.db,
-          artifactUri,
-          enqueueEmbeddings: true,
-        });
+        if (result.artifactUri) {
+          await importIndexArtifact(result.artifact, {
+            artifactUri: result.artifactUri,
+            db: options.db,
+            enqueueEmbeddings: true,
+          });
+        } else {
+          const artifactUri = await persistIndexArtifact(
+            result.artifact,
+            options.indexArtifactRoot ?? DEFAULT_INDEX_ARTIFACT_ROOT,
+          );
+          await importIndexArtifactFromUri({
+            artifactUri,
+            db: options.db,
+            enqueueEmbeddings: true,
+          });
+        }
       } finally {
         await rm(workspace.workspacePath, { force: true, recursive: true });
       }
@@ -135,13 +186,18 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       const payload = asEmbeddingBatchPayload(envelope.payload);
       await embedChunkBatch(payload, {
         db: options.db,
-        provider: createHashEmbeddingProvider(payload.embeddingModel),
+        provider: createEmbeddingProviderFromEnvironment(process.env, {
+          model: payload.embeddingModel,
+        }),
       });
     },
     [JOB_TYPES.ReviewPullRequest]: async (envelope) => {
       const payload = asReviewPullRequestPayload(envelope.payload);
 
       await runPullRequestReview(payload, {
+        ...(options.artifactPayloadStore
+          ? { artifactPayloadStore: options.artifactPayloadStore }
+          : {}),
         db: options.db,
         gitProvider: options.gitProvider,
         ...(options.llmGateway ? { llmGateway: options.llmGateway } : {}),
@@ -154,6 +210,19 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       await publishReviewRun(payload, {
         db: options.db,
         gitProvider: options.gitProvider,
+      });
+    },
+    [JOB_TYPES.BillingReconcile]: async (envelope) => {
+      const payload = asBillingReconcilePayload(envelope.payload);
+      if (options.billingReconciler) {
+        await options.billingReconciler(payload);
+        return;
+      }
+
+      await reconcileBillingState({
+        billingProvider: requireBillingProvider(options.billingProvider),
+        db: options.db,
+        ...payload,
       });
     },
   };
@@ -171,6 +240,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const store = new DrizzleDurableJobStore(databaseClient.db);
   const queueProducer = new BullMqQueueProducer(config.redisUrl);
   const workerConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
+  const billingProvider = createWorkerBillingProviderFromEnv(databaseClient.db);
   const gitProvider = createGitHubProvider({
     appId: config.githubAppId,
     privateKey: githubPrivateKey,
@@ -179,18 +249,29 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     process.env.HEIMDALL_REVIEW_SMOKE_FINDING === "true"
       ? createWorkerReviewSmokeGateway()
       : undefined;
+  const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
+  const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
+  const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
+  const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;
+  const indexerDriver =
+    createWorkerIndexerDriverFromEnvironment(process.env, {
+      indexArtifactRoot,
+      ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+    }) ?? createTypeScriptIndexerDriver();
+  await verifyWorkerIndexerCapabilities(indexerDriver);
   const processor = createDurableJobProcessor({
     store,
     handlers: createWorkerHandlers({
+      ...(billingProvider ? { billingProvider } : {}),
       db: databaseClient.db,
       gitProvider,
       ...(llmGateway ? { llmGateway } : {}),
-      ...(process.env.REPO_SYNC_WORKSPACE_ROOT
-        ? { workspaceRoot: process.env.REPO_SYNC_WORKSPACE_ROOT }
-        : {}),
-      ...(process.env.INDEX_ARTIFACT_ROOT
-        ? { indexArtifactRoot: process.env.INDEX_ARTIFACT_ROOT }
-        : {}),
+      ...(artifactPayloadStore ? { artifactPayloadStore } : {}),
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+      indexArtifactRoot,
+      indexerDriver,
+      ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
     }),
   });
   const workers = [
@@ -199,6 +280,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     QUEUE_NAMES.embedding,
     QUEUE_NAMES.review,
     QUEUE_NAMES.publishing,
+    QUEUE_NAMES.billing,
   ].map((queueName) => new Worker(queueName, processor, { connection: workerConnection }));
   const dispatch = async () => {
     await dispatchPendingJobs({ store, queueProducer });
@@ -220,6 +302,109 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       await databaseClient.close();
     },
   };
+}
+
+/** Creates the optional review artifact payload store configured for the worker process. */
+export function createWorkerReviewArtifactPayloadStoreFromEnv():
+  | ReviewArtifactPayloadStore
+  | undefined {
+  const store = createReviewArtifactPayloadStoreFromEnvironment(process.env);
+
+  return store instanceof InlineReviewArtifactPayloadStore ? undefined : store;
+}
+
+/** Creates the optional worker indexer driver selected by environment configuration. */
+export function createWorkerIndexerDriverFromEnvironment(
+  env: WorkerIndexerDriverEnvironment,
+  options: {
+    /** Durable directory used to store indexer CLI request, logs, and artifact output. */
+    readonly indexArtifactRoot: string;
+    /** Optional parent directory for repo-sync workspaces. */
+    readonly workspaceRoot?: string;
+    /** Maximum time allowed for one indexer run. */
+    readonly indexerTimeoutMs?: number;
+  },
+): CodeIndexerDriver | undefined {
+  const driverName = env.INDEXER_DRIVER ?? "in_process_ts";
+  if (driverName === "in_process_ts" || driverName === "typescript") {
+    return undefined;
+  }
+  if (driverName === "remote") {
+    const baseUrl = env.INDEXER_REMOTE_BASE_URL?.trim();
+    if (!baseUrl) {
+      throw new Error("INDEXER_REMOTE_BASE_URL is required when INDEXER_DRIVER=remote.");
+    }
+
+    const pollIntervalMs = optionalPositiveInteger(env.INDEXER_REMOTE_POLL_INTERVAL_MS);
+    const maxPollMs =
+      optionalPositiveInteger(env.INDEXER_REMOTE_MAX_POLL_MS) ?? options.indexerTimeoutMs;
+
+    return createRemoteIndexerDriver({
+      baseUrl,
+      ...(env.INDEXER_REMOTE_BEARER_TOKEN ? { bearerToken: env.INDEXER_REMOTE_BEARER_TOKEN } : {}),
+      ...(pollIntervalMs ? { pollIntervalMs } : {}),
+      ...(maxPollMs ? { maxPollMs } : {}),
+    });
+  }
+  if (driverName !== "cli") {
+    throw new Error(`Unsupported INDEXER_DRIVER: ${driverName}`);
+  }
+
+  const command = env.INDEXER_CLI_COMMAND?.trim();
+  if (!command) {
+    throw new Error("INDEXER_CLI_COMMAND is required when INDEXER_DRIVER=cli.");
+  }
+
+  return createCliIndexerDriver({
+    artifactRootPath: options.indexArtifactRoot,
+    command,
+    ...(env.INDEXER_CLI_ARGS_JSON
+      ? { args: parseIndexerCliArgsJson(env.INDEXER_CLI_ARGS_JSON) }
+      : {}),
+    ...(options.indexerTimeoutMs ? { timeoutMs: options.indexerTimeoutMs } : {}),
+    ...(options.workspaceRoot ? { workspaceRootPath: options.workspaceRoot } : {}),
+  });
+}
+
+/** Verifies the selected worker indexer before accepting jobs. */
+export async function verifyWorkerIndexerCapabilities(
+  driver: CodeIndexerDriver,
+): Promise<IndexerCapabilities> {
+  const capabilities = await driver.getCapabilities();
+  assertIndexerSupportsCurrentArtifactSchema(capabilities);
+  console.info(
+    "indexer.capabilities",
+    JSON.stringify({
+      driverName: capabilities.driverName,
+      driverVersion: capabilities.driverVersion,
+      supportedArtifactSchemaVersions: capabilities.supportedArtifactSchemaVersions,
+      supportedLanguages: capabilities.supportedLanguages,
+      supportedRecordTypes: capabilities.supportedRecordTypes,
+      supportsRemoteArtifacts: capabilities.supportsRemoteArtifacts,
+    }),
+  );
+
+  return capabilities;
+}
+
+/** Parses a positive integer environment value. */
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Parses INDEXER_CLI_ARGS_JSON into a spawn argument array. */
+function parseIndexerCliArgsJson(value: string): readonly string[] {
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error("INDEXER_CLI_ARGS_JSON must be a JSON array of strings.");
+  }
+
+  return parsed;
 }
 
 /** Creates a deterministic smoke-only gateway for live PR review smoke runs. */
@@ -501,6 +686,113 @@ function asPublishReviewPayload(payload: JobPayload): PublishReviewJobPayload {
   }
 
   return payload as PublishReviewJobPayload;
+}
+
+function asBillingReconcilePayload(payload: JobPayload): BillingReconcileJobPayload {
+  return payload as BillingReconcileJobPayload;
+}
+
+/** Requires billing provider configuration before provider-mutating billing jobs run. */
+function requireBillingProvider(provider: BillingProvider | undefined): BillingProvider {
+  if (!provider) {
+    throw new Error(
+      "Billing reconciliation requires HEIMDALL_BILLING_PROVIDER or STRIPE_SECRET_KEY.",
+    );
+  }
+
+  return provider;
+}
+
+/** Creates the billing provider used by worker-owned reconciliation jobs. */
+function createWorkerBillingProviderFromEnv(db: HeimdallDatabase): BillingProvider | undefined {
+  if (process.env.HEIMDALL_BILLING_PROVIDER === "fake") {
+    return new FakeBillingProvider({
+      ...(process.env.HEIMDALL_FAKE_BILLING_BASE_URL
+        ? { baseUrl: process.env.HEIMDALL_FAKE_BILLING_BASE_URL }
+        : {}),
+    });
+  }
+
+  const apiKey = process.env.STRIPE_SECRET_KEY;
+  if (!apiKey) {
+    return undefined;
+  }
+
+  return new StripeBillingProvider({
+    apiKey,
+    checkoutPriceByPlanKey: stripeCheckoutPriceMapFromEnv(
+      process.env.HEIMDALL_STRIPE_CHECKOUT_PRICE_MAP,
+    ),
+    requestLogger: new WorkerBillingProviderRequestLogger(db),
+    ...(process.env.STRIPE_WEBHOOK_SECRET
+      ? { webhookSecret: process.env.STRIPE_WEBHOOK_SECRET }
+      : {}),
+  });
+}
+
+/** Parses the Stripe checkout price map used when the same provider also handles checkout. */
+function stripeCheckoutPriceMapFromEnv(
+  value: string | undefined,
+): Readonly<Record<string, string>> {
+  if (!value) {
+    return {};
+  }
+
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(parsed as Record<string, unknown>).filter(
+      (entry): entry is [string, string] =>
+        entry[0].length > 0 && typeof entry[1] === "string" && entry[1].length > 0,
+    ),
+  );
+}
+
+/** Durable logger for worker-owned outbound billing provider requests. */
+class WorkerBillingProviderRequestLogger implements BillingProviderRequestLogger {
+  /** Creates a Postgres-backed provider request logger. */
+  public constructor(private readonly db: HeimdallDatabase) {}
+
+  /** Records one provider request outcome. */
+  public async record(input: BillingProviderRequestLogInput): Promise<void> {
+    await this.db
+      .insert(billingProviderRequests)
+      .values({
+        billingAccountId: input.billingAccountId ?? null,
+        billingProviderRequestId: `bpr_${randomUUID()}`,
+        completedAt: input.completedAt ? new Date(input.completedAt) : null,
+        errorCode: input.errorCode ?? null,
+        errorMessage: input.errorMessage ?? null,
+        idempotencyKey: input.idempotencyKey ?? null,
+        operation: input.operation,
+        orgId: input.orgId ?? null,
+        provider: input.provider,
+        providerRequestId: input.providerRequestId ?? null,
+        requestMetadata: input.requestMetadata,
+        responseMetadata: input.responseMetadata,
+        startedAt: new Date(input.startedAt),
+        status: input.status,
+      })
+      .onConflictDoUpdate({
+        target: [billingProviderRequests.provider, billingProviderRequests.idempotencyKey],
+        set: {
+          billingAccountId: input.billingAccountId ?? null,
+          completedAt: input.completedAt ? new Date(input.completedAt) : null,
+          errorCode: input.errorCode ?? null,
+          errorMessage: input.errorMessage ?? null,
+          operation: input.operation,
+          orgId: input.orgId ?? null,
+          providerRequestId: input.providerRequestId ?? null,
+          requestMetadata: input.requestMetadata,
+          responseMetadata: input.responseMetadata,
+          startedAt: new Date(input.startedAt),
+          status: input.status,
+        },
+      });
+  }
 }
 
 if (import.meta.main) {
