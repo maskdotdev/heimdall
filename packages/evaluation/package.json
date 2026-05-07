@@ -13,14 +13,18 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "eval": "bun run src/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "lint": "biome check .",
     "format": "biome format --write .",
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@sinclair/typebox": "catalog:"
+  },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }
