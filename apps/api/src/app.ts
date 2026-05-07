@@ -78,6 +78,7 @@ import {
   findingOutcomes,
   type HeimdallDatabase,
   invoices,
+  memoryCandidates,
   memoryFacts,
   oauthStates,
   orgMemberships,
@@ -1351,8 +1352,93 @@ type AdminMemoryFactDeleteRequest = Omit<
   "action" | "metadata" | "orgId" | "repoId" | "resourceId" | "resourceType"
 >;
 
+/** Memory candidate row returned by scoped product API routes. */
+type AdminMemoryCandidateSummary = {
+  /** Memory candidate ID. */
+  readonly memoryCandidateId: string;
+  /** Owning organization ID. */
+  readonly orgId: string;
+  /** Owning repository ID when the candidate is repository-scoped. */
+  readonly repoId?: string | undefined;
+  /** Source that proposed the candidate. */
+  readonly sourceKind: string;
+  /** Candidate kind proposed by feedback processing. */
+  readonly candidateKind: string;
+  /** Proposed durable memory text. */
+  readonly proposedContent: string;
+  /** Candidate lifecycle status. */
+  readonly status: string;
+  /** Candidate confidence score. */
+  readonly confidence: number;
+  /** Trust level assigned to the proposing signal. */
+  readonly trustLevel: string;
+  /** Login that created the candidate when known. */
+  readonly createdByLogin?: string | undefined;
+  /** Source feedback event ID when known. */
+  readonly sourceFeedbackEventId?: string | undefined;
+  /** Source finding ID when known. */
+  readonly sourceFindingId?: string | undefined;
+  /** Memory fact created from this candidate when approved. */
+  readonly approvedMemoryFactId?: string | undefined;
+  /** User ID that made the moderation decision when present. */
+  readonly decidedByUserId?: string | undefined;
+  /** Moderation decision timestamp when present. */
+  readonly decidedAt?: string | undefined;
+  /** Expiration timestamp when present. */
+  readonly expiresAt?: string | undefined;
+  /** Structured proposed scope payload. */
+  readonly proposedScope: Record<string, unknown>;
+  /** Structured proposed applies-to payload. */
+  readonly proposedAppliesTo: Record<string, unknown>;
+  /** Additional candidate metadata. */
+  readonly metadata?: Record<string, unknown> | undefined;
+  /** Candidate creation timestamp. */
+  readonly createdAt: string;
+  /** Candidate update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Parsed request body for memory candidate moderation. */
+type MemoryCandidateModerationBody = {
+  /** Operator reason for the moderation decision. */
+  readonly reason?: string | undefined;
+  /** Additional caller metadata for the moderation decision. */
+  readonly metadata?: Record<string, unknown> | undefined;
+};
+
+/** Input used to audit and idempotently moderate one memory candidate. */
+type AdminMemoryCandidateModerationRequest = Omit<
+  AdminAuditEventInput,
+  "action" | "metadata" | "orgId" | "repoId" | "resourceId" | "resourceType"
+> &
+  MemoryCandidateModerationBody & {
+    /** Caller-provided or request-derived idempotency key. */
+    readonly idempotencyKey: string;
+  };
+
+/** Result returned after approving one memory candidate. */
+type AdminMemoryCandidateApprovalSummary = {
+  /** Updated memory candidate. */
+  readonly candidate: AdminMemoryCandidateSummary;
+  /** Created or reused durable memory fact. */
+  readonly memoryFact: AdminMemoryFactSummary;
+  /** Audit row written for the approval request. */
+  readonly auditLogId: string;
+};
+
+/** Result returned after rejecting one memory candidate. */
+type AdminMemoryCandidateRejectionSummary = {
+  /** Updated memory candidate. */
+  readonly candidate: AdminMemoryCandidateSummary;
+  /** Audit row written for the rejection request. */
+  readonly auditLogId: string;
+};
+
 /** Database row shape for memory fact queries. */
 type MemoryFactRow = typeof memoryFacts.$inferSelect;
+
+/** Database row shape for memory candidate queries. */
+type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
 
 /** Query options for repository discovery. */
 type AdminRepositoryListQuery = {
@@ -2141,11 +2227,23 @@ export type AdminControlPlaneService = {
   ) => Promise<readonly AdminMemoryFactSummary[]>;
   /** Gets one memory fact by ID. */
   readonly getMemoryFact: (memoryFactId: string) => Promise<AdminMemoryFactSummary>;
+  /** Gets one memory candidate by ID. */
+  readonly getMemoryCandidate: (memoryCandidateId: string) => Promise<AdminMemoryCandidateSummary>;
   /** Creates one repository-scoped memory fact. */
   readonly createRepositoryMemoryFact: (
     repoId: string,
     request: AdminMemoryFactCreateRequest,
   ) => Promise<AdminMemoryFactSummary>;
+  /** Approves one memory candidate into a durable memory fact. */
+  readonly approveMemoryCandidate: (
+    memoryCandidateId: string,
+    request: AdminMemoryCandidateModerationRequest,
+  ) => Promise<AdminMemoryCandidateApprovalSummary>;
+  /** Rejects one memory candidate. */
+  readonly rejectMemoryCandidate: (
+    memoryCandidateId: string,
+    request: AdminMemoryCandidateModerationRequest,
+  ) => Promise<AdminMemoryCandidateRejectionSummary>;
   /** Updates one memory fact. */
   readonly updateMemoryFact: (
     memoryFactId: string,
@@ -4202,6 +4300,110 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         return handleAdminControlPlaneError(error, set);
       }
     })
+    .post(
+      "/api/v1/memory-candidates/:memoryCandidateId/approve",
+      async ({ params, request, set }) => {
+        const guardResult = await guardApiV1Session(
+          request,
+          set,
+          adminAuth,
+          productSessionAuth,
+          getProductSessionService,
+          observabilitySink,
+          "admin.settings.manage",
+        );
+        if ("response" in guardResult) {
+          return guardResult.response;
+        }
+
+        try {
+          const existing = await getAdminControlPlaneService().getMemoryCandidate(
+            params.memoryCandidateId,
+          );
+          const authorizationResponse = guardApiV1ScopedAccess(
+            guardResult,
+            existing.orgId,
+            existing.repoId,
+            "memory:write",
+            set,
+          );
+          if (authorizationResponse) {
+            return authorizationResponse;
+          }
+
+          const approval = await getAdminControlPlaneService().approveMemoryCandidate(
+            params.memoryCandidateId,
+            {
+              ...(await readMemoryCandidateModerationBody(request)),
+              actor: guardResult.actor,
+              idempotencyKey: memoryCandidateCommandIdempotencyKey(
+                request,
+                params.memoryCandidateId,
+                guardResult.requestId,
+              ),
+              requestId: guardResult.requestId,
+              sessionId: guardResult.session.sessionId,
+            },
+          );
+
+          return { data: approval };
+        } catch (error) {
+          return handleAdminControlPlaneError(error, set);
+        }
+      },
+    )
+    .post(
+      "/api/v1/memory-candidates/:memoryCandidateId/reject",
+      async ({ params, request, set }) => {
+        const guardResult = await guardApiV1Session(
+          request,
+          set,
+          adminAuth,
+          productSessionAuth,
+          getProductSessionService,
+          observabilitySink,
+          "admin.settings.manage",
+        );
+        if ("response" in guardResult) {
+          return guardResult.response;
+        }
+
+        try {
+          const existing = await getAdminControlPlaneService().getMemoryCandidate(
+            params.memoryCandidateId,
+          );
+          const authorizationResponse = guardApiV1ScopedAccess(
+            guardResult,
+            existing.orgId,
+            existing.repoId,
+            "memory:write",
+            set,
+          );
+          if (authorizationResponse) {
+            return authorizationResponse;
+          }
+
+          const rejection = await getAdminControlPlaneService().rejectMemoryCandidate(
+            params.memoryCandidateId,
+            {
+              ...(await readMemoryCandidateModerationBody(request)),
+              actor: guardResult.actor,
+              idempotencyKey: memoryCandidateCommandIdempotencyKey(
+                request,
+                params.memoryCandidateId,
+                guardResult.requestId,
+              ),
+              requestId: guardResult.requestId,
+              sessionId: guardResult.session.sessionId,
+            },
+          );
+
+          return { data: rejection };
+        } catch (error) {
+          return handleAdminControlPlaneError(error, set);
+        }
+      },
+    )
     .options("/admin/*", ({ request, set }) =>
       handleAdminPreflight(request, set, adminAuth, observabilitySink),
     )
@@ -5802,6 +6004,8 @@ function createAdminControlPlaneService(dependencies: {
         requireBillingProvider(dependencies.getBillingProvider?.()),
         request,
       ),
+    approveMemoryCandidate: (memoryCandidateId, request) =>
+      approveMemoryCandidate(dependencies.db, memoryCandidateId, request),
     createRepositoryMemoryFact: (repoId, request) =>
       createRepositoryMemoryFact(dependencies.db, repoId, request),
     createRepositoryRule: (repoId, request, audit) =>
@@ -5821,6 +6025,8 @@ function createAdminControlPlaneService(dependencies: {
       enqueueRepositorySync(dependencies.db, repoId, request),
     getBillingSummary: (query) => getBillingSummary(dependencies.db, query),
     getBillingReconciliation: (query) => getBillingReconciliation(dependencies.db, query),
+    getMemoryCandidate: (memoryCandidateId) =>
+      getMemoryCandidate(dependencies.db, memoryCandidateId),
     getMemoryFact: (memoryFactId) => getMemoryFact(dependencies.db, memoryFactId),
     getOrganization: (orgId) => getOrganization(dependencies.db, orgId),
     getProductUsageSummary: (query) => getProductUsageSummary(dependencies.db, query),
@@ -5864,6 +6070,8 @@ function createAdminControlPlaneService(dependencies: {
       previewRepositoryPolicy(dependencies.db, repoId, patch),
     recordFindingOutcome: (findingId, request) =>
       recordFindingOutcome(dependencies.db, findingId, request),
+    rejectMemoryCandidate: (memoryCandidateId, request) =>
+      rejectMemoryCandidate(dependencies.db, memoryCandidateId, request),
     suppressSimilarFinding: (findingId, request) =>
       suppressSimilarFinding(dependencies.db, findingId, request),
     recordAuditEvent: (event) => insertAuditLog(dependencies.db, event),
@@ -8755,6 +8963,14 @@ async function getMemoryFact(
   return toAdminMemoryFactSummary(await getMemoryFactRow(db, memoryFactId));
 }
 
+/** Gets one memory candidate by ID. */
+async function getMemoryCandidate(
+  db: HeimdallDatabase,
+  memoryCandidateId: string,
+): Promise<AdminMemoryCandidateSummary> {
+  return toAdminMemoryCandidateSummary(await getMemoryCandidateRow(db, memoryCandidateId));
+}
+
 /** Creates one repository-scoped memory fact and records an audit event. */
 async function createRepositoryMemoryFact(
   db: HeimdallDatabase,
@@ -8807,6 +9023,102 @@ async function createRepositoryMemoryFact(
     });
 
     return summary;
+  });
+}
+
+/** Approves one memory candidate into a durable memory fact and records an audit event. */
+async function approveMemoryCandidate(
+  db: HeimdallDatabase,
+  memoryCandidateId: string,
+  request: AdminMemoryCandidateModerationRequest,
+): Promise<AdminMemoryCandidateApprovalSummary> {
+  return db.transaction(async (tx) => {
+    const transactionDb = tx as HeimdallDatabase;
+    const current = await getMemoryCandidateRow(transactionDb, memoryCandidateId);
+    if (current.status === "rejected") {
+      throw new AdminRequestValidationError(
+        "memory_candidate.already_rejected",
+        "Rejected memory candidates cannot be approved.",
+        409,
+      );
+    }
+
+    const memoryFact = await createOrGetMemoryFactFromCandidate(transactionDb, current, request);
+    const alreadyApproved =
+      current.status === "approved" && current.approvedMemoryFactId === memoryFact.memoryFactId;
+    const candidate = alreadyApproved
+      ? toAdminMemoryCandidateSummary(current)
+      : await markMemoryCandidateApproved(transactionDb, current, memoryFact.memoryFactId, request);
+    const audit = await insertAuditLog(transactionDb, {
+      actor: request.actor,
+      action: "memory_candidate.approved",
+      metadata: {
+        alreadyApproved,
+        candidateKind: candidate.candidateKind,
+        idempotencyKey: request.idempotencyKey,
+        memoryFactId: memoryFact.memoryFactId,
+        ...(request.reason ? { reason: request.reason } : {}),
+        ...(candidate.repoId ? { repoId: candidate.repoId } : {}),
+        status: candidate.status,
+      },
+      orgId: candidate.orgId,
+      requestId: request.requestId,
+      resourceId: candidate.memoryCandidateId,
+      resourceType: "memory_candidate",
+      ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    });
+
+    return {
+      auditLogId: audit.auditLogId,
+      candidate,
+      memoryFact,
+    };
+  });
+}
+
+/** Rejects one memory candidate and records an audit event. */
+async function rejectMemoryCandidate(
+  db: HeimdallDatabase,
+  memoryCandidateId: string,
+  request: AdminMemoryCandidateModerationRequest,
+): Promise<AdminMemoryCandidateRejectionSummary> {
+  return db.transaction(async (tx) => {
+    const transactionDb = tx as HeimdallDatabase;
+    const current = await getMemoryCandidateRow(transactionDb, memoryCandidateId);
+    if (current.status === "approved") {
+      throw new AdminRequestValidationError(
+        "memory_candidate.already_approved",
+        "Approved memory candidates cannot be rejected.",
+        409,
+      );
+    }
+
+    const alreadyRejected = current.status === "rejected";
+    const candidate = alreadyRejected
+      ? toAdminMemoryCandidateSummary(current)
+      : await markMemoryCandidateRejected(transactionDb, current, request);
+    const audit = await insertAuditLog(transactionDb, {
+      actor: request.actor,
+      action: "memory_candidate.rejected",
+      metadata: {
+        alreadyRejected,
+        candidateKind: candidate.candidateKind,
+        idempotencyKey: request.idempotencyKey,
+        ...(request.reason ? { reason: request.reason } : {}),
+        ...(candidate.repoId ? { repoId: candidate.repoId } : {}),
+        status: candidate.status,
+      },
+      orgId: candidate.orgId,
+      requestId: request.requestId,
+      resourceId: candidate.memoryCandidateId,
+      resourceType: "memory_candidate",
+      ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    });
+
+    return {
+      auditLogId: audit.auditLogId,
+      candidate,
+    };
   });
 }
 
@@ -8937,6 +9249,23 @@ async function getMemoryFactRow(
   return row;
 }
 
+/** Gets a memory candidate row or raises a typed not-found error. */
+async function getMemoryCandidateRow(
+  db: HeimdallDatabase,
+  memoryCandidateId: string,
+): Promise<MemoryCandidateRow> {
+  const [row] = await db
+    .select()
+    .from(memoryCandidates)
+    .where(eq(memoryCandidates.memoryCandidateId, memoryCandidateId))
+    .limit(1);
+  if (!row) {
+    throw new AdminControlPlaneNotFoundError("memory_candidate", memoryCandidateId);
+  }
+
+  return row;
+}
+
 /** Converts a memory fact row into a scoped API DTO. */
 function toAdminMemoryFactSummary(row: MemoryFactRow): AdminMemoryFactSummary {
   const metadata = asRecord(row.metadata);
@@ -8963,6 +9292,205 @@ function toAdminMemoryFactSummary(row: MemoryFactRow): AdminMemoryFactSummary {
     text: row.body,
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/** Converts a memory candidate row into a scoped API DTO. */
+function toAdminMemoryCandidateSummary(row: MemoryCandidateRow): AdminMemoryCandidateSummary {
+  const metadata = asRecord(row.metadata);
+
+  return {
+    ...(row.approvedMemoryFactId ? { approvedMemoryFactId: row.approvedMemoryFactId } : {}),
+    candidateKind: row.candidateKind,
+    confidence: normalizedConfidence(row.confidence),
+    createdAt: row.createdAt.toISOString(),
+    ...(row.createdByLogin ? { createdByLogin: row.createdByLogin } : {}),
+    ...(row.decidedAt ? { decidedAt: row.decidedAt.toISOString() } : {}),
+    ...(row.decidedByUserId ? { decidedByUserId: row.decidedByUserId } : {}),
+    ...(row.expiresAt ? { expiresAt: row.expiresAt.toISOString() } : {}),
+    ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    memoryCandidateId: row.memoryCandidateId,
+    orgId: row.orgId,
+    proposedAppliesTo: asRecord(row.proposedAppliesTo),
+    proposedContent: row.proposedContent,
+    proposedScope: asRecord(row.proposedScope),
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    ...(row.sourceFeedbackEventId ? { sourceFeedbackEventId: row.sourceFeedbackEventId } : {}),
+    ...(row.sourceFindingId ? { sourceFindingId: row.sourceFindingId } : {}),
+    sourceKind: row.sourceKind,
+    status: row.status,
+    trustLevel: row.trustLevel,
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+/** Creates or reuses the durable memory fact for one approved candidate. */
+async function createOrGetMemoryFactFromCandidate(
+  db: HeimdallDatabase,
+  candidate: MemoryCandidateRow,
+  request: AdminMemoryCandidateModerationRequest,
+): Promise<AdminMemoryFactSummary> {
+  const memoryFactId =
+    candidate.approvedMemoryFactId ??
+    stablePrefixedId("mem", ["memory_candidate", candidate.memoryCandidateId]);
+  const factType = memoryFactKindForCandidate(candidate.candidateKind);
+  const [inserted] = await db
+    .insert(memoryFacts)
+    .values({
+      body: candidate.proposedContent,
+      confidence: normalizedConfidence(candidate.confidence),
+      expiresAt: candidate.expiresAt,
+      factType,
+      memoryFactId,
+      metadata: memoryFactMetadata({
+        actorUserId: request.actor.actorUserId,
+        idempotencyKey: request.idempotencyKey,
+        inputMetadata: memoryFactMetadataFromCandidate(candidate, request),
+        requestId: request.requestId,
+        source: "feedback",
+        subject: defaultMemorySubject(candidate.proposedContent),
+      }),
+      orgId: candidate.orgId,
+      repoId: candidate.repoId,
+      status: "active",
+    })
+    .onConflictDoNothing()
+    .returning();
+
+  return toAdminMemoryFactSummary(inserted ?? (await getMemoryFactRow(db, memoryFactId)));
+}
+
+/** Marks one memory candidate approved after its durable memory fact exists. */
+async function markMemoryCandidateApproved(
+  db: HeimdallDatabase,
+  candidate: MemoryCandidateRow,
+  memoryFactId: string,
+  request: AdminMemoryCandidateModerationRequest,
+): Promise<AdminMemoryCandidateSummary> {
+  const decisionAt = new Date();
+  const decidedByUserId = await existingUserId(db, request.actor.actorUserId);
+  const [updated] = await db
+    .update(memoryCandidates)
+    .set({
+      approvedMemoryFactId: memoryFactId,
+      decidedAt: decisionAt,
+      decidedByUserId,
+      metadata: memoryCandidateDecisionMetadata(candidate, "approved", request, memoryFactId),
+      status: "approved",
+      updatedAt: decisionAt,
+    })
+    .where(eq(memoryCandidates.memoryCandidateId, candidate.memoryCandidateId))
+    .returning();
+
+  return toAdminMemoryCandidateSummary(requireReturnedRow(updated));
+}
+
+/** Marks one memory candidate rejected. */
+async function markMemoryCandidateRejected(
+  db: HeimdallDatabase,
+  candidate: MemoryCandidateRow,
+  request: AdminMemoryCandidateModerationRequest,
+): Promise<AdminMemoryCandidateSummary> {
+  const decisionAt = new Date();
+  const decidedByUserId = await existingUserId(db, request.actor.actorUserId);
+  const [updated] = await db
+    .update(memoryCandidates)
+    .set({
+      decidedAt: decisionAt,
+      decidedByUserId,
+      metadata: memoryCandidateDecisionMetadata(candidate, "rejected", request),
+      status: "rejected",
+      updatedAt: decisionAt,
+    })
+    .where(eq(memoryCandidates.memoryCandidateId, candidate.memoryCandidateId))
+    .returning();
+
+  return toAdminMemoryCandidateSummary(requireReturnedRow(updated));
+}
+
+/** Returns a valid user ID for FK-backed decision fields when the actor is stored locally. */
+async function existingUserId(db: HeimdallDatabase, userId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ userId: users.userId })
+    .from(users)
+    .where(eq(users.userId, userId))
+    .limit(1);
+  return row?.userId ?? null;
+}
+
+/** Maps a feedback candidate kind to a scoped API memory fact kind. */
+function memoryFactKindForCandidate(candidateKind: string): MemoryFactKind {
+  if (
+    candidateKind === "suppress_exact_finding" ||
+    candidateKind === "suppress_similar_finding" ||
+    candidateKind === "suppress_category_in_scope"
+  ) {
+    return "suppression";
+  }
+  if (candidateKind === "architecture_convention") {
+    return "architecture_note";
+  }
+  if (
+    candidateKind === "team_preference" ||
+    candidateKind === "style_preference" ||
+    candidateKind === "severity_calibration"
+  ) {
+    return "review_preference";
+  }
+  if (candidateKind === "testing_convention") {
+    return "tooling_note";
+  }
+  if (candidateKind === "repo_fact" || candidateKind === "security_convention") {
+    return "repo_convention";
+  }
+
+  return "other";
+}
+
+/** Builds memory fact metadata from the approved candidate and moderation request. */
+function memoryFactMetadataFromCandidate(
+  candidate: MemoryCandidateRow,
+  request: AdminMemoryCandidateModerationRequest,
+): Record<string, unknown> {
+  return {
+    ...asRecord(candidate.metadata),
+    ...(request.metadata ?? {}),
+    candidateKind: candidate.candidateKind,
+    ...(candidate.createdByLogin ? { createdByLogin: candidate.createdByLogin } : {}),
+    memoryCandidateId: candidate.memoryCandidateId,
+    proposedAppliesTo: asRecord(candidate.proposedAppliesTo),
+    proposedScope: asRecord(candidate.proposedScope),
+    ...(request.reason ? { reason: request.reason } : {}),
+    ...(candidate.sourceFeedbackEventId
+      ? { sourceFeedbackEventId: candidate.sourceFeedbackEventId }
+      : {}),
+    ...(candidate.sourceFindingId ? { sourceFindingId: candidate.sourceFindingId } : {}),
+    sourceKind: candidate.sourceKind,
+    trustLevel: candidate.trustLevel,
+  };
+}
+
+/** Builds candidate metadata that captures the latest moderation decision. */
+function memoryCandidateDecisionMetadata(
+  candidate: MemoryCandidateRow,
+  decision: "approved" | "rejected",
+  request: AdminMemoryCandidateModerationRequest,
+  memoryFactId?: string,
+): Record<string, unknown> {
+  return {
+    ...asRecord(candidate.metadata),
+    ...(request.metadata ?? {}),
+    decidedByActorUserId: request.actor.actorUserId,
+    decision,
+    decisionIdempotencyKey: request.idempotencyKey,
+    ...(memoryFactId ? { memoryFactId } : {}),
+    ...(request.reason ? { reason: request.reason } : {}),
+    requestId: request.requestId,
+  };
+}
+
+/** Normalizes a confidence value to the API-supported range. */
+function normalizedConfidence(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 /** Builds stored memory metadata from caller input and audit context. */
@@ -12798,6 +13326,20 @@ async function readMemoryFactPatchBody(request: Request): Promise<MemoryFactPatc
   return patch;
 }
 
+/** Extracts a memory candidate moderation body from JSON with validation. */
+async function readMemoryCandidateModerationBody(
+  request: Request,
+): Promise<MemoryCandidateModerationBody> {
+  const record = asRecord(await request.json().catch(() => undefined));
+  const metadata = optionalMetadataRecord(record);
+  const reason = optionalBoundedStringField(record, "reason", 1000);
+
+  return {
+    ...(metadata ? { metadata } : {}),
+    ...(reason ? { reason } : {}),
+  };
+}
+
 /** Reads a memory fact kind from a JSON record. */
 function readMemoryFactKind(record: Record<string, unknown>, required: true): MemoryFactKind;
 function readMemoryFactKind(
@@ -13575,6 +14117,15 @@ function memoryFactCommandIdempotencyKey(
   requestId: string,
 ): string {
   return request.headers.get("idempotency-key")?.trim() || `${repoId}:${requestId}`;
+}
+
+/** Reads the caller-provided idempotency key for memory candidate moderation requests. */
+function memoryCandidateCommandIdempotencyKey(
+  request: Request,
+  memoryCandidateId: string,
+  requestId: string,
+): string {
+  return request.headers.get("idempotency-key")?.trim() || `${memoryCandidateId}:${requestId}`;
 }
 
 /** Reads a last-known default branch head SHA from repository metadata when present. */

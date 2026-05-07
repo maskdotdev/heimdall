@@ -74,6 +74,15 @@ type AdminReviewRerunRunFixture = Awaited<
   ReturnType<AdminControlPlaneService["enqueueReviewRerun"]>
 >;
 type AdminMemoryFactFixture = Awaited<ReturnType<AdminControlPlaneService["getMemoryFact"]>>;
+type AdminMemoryCandidateFixture = Awaited<
+  ReturnType<AdminControlPlaneService["getMemoryCandidate"]>
+>;
+type AdminMemoryCandidateApprovalFixture = Awaited<
+  ReturnType<AdminControlPlaneService["approveMemoryCandidate"]>
+>;
+type AdminMemoryCandidateRejectionFixture = Awaited<
+  ReturnType<AdminControlPlaneService["rejectMemoryCandidate"]>
+>;
 type AdminBackgroundJobDebugFixture = Awaited<
   ReturnType<AdminDebugService["getBackgroundJobDebugDetails"]>
 >;
@@ -2770,6 +2779,153 @@ describe("api app", () => {
     });
   });
 
+  it("approves and rejects scoped API v1 memory candidates", async () => {
+    const approvalRequests: Parameters<AdminControlPlaneService["approveMemoryCandidate"]>[1][] =
+      [];
+    const rejectionRequests: Parameters<AdminControlPlaneService["rejectMemoryCandidate"]>[1][] =
+      [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        approveMemoryCandidate: async (memoryCandidateId, request) => {
+          approvalRequests.push(request);
+          return memoryCandidateApprovalFixture({
+            candidate: memoryCandidateFixture({
+              approvedMemoryFactId: "mem_from_candidate",
+              memoryCandidateId,
+              status: "approved",
+            }),
+          });
+        },
+        getMemoryCandidate: async (memoryCandidateId) =>
+          memoryCandidateFixture({ memoryCandidateId }),
+        rejectMemoryCandidate: async (memoryCandidateId, request) => {
+          rejectionRequests.push(request);
+          return memoryCandidateRejectionFixture({
+            candidate: memoryCandidateFixture({
+              memoryCandidateId,
+              status: "rejected",
+            }),
+          });
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.settings.manage"],
+      providerSubject: "usr_admin",
+    });
+
+    const approvalResponse = await app.handle(
+      new Request("http://localhost/api/v1/memory-candidates/mcand_approve/approve", {
+        body: JSON.stringify({
+          metadata: { reviewedIn: "memory-dashboard" },
+          reason: "Matches the repository guidance.",
+        }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "idem_candidate_approve",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+        method: "POST",
+      }),
+    );
+    const rejectionResponse = await app.handle(
+      new Request("http://localhost/api/v1/memory-candidates/mcand_reject/reject", {
+        body: JSON.stringify({
+          reason: "Too broad for this repository.",
+        }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "idem_candidate_reject",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(approvalResponse.status).toBe(200);
+    expect(rejectionResponse.status).toBe(200);
+    expect(approvalRequests).toEqual([
+      expect.objectContaining({
+        idempotencyKey: "idem_candidate_approve",
+        reason: "Matches the repository guidance.",
+      }),
+    ]);
+    expect(rejectionRequests).toEqual([
+      expect.objectContaining({
+        idempotencyKey: "idem_candidate_reject",
+        reason: "Too broad for this repository.",
+      }),
+    ]);
+    await expect(approvalResponse.json()).resolves.toMatchObject({
+      data: {
+        candidate: {
+          approvedMemoryFactId: "mem_from_candidate",
+          memoryCandidateId: "mcand_approve",
+          status: "approved",
+        },
+        memoryFact: {
+          memoryFactId: "mem_from_candidate",
+        },
+      },
+    });
+    await expect(rejectionResponse.json()).resolves.toMatchObject({
+      data: {
+        candidate: {
+          memoryCandidateId: "mcand_reject",
+          status: "rejected",
+        },
+      },
+    });
+  });
+
+  it("blocks cross-scope memory candidate writes before mutation", async () => {
+    let approveCalled = false;
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        approveMemoryCandidate: async () => {
+          approveCalled = true;
+          return memoryCandidateApprovalFixture();
+        },
+        getMemoryCandidate: async () => memoryCandidateFixture({ orgId: "org_1" }),
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_2"],
+      permissions: ["admin.settings.manage"],
+      providerSubject: "usr_admin",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/api/v1/memory-candidates/mcand_1/approve", {
+        body: JSON.stringify({
+          reason: "Looks correct.",
+        }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(approveCalled).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "admin.scope_forbidden" },
+    });
+  });
+
   it("blocks cross-scope memory writes before mutation", async () => {
     let createCalled = false;
     const app = createApiApp({
@@ -4833,6 +4989,7 @@ function createMockControlPlaneService(
       provider: "stripe",
       url: "https://billing.stripe.test/session",
     }),
+    approveMemoryCandidate: async () => memoryCandidateApprovalFixture(),
     createRepositoryMemoryFact: async () => memoryFactFixture(),
     createRepositoryRule: async () => repoRuleSummaryFixture(),
     createReviewArtifactDownloadUrl: async () => reviewArtifactDownloadUrlFixture(),
@@ -4857,6 +5014,7 @@ function createMockControlPlaneService(
     getBillingSummary: async () => billingSummaryFixture(),
     getEntitlementSummary: async () => entitlementSummaryFixture(),
     getBillingReconciliation: async () => billingReconciliationFixture(),
+    getMemoryCandidate: async () => memoryCandidateFixture(),
     getMemoryFact: async () => memoryFactFixture(),
     getOrganization: async () => organizationFixture(),
     getProductUsageSummary: async () => productUsageSummaryFixture(),
@@ -4890,6 +5048,7 @@ function createMockControlPlaneService(
     },
     listAuditLogs: async () => [],
     recordFindingOutcome: async () => findingOutcomeRecordFixture(),
+    rejectMemoryCandidate: async () => memoryCandidateRejectionFixture(),
     suppressSimilarFinding: async () => findingSuppressionFixture(),
     recordAuditEvent: async (event) => auditLog(event.action),
     updateMemoryFact: async () => memoryFactFixture(),
@@ -5173,6 +5332,77 @@ function memoryFactFixture(
     subject: "Provider retry policy",
     text: "Prefer bounded retries for provider calls.",
     updatedAt: "2026-05-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Creates a memory candidate fixture. */
+function memoryCandidateFixture(
+  overrides: Partial<AdminMemoryCandidateFixture> = {},
+): AdminMemoryCandidateFixture {
+  return {
+    candidateKind: "repo_fact",
+    confidence: 0.8,
+    createdAt: "2026-05-05T12:00:00.000Z",
+    createdByLogin: "maintainer",
+    memoryCandidateId: "mcand_1",
+    metadata: {
+      source: "feedback",
+    },
+    orgId: "org_1",
+    proposedAppliesTo: {
+      pathGlobs: ["src/**"],
+    },
+    proposedContent: "Prefer bounded retries for provider calls.",
+    proposedScope: {
+      level: "repository",
+      orgId: "org_1",
+      repoId: "repo_1",
+    },
+    repoId: "repo_1",
+    sourceKind: "comment_feedback",
+    status: "pending",
+    trustLevel: "explicit_maintainer",
+    updatedAt: "2026-05-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Creates a memory candidate approval fixture. */
+function memoryCandidateApprovalFixture(
+  overrides: Partial<AdminMemoryCandidateApprovalFixture> = {},
+): AdminMemoryCandidateApprovalFixture {
+  return {
+    auditLogId: "audit_memory_candidate_approval",
+    candidate: memoryCandidateFixture({
+      approvedMemoryFactId: "mem_from_candidate",
+      decidedAt: "2026-05-05T13:00:00.000Z",
+      decidedByUserId: "usr_admin",
+      status: "approved",
+    }),
+    memoryFact: memoryFactFixture({
+      memoryFactId: "mem_from_candidate",
+      metadata: {
+        memoryCandidateId: "mcand_1",
+        source: "feedback",
+      },
+      source: "feedback",
+    }),
+    ...overrides,
+  };
+}
+
+/** Creates a memory candidate rejection fixture. */
+function memoryCandidateRejectionFixture(
+  overrides: Partial<AdminMemoryCandidateRejectionFixture> = {},
+): AdminMemoryCandidateRejectionFixture {
+  return {
+    auditLogId: "audit_memory_candidate_rejection",
+    candidate: memoryCandidateFixture({
+      decidedAt: "2026-05-05T13:00:00.000Z",
+      decidedByUserId: "usr_admin",
+      status: "rejected",
+    }),
     ...overrides,
   };
 }
