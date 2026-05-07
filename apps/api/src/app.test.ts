@@ -476,6 +476,41 @@ describe("api app", () => {
             warnings: result.warnings,
           };
         },
+        testRepositoryPolicy: async (_repoId, request) => {
+          calls.push(`test:${request.finding.location.path}`);
+          const result = buildReviewPolicySnapshot({
+            repository: repositoryFixture,
+            settings: settingsFixture,
+          });
+          return {
+            findingDecision: {
+              reasonCode: "suppressed_by_repo_rule",
+              severity: request.finding.severity,
+              shouldPublish: false,
+              trace: result.trace,
+            },
+            pathClassification: {
+              config: false,
+              documentation: false,
+              generated: true,
+              ignored: false,
+              included: true,
+              matchedPatterns: ["**/generated/**"],
+              path: request.finding.location.path,
+              reasonCodes: ["path_included", "generated_path"],
+              test: false,
+              trace: result.trace,
+              vendored: false,
+            },
+            preview: {
+              effectivePolicy: result.snapshot.effectivePolicy,
+              policyHash: "sha256:product-test",
+              policySnapshotId: "pol_product_test",
+              trace: result.trace,
+              warnings: result.warnings,
+            },
+          };
+        },
         updateRepositoryRule: async (_repoId, ruleId, request) => {
           calls.push(`update:${ruleId}:${request.enabled}`);
           return repoRuleSummaryFixture({
@@ -517,6 +552,27 @@ describe("api app", () => {
         method: "POST",
       }),
     );
+    const testResponse = await app.handle(
+      new Request("http://localhost/api/v1/repositories/repo_1/policy-test", {
+        body: JSON.stringify({
+          finding: {
+            body: "Generated client docs are intentionally omitted.",
+            category: "documentation",
+            confidence: 0.87,
+            location: {
+              isInDiff: true,
+              line: 12,
+              path: "src/generated/client.ts",
+              side: "RIGHT",
+            },
+            severity: "medium",
+            title: "Generated client method is missing docs",
+          },
+        }),
+        headers: productHeaders,
+        method: "POST",
+      }),
+    );
     const updateResponse = await app.handle(
       new Request("http://localhost/api/v1/repositories/repo_1/rules/rule_1", {
         body: JSON.stringify({ enabled: false }),
@@ -534,11 +590,13 @@ describe("api app", () => {
     expect(listResponse.status).toBe(200);
     expect(previewResponse.status).toBe(200);
     expect(createResponse.status).toBe(201);
+    expect(testResponse.status).toBe(200);
     expect(updateResponse.status).toBe(200);
     expect(deleteResponse.status).toBe(200);
     expect(observedPatch).toEqual({ maxCommentsPerReview: 4, reviewPolicy: "summary_only" });
     expect(calls).toEqual([
       "create:context:Public API guidance",
+      "test:src/generated/client.ts",
       "update:rule_1:false",
       "delete:rule_1",
     ]);
@@ -549,6 +607,13 @@ describe("api app", () => {
       data: {
         effectivePolicy: { reviewPolicy: "summary_only" },
         policyHash: "sha256:product-preview",
+      },
+    });
+    await expect(testResponse.json()).resolves.toMatchObject({
+      data: {
+        findingDecision: { reasonCode: "suppressed_by_repo_rule", shouldPublish: false },
+        pathClassification: { generated: true, path: "src/generated/client.ts" },
+        preview: { policyHash: "sha256:product-test" },
       },
     });
   });
@@ -4642,6 +4707,7 @@ describe("api app", () => {
 
   it("previews repository policy with a draft settings patch", async () => {
     let observedPatch: UpdateRepositoryControlPlaneSettingsRequest | undefined;
+    let observedTestPath: string | undefined;
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({
@@ -4670,6 +4736,41 @@ describe("api app", () => {
             ],
           };
         },
+        testRepositoryPolicy: async (_repoId, request) => {
+          observedTestPath = request.finding.location.path;
+          const result = buildReviewPolicySnapshot({
+            repository: repositoryFixture,
+            settings: settingsFixture,
+          });
+          return {
+            findingDecision: {
+              reasonCode: "below_severity_threshold",
+              severity: request.finding.severity,
+              shouldPublish: false,
+              trace: result.trace,
+            },
+            pathClassification: {
+              config: false,
+              documentation: false,
+              generated: false,
+              ignored: false,
+              included: true,
+              matchedPatterns: [],
+              path: request.finding.location.path,
+              reasonCodes: ["path_included"],
+              test: false,
+              trace: result.trace,
+              vendored: false,
+            },
+            preview: {
+              effectivePolicy: result.snapshot.effectivePolicy,
+              policyHash: "sha256:policy-test",
+              policySnapshotId: "pol_policy_test",
+              trace: result.trace,
+              warnings: result.warnings,
+            },
+          };
+        },
       }),
       githubWebhookHandler: noopWebhookHandler(),
     });
@@ -4691,14 +4792,50 @@ describe("api app", () => {
         },
       }),
     );
+    const testResponse = await app.handle(
+      new Request("http://localhost/admin/repos/repo_1/policy-test", {
+        method: "POST",
+        body: JSON.stringify({
+          settingsPatch: { severityThreshold: "high" },
+          finding: {
+            body: "The changed line can return NaN.",
+            category: "correctness",
+            confidence: 0.82,
+            location: {
+              isInDiff: true,
+              line: 2,
+              path: "src/math.ts",
+              side: "RIGHT",
+            },
+            severity: "medium",
+            title: "Handle non-finite numeric inputs",
+          },
+        }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+      }),
+    );
 
     expect(response.status).toBe(200);
+    expect(testResponse.status).toBe(200);
     expect(observedPatch).toEqual({ maxCommentsPerReview: 50, reviewPolicy: "summary_only" });
+    expect(observedTestPath).toBe("src/math.ts");
     await expect(response.json()).resolves.toMatchObject({
       data: {
         effectivePolicy: { reviewPolicy: "summary_only" },
         policyHash: "sha256:preview",
         warnings: [{ code: "comment_budget_clamped_by_safety_floor" }],
+      },
+    });
+    await expect(testResponse.json()).resolves.toMatchObject({
+      data: {
+        findingDecision: { reasonCode: "below_severity_threshold", shouldPublish: false },
+        pathClassification: { included: true, path: "src/math.ts" },
+        preview: { policyHash: "sha256:policy-test" },
       },
     });
   });
@@ -5077,6 +5214,40 @@ function createMockControlPlaneService(
         policySnapshotId: result.snapshot.policySnapshotId,
         trace: result.trace,
         warnings: result.warnings,
+      };
+    },
+    testRepositoryPolicy: async () => {
+      const result = buildReviewPolicySnapshot({
+        repository: repositoryFixture,
+        settings: settingsFixture,
+      });
+      return {
+        findingDecision: {
+          reasonCode: "finding_allowed",
+          severity: "medium",
+          shouldPublish: true,
+          trace: result.trace,
+        },
+        pathClassification: {
+          config: false,
+          documentation: false,
+          generated: false,
+          ignored: false,
+          included: true,
+          matchedPatterns: [],
+          path: "src/math.ts",
+          reasonCodes: ["path_included"],
+          test: false,
+          trace: result.trace,
+          vendored: false,
+        },
+        preview: {
+          effectivePolicy: result.snapshot.effectivePolicy,
+          policyHash: result.snapshot.policyHash,
+          policySnapshotId: result.snapshot.policySnapshotId,
+          trace: result.trace,
+          warnings: result.warnings,
+        },
       };
     },
     listAuditLogs: async () => [],

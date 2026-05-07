@@ -56,6 +56,8 @@ import {
   type ReviewPullRequestJobPayload,
   type SyncInstallationJobPayload,
   safeParseWithSchema,
+  type TestRepositoryPolicyRequest,
+  TestRepositoryPolicyRequestSchema,
   type UpdateMemoryJobPayload,
   type UpdateRepoRuleRequest,
   UpdateRepoRuleRequestSchema,
@@ -114,7 +116,12 @@ import { QUEUE_NAMES } from "@repo/queue";
 import {
   type BuildReviewPolicySnapshotResult,
   buildReviewPolicySnapshot,
+  classifyPath,
   type EffectiveReviewPolicy,
+  type EvaluateFindingPolicyInput,
+  evaluateFindingPolicy,
+  type FindingPolicyDecision,
+  type PathClassification,
   type PolicyDecisionTrace,
   type PolicyWarning,
 } from "@repo/rules";
@@ -813,6 +820,16 @@ type AdminRepositoryPolicyPreview = {
   readonly warnings: readonly PolicyWarning[];
   /** Compiler trace safe for support surfaces. */
   readonly trace: PolicyDecisionTrace;
+};
+
+/** Policy test response for a sample finding and path. */
+type AdminRepositoryPolicyTest = {
+  /** Effective policy preview used for this test. */
+  readonly preview: AdminRepositoryPolicyPreview;
+  /** Path classification for the sample finding location. */
+  readonly pathClassification: PathClassification;
+  /** Finding policy decision for the sample finding. */
+  readonly findingDecision: FindingPolicyDecision;
 };
 
 /** Repository discovery row returned by admin overview and repository list routes. */
@@ -2317,6 +2334,11 @@ export type AdminControlPlaneService = {
     repoId: string,
     patch: UpdateRepositoryControlPlaneSettingsRequest,
   ) => Promise<AdminRepositoryPolicyPreview>;
+  /** Tests the effective review policy against a sample finding. */
+  readonly testRepositoryPolicy: (
+    repoId: string,
+    request: TestRepositoryPolicyRequest,
+  ) => Promise<AdminRepositoryPolicyTest>;
   /** Gets repository control-plane settings. */
   readonly getRepositorySettings: (repoId: string) => Promise<AdminControlPlaneSettings>;
   /** Updates repository control-plane settings and writes an audit log in the same transaction. */
@@ -3464,6 +3486,57 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           parsed.value,
         );
         return { data: preview };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
+    .post("/api/v1/repositories/:repoId/policy-test", async ({ params, request, set }) => {
+      const guardResult = await guardApiV1Session(
+        request,
+        set,
+        adminAuth,
+        productSessionAuth,
+        getProductSessionService,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const parsed = safeParseWithSchema(
+        "TestRepositoryPolicyRequest",
+        TestRepositoryPolicyRequestSchema,
+        await request.json().catch(() => undefined),
+      );
+      if (!parsed.ok) {
+        set.status = 400;
+        return {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+          },
+        };
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().getRepositorySettings(params.repoId);
+        const authorizationResponse = guardApiV1ScopedAccess(
+          guardResult,
+          settings.repository.orgId,
+          settings.repository.repoId,
+          "rule:read",
+          set,
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const test = await getAdminControlPlaneService().testRepositoryPolicy(
+          params.repoId,
+          parsed.value,
+        );
+        return { data: test };
       } catch (error) {
         return handleAdminControlPlaneError(error, set);
       }
@@ -5579,6 +5652,54 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         return handleAdminControlPlaneError(error, set);
       }
     })
+    .post("/admin/repos/:repoId/policy-test", async ({ params, request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const parsed = safeParseWithSchema(
+        "TestRepositoryPolicyRequest",
+        TestRepositoryPolicyRequestSchema,
+        await request.json().catch(() => undefined),
+      );
+      if (!parsed.ok) {
+        set.status = 400;
+        return {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+          },
+        };
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().getRepositorySettings(params.repoId);
+        const authorizationResponse = guardScopedAccess(
+          guardResult.actor,
+          settings.repository.orgId,
+          settings.repository.repoId,
+          set,
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const test = await getAdminControlPlaneService().testRepositoryPolicy(
+          params.repoId,
+          parsed.value,
+        );
+        return { data: test };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
     .get("/admin/repos/:repoId/settings", async ({ params, request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -6105,6 +6226,8 @@ function createAdminControlPlaneService(dependencies: {
     listUsageSummary: (query) => listUsageSummary(dependencies.db, query),
     previewRepositoryPolicy: (repoId, patch) =>
       previewRepositoryPolicy(dependencies.db, repoId, patch),
+    testRepositoryPolicy: (repoId, request) =>
+      testRepositoryPolicy(dependencies.db, repoId, request),
     recordFindingOutcome: (findingId, request) =>
       recordFindingOutcome(dependencies.db, findingId, request),
     rejectMemoryCandidate: (memoryCandidateId, request) =>
@@ -10143,6 +10266,46 @@ async function previewRepositoryPolicy(
   repoId: string,
   patch: UpdateRepositoryControlPlaneSettingsRequest,
 ): Promise<AdminRepositoryPolicyPreview> {
+  return policyPreviewFromResult(await buildRepositoryPolicySnapshotForPreview(db, repoId, patch));
+}
+
+/** Tests the effective review policy against a sample finding and path. */
+async function testRepositoryPolicy(
+  db: HeimdallDatabase,
+  repoId: string,
+  request: TestRepositoryPolicyRequest,
+): Promise<AdminRepositoryPolicyTest> {
+  const result = await buildRepositoryPolicySnapshotForPreview(
+    db,
+    repoId,
+    request.settingsPatch ?? {},
+  );
+  const policy = result.snapshot.effectivePolicy;
+  const pathClassification = classifyPath({
+    path: request.finding.location.path,
+    policy,
+    ...(request.pathLineCount !== undefined ? { lineCount: request.pathLineCount } : {}),
+    ...(request.pathSizeBytes !== undefined ? { sizeBytes: request.pathSizeBytes } : {}),
+  });
+  const findingDecision = evaluateFindingPolicy({
+    finding: policyTestFindingFromRequest(request),
+    pathClassification,
+    policy,
+  });
+
+  return {
+    findingDecision,
+    pathClassification,
+    preview: policyPreviewFromResult(result),
+  };
+}
+
+/** Builds an effective policy snapshot for preview and local policy tests. */
+async function buildRepositoryPolicySnapshotForPreview(
+  db: HeimdallDatabase,
+  repoId: string,
+  patch: UpdateRepositoryControlPlaneSettingsRequest,
+): Promise<BuildReviewPolicySnapshotResult> {
   const current = await getRepositorySettings(db, repoId);
   const timestamp = new Date().toISOString();
   const settings = {
@@ -10159,14 +10322,37 @@ async function previewRepositoryPolicy(
     repoId,
   });
 
-  return policyPreviewFromResult(
-    buildReviewPolicySnapshot({
-      activeRules,
-      repository,
-      settings,
-      timestamp,
-    }),
-  );
+  return buildReviewPolicySnapshot({
+    activeRules,
+    repository,
+    settings,
+    timestamp,
+  });
+}
+
+/** Converts a policy test request into the finding shape used by rule evaluation. */
+function policyTestFindingFromRequest(
+  request: TestRepositoryPolicyRequest,
+): EvaluateFindingPolicyInput["finding"] {
+  return {
+    body: request.finding.body,
+    category: request.finding.category,
+    confidence: request.finding.confidence,
+    evidence:
+      request.finding.evidence && request.finding.evidence.length > 0
+        ? request.finding.evidence
+        : [
+            {
+              confidence: request.finding.confidence,
+              evidenceId: "ev_policy_test",
+              kind: "repo_rule",
+              summary: "Synthetic evidence for local policy testing.",
+            },
+          ],
+    location: request.finding.location,
+    severity: request.finding.severity,
+    title: request.finding.title,
+  };
 }
 
 /** Converts a typed repository rule to the admin API summary shape. */
