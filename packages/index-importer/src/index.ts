@@ -16,6 +16,15 @@ import {
 import type { ChunkRecord } from "@repo/index-schema";
 import type { IndexArtifact } from "@repo/indexer-driver";
 import { validateIndexArtifact } from "@repo/indexer-driver";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
 
 export const packageName = "@repo/index-importer" as const;
@@ -69,6 +78,12 @@ export type ImportIndexArtifactOptions = {
   readonly embeddingModel?: string;
   /** Maximum chunk IDs per embedding job. */
   readonly embeddingBatchSize?: number;
+  /** Optional metric recorder for aggregate index-import telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional trace context propagated from the durable indexing job. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe index-import spans. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Options for importing an artifact by resolving its URI first. */
@@ -91,6 +106,19 @@ export type ImportIndexArtifactResult = {
   readonly chunkCount: number;
   /** Number of queued embedding jobs. */
   readonly embeddingJobCount: number;
+};
+
+type IndexImporterTelemetryStatus = "failed" | "succeeded";
+
+type IndexImporterTelemetryState = {
+  /** Low-cardinality labels shared by index-import metrics. */
+  readonly labels: Readonly<{
+    readonly indexer: string;
+  }>;
+  /** Monotonic start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Product-safe import span. */
+  readonly span: TelemetrySpanHandle | undefined;
 };
 
 /** Creates a resolver that reads whole-artifact JSON files from file URLs or local paths. */
@@ -190,175 +218,314 @@ export async function importIndexArtifact(
   artifact: IndexArtifact,
   options: ImportIndexArtifactOptions,
 ): Promise<ImportIndexArtifactResult> {
+  const telemetry = startIndexImporterTelemetry(artifact, options);
   const validationErrors = validateIndexArtifact(artifact);
   if (validationErrors.length > 0) {
+    finishIndexImporterTelemetry(options.metrics, telemetry, {
+      error: new Error(`Invalid index artifact validation failed: ${validationErrors.join("; ")}`),
+      status: "failed",
+      validationFailureCount: validationErrors.length,
+    });
     throw new Error(`Invalid index artifact: ${validationErrors.join("; ")}`);
   }
 
-  const indexVersionId = stableId("idx", [
-    artifact.manifest.repoId,
-    artifact.manifest.commitSha,
-    artifact.manifest.indexerName,
-    artifact.manifest.indexerVersion,
-    artifact.manifest.chunkerVersion,
-  ]);
-  const artifactHash = artifact.manifest.artifactHash ?? hashArtifact(artifact);
-  const files = artifact.records.filter((record) => record.type === "file");
-  const symbolRecords = artifact.records.filter((record) => record.type === "symbol");
-  const edgeRecords = artifact.records.filter((record) => record.type === "edge");
-  const chunks = artifact.records.filter(
-    (record): record is ChunkRecord => record.type === "chunk",
-  );
+  try {
+    const indexVersionId = stableId("idx", [
+      artifact.manifest.repoId,
+      artifact.manifest.commitSha,
+      artifact.manifest.indexerName,
+      artifact.manifest.indexerVersion,
+      artifact.manifest.chunkerVersion,
+    ]);
+    const artifactHash = artifact.manifest.artifactHash ?? hashArtifact(artifact);
+    const files = artifact.records.filter((record) => record.type === "file");
+    const symbolRecords = artifact.records.filter((record) => record.type === "symbol");
+    const edgeRecords = artifact.records.filter((record) => record.type === "edge");
+    const chunks = artifact.records.filter(
+      (record): record is ChunkRecord => record.type === "chunk",
+    );
 
-  await options.db.transaction(async (tx) => {
-    await tx
-      .insert(codeIndexVersions)
-      .values({
-        indexVersionId,
-        repoId: artifact.manifest.repoId,
-        commitSha: artifact.manifest.commitSha,
-        indexKey: [
-          artifact.manifest.indexerName,
-          artifact.manifest.indexerVersion,
-          artifact.manifest.chunkerVersion,
-        ].join(":"),
-        status: "ready",
-        artifactUri: options.artifactUri,
-        artifactHash,
-        indexerName: artifact.manifest.indexerName,
-        indexerVersion: artifact.manifest.indexerVersion,
-        chunkerVersion: artifact.manifest.chunkerVersion,
-        fileCount: files.length,
-        symbolCount: symbolRecords.length,
-        edgeCount: edgeRecords.length,
-        chunkCount: chunks.length,
-        embeddedChunkCount: 0,
-        completedAt: new Date(artifact.manifest.generatedAt),
-      })
-      .onConflictDoUpdate({
-        target: [codeIndexVersions.repoId, codeIndexVersions.commitSha, codeIndexVersions.indexKey],
-        set: {
+    await options.db.transaction(async (tx) => {
+      await tx
+        .insert(codeIndexVersions)
+        .values({
+          indexVersionId,
+          repoId: artifact.manifest.repoId,
+          commitSha: artifact.manifest.commitSha,
+          indexKey: [
+            artifact.manifest.indexerName,
+            artifact.manifest.indexerVersion,
+            artifact.manifest.chunkerVersion,
+          ].join(":"),
           status: "ready",
           artifactUri: options.artifactUri,
           artifactHash,
+          indexerName: artifact.manifest.indexerName,
+          indexerVersion: artifact.manifest.indexerVersion,
+          chunkerVersion: artifact.manifest.chunkerVersion,
           fileCount: files.length,
           symbolCount: symbolRecords.length,
           edgeCount: edgeRecords.length,
           chunkCount: chunks.length,
+          embeddedChunkCount: 0,
           completedAt: new Date(artifact.manifest.generatedAt),
-          error: null,
-        },
-      });
+        })
+        .onConflictDoUpdate({
+          target: [
+            codeIndexVersions.repoId,
+            codeIndexVersions.commitSha,
+            codeIndexVersions.indexKey,
+          ],
+          set: {
+            status: "ready",
+            artifactUri: options.artifactUri,
+            artifactHash,
+            fileCount: files.length,
+            symbolCount: symbolRecords.length,
+            edgeCount: edgeRecords.length,
+            chunkCount: chunks.length,
+            completedAt: new Date(artifact.manifest.generatedAt),
+            error: null,
+          },
+        });
 
-    if (files.length > 0) {
-      await tx
-        .insert(indexedFiles)
-        .values(
-          files.map((file) => ({
-            fileId: file.fileId,
-            indexVersionId,
-            repoId: file.repoId,
-            commitSha: file.commitSha,
-            path: file.path,
-            language: file.language,
-            contentHash: file.contentHash,
-            sizeBytes: file.sizeBytes,
-            lineCount: file.lineCount,
-            isBinary: file.isBinary,
-            isGenerated: file.isGenerated,
-            isTest: file.isTest,
-            isVendored: file.isVendored,
-            metadata: file.metadata,
-          })),
-        )
-        .onConflictDoNothing();
-    }
+      if (files.length > 0) {
+        await tx
+          .insert(indexedFiles)
+          .values(
+            files.map((file) => ({
+              fileId: file.fileId,
+              indexVersionId,
+              repoId: file.repoId,
+              commitSha: file.commitSha,
+              path: file.path,
+              language: file.language,
+              contentHash: file.contentHash,
+              sizeBytes: file.sizeBytes,
+              lineCount: file.lineCount,
+              isBinary: file.isBinary,
+              isGenerated: file.isGenerated,
+              isTest: file.isTest,
+              isVendored: file.isVendored,
+              metadata: file.metadata,
+            })),
+          )
+          .onConflictDoNothing();
+      }
 
-    if (symbolRecords.length > 0) {
-      await tx
-        .insert(symbols)
-        .values(
-          symbolRecords.map((symbol) => ({
-            symbolId: symbol.symbolId,
-            indexVersionId,
-            fileId: symbol.fileId,
-            repoId: symbol.repoId,
-            commitSha: symbol.commitSha,
-            path: symbol.path,
-            language: symbol.language,
-            name: symbol.name,
-            qualifiedName: symbol.qualifiedName,
-            kind: symbol.kind,
-            startLine: symbol.range.startLine,
-            endLine: symbol.range.endLine,
-            contentHash: symbol.contentHash,
-            metadata: { ...symbol.metadata, signature: symbol.signature },
-          })),
-        )
-        .onConflictDoNothing();
-    }
+      if (symbolRecords.length > 0) {
+        await tx
+          .insert(symbols)
+          .values(
+            symbolRecords.map((symbol) => ({
+              symbolId: symbol.symbolId,
+              indexVersionId,
+              fileId: symbol.fileId,
+              repoId: symbol.repoId,
+              commitSha: symbol.commitSha,
+              path: symbol.path,
+              language: symbol.language,
+              name: symbol.name,
+              qualifiedName: symbol.qualifiedName,
+              kind: symbol.kind,
+              startLine: symbol.range.startLine,
+              endLine: symbol.range.endLine,
+              contentHash: symbol.contentHash,
+              metadata: { ...symbol.metadata, signature: symbol.signature },
+            })),
+          )
+          .onConflictDoNothing();
+      }
 
-    if (edgeRecords.length > 0) {
-      await tx
-        .insert(codeEdges)
-        .values(
-          edgeRecords.map((edge) => ({
-            edgeId: edge.edgeId,
-            indexVersionId,
-            repoId: edge.repoId,
-            commitSha: edge.commitSha,
-            fromId: edge.fromId,
-            toId: edge.toId,
-            fromKind: edge.fromKind,
-            toKind: edge.toKind,
-            kind: edge.kind,
-            confidence: edge.confidence,
-            metadata: edge.metadata,
-          })),
-        )
-        .onConflictDoNothing();
-    }
+      if (edgeRecords.length > 0) {
+        await tx
+          .insert(codeEdges)
+          .values(
+            edgeRecords.map((edge) => ({
+              edgeId: edge.edgeId,
+              indexVersionId,
+              repoId: edge.repoId,
+              commitSha: edge.commitSha,
+              fromId: edge.fromId,
+              toId: edge.toId,
+              fromKind: edge.fromKind,
+              toKind: edge.toKind,
+              kind: edge.kind,
+              confidence: edge.confidence,
+              metadata: edge.metadata,
+            })),
+          )
+          .onConflictDoNothing();
+      }
 
-    if (chunks.length > 0) {
-      await tx
-        .insert(codeChunks)
-        .values(
-          chunks.map((chunk) => ({
-            chunkId: chunk.chunkId,
-            indexVersionId,
-            fileId: chunk.fileId,
-            symbolId: chunk.symbolId,
-            repoId: chunk.repoId,
-            path: chunk.path,
-            startLine: chunk.range.startLine,
-            endLine: chunk.range.endLine,
-            contentHash: chunk.contentHash,
-            embeddingStatus: "pending",
-            metadata: {
-              ...chunk.metadata,
-              language: chunk.language,
-              kind: chunk.kind,
-              text: chunk.text,
-              tokenEstimate: chunk.tokenEstimate,
-            },
-          })),
-        )
-        .onConflictDoNothing();
-    }
+      if (chunks.length > 0) {
+        await tx
+          .insert(codeChunks)
+          .values(
+            chunks.map((chunk) => ({
+              chunkId: chunk.chunkId,
+              indexVersionId,
+              fileId: chunk.fileId,
+              symbolId: chunk.symbolId,
+              repoId: chunk.repoId,
+              path: chunk.path,
+              startLine: chunk.range.startLine,
+              endLine: chunk.range.endLine,
+              contentHash: chunk.contentHash,
+              embeddingStatus: "pending",
+              metadata: {
+                ...chunk.metadata,
+                language: chunk.language,
+                kind: chunk.kind,
+                text: chunk.text,
+                tokenEstimate: chunk.tokenEstimate,
+              },
+            })),
+          )
+          .onConflictDoNothing();
+      }
+    });
+
+    const embeddingJobCount = options.enqueueEmbeddings
+      ? await enqueueEmbeddingBatches(indexVersionId, artifact.manifest.repoId, chunks, options)
+      : 0;
+    const result = {
+      indexVersionId,
+      fileCount: files.length,
+      symbolCount: symbolRecords.length,
+      edgeCount: edgeRecords.length,
+      chunkCount: chunks.length,
+      embeddingJobCount,
+    } satisfies ImportIndexArtifactResult;
+    finishIndexImporterTelemetry(options.metrics, telemetry, {
+      artifact,
+      result,
+      status: "succeeded",
+    });
+    return result;
+  } catch (error) {
+    finishIndexImporterTelemetry(options.metrics, telemetry, { error, status: "failed" });
+    throw error;
+  }
+}
+
+/** Starts product-safe index-import telemetry and returns shared metric labels. */
+function startIndexImporterTelemetry(
+  artifact: IndexArtifact,
+  options: ImportIndexArtifactOptions,
+): IndexImporterTelemetryState {
+  const labels = { indexer: normalizeIndexImporterLabel(artifact.manifest.indexerName) };
+  const span = options.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.indexImporterImportArtifact, {
+    attributes: {
+      "app.repo_id": artifact.manifest.repoId,
+      "index_importer.chunk_count": artifact.manifest.chunkCount,
+      "index_importer.edge_count": artifact.manifest.edgeCount,
+      "index_importer.file_count": artifact.manifest.fileCount,
+      "index_importer.indexer": labels.indexer,
+      "index_importer.record_count": artifact.manifest.recordCount,
+      "index_importer.schema_version": artifact.manifest.schemaVersion,
+      "index_importer.symbol_count": artifact.manifest.symbolCount,
+    },
+    ...(options.traceContext ? { traceContext: options.traceContext } : {}),
   });
 
-  const embeddingJobCount = options.enqueueEmbeddings
-    ? await enqueueEmbeddingBatches(indexVersionId, artifact.manifest.repoId, chunks, options)
-    : 0;
-
   return {
-    indexVersionId,
-    fileCount: files.length,
-    symbolCount: symbolRecords.length,
-    edgeCount: edgeRecords.length,
-    chunkCount: chunks.length,
-    embeddingJobCount,
+    labels,
+    span,
+    startedAtMs: Date.now(),
   };
+}
+
+/** Ends an index-import span and emits aggregate import metrics. */
+function finishIndexImporterTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: IndexImporterTelemetryState,
+  input: {
+    /** Imported artifact, when import reached record classification. */
+    readonly artifact?: IndexArtifact;
+    /** Error raised while importing, when the operation failed. */
+    readonly error?: unknown;
+    /** Import result, when the operation succeeded. */
+    readonly result?: ImportIndexArtifactResult;
+    /** Final index-import status. */
+    readonly status: IndexImporterTelemetryStatus;
+    /** Number of artifact validation failures, when validation failed. */
+    readonly validationFailureCount?: number;
+  },
+): void {
+  const durationMs = Date.now() - telemetry.startedAtMs;
+  const labels = {
+    ...telemetry.labels,
+    ...(input.error === undefined ? {} : { error_class: classifyTelemetryError(input.error) }),
+    status: input.status,
+  };
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.indexImporterImportsTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.indexImporterDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+
+  if (input.artifact) {
+    recordIndexImporterRecordMetrics(metrics, input.artifact);
+  }
+  if (input.validationFailureCount && input.validationFailureCount > 0) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.indexImporterValidationFailuresTotal, {
+      labels: telemetry.labels,
+      value: input.validationFailureCount,
+    });
+  }
+
+  telemetry.span?.end({
+    ...(input.error === undefined ? {} : { error: input.error }),
+    attributes: {
+      "index_importer.duration_ms": Math.max(0, durationMs),
+      ...(input.result
+        ? {
+            "app.index_version_id": input.result.indexVersionId,
+            "index_importer.embedding_job_count": input.result.embeddingJobCount,
+          }
+        : {}),
+      ...(input.validationFailureCount
+        ? { "index_importer.validation_failure_count": input.validationFailureCount }
+        : {}),
+      ...(input.error === undefined
+        ? {}
+        : { "index_importer.error_class": classifyTelemetryError(input.error) }),
+      "index_importer.status": input.status,
+    },
+    status: input.status === "succeeded" ? "ok" : "error",
+  });
+}
+
+/** Records imported record counts grouped by bounded record type. */
+function recordIndexImporterRecordMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  artifact: IndexArtifact,
+): void {
+  const countsByType = new Map<string, number>();
+  for (const record of artifact.records) {
+    countsByType.set(record.type, (countsByType.get(record.type) ?? 0) + 1);
+  }
+
+  for (const [recordType, count] of countsByType) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.indexImporterRecordsTotal, {
+      labels: { record_type: recordType },
+      value: count,
+    });
+  }
+}
+
+/** Normalizes index-importer telemetry label values. */
+function normalizeIndexImporterLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized.length > 0 ? normalized : "unknown";
 }
 
 /** Enqueues durable embedding batch jobs for imported chunks. */

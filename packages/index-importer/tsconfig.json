@@ -14,6 +14,7 @@
     { "path": "../db/tsconfig.build.json" },
     { "path": "../index-schema/tsconfig.build.json" },
     { "path": "../indexer-driver/tsconfig.build.json" },
+    { "path": "../observability/tsconfig.build.json" },
     { "path": "../queue/tsconfig.build.json" }
   ]
 }

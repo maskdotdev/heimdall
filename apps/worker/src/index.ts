@@ -462,6 +462,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             artifactUri: result.artifactUri,
             db: options.db,
             enqueueEmbeddings: true,
+            ...(options.metrics ? { metrics: options.metrics } : {}),
+            ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+            ...(options.traces ? { traces: options.traces } : {}),
           });
         } else {
           const artifactUri = await persistIndexArtifact(
@@ -472,6 +475,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             artifactUri,
             db: options.db,
             enqueueEmbeddings: true,
+            ...(options.metrics ? { metrics: options.metrics } : {}),
+            ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+            ...(options.traces ? { traces: options.traces } : {}),
           });
         }
       } finally {

@@ -604,6 +604,9 @@ importers:
       '@repo/indexer-driver':
         specifier: workspace:*
         version: link:../indexer-driver
+      '@repo/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@repo/queue':
         specifier: workspace:*
         version: link:../queue

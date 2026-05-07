@@ -2,17 +2,54 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { HeimdallDatabase } from "@repo/db";
 import type { IndexArtifact } from "@repo/indexer-driver";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricOptions,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanEndOptions,
+  type TelemetrySpanOptions,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createFileSystemIndexArtifactResolver,
   createIndexArtifactResolverFromEnvironment,
   createS3CompatibleIndexArtifactResolver,
+  importIndexArtifact,
   readIndexArtifactFromUri,
 } from "../src";
 
 /** Temporary directories created by tests. */
 const tempRoots: string[] = [];
+
+type RecordedMetric = {
+  /** Metric instrument kind recorded by the fake recorder. */
+  readonly kind: "counter" | "histogram";
+  /** Low-cardinality metric labels. */
+  readonly labels?: TelemetryMetricOptions["labels"] | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+type RecordedSpan = {
+  /** Attributes attached when the span ended. */
+  readonly endAttributes?: TelemetrySpanEndOptions["attributes"] | undefined;
+  /** Error attached when the span ended. */
+  readonly error?: unknown;
+  /** Span name. */
+  readonly name: string;
+  /** Attributes attached when the span started. */
+  readonly startAttributes?: TelemetrySpanOptions["attributes"] | undefined;
+  /** Span status attached when the span ended. */
+  readonly status?: TelemetrySpanEndOptions["status"] | undefined;
+};
 
 afterEach(async () => {
   await Promise.all(tempRoots.map((root) => rm(root, { force: true, recursive: true })));
@@ -153,6 +190,111 @@ describe("createFileSystemIndexArtifactResolver", () => {
   });
 });
 
+describe("importIndexArtifact telemetry", () => {
+  it("records product-safe successful import metrics and spans", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const result = await importIndexArtifact(emptyArtifact(), {
+      artifactUri: "file:///tmp/index-artifact.json",
+      db: createImportDatabaseStub(),
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(result).toMatchObject({
+      chunkCount: 0,
+      edgeCount: 0,
+      embeddingJobCount: 0,
+      fileCount: 0,
+      symbolCount: 0,
+    });
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: {
+            indexer: "fake-indexer",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.indexImporterImportsTotal,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: {
+            indexer: "fake-indexer",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.indexImporterDurationMs,
+          unit: "ms",
+        }),
+      ]),
+    );
+    expect(spans).toEqual([
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "app.index_version_id": expect.stringMatching(/^idx_/u),
+          "index_importer.embedding_job_count": 0,
+          "index_importer.status": "succeeded",
+        }),
+        name: OBSERVABILITY_SPAN_NAMES.indexImporterImportArtifact,
+        startAttributes: expect.objectContaining({
+          "app.repo_id": "repo_1",
+          "index_importer.indexer": "fake-indexer",
+          "index_importer.record_count": 0,
+        }),
+        status: "ok",
+      }),
+    ]);
+    expect(JSON.stringify(metrics)).not.toContain("index-artifact.json");
+    expect(JSON.stringify(spans)).not.toContain("index-artifact.json");
+  });
+
+  it("records validation failure telemetry without importing records", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const invalidArtifact = {
+      ...emptyArtifact(),
+      manifest: { ...emptyArtifact().manifest, recordCount: 1 },
+    } satisfies IndexArtifact;
+
+    await expect(
+      importIndexArtifact(invalidArtifact, {
+        artifactUri: "file:///tmp/index-artifact.json",
+        db: createImportDatabaseStub(),
+        metrics: createRecordingMetrics(metrics),
+        traces: createRecordingTraces(spans),
+      }),
+    ).rejects.toThrow("Invalid index artifact:");
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: {
+            error_class: "validation_error",
+            indexer: "fake-indexer",
+            status: "failed",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.indexImporterImportsTotal,
+        }),
+        expect.objectContaining({
+          labels: { indexer: "fake-indexer" },
+          name: OBSERVABILITY_METRIC_NAMES.indexImporterValidationFailuresTotal,
+          value: 1,
+        }),
+      ]),
+    );
+    expect(spans).toEqual([
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "index_importer.error_class": "validation_error",
+          "index_importer.status": "failed",
+          "index_importer.validation_failure_count": 1,
+        }),
+        status: "error",
+      }),
+    ]);
+  });
+});
+
 /** Creates a temporary root directory and schedules cleanup. */
 async function createTempRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "heimdall-index-importer-"));
@@ -189,5 +331,63 @@ function emptyArtifact(): IndexArtifact {
       symbolCount: 0,
     },
     records: [],
+  };
+}
+
+/** Creates the minimum DB surface needed by empty artifact imports. */
+function createImportDatabaseStub(): HeimdallDatabase {
+  const tx = {
+    insert: (_table: unknown) => ({
+      values: (_values: unknown) => ({
+        onConflictDoNothing: async () => undefined,
+        onConflictDoUpdate: async (_input: unknown) => undefined,
+      }),
+    }),
+  };
+  const db = {
+    transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+  };
+
+  return db as unknown as HeimdallDatabase;
+}
+
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          error: endOptions.error,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
   };
 }
