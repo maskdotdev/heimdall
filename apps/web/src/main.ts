@@ -2255,6 +2255,17 @@ type InspectorViewState = {
 /** Moderation decision available for one pending memory candidate. */
 type MemoryCandidateModerationDecision = "approve" | "reject";
 
+/** Finding outcome values accepted by the scoped API. */
+type ProductFindingOutcomeValue = "accepted" | "rejected" | "ignored" | "resolved" | "dismissed";
+
+/** Product finding outcome action shown in the review detail panel. */
+type ProductFindingOutcomeAction = {
+  /** API outcome value sent to the scoped API. */
+  readonly outcome: ProductFindingOutcomeValue;
+  /** Button label shown to the user. */
+  readonly label: string;
+};
+
 /** Mutable application state. */
 type AppState = {
   /** Active top-level console mode. */
@@ -2315,6 +2326,13 @@ const DEFAULT_ENTITLEMENT_FEATURE_KEYS = [
   "static_analysis.enabled",
   "security.audit_logs",
 ].join("\n");
+const PRODUCT_FINDING_OUTCOME_ACTIONS: readonly ProductFindingOutcomeAction[] = [
+  { outcome: "accepted", label: "Useful" },
+  { outcome: "rejected", label: "False positive" },
+  { outcome: "ignored", label: "Not useful" },
+  { outcome: "resolved", label: "Addressed" },
+  { outcome: "dismissed", label: "Dismissed" },
+];
 const ADMIN_SETTINGS_RENDER_OPTIONS: SettingsFormRenderOptions = {
   settingsFieldPrefix: "settings",
   ruleFieldPrefix: "rule",
@@ -2597,10 +2615,10 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   if (action === "set-product-finding-outcome") {
-    await recordProductFindingOutcome(
-      requiredDatasetValue(element, "findingId"),
-      requiredDatasetValue(element, "outcome"),
-    );
+    const outcome = requiredDatasetValue(element, "outcome");
+    if (isProductFindingOutcomeValue(outcome)) {
+      await recordProductFindingOutcome(requiredDatasetValue(element, "findingId"), outcome);
+    }
     return;
   }
 
@@ -3678,7 +3696,10 @@ async function loadProductFindingDetail(findingId: string): Promise<void> {
 }
 
 /** Records one product finding outcome and refreshes the selected finding. */
-async function recordProductFindingOutcome(findingId: string, outcome: string): Promise<void> {
+async function recordProductFindingOutcome(
+  findingId: string,
+  outcome: ProductFindingOutcomeValue,
+): Promise<void> {
   const detail = state.product.reviewDetail;
   if (!detail) {
     return;
@@ -5653,7 +5674,6 @@ function renderProductFindingOutcomeControls(
   canWriteFindings: boolean,
 ): string {
   const disabled = canWriteFindings ? "" : "disabled";
-  const outcomes = ["accepted", "rejected", "false_positive", "not_actionable", "resolved"];
   return `
     <div class="finding-outcome-controls">
       <label>
@@ -5665,22 +5685,20 @@ function renderProductFindingOutcomeControls(
         >${escapeHtml(outcomeNote)}</textarea>
       </label>
       <div class="row-actions">
-        ${outcomes
-          .map(
-            (outcome) => `
+        ${PRODUCT_FINDING_OUTCOME_ACTIONS.map(
+          (action) => `
               <button
                 class="ghost small"
                 data-action="set-product-finding-outcome"
                 data-finding-id="${escapeAttribute(finding.findingId)}"
-                data-outcome="${escapeAttribute(outcome)}"
+                data-outcome="${escapeAttribute(action.outcome)}"
                 type="button"
                 ${disabled}
               >
-                ${escapeHtml(outcome.replaceAll("_", " "))}
+                ${escapeHtml(action.label)}
               </button>
             `,
-          )
-          .join("")}
+        ).join("")}
       </div>
     </div>
   `;
@@ -10302,6 +10320,11 @@ function isMemoryRulesDetails(details: InspectorDetails): details is AdminMemory
     "rules" in details &&
     "repository" in details
   );
+}
+
+/** Narrows a string to a scoped API finding outcome value. */
+function isProductFindingOutcomeValue(value: string): value is ProductFindingOutcomeValue {
+  return PRODUCT_FINDING_OUTCOME_ACTIONS.some((action) => action.outcome === value);
 }
 
 /** Narrows replay plans to webhook replay plans. */
