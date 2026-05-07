@@ -5,6 +5,9 @@ import { rm } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
   assertEvalGate,
+  buildEvalHistoryWrite,
+  type EvalReportArtifacts,
+  type EvalSuite,
   type EvalVariant,
   loadEvalSuiteFromFile,
   loadRegisteredEvalSuite,
@@ -27,6 +30,20 @@ type EvalCliOptions = {
   readonly outputDir: string;
   /** Whether to remove the output directory before writing artifacts. */
   readonly cleanOutput: boolean;
+  /** Optional database URL for eval history persistence. */
+  readonly databaseUrl?: string;
+  /** Whether to persist eval history after writing artifacts. */
+  readonly persistHistory: boolean;
+  /** Actor or automation that triggered this eval run. */
+  readonly triggeredBy: string;
+  /** Runtime environment label for persisted eval history. */
+  readonly historyEnvironment: string;
+  /** Optional commit SHA under evaluation. */
+  readonly gitCommitSha?: string;
+  /** Optional branch under evaluation. */
+  readonly branch?: string;
+  /** Whether this run should become the active baseline for its suite and variant. */
+  readonly setActiveBaseline: boolean;
   /** Whether to exit nonzero when gate thresholds fail. */
   readonly failOnThreshold: boolean;
 };
@@ -60,8 +77,54 @@ async function main(args: readonly string[]): Promise<void> {
     `Artifacts:\n- ${artifacts.markdownPath}\n- ${artifacts.htmlPath}\n- ${artifacts.jsonPath}\n- ${artifacts.junitPath}\n`,
   );
 
+  if (options.persistHistory) {
+    const evalRunId = await persistEvalHistory({ artifacts, options, report, suite });
+    process.stdout.write(`Persisted eval history: ${evalRunId}\n`);
+  }
+
   if (options.failOnThreshold) {
     assertEvalGate(report);
+  }
+}
+
+/** Input for persisting one eval run from the CLI. */
+type PersistEvalHistoryInput = {
+  /** Artifact paths written by the eval runner. */
+  readonly artifacts: EvalReportArtifacts;
+  /** Parsed CLI options. */
+  readonly options: EvalCliOptions;
+  /** Evaluation report to persist. */
+  readonly report: ReturnType<typeof runEvaluation>;
+  /** Evaluation suite used for the run. */
+  readonly suite: EvalSuite;
+};
+
+/** Persists eval history using the DB package only when the CLI requests it. */
+async function persistEvalHistory(input: PersistEvalHistoryInput): Promise<string> {
+  const { createDatabaseClient, EvaluationRepository } = await import("@repo/db");
+  const client = createDatabaseClient({
+    ...(input.options.databaseUrl ? { url: input.options.databaseUrl } : {}),
+    maxConnections: 1,
+  });
+
+  try {
+    const repository = new EvaluationRepository(client.db);
+    const run = await repository.recordEvalHistory(
+      buildEvalHistoryWrite({
+        artifacts: input.artifacts,
+        environment: input.options.historyEnvironment,
+        report: input.report,
+        setAsActiveBaseline: input.options.setActiveBaseline,
+        suite: input.suite,
+        triggeredBy: input.options.triggeredBy,
+        ...(input.options.branch ? { branch: input.options.branch } : {}),
+        ...(input.options.gitCommitSha ? { gitCommitSha: input.options.gitCommitSha } : {}),
+      }),
+    );
+
+    return run.evalRunId;
+  } finally {
+    await client.close();
   }
 }
 
@@ -97,6 +160,13 @@ function parseRunOptions(args: readonly string[]): EvalCliOptions {
   let liveModel = false;
   let outputDir = ".heimdall/eval-runs/smoke-full-pipeline-v1";
   let cleanOutput = false;
+  let databaseUrl: string | undefined;
+  let persistHistory = false;
+  let triggeredBy = "eval-cli";
+  let historyEnvironment = "local";
+  let gitCommitSha: string | undefined;
+  let branch: string | undefined;
+  let setActiveBaseline = false;
   let failOnThreshold = true;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -121,6 +191,33 @@ function parseRunOptions(args: readonly string[]): EvalCliOptions {
       case "--clean-output":
         cleanOutput = true;
         break;
+      case "--database-url":
+        databaseUrl = readOptionValue(args, index, arg);
+        persistHistory = true;
+        index += 1;
+        break;
+      case "--persist-history":
+        persistHistory = true;
+        break;
+      case "--triggered-by":
+        triggeredBy = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--history-environment":
+        historyEnvironment = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--git-commit":
+        gitCommitSha = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--branch":
+        branch = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--set-active-baseline":
+        setActiveBaseline = true;
+        break;
       case "--no-live-models":
         liveModel = false;
         break;
@@ -142,6 +239,13 @@ function parseRunOptions(args: readonly string[]): EvalCliOptions {
     liveModel,
     outputDir,
     cleanOutput,
+    ...(databaseUrl ? { databaseUrl } : {}),
+    persistHistory,
+    triggeredBy,
+    historyEnvironment,
+    ...(gitCommitSha ? { gitCommitSha } : {}),
+    ...(branch ? { branch } : {}),
+    setActiveBaseline,
     failOnThreshold,
   };
 }

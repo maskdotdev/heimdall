@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { EvalHistoryWrite } from "@repo/db";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -275,6 +276,40 @@ export type EvalReportArtifacts = {
   readonly markdownPath: string;
 };
 
+/** Input for converting an eval report into durable history rows. */
+export type BuildEvalHistoryWriteInput = {
+  /** Suite used to produce the report. */
+  readonly suite: EvalSuite;
+  /** Report to persist. */
+  readonly report: EvalReport;
+  /** Optional report artifacts to link from history rows. */
+  readonly artifacts?: EvalReportArtifacts;
+  /** Actor or system that triggered the eval run. */
+  readonly triggeredBy?: string;
+  /** Runtime environment where the eval ran. */
+  readonly environment?: string;
+  /** Optional commit SHA evaluated by this run. */
+  readonly gitCommitSha?: string;
+  /** Optional branch evaluated by this run. */
+  readonly branch?: string;
+  /** Owner label to persist with the suite row. */
+  readonly suiteOwner?: string;
+  /** Version label to persist with the suite row. */
+  readonly suiteVersion?: string;
+  /** Whether this run should become the active baseline for its suite and variant. */
+  readonly setAsActiveBaseline?: boolean;
+};
+
+/** Product-safe artifact reference persisted with eval history rows. */
+export type EvalHistoryArtifactRef = {
+  /** Artifact kind. */
+  readonly kind: "html" | "json" | "junit" | "markdown";
+  /** Artifact display name. */
+  readonly name: string;
+  /** File URI for the artifact. */
+  readonly uri: string;
+};
+
 /** Baseline comparison output for candidate and baseline reports. */
 export type EvalReportComparison = {
   /** Baseline report ID. */
@@ -452,6 +487,77 @@ export async function writeEvalReportArtifacts(
   return { htmlPath, jsonPath, junitPath, markdownPath };
 }
 
+/** Builds durable, product-safe eval history rows from a suite and report. */
+export function buildEvalHistoryWrite(input: BuildEvalHistoryWriteInput): EvalHistoryWrite {
+  const artifactRefs = input.artifacts ? buildEvalHistoryArtifactRefs(input.artifacts) : [];
+  const suiteVersion = input.suiteVersion ?? EVAL_SUITE_SCHEMA_VERSION;
+  const startedAt = new Date(input.report.startedAt);
+  const completedAt = new Date(input.report.completedAt);
+
+  return {
+    suite: {
+      evalSuiteId: input.suite.suiteId,
+      name: input.suite.name,
+      description: input.suite.description,
+      version: suiteVersion,
+      owner: input.suiteOwner ?? "heimdall",
+      tags: [...new Set(input.suite.cases.flatMap((evalCase) => evalCase.tags))],
+      defaultRunner: "deterministic_fixture",
+      defaultGraders: [
+        "expected_finding_match",
+        "line_anchor_validity",
+        "retrieval_recall_at_10",
+        "cost_latency_gate",
+      ],
+      thresholds: input.suite.thresholds,
+    },
+    cases: input.suite.cases.map((evalCase) => buildEvalHistoryCase(input.suite.suiteId, evalCase)),
+    variant: {
+      evalVariantId: input.report.variant.variantId,
+      name: input.report.variant.label,
+      description: input.report.variant.liveModel ? "Live model evaluation" : "Deterministic eval",
+      config: {
+        label: input.report.variant.label,
+        liveModel: input.report.variant.liveModel,
+      },
+      createdBy: input.triggeredBy ?? "eval-cli",
+      ...(input.gitCommitSha ? { gitCommitSha: input.gitCommitSha } : {}),
+    },
+    run: {
+      evalRunId: input.report.evalRunId,
+      evalSuiteId: input.report.suiteId,
+      evalVariantId: input.report.variant.variantId,
+      status: input.report.gate.status,
+      triggeredBy: input.triggeredBy ?? "eval-cli",
+      environment: input.environment ?? "local",
+      caseCount: input.report.metrics.cases,
+      startedAt,
+      completedAt,
+      reportUri: artifactRefs.find((artifact) => artifact.kind === "json")?.uri,
+      summary: {
+        gate: input.report.gate,
+        metrics: input.report.metrics,
+        artifacts: artifactRefs,
+      },
+      ...(input.branch ? { branch: input.branch } : {}),
+      ...(input.gitCommitSha ? { gitCommitSha: input.gitCommitSha } : {}),
+    },
+    caseResults: input.report.caseResults.map((caseResult) =>
+      buildEvalHistoryCaseResult(input.report.evalRunId, caseResult, artifactRefs),
+    ),
+    ...(input.setAsActiveBaseline
+      ? {
+          baseline: {
+            evalSuiteId: input.report.suiteId,
+            baselineVariantId: input.report.variant.variantId,
+            evalRunId: input.report.evalRunId,
+            active: true,
+          },
+        }
+      : {}),
+  };
+}
+
 /** Renders a CI-safe Markdown report without raw fixture code or context text. */
 export function renderEvalReportMarkdown(report: EvalReport): string {
   const failedCases = report.caseResults.filter((caseResult) => caseResult.status === "fail");
@@ -615,6 +721,136 @@ function renderEvalGateJUnitTestcase(check: EvalGateCheck): string {
     `    <failure message="${escapeXml(message)}">${escapeXml(message)}</failure>`,
     "  </testcase>",
   ].join("\n");
+}
+
+/** Builds product-safe artifact references for persisted eval history. */
+function buildEvalHistoryArtifactRefs(
+  artifacts: EvalReportArtifacts,
+): readonly EvalHistoryArtifactRef[] {
+  return [
+    {
+      kind: "markdown",
+      name: "report.md",
+      uri: pathToFileURL(artifacts.markdownPath).toString(),
+    },
+    {
+      kind: "html",
+      name: "report.html",
+      uri: pathToFileURL(artifacts.htmlPath).toString(),
+    },
+    {
+      kind: "json",
+      name: "report.json",
+      uri: pathToFileURL(artifacts.jsonPath).toString(),
+    },
+    {
+      kind: "junit",
+      name: "report.junit.xml",
+      uri: pathToFileURL(artifacts.junitPath).toString(),
+    },
+  ];
+}
+
+/** Builds a sanitized eval case row without raw context text or actual finding bodies. */
+function buildEvalHistoryCase(
+  evalSuiteId: string,
+  evalCase: EvalCase,
+): NonNullable<EvalHistoryWrite["cases"]>[number] {
+  const expectedFindingLabels = evalCase.expectedFindings.map((finding) => ({
+    category: finding.category,
+    expectedFindingId: finding.expectedFindingId,
+    location: finding.location,
+    maxLineDistance: finding.maxLineDistance,
+    severity: finding.severity,
+    title: finding.title,
+  }));
+  const expectedContextLabels = evalCase.expectedContexts.map((context) => context.label);
+
+  return {
+    evalCaseId: evalCase.caseId,
+    evalSuiteId,
+    name: evalCase.title,
+    description: evalCase.description,
+    language: inferEvalCaseLanguage(evalCase.tags),
+    tags: evalCase.tags,
+    source: "curated_fixture",
+    privacyLevel: "synthetic",
+    difficulty: inferEvalCaseDifficulty(evalCase),
+    fixture: {
+      caseId: evalCase.caseId,
+      changedFiles: evalCase.changedFiles.map((changedFile) => ({
+        changeType: changedFile.changeType,
+        path: changedFile.path,
+        reviewableLines: changedFile.reviewableLines,
+      })),
+      schemaVersion: EVAL_SUITE_SCHEMA_VERSION,
+    },
+    input: {
+      changedFilePaths: evalCase.changedFiles.map((changedFile) => changedFile.path),
+      expectedContextLabels,
+      tags: evalCase.tags,
+    },
+    labels: {
+      expectedFindings: expectedFindingLabels,
+    },
+    expected: {
+      expectedContextLabels,
+      expectedFindingIds: evalCase.expectedFindings.map((finding) => finding.expectedFindingId),
+    },
+    active: true,
+  };
+}
+
+/** Builds a product-safe eval case result row for history storage. */
+function buildEvalHistoryCaseResult(
+  evalRunId: string,
+  caseResult: EvalCaseResult,
+  artifactRefs: readonly EvalHistoryArtifactRef[],
+): EvalHistoryWrite["caseResults"][number] {
+  return {
+    evalCaseResultId: stableEvalCaseResultId(evalRunId, caseResult.caseId),
+    evalRunId,
+    evalCaseId: caseResult.caseId,
+    status: caseResult.status,
+    scores: evalCaseMetricNames.map((metric) => ({
+      metric,
+      value: caseResult.metrics[metric],
+    })),
+    matchedFindings: caseResult.matchedExpectedFindingIds,
+    unmatchedExpectedFindings: caseResult.missedExpectedFindingIds,
+    unmatchedGeneratedFindings: caseResult.falsePositiveFindingIds,
+    timings: {
+      latencyMs: caseResult.metrics.latencyMs,
+    },
+    costs: {
+      costUsd: caseResult.metrics.costUsd,
+    },
+    artifacts: artifactRefs,
+    error:
+      caseResult.failureReasons.length > 0
+        ? {
+            failureReasons: caseResult.failureReasons,
+          }
+        : undefined,
+  };
+}
+
+/** Infers a primary language label from eval case tags. */
+function inferEvalCaseLanguage(tags: readonly string[]): string {
+  return tags.find((tag) => tag === "typescript") ?? "mixed";
+}
+
+/** Infers a coarse difficulty label for the persisted eval case. */
+function inferEvalCaseDifficulty(evalCase: EvalCase): string {
+  if (evalCase.expectedFindings.length === 0) {
+    return "noise_guard";
+  }
+
+  if (evalCase.tags.includes("retrieval")) {
+    return "cross_context";
+  }
+
+  return "mvp";
 }
 
 /** Throws when an evaluation report fails its configured gate. */
@@ -1104,6 +1340,11 @@ function percentile(values: readonly number[], percentileValue: number): number 
 /** Creates a stable run ID from suite, variant, and timestamp. */
 function stableEvalRunId(suiteId: string, variantId: string, timestamp: string): string {
   return `eval_${hashParts([suiteId, variantId, timestamp]).slice(0, 24)}`;
+}
+
+/** Creates a stable case result ID for a persisted eval run. */
+function stableEvalCaseResultId(evalRunId: string, caseId: string): string {
+  return `evalcase_${hashParts([evalRunId, caseId]).slice(0, 24)}`;
 }
 
 /** Creates a SHA-256 hash from deterministic parts. */

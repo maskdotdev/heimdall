@@ -515,6 +515,9 @@ importers:
 
   packages/evaluation:
     dependencies:
+      '@repo/db':
+        specifier: workspace:*
+        version: link:../db
       '@sinclair/typebox':
         specifier: 'catalog:'
         version: 0.34.49

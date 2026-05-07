@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildEvalHistoryWrite,
   compareEvalReports,
   loadRegisteredEvalSuite,
   parseEvalCase,
@@ -58,6 +59,36 @@ describe("evaluation harness", () => {
     } finally {
       await rm(outputDir, { force: true, recursive: true });
     }
+  });
+
+  it("builds product-safe eval history rows for persistence", async () => {
+    const suite = await loadRegisteredEvalSuite("smoke-full-pipeline-v1");
+    const report = runEvaluation({
+      suite,
+      timestamp: "2026-05-06T00:00:00.000Z",
+    });
+    const history = buildEvalHistoryWrite({
+      branch: "main",
+      environment: "ci",
+      gitCommitSha: "abc123",
+      report,
+      setAsActiveBaseline: true,
+      suite,
+      triggeredBy: "vitest",
+    });
+
+    expect(history.suite.evalSuiteId).toBe("smoke-full-pipeline-v1");
+    expect(history.variant.evalVariantId).toBe("local");
+    expect(history.run.evalRunId).toBe(report.evalRunId);
+    expect(history.run.environment).toBe("ci");
+    expect(history.cases).toHaveLength(suite.cases.length);
+    expect(history.caseResults).toHaveLength(report.caseResults.length);
+    expect(history.baseline).toMatchObject({
+      active: true,
+      baselineVariantId: "local",
+      evalRunId: report.evalRunId,
+    });
+    expect(JSON.stringify(history)).not.toContain("The new branch can read session.expiresAt");
   });
 
   it("reports lost true positives during baseline comparison", async () => {
