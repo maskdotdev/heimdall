@@ -1228,15 +1228,27 @@ export function redactTelemetryText(
   redaction: ObservabilityRedactionConfig = DEFAULT_OBSERVABILITY_CONFIG.redaction,
 ): string {
   const maxLength = redaction.strict ? 1000 : 2000;
+  const codeRedactedValue = redaction.captureCodeSnippets
+    ? value
+    : value.replace(/```[\s\S]*?```/gu, "[redacted-code-block]");
 
-  return value
+  return codeRedactedValue
+    .replace(
+      /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
+      "[redacted-private-key]",
+    )
+    .replace(/\b(Authorization|Set-Cookie|Cookie):[^\n\r]*/giu, "$1: [redacted]")
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gu, "Bearer [redacted]")
     .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/gu, "[redacted-token]")
     .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/gu, "[redacted-token]")
     .replace(
-      /\b(token|secret|password|api[_-]?key|authorization|cookie)=([^\s,;]+)/giu,
+      /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|DATABASE_URL|REDIS_URL|COOKIE|AUTHORIZATION)|token|secret|password|api[_-]?key|private[_-]?key|authorization|cookie|database[_-]?url|redis[_-]?url|signed[_-]?url)\s*[:=]\s*([^\s,;]+)/giu,
       "$1=[redacted]",
+    )
+    .replace(
+      /([?&](?:X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|Signature|AWSAccessKeyId|token|access_token|sig)=)[^&\s]+/giu,
+      "$1[redacted]",
     )
     .slice(0, maxLength);
 }
@@ -2453,36 +2465,37 @@ function shouldDropTelemetryAttribute(
   }
 
   const normalizedKey = key.toLowerCase();
+  const normalizedTelemetryKey = normalizedKey.replaceAll(/[.-]/gu, "_");
   if (!redaction.includeDebugAttributes && normalizedKey.startsWith("debug.")) {
     return true;
   }
-  if (!redaction.capturePrompts && normalizedKey.includes("prompt")) {
+  if (!redaction.capturePrompts && normalizedTelemetryKey.includes("prompt")) {
     return true;
   }
   if (
     !redaction.captureCodeSnippets &&
-    (normalizedKey.includes("code_snippet") ||
-      normalizedKey.includes("snippet") ||
-      normalizedKey.includes("raw_diff") ||
-      normalizedKey.includes("patch") ||
-      normalizedKey.includes("source_body"))
+    (normalizedTelemetryKey.includes("code_snippet") ||
+      normalizedTelemetryKey.includes("snippet") ||
+      normalizedTelemetryKey.includes("raw_diff") ||
+      normalizedTelemetryKey.includes("patch") ||
+      normalizedTelemetryKey.includes("source_body"))
   ) {
     return true;
   }
 
   return (
-    normalizedKey.includes("token") ||
-    normalizedKey.includes("secret") ||
-    normalizedKey.includes("password") ||
-    normalizedKey.includes("private_key") ||
-    normalizedKey.includes("api_key") ||
-    normalizedKey.includes("authorization") ||
-    normalizedKey.includes("cookie") ||
-    normalizedKey.includes("connection_string") ||
-    normalizedKey.includes("database_url") ||
-    normalizedKey.includes("redis_url") ||
-    normalizedKey.includes("signed_url") ||
-    normalizedKey.includes("email")
+    normalizedTelemetryKey.includes("token") ||
+    normalizedTelemetryKey.includes("secret") ||
+    normalizedTelemetryKey.includes("password") ||
+    normalizedTelemetryKey.includes("private_key") ||
+    normalizedTelemetryKey.includes("api_key") ||
+    normalizedTelemetryKey.includes("authorization") ||
+    normalizedTelemetryKey.includes("cookie") ||
+    normalizedTelemetryKey.includes("connection_string") ||
+    normalizedTelemetryKey.includes("database_url") ||
+    normalizedTelemetryKey.includes("redis_url") ||
+    normalizedTelemetryKey.includes("signed_url") ||
+    normalizedTelemetryKey.includes("email")
   );
 }
 

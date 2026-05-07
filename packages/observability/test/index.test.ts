@@ -21,6 +21,7 @@ import {
   OBSERVABILITY_SPAN_NAMES,
   ObservabilityConfigValidationError,
   recordAdminControlPlaneTelemetryEvent,
+  redactTelemetryText,
   renderStructuredTelemetryLogLine,
   renderTelemetryMetricLine,
   renderTelemetrySpanLine,
@@ -186,6 +187,52 @@ describe("structured telemetry logging", () => {
     expect(attributes).toEqual({
       "http.status_code": 200,
       "provider.message": "Bearer [redacted] failed for [redacted-email]",
+    });
+  });
+
+  it("redacts Phase 25 secret and source-code regression fixtures", () => {
+    const unsafeText = [
+      "Authorization: Bearer github_pat_11AAABBBCCCDDDEEEFFF",
+      "token=ghp_1234567890abcdef",
+      "OPENAI_API_KEY=sk-1234567890abcdefghijklmnop",
+      "DATABASE_URL=postgres://dev:secret@localhost:5432/heimdall",
+      "REDIS_URL=redis://default:secret@localhost:6379/0",
+      "Cookie: heimdall_session=raw-cookie-value",
+      "https://artifact.example/review.json?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA",
+      "-----BEGIN PRIVATE KEY-----",
+      "private-key-body",
+      "-----END PRIVATE KEY-----",
+      "```ts",
+      "export const leaked = process.env.OPENAI_API_KEY;",
+      "```",
+    ].join("\n");
+
+    const redacted = redactTelemetryText(unsafeText);
+
+    expect(redacted).toContain("[redacted-code-block]");
+    expect(redacted).toContain("[redacted-private-key]");
+    expect(redacted).not.toContain("github_pat_11AAABBBCCCDDDEEEFFF");
+    expect(redacted).not.toContain("ghp_1234567890abcdef");
+    expect(redacted).not.toContain("sk-1234567890abcdefghijklmnop");
+    expect(redacted).not.toContain("postgres://dev:secret");
+    expect(redacted).not.toContain("redis://default:secret");
+    expect(redacted).not.toContain("raw-cookie-value");
+    expect(redacted).not.toContain("deadbeef");
+    expect(redacted).not.toContain("private-key-body");
+    expect(redacted).not.toContain("export const leaked");
+  });
+
+  it("drops source-like telemetry attributes when code capture is disabled", () => {
+    const attributes = sanitizeTelemetryAttributes({
+      "error.message": "DATABASE_URL=postgres://dev:secret@localhost:5432/heimdall",
+      "patch.content": "diff --git a/src/app.ts b/src/app.ts",
+      "raw.diff": "+ const leaked = true;",
+      "request.cookie": "heimdall_session=raw-cookie-value",
+      "source.body": "export const leaked = process.env.OPENAI_API_KEY;",
+    });
+
+    expect(attributes).toEqual({
+      "error.message": "DATABASE_URL=[redacted]",
     });
   });
 
