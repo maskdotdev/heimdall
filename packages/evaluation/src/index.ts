@@ -265,6 +265,8 @@ export type RunEvaluationInput = {
 
 /** Paths written for one evaluation report artifact set. */
 export type EvalReportArtifacts = {
+  /** Absolute path to the HTML report. */
+  readonly htmlPath: string;
   /** Absolute path to the JSON report. */
   readonly jsonPath: string;
   /** Absolute path to the JUnit XML report. */
@@ -432,20 +434,22 @@ export function runEvaluation(input: RunEvaluationInput): EvalReport {
   return parseEvalReport(report);
 }
 
-/** Writes JSON and Markdown report artifacts to an output directory. */
+/** Writes HTML, JSON, JUnit XML, and Markdown report artifacts to an output directory. */
 export async function writeEvalReportArtifacts(
   report: EvalReport,
   outputDir: string,
 ): Promise<EvalReportArtifacts> {
   const absoluteOutputDir = resolve(outputDir);
   await mkdir(absoluteOutputDir, { recursive: true });
+  const htmlPath = resolve(absoluteOutputDir, "report.html");
   const jsonPath = resolve(absoluteOutputDir, "report.json");
   const junitPath = resolve(absoluteOutputDir, "report.junit.xml");
   const markdownPath = resolve(absoluteOutputDir, "report.md");
+  await writeFile(htmlPath, renderEvalReportHtml(report), "utf8");
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   await writeFile(junitPath, renderEvalReportJUnit(report), "utf8");
   await writeFile(markdownPath, renderEvalReportMarkdown(report), "utf8");
-  return { jsonPath, junitPath, markdownPath };
+  return { htmlPath, jsonPath, junitPath, markdownPath };
 }
 
 /** Renders a CI-safe Markdown report without raw fixture code or context text. */
@@ -490,6 +494,74 @@ export function renderEvalReportMarkdown(report: EvalReport): string {
   ];
 
   return `${lines.join("\n")}\n`;
+}
+
+/** Renders a CI-safe static HTML report without raw fixture code or context text. */
+export function renderEvalReportHtml(report: EvalReport): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Evaluation ${escapeXml(report.suiteId)}</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 32px; color: #17202a; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0 24px; }
+    th, td { border: 1px solid #d7dde5; padding: 8px 10px; text-align: left; }
+    th { background: #f3f6f9; }
+    .pass { color: #166534; font-weight: 700; }
+    .fail { color: #991b1b; font-weight: 700; }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .metric { border: 1px solid #d7dde5; padding: 12px; }
+    .metric span { display: block; color: #526173; font-size: 12px; text-transform: uppercase; }
+    .metric strong { display: block; margin-top: 4px; font-size: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Evaluation: ${escapeXml(report.suiteId)}</h1>
+  <p>Variant: ${escapeXml(report.variant.variantId)}</p>
+  <p>Status: <span class="${report.gate.status}">${report.gate.status.toUpperCase()}</span></p>
+  <section>
+    <h2>Metrics</h2>
+    <div class="metric-grid">
+      <div class="metric"><span>Weighted recall</span><strong>${formatRate(report.metrics.weightedRecall)}</strong></div>
+      <div class="metric"><span>Published precision</span><strong>${formatRate(report.metrics.publishedPrecision)}</strong></div>
+      <div class="metric"><span>False positive rate</span><strong>${formatRate(report.metrics.falsePositiveRate)}</strong></div>
+      <div class="metric"><span>Anchor validity</span><strong>${formatRate(report.metrics.anchorValidity)}</strong></div>
+      <div class="metric"><span>Retrieval recall@10</span><strong>${formatRate(report.metrics.retrievalRecallAt10)}</strong></div>
+      <div class="metric"><span>P95 latency</span><strong>${report.metrics.p95LatencyMs.toFixed(0)}ms</strong></div>
+    </div>
+  </section>
+  <section>
+    <h2>Gate</h2>
+    <table>
+      <thead><tr><th>Metric</th><th>Actual</th><th>Gate</th><th>Status</th></tr></thead>
+      <tbody>${report.gate.checks.map(renderEvalGateHtmlRow).join("")}</tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Cases</h2>
+    <table>
+      <thead><tr><th>Case</th><th>Status</th><th>Matched</th><th>False positives</th><th>Reasons</th></tr></thead>
+      <tbody>${report.caseResults.map(renderEvalCaseHtmlRow).join("")}</tbody>
+    </table>
+  </section>
+</body>
+</html>
+`;
+}
+
+/** Renders one eval gate check as a static HTML row. */
+function renderEvalGateHtmlRow(check: EvalGateCheck): string {
+  return `<tr><td>${escapeXml(check.metric)}</td><td>${formatGateNumber(check.actual)}</td><td>${check.comparator} ${formatGateNumber(
+    check.threshold,
+  )}</td><td class="${check.status}">${check.status.toUpperCase()}</td></tr>`;
+}
+
+/** Renders one eval case as a static HTML row. */
+function renderEvalCaseHtmlRow(caseResult: EvalCaseResult): string {
+  return `<tr><td>${escapeXml(caseResult.caseId)}</td><td class="${caseResult.status}">${caseResult.status.toUpperCase()}</td><td>${caseResult.metrics.matchedFindings}/${caseResult.metrics.expectedFindings}</td><td>${caseResult.metrics.falsePositives}</td><td>${escapeXml(
+    caseResult.failureReasons.join("; ") || "None",
+  )}</td></tr>`;
 }
 
 /** Renders a CI-safe JUnit XML report without raw fixture code or context text. */
@@ -1044,7 +1116,7 @@ function formatRate(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-/** Formats one gate number for Markdown output. */
+/** Formats one gate number for human-readable reports. */
 function formatGateNumber(value: number): string {
   return value > 1 ? value.toFixed(2) : value.toFixed(3);
 }

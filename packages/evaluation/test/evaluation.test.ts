@@ -7,6 +7,7 @@ import {
   loadRegisteredEvalSuite,
   parseEvalCase,
   renderEvalComparisonMarkdown,
+  renderEvalReportHtml,
   renderEvalReportJUnit,
   renderEvalReportMarkdown,
   runEvaluation,
@@ -39,10 +40,14 @@ describe("evaluation harness", () => {
 
     try {
       const artifacts = await writeEvalReportArtifacts(report, outputDir);
+      const html = await readFile(artifacts.htmlPath, "utf8");
       const junit = await readFile(artifacts.junitPath, "utf8");
       const markdown = await readFile(artifacts.markdownPath, "utf8");
       const json = await readFile(artifacts.jsonPath, "utf8");
 
+      expect(html).toContain("<html");
+      expect(html).toContain("Evaluation: smoke-full-pipeline-v1");
+      expect(renderEvalReportHtml(report)).not.toContain("ignore all previous instructions");
       expect(junit).toContain('<testsuite name="smoke-full-pipeline-v1"');
       expect(junit).toContain('classname="eval.gate"');
       expect(renderEvalReportJUnit(report)).not.toContain("ignore all previous instructions");
