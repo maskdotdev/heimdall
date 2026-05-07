@@ -16,9 +16,12 @@ import {
   buildEmbeddingInputBatches,
   createEmbeddingProviderFromEnvironment,
   createHashEmbeddingProvider,
+  createOpenAIEmbeddingProvider,
   DEFAULT_EMBEDDING_DIMENSIONS,
   type EmbeddingProvider,
+  EmbeddingProviderError,
   embedChunkBatch,
+  type OpenAIEmbeddingsFetch,
   roughTokenEstimate,
 } from "../src";
 
@@ -48,6 +51,13 @@ type RecordedSpan = {
   readonly status?: TelemetrySpanEndOptions["status"] | undefined;
 };
 
+type RecordedOpenAIEmbeddingsFetchCall = {
+  /** Fetch init used for the provider request. */
+  readonly init?: RequestInit | undefined;
+  /** URL passed to the fetch boundary. */
+  readonly url: string;
+};
+
 type TestCodeChunkRow = {
   /** Stable chunk ID returned by the fake chunk query. */
   readonly chunkId: string;
@@ -72,6 +82,86 @@ describe("createHashEmbeddingProvider", () => {
 
     expect(provider.dimensions).toBe(DEFAULT_EMBEDDING_DIMENSIONS);
     expect(vector).toHaveLength(DEFAULT_EMBEDDING_DIMENSIONS);
+  });
+});
+
+describe("createOpenAIEmbeddingProvider", () => {
+  it("sends float embedding requests and returns vectors in input order", async () => {
+    const calls: RecordedOpenAIEmbeddingsFetchCall[] = [];
+    const provider = createOpenAIEmbeddingProvider({
+      apiKey: "sk-test-openai-key",
+      baseUrl: "https://provider.example/v1/",
+      dimensions: 2,
+      fetch: recordingOpenAIEmbeddingsFetch(calls, {
+        data: [
+          { embedding: [0.3, 0.4], index: 1 },
+          { embedding: [0.1, 0.2], index: 0 },
+        ],
+      }),
+      model: "text-embedding-3-small",
+    });
+
+    await expect(provider.embedTexts(["first", "second"])).resolves.toEqual([
+      [0.1, 0.2],
+      [0.3, 0.4],
+    ]);
+
+    const call = requireFirstOpenAIEmbeddingsFetchCall(calls);
+    expect(call.url).toBe("https://provider.example/v1/embeddings");
+    expect(call.init).toMatchObject({
+      headers: expect.objectContaining({
+        Authorization: "Bearer sk-test-openai-key",
+        "Content-Type": "application/json",
+      }),
+      method: "POST",
+    });
+    expect(openAIEmbeddingsRequestJsonBody(call)).toEqual({
+      dimensions: 2,
+      encoding_format: "float",
+      input: ["first", "second"],
+      model: "text-embedding-3-small",
+    });
+  });
+
+  it("normalizes OpenAI embeddings HTTP errors without exposing provider bodies", async () => {
+    const provider = createOpenAIEmbeddingProvider({
+      apiKey: "sk-test-openai-key",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "invalid_api_key",
+              message: "raw provider message with sk-secret-value",
+              type: "invalid_request_error",
+            },
+          }),
+          {
+            headers: { "x-request-id": "req_embedding_auth" },
+            status: 401,
+          },
+        ),
+      model: "text-embedding-3-small",
+    });
+
+    let caughtError: unknown;
+    try {
+      await provider.embedTexts(["first"]);
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toBeInstanceOf(EmbeddingProviderError);
+    expect(caughtError).toMatchObject({
+      code: "provider_auth_failed",
+      details: {
+        errorCode: "invalid_api_key",
+        errorType: "invalid_request_error",
+        requestId: "req_embedding_auth",
+        status: 401,
+      },
+      retryable: false,
+    });
+    expect(caughtError).not.toMatchObject({ message: expect.stringContaining("sk-secret-value") });
   });
 });
 
@@ -100,6 +190,21 @@ describe("createEmbeddingProviderFromEnvironment", () => {
     expect(provider).toMatchObject({
       dimensions: 8,
       model: "fake-code-embedding",
+    });
+  });
+
+  it("creates an OpenAI embedding provider from direct environment values", async () => {
+    const provider = createEmbeddingProviderFromEnvironment({
+      EMBEDDING_DIMENSIONS: "2",
+      EMBEDDING_MODEL: "text-embedding-3-small",
+      EMBEDDING_PROVIDER: "openai",
+      OPENAI_API_KEY: "sk-test-openai-key",
+    });
+
+    expect(provider).toMatchObject({
+      dimensions: 2,
+      model: "text-embedding-3-small",
+      providerId: "openai",
     });
   });
 
@@ -346,6 +451,42 @@ describe("buildEmbeddingInputBatches", () => {
     ]);
   });
 });
+
+/** Creates a fake OpenAI embeddings fetch that records request data. */
+function recordingOpenAIEmbeddingsFetch(
+  records: RecordedOpenAIEmbeddingsFetchCall[],
+  body: unknown,
+): OpenAIEmbeddingsFetch {
+  return async (url, init) => {
+    records.push({ ...(init ? { init } : {}), url: String(url) });
+
+    return new Response(JSON.stringify(body), {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    });
+  };
+}
+
+/** Returns the first recorded OpenAI embeddings fetch call or fails the test. */
+function requireFirstOpenAIEmbeddingsFetchCall(
+  calls: readonly RecordedOpenAIEmbeddingsFetchCall[],
+): RecordedOpenAIEmbeddingsFetchCall {
+  const call = calls[0];
+  if (!call) {
+    throw new Error("Expected at least one OpenAI embeddings fetch call.");
+  }
+
+  return call;
+}
+
+/** Parses the JSON request body from a recorded OpenAI embeddings fetch call. */
+function openAIEmbeddingsRequestJsonBody(call: RecordedOpenAIEmbeddingsFetchCall): unknown {
+  if (typeof call.init?.body !== "string") {
+    throw new Error("Expected OpenAI embeddings request body to be a JSON string.");
+  }
+
+  return JSON.parse(call.init.body) as unknown;
+}
 
 /** Creates a minimal built embedding input for batch policy tests. */
 function testInput(inputId: string, tokenEstimate: number, charCount: number): BuiltEmbeddingInput {

@@ -24,6 +24,7 @@
     "@repo/db": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
     "@repo/observability": "workspace:*",
+    "@sinclair/typebox": "catalog:",
     "drizzle-orm": "catalog:"
   },
   "devDependencies": {

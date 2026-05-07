@@ -16,12 +16,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cleanupExpiredReviewArtifacts,
   createRedisPublishThrottle,
+  createWorkerEmbeddingProviderFromEnvironment,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
   createWorkerLlmGatewayFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
   type RedisPublishThrottleClient,
+  resolveWorkerEmbeddingApiKey,
   resolveWorkerGitHubPrivateKey,
   resolveWorkerLlmApiKey,
   verifyWorkerIndexerCapabilities,
@@ -131,6 +133,40 @@ describe("resolveWorkerLlmApiKey", () => {
   });
 });
 
+describe("resolveWorkerEmbeddingApiKey", () => {
+  it("resolves the local embedding provider API key through an env secret ref", async () => {
+    await expect(
+      resolveWorkerEmbeddingApiKey({
+        OPENAI_EMBEDDING_API_KEY: "sk-test-embedding-key",
+      }),
+    ).resolves.toBe("sk-test-embedding-key");
+  });
+
+  it("resolves an explicit embedding provider API key secret ref", async () => {
+    await expect(
+      resolveWorkerEmbeddingApiKey({
+        EMBEDDING_PROVIDER_API_KEY_SECRET_REF: "env:WORKER_EMBEDDING_API_KEY",
+        OPENAI_API_KEY: "ignored-direct-key",
+        WORKER_EMBEDDING_API_KEY: "sk-resolved-embedding-key",
+      }),
+    ).resolves.toBe("sk-resolved-embedding-key");
+  });
+
+  it("returns undefined when no embedding provider API key ref or env fallback exists", async () => {
+    await expect(resolveWorkerEmbeddingApiKey({})).resolves.toBeUndefined();
+  });
+
+  it("fails closed for unsupported embedding provider secret providers", async () => {
+    await expect(
+      resolveWorkerEmbeddingApiKey({
+        EMBEDDING_PROVIDER_API_KEY_SECRET_REF: "aws:prod/openai/embeddings-api-key",
+      }),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+  });
+});
+
 describe("createWorkerLlmGatewayFromEnvironment", () => {
   it("keeps the review LLM disabled by default", async () => {
     await expect(createWorkerLlmGatewayFromEnvironment({})).resolves.toBeUndefined();
@@ -220,6 +256,75 @@ describe("createWorkerLlmGatewayFromEnvironment", () => {
         LLM_PROVIDER: "bogus",
       }),
     ).rejects.toThrow("Unsupported LLM_PROVIDER: bogus");
+  });
+});
+
+describe("createWorkerEmbeddingProviderFromEnvironment", () => {
+  it("keeps the local hash embedding provider as the default", async () => {
+    const provider = await createWorkerEmbeddingProviderFromEnvironment(
+      {},
+      { model: "text-embedding-3-small" },
+    );
+
+    expect(provider).toMatchObject({
+      model: "text-embedding-3-small",
+      providerId: "hash",
+    });
+  });
+
+  it("creates an OpenAI-compatible embedding provider from explicit worker environment", async () => {
+    const calls: RecordedEmbeddingFetchCall[] = [];
+    const provider = await createWorkerEmbeddingProviderFromEnvironment(
+      {
+        EMBEDDING_DIMENSIONS: "2",
+        EMBEDDING_PROVIDER: "openai",
+        OPENAI_EMBEDDING_API_KEY: "sk-test-embedding-key",
+      },
+      {
+        fetch: async (url, init) => {
+          calls.push({ ...(init ? { init } : {}), url: String(url) });
+          return embeddingResponse({
+            data: [{ embedding: [0.1, 0.2], index: 0 }],
+          });
+        },
+        model: "text-embedding-3-small",
+      },
+    );
+
+    await expect(provider.embedTexts(["first"])).resolves.toEqual([[0.1, 0.2]]);
+
+    const call = requireFirstEmbeddingFetchCall(calls);
+    expect(call.url).toBe("https://api.openai.com/v1/embeddings");
+    expect(call.init).toMatchObject({
+      headers: expect.objectContaining({
+        Authorization: "Bearer sk-test-embedding-key",
+      }),
+      method: "POST",
+    });
+    expect(embeddingRequestJsonBody(call)).toMatchObject({
+      dimensions: 2,
+      encoding_format: "float",
+      input: ["first"],
+      model: "text-embedding-3-small",
+    });
+  });
+
+  it("requires an API key when the OpenAI-compatible embedding provider is configured", async () => {
+    await expect(
+      createWorkerEmbeddingProviderFromEnvironment({
+        EMBEDDING_PROVIDER: "openai",
+      }),
+    ).rejects.toThrow(
+      "EMBEDDING_PROVIDER_API_KEY_SECRET_REF, OPENAI_EMBEDDING_API_KEY_SECRET_REF, OPENAI_API_KEY_SECRET_REF, or OPENAI_API_KEY is required",
+    );
+  });
+
+  it("rejects unsupported worker embedding providers", async () => {
+    await expect(
+      createWorkerEmbeddingProviderFromEnvironment({
+        EMBEDDING_PROVIDER: "bogus",
+      }),
+    ).rejects.toThrow("Unsupported EMBEDDING_PROVIDER: bogus");
   });
 });
 
@@ -943,6 +1048,14 @@ type RecordedLlmFetchCall = {
   readonly url: string;
 };
 
+/** Fetch call captured by worker embedding provider tests. */
+type RecordedEmbeddingFetchCall = {
+  /** Request init passed to the fake fetch implementation. */
+  readonly init?: RequestInit;
+  /** Request URL passed to the fake fetch implementation. */
+  readonly url: string;
+};
+
 /** Creates a successful Chat Completions response for worker LLM gateway tests. */
 function llmChatCompletionResponse(content: unknown): Response {
   return new Response(
@@ -983,6 +1096,40 @@ function llmRequestJsonBody(call: RecordedLlmFetchCall): Record<string, unknown>
   const parsed = JSON.parse(call.init.body) as unknown;
   if (!isRecord(parsed)) {
     throw new Error("Expected worker LLM request body to be a JSON object.");
+  }
+
+  return parsed;
+}
+
+/** Creates a successful embeddings response for worker embedding provider tests. */
+function embeddingResponse(content: unknown): Response {
+  return new Response(JSON.stringify(content), {
+    headers: { "Content-Type": "application/json" },
+    status: 200,
+  });
+}
+
+/** Returns the first recorded worker embedding fetch call or raises a test setup failure. */
+function requireFirstEmbeddingFetchCall(
+  calls: readonly RecordedEmbeddingFetchCall[],
+): RecordedEmbeddingFetchCall {
+  const call = calls[0];
+  if (!call) {
+    throw new Error("Expected one worker embedding fetch call.");
+  }
+
+  return call;
+}
+
+/** Parses a worker embedding JSON request body into an object for assertions. */
+function embeddingRequestJsonBody(call: RecordedEmbeddingFetchCall): Record<string, unknown> {
+  if (typeof call.init?.body !== "string") {
+    throw new Error("Expected worker embedding request body to be a JSON string.");
+  }
+
+  const parsed = JSON.parse(call.init.body) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Expected worker embedding request body to be a JSON object.");
   }
 
   return parsed;

@@ -47,7 +47,13 @@ import {
   sandboxRuns,
   validatedFindings,
 } from "@repo/db";
-import { createEmbeddingProviderFromEnvironment, embedChunkBatch } from "@repo/embedding";
+import {
+  createEmbeddingProviderFromEnvironment,
+  createOpenAIEmbeddingProvider,
+  type EmbeddingProvider,
+  embedChunkBatch,
+  type OpenAIEmbeddingsFetch,
+} from "@repo/embedding";
 import {
   createGitHubProvider,
   type GitHubInstallationRef,
@@ -160,6 +166,8 @@ export type CreateWorkerHandlersOptions = {
   readonly reviewArtifactCleaner?: (payload: ReviewArtifactCleanupJobPayload) => Promise<void>;
   /** Git provider used by repo sync handlers. */
   readonly gitProvider: GitProvider;
+  /** Optional embedding provider used by embedding jobs. */
+  readonly embeddingProvider?: EmbeddingProvider;
   /** Optional model gateway used by review jobs. */
   readonly llmGateway?: LLMGateway;
   /** Optional static-analysis runner used by review jobs. */
@@ -191,6 +199,9 @@ export type WorkerStaticAnalysisRunnerEnvironment = Readonly<Record<string, stri
 /** Environment values used to select the worker LLM gateway. */
 export type WorkerLlmGatewayEnvironment = Readonly<Record<string, string | undefined>>;
 
+/** Environment values used to select the worker embedding provider. */
+export type WorkerEmbeddingProviderEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Runtime dependencies used while creating a worker static-analysis runner. */
 export type WorkerStaticAnalysisRunnerOptions = {
   /** Optional database used to persist sandbox run results. */
@@ -211,6 +222,16 @@ export type WorkerLlmGatewayOptions = {
   readonly secretsManager?: SecretsManager;
   /** Optional span recorder used for LLM gateway telemetry. */
   readonly traces?: TelemetrySpanRecorder;
+};
+
+/** Runtime dependencies used while creating a worker embedding provider. */
+export type WorkerEmbeddingProviderOptions = {
+  /** Optional fetch implementation used by provider adapters. */
+  readonly fetch?: OpenAIEmbeddingsFetch;
+  /** Model requested by the queued embedding job. */
+  readonly model?: string;
+  /** Optional secrets manager used to resolve provider API keys. */
+  readonly secretsManager?: SecretsManager;
 };
 
 /** Runtime handle returned by the worker process bootstrap. */
@@ -532,9 +553,11 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       const payload = asEmbeddingBatchPayload(envelope.payload);
       await embedChunkBatch(payload, {
         db: options.db,
-        provider: createEmbeddingProviderFromEnvironment(process.env, {
-          model: payload.embeddingModel,
-        }),
+        provider:
+          options.embeddingProvider ??
+          (await createWorkerEmbeddingProviderFromEnvironment(process.env, {
+            model: payload.embeddingModel,
+          })),
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
@@ -680,6 +703,39 @@ export async function resolveWorkerLlmApiKey(
   return resolved.value;
 }
 
+/** Resolves the worker embedding provider API key through the security secret boundary. */
+export async function resolveWorkerEmbeddingApiKey(
+  env: WorkerEmbeddingProviderEnvironment,
+  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+): Promise<string | undefined> {
+  const secretRefValue = firstEnvValue(env, [
+    "HEIMDALL_EMBEDDING_API_KEY_SECRET_REF",
+    "EMBEDDING_PROVIDER_API_KEY_SECRET_REF",
+    "OPENAI_EMBEDDING_API_KEY_SECRET_REF",
+    "OPENAI_API_KEY_SECRET_REF",
+  ]);
+  const localEnvName = firstEnvName(env, [
+    "HEIMDALL_EMBEDDING_API_KEY",
+    "EMBEDDING_PROVIDER_API_KEY",
+    "OPENAI_EMBEDDING_API_KEY",
+    "OPENAI_API_KEY",
+  ]);
+  const secretRef = secretRefValue
+    ? parseSecretRef(secretRefValue)
+    : localEnvName
+      ? parseSecretRef(`env:${localEnvName}`)
+      : undefined;
+  if (!secretRef) {
+    return undefined;
+  }
+
+  const resolved = await secretsManager.resolveSecret(secretRef, {
+    purpose: "llm_provider_api_key",
+    service: "worker",
+  });
+  return resolved.value;
+}
+
 /** Creates the optional worker LLM gateway selected by environment configuration. */
 export async function createWorkerLlmGatewayFromEnvironment(
   env: WorkerLlmGatewayEnvironment,
@@ -748,6 +804,60 @@ export async function createWorkerLlmGatewayFromEnvironment(
       ...(options.traces ? { traces: options.traces } : {}),
     },
   );
+}
+
+/** Creates the worker embedding provider selected by environment configuration. */
+export async function createWorkerEmbeddingProviderFromEnvironment(
+  env: WorkerEmbeddingProviderEnvironment,
+  options: WorkerEmbeddingProviderOptions = {},
+): Promise<EmbeddingProvider> {
+  const providerName =
+    optionalEnvString(env.HEIMDALL_EMBEDDING_PROVIDER) ?? optionalEnvString(env.EMBEDDING_PROVIDER);
+
+  if (!providerName || isLocalEmbeddingProviderName(providerName)) {
+    return createEmbeddingProviderFromEnvironment(env, {
+      ...(options.model ? { model: options.model } : {}),
+    });
+  }
+  if (!isOpenAIEmbeddingProviderName(providerName)) {
+    throw new Error(`Unsupported EMBEDDING_PROVIDER: ${providerName}`);
+  }
+
+  const model =
+    options.model ??
+    optionalEnvString(env.HEIMDALL_EMBEDDING_MODEL) ??
+    optionalEnvString(env.EMBEDDING_MODEL) ??
+    "text-embedding-3-small";
+  const apiKey = await resolveWorkerEmbeddingApiKey(
+    env,
+    options.secretsManager ?? createLocalEnvSecretsManager({ env }),
+  );
+  if (!apiKey) {
+    throw new Error(
+      "EMBEDDING_PROVIDER_API_KEY_SECRET_REF, OPENAI_EMBEDDING_API_KEY_SECRET_REF, OPENAI_API_KEY_SECRET_REF, or OPENAI_API_KEY is required when the OpenAI embedding provider is configured.",
+    );
+  }
+
+  const configuredDimensions =
+    optionalPositiveInteger(env.HEIMDALL_EMBEDDING_DIMENSIONS) ??
+    optionalPositiveInteger(env.EMBEDDING_DIMENSIONS);
+  const baseUrl =
+    optionalEnvString(env.HEIMDALL_EMBEDDING_BASE_URL) ??
+    optionalEnvString(env.EMBEDDING_PROVIDER_BASE_URL) ??
+    optionalEnvString(env.OPENAI_BASE_URL);
+  const timeoutMs =
+    optionalPositiveInteger(env.HEIMDALL_EMBEDDING_TIMEOUT_MS) ??
+    optionalPositiveInteger(env.EMBEDDING_PROVIDER_TIMEOUT_MS) ??
+    optionalPositiveInteger(env.OPENAI_TIMEOUT_MS);
+
+  return createOpenAIEmbeddingProvider({
+    apiKey,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(configuredDimensions ? { dimensions: configuredDimensions } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    model,
+    ...(timeoutMs ? { timeoutMs } : {}),
+  });
 }
 
 /** Starts BullMQ workers and a polling outbox dispatcher. */
@@ -1496,19 +1606,42 @@ function hasOpenAIProviderConfiguration(env: WorkerLlmGatewayEnvironment): boole
   return Boolean(firstEnvValue(env, ["HEIMDALL_LLM_MODEL", "LLM_MODEL", "OPENAI_MODEL"]));
 }
 
+/** Returns whether a provider selector names a local embedding provider. */
+function isLocalEmbeddingProviderName(value: string): boolean {
+  const normalized = normalizeProviderSelector(value);
+
+  return normalized === "hash" || normalized === "fake" || normalized === "local";
+}
+
+/** Returns whether a provider selector names an OpenAI-compatible embeddings provider. */
+function isOpenAIEmbeddingProviderName(value: string): boolean {
+  const normalized = normalizeProviderSelector(value);
+
+  return (
+    normalized === "openai" ||
+    normalized === "openai_compatible" ||
+    normalized === "openai_embeddings"
+  );
+}
+
 /** Returns whether a provider selector names an OpenAI-compatible provider. */
 function isOpenAIProviderName(value: string): boolean {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replaceAll(/[^a-z0-9]+/gu, "_")
-    .replaceAll(/^_+|_+$/gu, "");
+  const normalized = normalizeProviderSelector(value);
 
   return (
     normalized === "openai" ||
     normalized === "openai_chat_completions" ||
     normalized === "openai_compatible"
   );
+}
+
+/** Normalizes provider selectors from configuration into low-cardinality tokens. */
+function normalizeProviderSelector(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "");
 }
 
 /** Parses INDEXER_CLI_ARGS_JSON into a spawn argument array. */

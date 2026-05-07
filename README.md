@@ -32,6 +32,16 @@ For an OpenAI-compatible Chat Completions provider, set `LLM_PROVIDER=openai`, `
 `OPENAI_API_KEY` development fallback. Set `HEIMDALL_REVIEW_SMOKE_FINDING=true` only for the
 guarded live PR review smoke, which uses the deterministic smoke gateway instead of a real model.
 
+## Embedding Provider
+
+Code chunk embeddings default to deterministic local hash vectors so local indexing and retrieval
+work without a network provider. For OpenAI-compatible embeddings, set `EMBEDDING_PROVIDER=openai`,
+`EMBEDDING_MODEL=text-embedding-3-small`, and either `EMBEDDING_PROVIDER_API_KEY_SECRET_REF`,
+`OPENAI_EMBEDDING_API_KEY_SECRET_REF`, `OPENAI_API_KEY_SECRET_REF`, or a local
+`OPENAI_EMBEDDING_API_KEY`/`OPENAI_API_KEY` development fallback. Leave
+`EMBEDDING_DIMENSIONS=1536` unless the database vector schema and selected model are changed
+together.
+
 ## Repository Structure
 
 ```text

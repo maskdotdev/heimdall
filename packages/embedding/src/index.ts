@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { EmbeddingBatchJobPayload } from "@repo/contracts";
+import { type EmbeddingBatchJobPayload, parseWithSchema } from "@repo/contracts";
 import {
   codeChunkEmbeddings,
   codeChunks,
@@ -15,6 +15,7 @@ import {
   type TelemetrySpanRecorder,
   type TelemetryTraceContextInput,
 } from "@repo/observability";
+import { type Static, Type } from "@sinclair/typebox";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 export const packageName = "@repo/embedding" as const;
@@ -38,6 +39,45 @@ export const DEFAULT_EMBEDDING_BATCH_POLICY = {
 /** Default local provider identifier used when no embedding provider is configured. */
 export const DEFAULT_EMBEDDING_PROVIDER = "hash";
 
+const OpenAIEmbeddingObjectSchema = Type.Object(
+  {
+    embedding: Type.Array(Type.Number()),
+    index: Type.Integer(),
+  },
+  { additionalProperties: true },
+);
+
+const OpenAIEmbeddingsResponseSchema = Type.Object(
+  {
+    data: Type.Array(OpenAIEmbeddingObjectSchema),
+  },
+  { additionalProperties: true },
+);
+
+const OpenAIErrorResponseSchema = Type.Object(
+  {
+    error: Type.Optional(
+      Type.Object(
+        {
+          code: Type.Optional(Type.Union([Type.String(), Type.Number(), Type.Null()])),
+          type: Type.Optional(Type.String()),
+        },
+        { additionalProperties: true },
+      ),
+    ),
+  },
+  { additionalProperties: true },
+);
+
+type OpenAIEmbeddingsResponse = Static<typeof OpenAIEmbeddingsResponseSchema>;
+
+type OpenAIHttpErrorMapping = {
+  /** Normalized embedding provider error code. */
+  readonly code: EmbeddingProviderErrorCode;
+  /** Whether the request is safe to retry later. */
+  readonly retryable: boolean;
+};
+
 /** Provider boundary for chunk embeddings. */
 export type EmbeddingProvider = {
   /** Low-cardinality provider ID used for telemetry. */
@@ -49,6 +89,94 @@ export type EmbeddingProvider = {
   /** Embeds input texts in order. */
   readonly embedTexts: (texts: readonly string[]) => Promise<readonly (readonly number[])[]>;
 };
+
+/** Fetch boundary used by the OpenAI Embeddings provider. */
+export type OpenAIEmbeddingsFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+/** Options used to create an OpenAI-compatible embeddings provider. */
+export type OpenAIEmbeddingProviderOptions = {
+  /** Secret API key used only in the Authorization header. */
+  readonly apiKey: string;
+  /** Optional OpenAI-compatible API base URL. Defaults to https://api.openai.com/v1. */
+  readonly baseUrl?: string;
+  /** Optional vector dimensions to request from supported embedding models. */
+  readonly dimensions?: number;
+  /** Optional fetch implementation for tests or alternate runtimes. */
+  readonly fetch?: OpenAIEmbeddingsFetch;
+  /** Model identifier sent to the provider. */
+  readonly model: string;
+  /** Optional OpenAI organization header value. */
+  readonly organization?: string;
+  /** Optional OpenAI project header value. */
+  readonly project?: string;
+  /** Optional request timeout in milliseconds. */
+  readonly timeoutMs?: number;
+};
+
+/** Normalized embedding provider failure codes. */
+export type EmbeddingProviderErrorCode =
+  | "provider_unavailable"
+  | "provider_rate_limited"
+  | "provider_auth_failed"
+  | "model_not_found"
+  | "model_capability_missing"
+  | "input_too_large"
+  | "timeout"
+  | "schema_validation_failed"
+  | "unknown";
+
+/** Details used to construct a normalized embedding provider error. */
+export type EmbeddingProviderErrorOptions = {
+  /** Stable provider error code. */
+  readonly code: EmbeddingProviderErrorCode;
+  /** Original error object, never serialized by embedding callers. */
+  readonly cause?: unknown;
+  /** Product-safe diagnostic metadata. */
+  readonly details?: Readonly<Record<string, unknown>>;
+  /** Model that raised or caused the error. */
+  readonly model?: string;
+  /** Provider adapter that raised or caused the error. */
+  readonly provider?: string;
+  /** Whether retrying the same request is expected to be safe. */
+  readonly retryable?: boolean;
+};
+
+/** Error raised by embedding provider adapters after provider or response failures. */
+export class EmbeddingProviderError extends Error {
+  /** Stable provider error code. */
+  public readonly code: EmbeddingProviderErrorCode;
+  /** Original error object, never serialized by embedding callers. */
+  public override readonly cause?: unknown;
+  /** Product-safe diagnostic metadata. */
+  public readonly details?: Readonly<Record<string, unknown>>;
+  /** Model that raised or caused the error. */
+  public readonly model?: string;
+  /** Provider adapter that raised or caused the error. */
+  public readonly provider?: string;
+  /** Whether retrying the same request is expected to be safe. */
+  public readonly retryable: boolean;
+
+  /** Creates a normalized embedding provider error. */
+  public constructor(message: string, options: EmbeddingProviderErrorOptions) {
+    super(message);
+    this.name = "EmbeddingProviderError";
+    this.code = options.code;
+    this.retryable = options.retryable ?? isRetryableEmbeddingProviderErrorCode(options.code);
+
+    if (options.cause) {
+      this.cause = options.cause;
+    }
+    if (options.details) {
+      this.details = options.details;
+    }
+    if (options.model) {
+      this.model = options.model;
+    }
+    if (options.provider) {
+      this.provider = options.provider;
+    }
+  }
+}
 
 /** Environment values used to select an embedding provider. */
 export type EmbeddingProviderEnvironment = Readonly<Record<string, string | undefined>>;
@@ -537,6 +665,138 @@ export function createHashEmbeddingProvider(
   };
 }
 
+/** Provider adapter backed by the OpenAI-compatible Embeddings HTTP API. */
+export class OpenAIEmbeddingProvider implements EmbeddingProvider {
+  /** Low-cardinality provider ID used for telemetry. */
+  public readonly providerId = "openai";
+
+  /** Vector dimension returned by the provider. */
+  public readonly dimensions: number;
+
+  /** Model identifier sent to the provider. */
+  public readonly model: string;
+
+  /** Secret API key used only for request authorization. */
+  private readonly apiKey: string;
+
+  /** OpenAI-compatible API base URL without a trailing slash. */
+  private readonly baseUrl: string;
+
+  /** Requested embedding dimensions, when explicitly configured. */
+  private readonly dimensionsParameter: number | undefined;
+
+  /** Fetch implementation used for provider requests. */
+  private readonly fetchFn: OpenAIEmbeddingsFetch;
+
+  /** Optional organization header value. */
+  private readonly organization: string | undefined;
+
+  /** Optional project header value. */
+  private readonly project: string | undefined;
+
+  /** Optional request timeout in milliseconds. */
+  private readonly timeoutMs: number | undefined;
+
+  /** Creates an OpenAI-compatible embeddings provider. */
+  public constructor(options: OpenAIEmbeddingProviderOptions) {
+    this.apiKey = requireOpenAIProviderString(options.apiKey, "apiKey");
+    this.baseUrl = normalizeOpenAIBaseUrl(options.baseUrl ?? "https://api.openai.com/v1");
+    this.dimensionsParameter = optionalPositiveNumber(options.dimensions);
+    this.dimensions = this.dimensionsParameter ?? DEFAULT_EMBEDDING_DIMENSIONS;
+    this.fetchFn = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.model = requireOpenAIProviderString(options.model, "model");
+    this.organization = optionalProviderString(options.organization);
+    this.project = optionalProviderString(options.project);
+    this.timeoutMs = optionalPositiveNumber(options.timeoutMs);
+  }
+
+  /** Calls the embeddings endpoint and returns vectors in the original input order. */
+  public async embedTexts(texts: readonly string[]): Promise<readonly (readonly number[])[]> {
+    if (texts.length === 0) {
+      return [];
+    }
+    if (texts.some((text) => text.trim().length === 0)) {
+      throw new EmbeddingProviderError("OpenAI embeddings input cannot contain empty text.", {
+        code: "schema_validation_failed",
+        model: this.model,
+        provider: this.providerId,
+        retryable: false,
+      });
+    }
+
+    const response = await this.fetchEmbeddings(texts);
+    if (!response.ok) {
+      throw await openAIEmbeddingsHttpError(response, this.model);
+    }
+
+    const body = await readOpenAIEmbeddingsJsonResponse(response, this.model);
+    const embeddings = parseOpenAIEmbeddingsResponse(body, this.model);
+
+    return openAIEmbeddingVectorsByInputOrder(embeddings, texts.length, this.model);
+  }
+
+  /** Sends one embeddings request with optional timeout handling. */
+  private async fetchEmbeddings(texts: readonly string[]): Promise<Response> {
+    const controller = this.timeoutMs ? new AbortController() : undefined;
+    const timeout =
+      controller && this.timeoutMs
+        ? setTimeout(() => controller.abort(), this.timeoutMs)
+        : undefined;
+
+    try {
+      return await this.fetchFn(`${this.baseUrl}/embeddings`, {
+        body: JSON.stringify(this.createRequestBody(texts)),
+        headers: this.createRequestHeaders(),
+        method: "POST",
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (error) {
+      const isTimeout = controller?.signal.aborted === true;
+      throw new EmbeddingProviderError(
+        isTimeout ? "OpenAI embeddings request timed out." : "OpenAI embeddings request failed.",
+        {
+          cause: error,
+          code: isTimeout ? "timeout" : "provider_unavailable",
+          model: this.model,
+          provider: this.providerId,
+          retryable: true,
+        },
+      );
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  /** Builds the provider request body for a float embeddings call. */
+  private createRequestBody(texts: readonly string[]): Record<string, unknown> {
+    return {
+      encoding_format: "float",
+      input: texts,
+      model: this.model,
+      ...(this.dimensionsParameter ? { dimensions: this.dimensionsParameter } : {}),
+    };
+  }
+
+  /** Builds request headers without exposing the API key to logs or metadata. */
+  private createRequestHeaders(): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.apiKey}`,
+      "Content-Type": "application/json",
+      ...(this.organization ? { "OpenAI-Organization": this.organization } : {}),
+      ...(this.project ? { "OpenAI-Project": this.project } : {}),
+    };
+  }
+}
+
+/** Creates an OpenAI-compatible embeddings provider adapter. */
+export function createOpenAIEmbeddingProvider(
+  options: OpenAIEmbeddingProviderOptions,
+): EmbeddingProvider {
+  return new OpenAIEmbeddingProvider(options);
+}
+
 /** Creates the configured embedding provider for worker and local runs. */
 export function createEmbeddingProviderFromEnvironment(
   env: EmbeddingProviderEnvironment,
@@ -547,21 +807,47 @@ export function createEmbeddingProviderFromEnvironment(
     env.EMBEDDING_PROVIDER ??
     DEFAULT_EMBEDDING_PROVIDER
   ).toLowerCase();
+  const configuredDimensions =
+    optionalPositiveInteger(env.HEIMDALL_EMBEDDING_DIMENSIONS) ??
+    optionalPositiveInteger(env.EMBEDDING_DIMENSIONS);
   const model =
     options.model ??
     env.HEIMDALL_EMBEDDING_MODEL ??
     env.EMBEDDING_MODEL ??
     "text-embedding-3-small";
-  const dimensions =
-    optionalPositiveInteger(env.HEIMDALL_EMBEDDING_DIMENSIONS) ??
-    optionalPositiveInteger(env.EMBEDDING_DIMENSIONS) ??
-    DEFAULT_EMBEDDING_DIMENSIONS;
+  const dimensions = configuredDimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
 
   if (providerName === "hash" || providerName === "fake" || providerName === "local") {
     return createHashEmbeddingProvider(model, dimensions, providerName);
   }
-  if (providerName === "openai") {
-    throw new Error("OpenAI embedding provider is not implemented yet.");
+  if (isOpenAIEmbeddingProviderName(providerName)) {
+    const apiKey =
+      optionalProviderString(env.HEIMDALL_EMBEDDING_API_KEY) ??
+      optionalProviderString(env.EMBEDDING_PROVIDER_API_KEY) ??
+      optionalProviderString(env.OPENAI_EMBEDDING_API_KEY) ??
+      optionalProviderString(env.OPENAI_API_KEY);
+    if (!apiKey) {
+      throw new Error(
+        "EMBEDDING_PROVIDER_API_KEY or OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai.",
+      );
+    }
+
+    const baseUrl =
+      optionalProviderString(env.HEIMDALL_EMBEDDING_BASE_URL) ??
+      optionalProviderString(env.EMBEDDING_PROVIDER_BASE_URL) ??
+      optionalProviderString(env.OPENAI_BASE_URL);
+    const timeoutMs =
+      optionalPositiveInteger(env.HEIMDALL_EMBEDDING_TIMEOUT_MS) ??
+      optionalPositiveInteger(env.EMBEDDING_PROVIDER_TIMEOUT_MS) ??
+      optionalPositiveInteger(env.OPENAI_TIMEOUT_MS);
+
+    return createOpenAIEmbeddingProvider({
+      apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(configuredDimensions ? { dimensions: configuredDimensions } : {}),
+      model,
+      ...(timeoutMs ? { timeoutMs } : {}),
+    });
   }
 
   throw new Error(`Unsupported embedding provider: ${providerName}`);
@@ -679,4 +965,263 @@ function stableId(prefix: string, parts: readonly unknown[]): string {
     .update(parts.map((part) => String(part)).join(":"))
     .digest("base64url")
     .slice(0, 26)}`;
+}
+
+/** Returns whether an embedding provider error code is retryable by default. */
+function isRetryableEmbeddingProviderErrorCode(code: EmbeddingProviderErrorCode): boolean {
+  return code === "provider_unavailable" || code === "provider_rate_limited" || code === "timeout";
+}
+
+/** Returns whether a provider selector names an OpenAI-compatible embeddings provider. */
+function isOpenAIEmbeddingProviderName(value: string): boolean {
+  const normalized = normalizeProviderSelector(value);
+
+  return (
+    normalized === "openai" ||
+    normalized === "openai_compatible" ||
+    normalized === "openai_embeddings"
+  );
+}
+
+/** Normalizes provider selectors from configuration into low-cardinality tokens. */
+function normalizeProviderSelector(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "");
+}
+
+/** Reads a required OpenAI provider option string. */
+function requireOpenAIProviderString(value: string | undefined, fieldName: string): string {
+  const trimmed = optionalProviderString(value);
+  if (!trimmed) {
+    throw new Error(`OpenAI embedding provider option ${fieldName} is required.`);
+  }
+
+  return trimmed;
+}
+
+/** Reads a non-empty provider string. */
+function optionalProviderString(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Parses a positive finite number option. */
+function optionalPositiveNumber(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/** Normalizes an OpenAI-compatible base URL without a trailing slash. */
+function normalizeOpenAIBaseUrl(value: string): string {
+  const url = requireOpenAIProviderString(value, "baseUrl");
+  return url.replaceAll(/\/+$/gu, "");
+}
+
+/** Reads an embeddings response body as JSON without trusting its shape. */
+async function readOpenAIEmbeddingsJsonResponse(
+  response: Response,
+  model: string,
+): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    throw new EmbeddingProviderError("OpenAI embeddings response was not valid JSON.", {
+      cause: error,
+      code: "provider_unavailable",
+      details: { responseShape: "embeddings" },
+      model,
+      provider: "openai",
+      retryable: true,
+    });
+  }
+}
+
+/** Parses the provider response envelope without trusting provider output shape. */
+function parseOpenAIEmbeddingsResponse(body: unknown, model: string): OpenAIEmbeddingsResponse {
+  try {
+    return parseWithSchema("OpenAIEmbeddingsResponse", OpenAIEmbeddingsResponseSchema, body);
+  } catch (error) {
+    throw openAIEmbeddingsResponseShapeError("OpenAI embeddings response envelope was invalid.", {
+      cause: error,
+      model,
+    });
+  }
+}
+
+/** Orders OpenAI embedding objects by their provider-returned input index. */
+function openAIEmbeddingVectorsByInputOrder(
+  response: OpenAIEmbeddingsResponse,
+  expectedCount: number,
+  model: string,
+): readonly (readonly number[])[] {
+  const vectors = new Array<readonly number[] | undefined>(expectedCount);
+
+  for (const item of response.data) {
+    if (item.index < 0 || item.index >= expectedCount) {
+      throw openAIEmbeddingsResponseShapeError(
+        "OpenAI embeddings response included an out-of-range embedding index.",
+        { model },
+      );
+    }
+    if (vectors[item.index]) {
+      throw openAIEmbeddingsResponseShapeError(
+        "OpenAI embeddings response included a duplicate embedding index.",
+        { model },
+      );
+    }
+
+    vectors[item.index] = item.embedding;
+  }
+
+  return vectors.map((vector, index) => {
+    if (!vector) {
+      throw openAIEmbeddingsResponseShapeError(
+        `OpenAI embeddings response did not include embedding index ${index}.`,
+        { model },
+      );
+    }
+
+    return vector;
+  });
+}
+
+/** Creates a provider-unavailable error for an invalid OpenAI embeddings response envelope. */
+function openAIEmbeddingsResponseShapeError(
+  message: string,
+  options: {
+    /** Original validation or parsing error. */
+    readonly cause?: unknown;
+    /** Model that returned the invalid response. */
+    readonly model: string;
+  },
+): EmbeddingProviderError {
+  return new EmbeddingProviderError(message, {
+    ...(options.cause ? { cause: options.cause } : {}),
+    code: "provider_unavailable",
+    details: { responseShape: "embeddings" },
+    model: options.model,
+    provider: "openai",
+    retryable: true,
+  });
+}
+
+/** Creates a normalized provider error from an OpenAI embeddings HTTP failure. */
+async function openAIEmbeddingsHttpError(
+  response: Response,
+  model: string,
+): Promise<EmbeddingProviderError> {
+  const details = await openAIEmbeddingsHttpErrorDetails(response);
+  const mapping = openAIEmbeddingsErrorMappingForStatus(
+    response.status,
+    stringDetail(details, "errorCode"),
+  );
+
+  return new EmbeddingProviderError(
+    `OpenAI embeddings request failed with HTTP ${response.status}.`,
+    {
+      code: mapping.code,
+      details,
+      model,
+      provider: "openai",
+      retryable: mapping.retryable,
+    },
+  );
+}
+
+/** Extracts product-safe details from an OpenAI embeddings HTTP error response. */
+async function openAIEmbeddingsHttpErrorDetails(
+  response: Response,
+): Promise<Readonly<Record<string, unknown>>> {
+  const parsed = await safeReadOpenAIErrorBody(response);
+  const error = parseOpenAIErrorBody(parsed);
+  const requestId =
+    optionalProviderString(response.headers.get("x-request-id")) ??
+    optionalProviderString(response.headers.get("openai-request-id"));
+  const errorCode = openAIErrorCodeString(error?.code);
+
+  return {
+    ...(errorCode ? { errorCode } : {}),
+    ...(optionalProviderString(error?.type)
+      ? { errorType: optionalProviderString(error?.type) }
+      : {}),
+    ...(requestId ? { requestId } : {}),
+    status: response.status,
+    statusFamily: `${Math.trunc(response.status / 100)}xx`,
+  };
+}
+
+/** Reads an OpenAI error body when the response body is valid JSON. */
+async function safeReadOpenAIErrorBody(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parses an OpenAI error response with a narrow boundary schema. */
+function parseOpenAIErrorBody(
+  value: unknown,
+): Static<typeof OpenAIErrorResponseSchema>["error"] | undefined {
+  try {
+    return parseWithSchema("OpenAIErrorResponse", OpenAIErrorResponseSchema, value).error;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Converts an OpenAI error code value into a safe string detail. */
+function openAIErrorCodeString(value: string | number | null | undefined): string | undefined {
+  if (typeof value === "string") {
+    return optionalProviderString(value);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return undefined;
+}
+
+/** Maps OpenAI embeddings HTTP statuses into the provider error model. */
+function openAIEmbeddingsErrorMappingForStatus(
+  status: number,
+  errorCode: string | undefined,
+): OpenAIHttpErrorMapping {
+  const normalizedErrorCode = errorCode?.trim().toLowerCase();
+  if (normalizedErrorCode === "context_length_exceeded" || status === 413) {
+    return { code: "input_too_large", retryable: false };
+  }
+
+  if (status === 401 || status === 403) {
+    return { code: "provider_auth_failed", retryable: false };
+  }
+  if (status === 404) {
+    return { code: "model_not_found", retryable: false };
+  }
+  if (status === 408) {
+    return { code: "timeout", retryable: true };
+  }
+  if (status === 429) {
+    return { code: "provider_rate_limited", retryable: true };
+  }
+  if (status >= 500) {
+    return { code: "provider_unavailable", retryable: true };
+  }
+  if (status === 400) {
+    return { code: "model_capability_missing", retryable: false };
+  }
+
+  return { code: "unknown", retryable: false };
+}
+
+/** Reads one string field from a product-safe detail record. */
+function stringDetail(details: Readonly<Record<string, unknown>>, key: string): string | undefined {
+  const value = details[key];
+  return typeof value === "string" ? value : undefined;
 }
