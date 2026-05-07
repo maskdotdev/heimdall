@@ -11,7 +11,7 @@ import type {
 import { createMemoryObservabilitySink } from "@repo/observability";
 import { signAdminIdentityAssertion } from "@repo/security";
 import { describe, expect, it } from "vitest";
-import { type AdminControlPlaneService, createApiApp } from "./app";
+import { type AdminControlPlaneService, createApiApp, type ProductDashboardService } from "./app";
 
 /** Allowed admin dashboard origin used by API route tests. */
 const adminOrigin = "http://localhost:3001";
@@ -51,6 +51,33 @@ describe("api app", () => {
     await expect(response.json()).resolves.toMatchObject({
       status: "accepted",
       deliveryId: "delivery-1",
+    });
+  });
+
+  it("serves product onboarding without an admin session", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      productDashboardService: createMockProductDashboardService(),
+    });
+
+    const response = await app.handle(new Request("http://localhost/app/onboarding"));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        githubApp: {
+          configured: true,
+          installUrl: "https://github.com/apps/heimdall-dev/installations/new",
+          webhookConfigured: true,
+        },
+        installations: [{ accountLogin: "octo-org" }],
+        recentReviews: [{ repoFullName: "octo-org/heimdall" }],
+        repositories: [{ fullName: "octo-org/heimdall" }],
+        webhook: {
+          latestEventName: "pull_request",
+          totalDeliveries: 3,
+        },
+      },
     });
   });
 
@@ -788,6 +815,56 @@ function createMockControlPlaneService(
       settings: settingsFixture,
     }),
     ...overrides,
+  };
+}
+
+/** Creates a mock product dashboard service. */
+function createMockProductDashboardService(): ProductDashboardService {
+  return {
+    getOnboarding: async () => ({
+      githubApp: {
+        appId: "123",
+        appSlug: "heimdall-dev",
+        configured: true,
+        installUrl: "https://github.com/apps/heimdall-dev/installations/new",
+        webhookConfigured: true,
+        webhookUrl: "https://api.heimdall.test/webhooks/github",
+      },
+      installations: [
+        {
+          accountLogin: "octo-org",
+          accountType: "organization",
+          installedAt: "2026-05-05T12:00:00.000Z",
+          provider: "github",
+        },
+      ],
+      recentReviews: [
+        {
+          authorLogin: "octocat",
+          counts: reviewRunSummaryFixture.counts,
+          pullRequestNumber: 42,
+          pullRequestTitle: "Improve review pipeline",
+          repoFullName: "octo-org/heimdall",
+          status: "completed",
+          updatedAt: "2026-05-05T12:10:00.000Z",
+        },
+      ],
+      repositories: [
+        {
+          defaultBranch: "main",
+          enabled: true,
+          fullName: "octo-org/heimdall",
+          latestReviewStatus: "completed",
+          visibility: "private",
+        },
+      ],
+      webhook: {
+        latestDeliveryAt: "2026-05-05T12:15:00.000Z",
+        latestEventName: "pull_request",
+        latestStatus: "processed",
+        totalDeliveries: 3,
+      },
+    }),
   };
 }
 

@@ -384,6 +384,30 @@ button.small {
   white-space: nowrap;
 }
 
+.mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.mode-switch button {
+  min-height: 2rem;
+  padding: 0.35rem 0.75rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.mode-switch button.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--text-inverse);
+}
+
 /* ============================================================================
    Auth Panel - Simplified Connection Flow
    ============================================================================ */
@@ -818,6 +842,115 @@ button.small {
   content: "○";
   font-size: 1.5rem;
   opacity: 0.5;
+}
+
+/* ============================================================================
+   Product Onboarding
+   ============================================================================ */
+
+.product-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.product-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1.5rem;
+  align-items: end;
+  padding: 1.5rem;
+  background: linear-gradient(135deg, rgba(212, 168, 82, 0.16), transparent 42%), var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.product-hero h2 {
+  max-width: 760px;
+  margin-top: 0.35rem;
+  font-size: 2rem;
+  line-height: 1.08;
+}
+
+.product-hero p:not(.eyebrow) {
+  max-width: 720px;
+  margin-top: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.product-actions {
+  display: flex;
+  gap: 0.625rem;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.product-summary {
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+}
+
+.product-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.42fr) minmax(280px, 0.58fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.product-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.product-wide {
+  grid-column: 1 / -1;
+}
+
+.setup-list,
+.install-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.setup-row,
+.mini-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.setup-row > div,
+.mini-row > div {
+  min-width: 0;
+}
+
+.setup-row strong,
+.mini-row strong {
+  display: block;
+}
+
+.setup-row code {
+  display: block;
+  margin-top: 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.mini-row span:not(.status) {
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
 }
 
 /* ============================================================================
@@ -1339,11 +1472,21 @@ tbody tr:hover {
   }
 
   .overview-grid,
+  .product-grid,
+  .product-hero,
   .split,
   .operator-brief,
   .connection-grid,
   .guided-path {
     grid-template-columns: 1fr;
+  }
+
+  .product-summary {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .product-actions {
+    justify-content: flex-start;
   }
 
   .resource-controls,
@@ -1391,5 +1534,9 @@ tbody tr:hover {
 @media (max-width: 480px) {
   .primary-nav .tab {
     flex: 1 1 100%;
+  }
+
+  .product-summary {
+    grid-template-columns: 1fr;
   }
 }

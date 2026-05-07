@@ -19,11 +19,13 @@ import {
   createDatabaseClient,
   type DatabaseClient,
   type HeimdallDatabase,
+  providerInstallations,
   pullRequestSnapshots,
   RepositoryRepository,
   repoRules,
   repositories,
   reviewRuns,
+  webhookEvents,
 } from "@repo/db";
 import {
   type AdminControlPlaneTelemetryEventInput,
@@ -119,6 +121,113 @@ type AdminErrorResponse = {
     /** Human-readable error message. */
     readonly message: string;
   };
+};
+
+/** Public GitHub App setup details shown on the product dashboard. */
+export type ProductGitHubAppSetup = {
+  /** Whether the API has enough GitHub App config to ingest and process webhooks. */
+  readonly configured: boolean;
+  /** GitHub App ID when configured. */
+  readonly appId?: string | undefined;
+  /** GitHub App slug used to build the install URL when available. */
+  readonly appSlug?: string | undefined;
+  /** Direct GitHub App installation URL when available. */
+  readonly installUrl?: string | undefined;
+  /** Whether webhook signature verification has a configured secret. */
+  readonly webhookConfigured: boolean;
+  /** Public webhook URL to configure in GitHub App settings when WEB_URL is known. */
+  readonly webhookUrl?: string | undefined;
+};
+
+/** Public installation summary for product onboarding. */
+export type ProductInstallationSummary = {
+  /** Git provider. */
+  readonly provider: string;
+  /** GitHub account login that owns the installation. */
+  readonly accountLogin: string;
+  /** GitHub account type. */
+  readonly accountType: string;
+  /** Installation creation timestamp. */
+  readonly installedAt: string;
+  /** Suspension timestamp when GitHub suspended the installation. */
+  readonly suspendedAt?: string | undefined;
+  /** Deletion timestamp when the installation was removed. */
+  readonly deletedAt?: string | undefined;
+};
+
+/** Product-facing repository summary for onboarding. */
+export type ProductRepositorySummary = {
+  /** Repository full name. */
+  readonly fullName: string;
+  /** Default branch when known. */
+  readonly defaultBranch?: string | undefined;
+  /** Repository visibility. */
+  readonly visibility: string;
+  /** Whether review automation is enabled. */
+  readonly enabled: boolean;
+  /** Latest review status for this repository when present. */
+  readonly latestReviewStatus?: string | undefined;
+};
+
+/** Product-facing review summary for onboarding. */
+export type ProductReviewSummary = {
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Pull request number. */
+  readonly pullRequestNumber: number;
+  /** Pull request title when known. */
+  readonly pullRequestTitle?: string | undefined;
+  /** Pull request author login when known. */
+  readonly authorLogin?: string | undefined;
+  /** Review run status. */
+  readonly status: string;
+  /** Review finding counts. */
+  readonly counts: {
+    /** Candidate findings produced by the review. */
+    readonly candidateFindings: number;
+    /** Validated findings retained after validation. */
+    readonly validatedFindings: number;
+    /** Published findings. */
+    readonly publishedFindings: number;
+    /** Rejected findings. */
+    readonly rejectedFindings: number;
+  };
+  /** Last update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Public webhook activity summary for product onboarding. */
+export type ProductWebhookSummary = {
+  /** Total webhook deliveries persisted by the API. */
+  readonly totalDeliveries: number;
+  /** Latest webhook delivery timestamp when present. */
+  readonly latestDeliveryAt?: string | undefined;
+  /** Latest webhook event name when present. */
+  readonly latestEventName?: string | undefined;
+  /** Latest webhook action when present. */
+  readonly latestAction?: string | undefined;
+  /** Latest webhook processing status when present. */
+  readonly latestStatus?: string | undefined;
+};
+
+/** Public product onboarding payload for the normal application flow. */
+export type ProductOnboardingSummary = {
+  /** GitHub App setup details. */
+  readonly githubApp: ProductGitHubAppSetup;
+  /** Recent provider installations. */
+  readonly installations: readonly ProductInstallationSummary[];
+  /** Recent repositories known from installation or repository webhooks. */
+  readonly repositories: readonly ProductRepositorySummary[];
+  /** Recent review runs across known repositories. */
+  readonly recentReviews: readonly ProductReviewSummary[];
+  /** Webhook delivery activity. */
+  readonly webhook: ProductWebhookSummary;
+};
+
+/** Service surface for the normal product onboarding dashboard. */
+export type ProductDashboardService = {
+  /** Loads product setup and activity state. */
+  readonly getOnboarding: () => Promise<ProductOnboardingSummary>;
 };
 
 /** Minimal Elysia set object shape used by admin helpers. */
@@ -402,6 +511,8 @@ export type CreateApiAppOptions = {
   readonly adminDebugService?: AdminDebugService;
   /** Admin control-plane service for tests or custom composition. */
   readonly adminControlPlaneService?: AdminControlPlaneService;
+  /** Product dashboard service for tests or custom composition. */
+  readonly productDashboardService?: ProductDashboardService;
   /** Admin control-plane authentication override for tests or custom composition. */
   readonly adminControlPlaneAuth?: AdminControlPlaneAuthOptions;
   /** Admin control-plane observability sink for structured telemetry. */
@@ -426,11 +537,22 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
   const getAdminControlPlaneService = () =>
     options.adminControlPlaneService ??
     createAdminControlPlaneService({ db: getDatabaseClient().db });
+  const getProductDashboardService = () =>
+    options.productDashboardService ??
+    createProductDashboardService({ db: getDatabaseClient().db });
   const adminAuth = resolveAdminControlPlaneAuth(options.adminControlPlaneAuth);
   const observabilitySink = options.adminObservabilitySink ?? createNoopObservabilitySink();
 
   return new Elysia()
     .get("/healthz", () => ({ ok: true, service: "api" }))
+    .options("/app/*", ({ request, set }) => {
+      setProductResponseHeaders(request, set);
+      set.status = 204;
+    })
+    .get("/app/onboarding", async ({ request, set }) => {
+      setProductResponseHeaders(request, set);
+      return { data: await getProductDashboardService().getOnboarding() };
+    })
     .options("/admin/*", ({ request, set }) =>
       handleAdminPreflight(request, set, adminAuth, observabilitySink),
     )
@@ -1160,6 +1282,155 @@ function createAdminControlPlaneService(dependencies: {
     recordAuditEvent: (event) => insertAuditLog(dependencies.db, event),
     updateRepositorySettings: (repoId, patch, audit) =>
       updateRepositorySettings(dependencies.db, repoId, patch, audit),
+  };
+}
+
+/** Creates the product dashboard service backed by the database. */
+function createProductDashboardService(dependencies: {
+  /** Database used to read product setup and activity state. */
+  readonly db: HeimdallDatabase;
+}): ProductDashboardService {
+  return {
+    getOnboarding: () => getProductOnboarding(dependencies.db),
+  };
+}
+
+/** Loads the normal product onboarding state from deployment config and persisted GitHub data. */
+async function getProductOnboarding(db: HeimdallDatabase): Promise<ProductOnboardingSummary> {
+  const [installations, repositories, recentReviews, webhook] = await Promise.all([
+    listProductInstallations(db),
+    listProductRepositories(db),
+    listProductReviewRuns(db),
+    getProductWebhookSummary(db),
+  ]);
+
+  return {
+    githubApp: productGitHubAppSetup(),
+    installations,
+    recentReviews,
+    repositories,
+    webhook,
+  };
+}
+
+/** Builds GitHub App setup details from the current deployment environment. */
+function productGitHubAppSetup(): ProductGitHubAppSetup {
+  const appId = emptyToUndefined(process.env.GITHUB_APP_ID);
+  const appSlug = emptyToUndefined(process.env.HEIMDALL_GITHUB_APP_SLUG);
+  const explicitInstallUrl = emptyToUndefined(process.env.HEIMDALL_GITHUB_APP_INSTALL_URL);
+  const installUrl =
+    explicitInstallUrl ?? (appSlug ? `https://github.com/apps/${appSlug}/installations/new` : "");
+  const webhookUrl = productWebhookUrl();
+  const webhookConfigured = Boolean(emptyToUndefined(process.env.GITHUB_WEBHOOK_SECRET));
+
+  return {
+    configured: Boolean(appId && webhookConfigured && installUrl),
+    ...(appId ? { appId } : {}),
+    ...(appSlug ? { appSlug } : {}),
+    ...(installUrl ? { installUrl } : {}),
+    webhookConfigured,
+    ...(webhookUrl ? { webhookUrl } : {}),
+  };
+}
+
+/** Returns the public GitHub webhook URL for the API deployment when configured. */
+function productWebhookUrl(): string | undefined {
+  const apiUrl = emptyToUndefined(process.env.HEIMDALL_API_PUBLIC_URL);
+  const legacyApiUrl = emptyToUndefined(process.env.API_URL);
+  const webUrl = emptyToUndefined(process.env.WEB_URL);
+  const baseUrl = apiUrl ?? legacyApiUrl ?? webUrl;
+  if (!baseUrl) {
+    return undefined;
+  }
+
+  try {
+    return new URL("/webhooks/github", baseUrl).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Lists recent GitHub App installations for the product dashboard. */
+async function listProductInstallations(
+  db: HeimdallDatabase,
+): Promise<readonly ProductInstallationSummary[]> {
+  const rows = await db
+    .select({
+      accountLogin: providerInstallations.accountLogin,
+      accountType: providerInstallations.accountType,
+      deletedAt: providerInstallations.deletedAt,
+      installedAt: providerInstallations.installedAt,
+      provider: providerInstallations.provider,
+      suspendedAt: providerInstallations.suspendedAt,
+    })
+    .from(providerInstallations)
+    .orderBy(desc(providerInstallations.installedAt))
+    .limit(10);
+
+  return rows.map((row) => ({
+    accountLogin: row.accountLogin,
+    accountType: row.accountType,
+    ...(row.deletedAt ? { deletedAt: row.deletedAt.toISOString() } : {}),
+    installedAt: row.installedAt.toISOString(),
+    provider: row.provider,
+    ...(row.suspendedAt ? { suspendedAt: row.suspendedAt.toISOString() } : {}),
+  }));
+}
+
+/** Lists product-safe repository summaries without admin metadata. */
+async function listProductRepositories(
+  db: HeimdallDatabase,
+): Promise<readonly ProductRepositorySummary[]> {
+  const rows = await listRepositories(db, { limit: 12 });
+  return rows.map((repository) => ({
+    ...(repository.defaultBranch ? { defaultBranch: repository.defaultBranch } : {}),
+    enabled: repository.enabled,
+    fullName: repository.fullName,
+    ...(repository.latestReviewStatus ? { latestReviewStatus: repository.latestReviewStatus } : {}),
+    visibility: repository.visibility,
+  }));
+}
+
+/** Lists product-safe review summaries without run IDs or commit SHAs. */
+async function listProductReviewRuns(
+  db: HeimdallDatabase,
+): Promise<readonly ProductReviewSummary[]> {
+  const rows = await listReviewRuns(db, { limit: 12 });
+  return rows.map((review) => ({
+    ...(review.authorLogin ? { authorLogin: review.authorLogin } : {}),
+    counts: review.counts,
+    pullRequestNumber: review.pullRequestNumber,
+    ...(review.pullRequestTitle ? { pullRequestTitle: review.pullRequestTitle } : {}),
+    repoFullName: review.repoFullName,
+    status: review.status,
+    updatedAt: review.updatedAt,
+  }));
+}
+
+/** Summarizes persisted webhook activity for the product dashboard. */
+async function getProductWebhookSummary(db: HeimdallDatabase): Promise<ProductWebhookSummary> {
+  const [countRow] = await db.select({ count: sql<number>`count(*)::int` }).from(webhookEvents);
+  const [latest] = await db
+    .select({
+      action: webhookEvents.action,
+      eventName: webhookEvents.eventName,
+      receivedAt: webhookEvents.receivedAt,
+      status: webhookEvents.status,
+    })
+    .from(webhookEvents)
+    .orderBy(desc(webhookEvents.receivedAt))
+    .limit(1);
+
+  return {
+    totalDeliveries: countRow?.count ?? 0,
+    ...(latest
+      ? {
+          ...(latest.action ? { latestAction: latest.action } : {}),
+          latestDeliveryAt: latest.receivedAt.toISOString(),
+          latestEventName: latest.eventName,
+          latestStatus: latest.status,
+        }
+      : {}),
   };
 }
 
@@ -2150,6 +2421,27 @@ function setAdminResponseHeaders(
   }
 }
 
+/** Applies public product dashboard headers and optional CORS. */
+function setProductResponseHeaders(request: Request, set: AdminResponseSet): void {
+  const origin = request.headers.get("origin");
+  const allowedOrigins =
+    parseStringList(process.env.HEIMDALL_APP_ALLOWED_ORIGINS) ??
+    parseStringList(process.env.WEB_URL) ??
+    [];
+  set.headers = {
+    ...(set.headers ?? {}),
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  };
+
+  if (origin && allowedOrigins.includes(origin)) {
+    set.headers["access-control-allow-headers"] = "content-type,x-request-id";
+    set.headers["access-control-allow-methods"] = "GET,OPTIONS";
+    set.headers["access-control-allow-origin"] = origin;
+    set.headers.vary = "Origin";
+  }
+}
+
 /** Returns a public session DTO for the dashboard. */
 function publicAdminSession(session: AdminSession) {
   return {
@@ -2484,6 +2776,11 @@ function parseIdentityProvider(value: string | undefined): AdminIdentityProvider
 /** Parses an admin session cookie SameSite policy. */
 function parseCookieSameSite(value: string | undefined): "Strict" | "Lax" | "None" | undefined {
   return value === "Strict" || value === "Lax" || value === "None" ? value : undefined;
+}
+
+/** Converts blank environment values to undefined. */
+function emptyToUndefined(value: string | undefined): string | undefined {
+  return value && value.trim().length > 0 ? value : undefined;
 }
 
 /** Parses a JSON or comma-separated string list. */

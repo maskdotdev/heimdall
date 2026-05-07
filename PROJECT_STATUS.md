@@ -54,6 +54,10 @@ tracked milestone.
 
 - Latest completed milestone: guarded live PR review smoke verified webhook-to-publish completion
   against development PR `maskdotdev/heimdall#2`.
+- Latest product flow milestone: the dashboard now opens on the normal GitHub App onboarding path,
+  backed by `/app/onboarding` for GitHub App install readiness, installation status, repository
+  discovery, webhook activity, and recent review visibility. The admin console remains available as
+  a separate operator mode.
 - Latest implementation milestone: Railway staging admin control-plane proof completed with signed
   IdP-backed sessions, scoped permissions, CSRF/CORS protections, settings APIs/UI, audit history
   search, replay execution, rollback notes, and committed evidence.

@@ -70,6 +70,29 @@ pnpm infra:up
 pnpm infra:down
 ```
 
+## Product GitHub App Flow
+
+The normal product path is separate from the admin control plane. A user installs the Heimdall
+GitHub App, GitHub sends installation and pull request webhooks to the API, the worker reviews the
+pull request, and the product dashboard shows setup, installations, repositories, and recent review
+activity.
+
+Configure the same GitHub App values locally and in production:
+
+```bash
+GITHUB_APP_ID="<app id>"
+GITHUB_PRIVATE_KEY="<pem private key>"
+GITHUB_WEBHOOK_SECRET="<webhook secret>"
+HEIMDALL_GITHUB_APP_SLUG="heimdall-dev"
+HEIMDALL_API_PUBLIC_URL="https://api.example.com"
+HEIMDALL_APP_ALLOWED_ORIGINS="https://app.example.com"
+VITE_HEIMDALL_API_BASE_URL="https://api.example.com"
+```
+
+`HEIMDALL_GITHUB_APP_INSTALL_URL` can replace `HEIMDALL_GITHUB_APP_SLUG` when you need a custom
+installation URL. The dashboard reads `/app/onboarding` without an admin session and uses the
+configured install URL as the primary call to action.
+
 ## Admin Control Plane
 
 Admin routes are disabled by default and fail closed unless identity, session, CORS, and exposure

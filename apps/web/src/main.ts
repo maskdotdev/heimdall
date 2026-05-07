@@ -371,6 +371,9 @@ type InspectorKind = "webhook" | "review" | "publisher";
 /** Primary dashboard view. */
 type ViewKind = "overview" | "inspectors" | "settings" | "audit";
 
+/** Top-level console mode. */
+type ConsoleMode = "product" | "admin";
+
 /** API envelope returned by the admin API for successful requests. */
 type ApiEnvelope<T> = {
   /** Response data payload. */
@@ -528,6 +531,98 @@ type AdminDashboardOverview = {
   readonly recentReviews: readonly AdminReviewRunSummary[];
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
+};
+
+/** Product GitHub App setup returned by the public onboarding API. */
+type ProductGitHubAppSetup = {
+  /** Whether the deployment is ready to accept a GitHub App install. */
+  readonly configured: boolean;
+  /** GitHub App ID when configured. */
+  readonly appId?: string;
+  /** GitHub App slug when configured. */
+  readonly appSlug?: string;
+  /** GitHub App install URL. */
+  readonly installUrl?: string;
+  /** Whether webhook signature verification is configured. */
+  readonly webhookConfigured: boolean;
+  /** Webhook URL to configure in GitHub. */
+  readonly webhookUrl?: string;
+};
+
+/** Product installation row returned by the public onboarding API. */
+type ProductInstallationSummary = {
+  /** Git provider. */
+  readonly provider: string;
+  /** GitHub account login. */
+  readonly accountLogin: string;
+  /** GitHub account type. */
+  readonly accountType: string;
+  /** Installation timestamp. */
+  readonly installedAt: string;
+  /** Suspension timestamp when present. */
+  readonly suspendedAt?: string;
+  /** Deletion timestamp when present. */
+  readonly deletedAt?: string;
+};
+
+/** Product-facing repository summary returned by onboarding. */
+type ProductRepositorySummary = {
+  /** Repository full name. */
+  readonly fullName: string;
+  /** Default branch when present. */
+  readonly defaultBranch?: string;
+  /** Repository visibility. */
+  readonly visibility: string;
+  /** Whether review automation is enabled. */
+  readonly enabled: boolean;
+  /** Latest review status when present. */
+  readonly latestReviewStatus?: string;
+};
+
+/** Product-facing review summary returned by onboarding. */
+type ProductReviewSummary = {
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Pull request number. */
+  readonly pullRequestNumber: number;
+  /** Pull request title when present. */
+  readonly pullRequestTitle?: string;
+  /** Pull request author login when present. */
+  readonly authorLogin?: string;
+  /** Review run status. */
+  readonly status: string;
+  /** Review finding counts. */
+  readonly counts: AdminReviewFindingCounts;
+  /** Last update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Product webhook summary returned by the public onboarding API. */
+type ProductWebhookSummary = {
+  /** Total persisted webhook deliveries. */
+  readonly totalDeliveries: number;
+  /** Latest delivery timestamp when present. */
+  readonly latestDeliveryAt?: string;
+  /** Latest webhook event name when present. */
+  readonly latestEventName?: string;
+  /** Latest webhook action when present. */
+  readonly latestAction?: string;
+  /** Latest webhook processing status when present. */
+  readonly latestStatus?: string;
+};
+
+/** Product onboarding response. */
+type ProductOnboardingSummary = {
+  /** GitHub App setup state. */
+  readonly githubApp: ProductGitHubAppSetup;
+  /** GitHub App installations known to the API. */
+  readonly installations: readonly ProductInstallationSummary[];
+  /** Repositories known from GitHub webhooks. */
+  readonly repositories: readonly ProductRepositorySummary[];
+  /** Recent review runs. */
+  readonly recentReviews: readonly ProductReviewSummary[];
+  /** Webhook delivery activity. */
+  readonly webhook: ProductWebhookSummary;
 };
 
 /** Repository settings returned by settings APIs. */
@@ -700,6 +795,16 @@ type AuditViewState = {
   error?: string | undefined;
 };
 
+/** Mutable product onboarding state. */
+type ProductViewState = {
+  /** Loaded product onboarding payload. */
+  data?: ProductOnboardingSummary | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+};
+
 /** Inspector API route builder configuration. */
 type InspectorConfig = {
   /** Inspector kind. */
@@ -749,6 +854,8 @@ type InspectorViewState = {
 
 /** Mutable application state. */
 type AppState = {
+  /** Active top-level console mode. */
+  activeMode: ConsoleMode;
   /** Active primary dashboard view. */
   activeView: ViewKind;
   /** Active inspector tab. */
@@ -765,6 +872,8 @@ type AppState = {
   authError?: string | undefined;
   /** Per-inspector state. */
   inspectors: Record<InspectorKind, InspectorViewState>;
+  /** Product onboarding state. */
+  product: ProductViewState;
   /** Overview view state. */
   overview: OverviewViewState;
   /** Settings view state. */
@@ -821,6 +930,7 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
 };
 
 const state: AppState = {
+  activeMode: "product",
   activeView: "overview",
   activeKind: "webhook",
   apiBaseUrl: sessionStorage.getItem(API_BASE_URL_STORAGE_KEY) ?? apiBaseUrl,
@@ -830,6 +940,7 @@ const state: AppState = {
     review: { id: "", confirmationTokenInput: "" },
     publisher: { id: "", confirmationTokenInput: "" },
   },
+  product: {},
   overview: {
     repositorySearch: "",
     reviewRepoId: "",
@@ -860,6 +971,7 @@ app.addEventListener("click", (event) => {
 app.addEventListener("input", handleInput);
 
 render();
+void loadProductOnboarding();
 void completePendingGatewayLogin();
 
 /** Handles delegated click events from the dashboard. */
@@ -893,6 +1005,31 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   event.preventDefault();
+  if (action === "show-product") {
+    state.activeMode = "product";
+    render();
+    if (!state.product.data && !state.product.loading) {
+      await loadProductOnboarding();
+    }
+    return;
+  }
+
+  if (action === "show-admin") {
+    state.activeMode = "admin";
+    render();
+    return;
+  }
+
+  if (action === "load-product") {
+    await loadProductOnboarding();
+    return;
+  }
+
+  if (action === "install-github-app") {
+    openGitHubInstall();
+    return;
+  }
+
   if (action === "login-github") {
     startGitHubLogin();
     return;
@@ -1076,6 +1213,7 @@ async function completePendingGatewayLogin(): Promise<void> {
     return;
   }
 
+  state.activeMode = "admin";
   await connectAdminSession();
 }
 
@@ -1160,6 +1298,33 @@ async function clearAuth(): Promise<void> {
     state.authLoading = undefined;
     render();
   }
+}
+
+/** Loads the product onboarding dashboard. */
+async function loadProductOnboarding(): Promise<void> {
+  state.product.loading = "Loading GitHub App setup";
+  state.product.error = undefined;
+  render();
+  try {
+    state.product.data = await requestProductData<ProductOnboardingSummary>("/app/onboarding");
+  } catch (error) {
+    state.product.error = errorMessage(error);
+  } finally {
+    state.product.loading = undefined;
+    render();
+  }
+}
+
+/** Opens the configured GitHub App installation URL. */
+function openGitHubInstall(): void {
+  const installUrl = state.product.data?.githubApp.installUrl;
+  if (!installUrl) {
+    state.product.error = "Configure HEIMDALL_GITHUB_APP_SLUG or HEIMDALL_GITHUB_APP_INSTALL_URL.";
+    render();
+    return;
+  }
+
+  window.location.assign(installUrl);
 }
 
 /** Loads debug details for the selected inspector. */
@@ -1457,6 +1622,22 @@ async function requestAdminData<T>(path: string, init: RequestInit = {}): Promis
   return (body as ApiEnvelope<T>).data;
 }
 
+/** Requests a typed data payload from the public product API. */
+async function requestProductData<T>(path: string): Promise<T> {
+  const response = await fetch(adminUrl(path), { credentials: "omit" });
+  const body = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    throw new Error(apiErrorMessage(body, response.status));
+  }
+
+  const envelope = body as ApiEnvelope<T> | undefined;
+  if (!envelope || !("data" in envelope)) {
+    throw new Error("Product API response did not include data.");
+  }
+
+  return envelope.data;
+}
+
 /** Requests a signed identity assertion from the configured admin gateway. */
 async function requestGatewayAssertion(): Promise<AdminIdentityRequestHeaders> {
   const response = await fetch(gatewayAssertionUrl(), {
@@ -1579,15 +1760,279 @@ function render(): void {
       <header class="topbar">
         <div>
           <p class="eyebrow">Heimdall</p>
-          <h1>Operator Console</h1>
+          <h1>${state.activeMode === "product" ? "Product Console" : "Operator Console"}</h1>
         </div>
+        ${renderModeSwitch()}
         ${renderSessionBadge()}
       </header>
-      ${renderAuthPanel()}
       ${
-        state.session ? `${renderPrimaryNav()}${renderActiveView()}` : renderDisconnectedWorkspace()
+        state.activeMode === "product"
+          ? renderProductDashboard()
+          : `${renderAuthPanel()}${
+              state.session
+                ? `${renderPrimaryNav()}${renderActiveView()}`
+                : renderDisconnectedWorkspace()
+            }`
       }
     </div>
+  `;
+}
+
+/** Renders the top-level console switch. */
+function renderModeSwitch(): string {
+  return `
+    <nav class="mode-switch" aria-label="Console mode">
+      <button
+        class="${state.activeMode === "product" ? "active" : ""}"
+        data-action="show-product"
+        type="button"
+      >
+        Product
+      </button>
+      <button
+        class="${state.activeMode === "admin" ? "active" : ""}"
+        data-action="show-admin"
+        type="button"
+      >
+        Admin
+      </button>
+    </nav>
+  `;
+}
+
+/** Renders the normal product dashboard and onboarding flow. */
+function renderProductDashboard(): string {
+  const product = state.product;
+  const data = product.data;
+
+  return `
+    <main class="product-workspace">
+      <section class="product-hero">
+        <div>
+          <p class="eyebrow">GitHub App Flow</p>
+          <h2>Install Heimdall, open a pull request, and watch reviews land.</h2>
+          <p>
+            This is the normal application path. The admin console is only for internal replay,
+            audit, and support operations.
+          </p>
+        </div>
+        <div class="product-actions">
+          <button
+            class="primary"
+            data-action="install-github-app"
+            type="button"
+            ${data?.githubApp.installUrl ? "" : "disabled"}
+          >
+            Install GitHub App
+          </button>
+          <button data-action="load-product" type="button">Refresh</button>
+        </div>
+      </section>
+      ${product.loading ? `<p class="notice">${escapeHtml(product.loading)}...</p>` : ""}
+      ${product.error ? `<p class="error-line">${escapeHtml(product.error)}</p>` : ""}
+      ${data ? renderProductReadiness(data) : renderProductLoadingState()}
+    </main>
+  `;
+}
+
+/** Renders product setup and activity state. */
+function renderProductReadiness(data: ProductOnboardingSummary): string {
+  return `
+    <section class="summary-grid product-summary">
+      ${renderMetric("GitHub App", data.githubApp.configured ? "ready" : "needs config", !data.githubApp.configured)}
+      ${renderMetric("Installations", String(data.installations.length))}
+      ${renderMetric("Repositories", String(data.repositories.length))}
+      ${renderMetric("Webhooks", String(data.webhook.totalDeliveries))}
+    </section>
+    <section class="product-grid">
+      ${renderProductSetupPanel(data)}
+      ${renderProductInstallations(data.installations)}
+      ${renderProductRepositories(data.repositories)}
+      ${renderProductReviews(data.recentReviews)}
+    </section>
+  `;
+}
+
+/** Renders product setup details. */
+function renderProductSetupPanel(data: ProductOnboardingSummary): string {
+  const app = data.githubApp;
+  const webhookLabel = data.webhook.latestEventName
+    ? `${data.webhook.latestEventName}${data.webhook.latestAction ? `:${data.webhook.latestAction}` : ""}`
+    : "No deliveries yet";
+
+  return `
+    <section class="panel product-panel product-setup">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Setup</p>
+          <h3>GitHub App</h3>
+        </div>
+        <span class="status ${app.configured ? "ok" : "warn"}">
+          ${app.configured ? "ready" : "missing config"}
+        </span>
+      </div>
+      <div class="setup-list">
+        ${renderSetupRow("App ID", app.appId ?? "Not configured", Boolean(app.appId))}
+        ${renderSetupRow("Install URL", app.installUrl ?? "Set HEIMDALL_GITHUB_APP_SLUG", Boolean(app.installUrl))}
+        ${renderSetupRow("Webhook secret", app.webhookConfigured ? "Configured" : "Missing", app.webhookConfigured)}
+        ${renderSetupRow("Webhook URL", app.webhookUrl ?? "Set HEIMDALL_API_PUBLIC_URL or WEB_URL", Boolean(app.webhookUrl))}
+        ${renderSetupRow("Latest webhook", webhookLabel, Boolean(data.webhook.latestEventName))}
+      </div>
+    </section>
+  `;
+}
+
+/** Renders one setup checklist row. */
+function renderSetupRow(label: string, value: string, ok: boolean): string {
+  return `
+    <div class="setup-row">
+      <span class="status ${ok ? "ok" : "warn"}">${ok ? "ready" : "todo"}</span>
+      <div>
+        <strong>${escapeHtml(label)}</strong>
+        <code>${escapeHtml(value)}</code>
+      </div>
+    </div>
+  `;
+}
+
+/** Renders known GitHub App installations. */
+function renderProductInstallations(rows: readonly ProductInstallationSummary[]): string {
+  return `
+    <section class="panel product-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Connection</p>
+          <h3>Installations</h3>
+        </div>
+      </div>
+      ${
+        rows.length === 0
+          ? `<p class="inline-empty">No GitHub App installation webhook has arrived yet.</p>`
+          : `<div class="install-list">${rows.map(renderProductInstallation).join("")}</div>`
+      }
+    </section>
+  `;
+}
+
+/** Renders one product installation row. */
+function renderProductInstallation(row: ProductInstallationSummary): string {
+  const status = row.deletedAt ? "deleted" : row.suspendedAt ? "suspended" : "active";
+  return `
+    <article class="mini-row">
+      <div>
+        <strong>${escapeHtml(row.accountLogin)}</strong>
+        <span>${escapeHtml(row.provider)} · ${escapeHtml(row.accountType)}</span>
+      </div>
+      <span class="status ${status === "active" ? "ok" : "warn"}">${escapeHtml(status)}</span>
+    </article>
+  `;
+}
+
+/** Renders known product repositories. */
+function renderProductRepositories(rows: readonly ProductRepositorySummary[]): string {
+  return `
+    <section class="panel product-panel product-wide">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Repositories</p>
+          <h3>Monitored Repos</h3>
+        </div>
+      </div>
+      ${
+        rows.length === 0
+          ? `<p class="inline-empty">Install the GitHub App on a repository to populate this list.</p>`
+          : `<div class="repo-list">${rows.map(renderProductRepositoryCard).join("")}</div>`
+      }
+    </section>
+  `;
+}
+
+/** Renders one product repository card without admin-only controls. */
+function renderProductRepositoryCard(repository: ProductRepositorySummary): string {
+  return `
+    <article class="repo-card">
+      <div>
+        <div class="repo-title">
+          <strong>${escapeHtml(repository.fullName)}</strong>
+          <span class="status ${repository.enabled ? "ok" : "muted"}">
+            ${repository.enabled ? "reviewing" : "paused"}
+          </span>
+        </div>
+        <p class="muted-text">
+          ${escapeHtml(repository.visibility)}${repository.defaultBranch ? ` · ${escapeHtml(repository.defaultBranch)}` : ""}
+        </p>
+      </div>
+      ${
+        repository.latestReviewStatus
+          ? `<span class="status ${statusClass(repository.latestReviewStatus)}">${escapeHtml(repository.latestReviewStatus)}</span>`
+          : `<span class="status muted">waiting for PR</span>`
+      }
+    </article>
+  `;
+}
+
+/** Renders product review activity. */
+function renderProductReviews(rows: readonly ProductReviewSummary[]): string {
+  return `
+    <section class="panel product-panel product-wide">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Reviews</p>
+          <h3>Recent PR Reviews</h3>
+        </div>
+      </div>
+      ${
+        rows.length === 0
+          ? `<p class="inline-empty">Open or update a pull request after installation to trigger review work.</p>`
+          : renderProductReviewRows(rows)
+      }
+    </section>
+  `;
+}
+
+/** Renders product review rows without admin-only inspector actions. */
+function renderProductReviewRows(rows: readonly ProductReviewSummary[]): string {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Pull request</th>
+            <th>Repository</th>
+            <th>Status</th>
+            <th>Findings</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (review) => `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(review.pullRequestTitle ?? `PR #${review.pullRequestNumber}`)}</strong>
+                    <span class="muted-text">#${review.pullRequestNumber}${review.authorLogin ? ` by ${escapeHtml(review.authorLogin)}` : ""}</span>
+                  </td>
+                  <td>${escapeHtml(review.repoFullName)}</td>
+                  <td><span class="status ${statusClass(review.status)}">${escapeHtml(review.status)}</span></td>
+                  <td>${escapeHtml(`${review.counts.publishedFindings} published`)}</td>
+                  <td>${escapeHtml(formatTime(review.updatedAt))}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders the product dashboard before the first load completes. */
+function renderProductLoadingState(): string {
+  return `
+    <section class="panel product-panel">
+      <p class="inline-empty">Loading deployment setup and GitHub App activity.</p>
+    </section>
   `;
 }
 
