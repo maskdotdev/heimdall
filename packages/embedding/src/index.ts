@@ -53,6 +53,15 @@ const OpenAIEmbeddingObjectSchema = Type.Object(
 const OpenAIEmbeddingsResponseSchema = Type.Object(
   {
     data: Type.Array(OpenAIEmbeddingObjectSchema),
+    usage: Type.Optional(
+      Type.Object(
+        {
+          prompt_tokens: Type.Optional(Type.Integer({ minimum: 0 })),
+          total_tokens: Type.Optional(Type.Integer({ minimum: 0 })),
+        },
+        { additionalProperties: true },
+      ),
+    ),
   },
   { additionalProperties: true },
 );
@@ -91,6 +100,26 @@ export type EmbeddingProvider = {
   readonly dimensions: number;
   /** Embeds input texts in order. */
   readonly embedTexts: (texts: readonly string[]) => Promise<readonly (readonly number[])[]>;
+  /** Optionally embeds texts and returns provider-reported usage for the request. */
+  readonly embedTextsWithUsage?: (
+    texts: readonly string[],
+  ) => Promise<EmbeddingProviderBatchResult>;
+};
+
+/** Provider-reported token usage for one embedding request. */
+export type EmbeddingProviderUsage = {
+  /** Input tokens reported by the provider. */
+  readonly inputTokens?: number;
+  /** Total tokens reported by the provider. */
+  readonly totalTokens?: number;
+};
+
+/** Rich embedding provider result used when an adapter exposes request usage. */
+export type EmbeddingProviderBatchResult = {
+  /** Provider vectors in the original input order. */
+  readonly vectors: readonly (readonly number[])[];
+  /** Optional provider-reported token usage for the request. */
+  readonly usage?: EmbeddingProviderUsage;
 };
 
 /** Fetch boundary used by the OpenAI Embeddings provider. */
@@ -470,8 +499,9 @@ export async function embedChunkBatch(
         : undefined;
 
     for (const [batchIndex, inputBatch] of inputBatches.entries()) {
+      const providerResult = await embedProviderInputBatch(options.provider, inputBatch);
       const vectors = validateEmbeddingVectors(
-        await options.provider.embedTexts(inputBatch.map((input) => input.text)),
+        providerResult.vectors,
         inputBatch.length,
         options.provider.dimensions,
       );
@@ -484,6 +514,7 @@ export async function embedChunkBatch(
         options,
         orgId: usageOrgId,
         payload,
+        ...(providerResult.usage ? { usage: providerResult.usage } : {}),
       });
     }
 
@@ -829,6 +860,19 @@ export function estimateEmbeddingTokenCost(input: {
   return Math.ceil((input.tokenCount * rateCard.inputTokenCostMicrosPer1k) / 1_000);
 }
 
+/** Embeds one provider input batch through the richest provider method available. */
+async function embedProviderInputBatch(
+  provider: EmbeddingProvider,
+  inputBatch: readonly BuiltEmbeddingInput[],
+): Promise<EmbeddingProviderBatchResult> {
+  const texts = inputBatch.map((input) => input.text);
+  if (provider.embedTextsWithUsage) {
+    return provider.embedTextsWithUsage(texts);
+  }
+
+  return { vectors: await provider.embedTexts(texts) };
+}
+
 /** Deterministic local embedding provider for tests and offline retrieval smoke checks. */
 export function createHashEmbeddingProvider(
   model = "heimdall-hash-embedding",
@@ -890,8 +934,15 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 
   /** Calls the embeddings endpoint and returns vectors in the original input order. */
   public async embedTexts(texts: readonly string[]): Promise<readonly (readonly number[])[]> {
+    return (await this.embedTextsWithUsage(texts)).vectors;
+  }
+
+  /** Calls the embeddings endpoint and returns vectors plus provider usage when available. */
+  public async embedTextsWithUsage(
+    texts: readonly string[],
+  ): Promise<EmbeddingProviderBatchResult> {
     if (texts.length === 0) {
-      return [];
+      return { vectors: [] };
     }
     if (texts.some((text) => text.trim().length === 0)) {
       throw new EmbeddingProviderError("OpenAI embeddings input cannot contain empty text.", {
@@ -910,7 +961,10 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     const body = await readOpenAIEmbeddingsJsonResponse(response, this.model);
     const embeddings = parseOpenAIEmbeddingsResponse(body, this.model);
 
-    return openAIEmbeddingVectorsByInputOrder(embeddings, texts.length, this.model);
+    return {
+      vectors: openAIEmbeddingVectorsByInputOrder(embeddings, texts.length, this.model),
+      ...optionalEmbeddingUsageProperty(openAIEmbeddingUsage(embeddings)),
+    };
   }
 
   /** Sends one embeddings request with optional timeout handling. */
@@ -1312,12 +1366,18 @@ async function recordEmbeddingProviderUsage(input: {
   readonly orgId: string | undefined;
   /** Durable embedding job payload. */
   readonly payload: EmbeddingBatchJobPayload;
+  /** Provider-reported request usage, when the adapter exposes it. */
+  readonly usage?: EmbeddingProviderUsage;
 }): Promise<void> {
   if (!input.options.usageLedger || !input.orgId || input.inputBatch.length === 0) {
     return;
   }
 
-  const tokenCount = input.inputBatch.reduce((total, entry) => total + entry.tokenEstimate, 0);
+  const estimatedInputTokens = input.inputBatch.reduce(
+    (total, entry) => total + entry.tokenEstimate,
+    0,
+  );
+  const tokenCount = embeddingUsageTokenCount(input.usage, estimatedInputTokens);
   if (tokenCount <= 0) {
     return;
   }
@@ -1351,15 +1411,22 @@ async function recordEmbeddingProviderUsage(input: {
       inputCount: input.inputBatch.length,
       inputKind: "code_chunk",
       inputSetHash,
-      inputTokens: tokenCount,
+      estimatedInputTokens,
       model: input.options.provider.model,
       provider,
+      ...(input.usage?.inputTokens === undefined
+        ? {}
+        : { providerInputTokens: input.usage.inputTokens }),
+      ...(input.usage?.totalTokens === undefined
+        ? {}
+        : { providerTotalTokens: input.usage.totalTokens }),
       rateCardEffectiveAt: rateCard.effectiveAt,
       rateCardId: rateCard.rateCardId,
       rateCardModel: rateCard.model,
       rateCardProvider: rateCard.provider,
       rateCardSource: rateCard.source,
       requestedModel: input.payload.embeddingModel,
+      tokenSource: embeddingUsageTokenSource(input.usage),
     },
     occurredAt: (input.options.now ?? (() => new Date()))().toISOString(),
     orgId: input.orgId,
@@ -1367,6 +1434,28 @@ async function recordEmbeddingProviderUsage(input: {
     repoId: input.payload.repoId,
     unit: "token",
   });
+}
+
+/** Chooses the best token count for billing from provider usage or local estimates. */
+function embeddingUsageTokenCount(
+  usage: EmbeddingProviderUsage | undefined,
+  estimatedInputTokens: number,
+): number {
+  return usage?.totalTokens ?? usage?.inputTokens ?? estimatedInputTokens;
+}
+
+/** Labels the source of the token quantity recorded in an embedding usage event. */
+function embeddingUsageTokenSource(
+  usage: EmbeddingProviderUsage | undefined,
+): "estimated" | "provider_input" | "provider_total" {
+  if (usage?.totalTokens !== undefined) {
+    return "provider_total";
+  }
+  if (usage?.inputTokens !== undefined) {
+    return "provider_input";
+  }
+
+  return "estimated";
 }
 
 /** Validates that provider output matches the storage contract before writing rows. */
@@ -1457,6 +1546,15 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Parses provider token counts without accepting negative or unsafe values. */
+function optionalNonNegativeInteger(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 /** Truncates a chunk body while preserving the start and end of the source text. */
@@ -1631,6 +1729,29 @@ function openAIEmbeddingVectorsByInputOrder(
 
     return vector;
   });
+}
+
+/** Extracts provider-reported embedding token usage from an OpenAI response envelope. */
+function openAIEmbeddingUsage(
+  response: OpenAIEmbeddingsResponse,
+): EmbeddingProviderUsage | undefined {
+  const inputTokens = optionalNonNegativeInteger(response.usage?.prompt_tokens);
+  const totalTokens = optionalNonNegativeInteger(response.usage?.total_tokens);
+  if (inputTokens === undefined && totalTokens === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+  };
+}
+
+/** Creates an exact-optional usage property for provider batch results. */
+function optionalEmbeddingUsageProperty(
+  usage: EmbeddingProviderUsage | undefined,
+): Partial<Pick<EmbeddingProviderBatchResult, "usage">> {
+  return usage === undefined ? {} : { usage };
 }
 
 /** Creates a provider-unavailable error for an invalid OpenAI embeddings response envelope. */

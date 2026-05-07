@@ -109,14 +109,24 @@ describe("createOpenAIEmbeddingProvider", () => {
           { embedding: [0.3, 0.4], index: 1 },
           { embedding: [0.1, 0.2], index: 0 },
         ],
+        usage: {
+          prompt_tokens: 7,
+          total_tokens: 7,
+        },
       }),
       model: "text-embedding-3-small",
     });
 
-    await expect(provider.embedTexts(["first", "second"])).resolves.toEqual([
-      [0.1, 0.2],
-      [0.3, 0.4],
-    ]);
+    if (!provider.embedTextsWithUsage) {
+      throw new Error("Expected OpenAI provider to expose usage-aware embeddings.");
+    }
+    await expect(provider.embedTextsWithUsage(["first", "second"])).resolves.toEqual({
+      usage: { inputTokens: 7, totalTokens: 7 },
+      vectors: [
+        [0.1, 0.2],
+        [0.3, 0.4],
+      ],
+    });
 
     const call = requireFirstOpenAIEmbeddingsFetchCall(calls);
     expect(call.url).toBe("https://provider.example/v1/embeddings");
@@ -486,13 +496,14 @@ describe("embedChunkBatch", () => {
           metadata: expect.objectContaining({
             batchIndex,
             dimensions: 2,
+            estimatedInputTokens: tokenCount,
             inputCount: 1,
             inputKind: "code_chunk",
-            inputTokens: tokenCount,
             model: "text-embedding-3-small",
             provider: "fake",
             rateCardId: "embedding_rate_manual_test_v1",
             requestedModel: "text-embedding-3-small",
+            tokenSource: "estimated",
           }),
           occurredAt: "2026-05-07T12:00:00.000Z",
           orgId: "org_1",
@@ -506,6 +517,61 @@ describe("embedChunkBatch", () => {
     expect(JSON.stringify(usageEvents)).not.toContain("src/second.ts");
     expect(JSON.stringify(usageEvents)).not.toContain("firstValue");
     expect(JSON.stringify(usageEvents)).not.toContain("secondValue");
+  });
+
+  it("prefers provider-reported usage tokens for embedding ledger events", async () => {
+    const usageEvents: EmbeddingUsageEventInput[] = [];
+    const rateCard = {
+      effectiveAt: "2026-05-07T00:00:00.000Z",
+      inputTokenCostMicrosPer1k: 100,
+      model: "text-embedding-3-small",
+      provider: "fake",
+      rateCardId: "embedding_rate_manual_test_v1",
+      source: "manual",
+    } satisfies EmbeddingTokenRateCard;
+    const provider = {
+      dimensions: 2,
+      embedTexts: async () => {
+        throw new Error("Expected usage-aware embedding path.");
+      },
+      embedTextsWithUsage: async (texts) => ({
+        usage: { inputTokens: 41, totalTokens: 42 },
+        vectors: texts.map(() => [0.1, 0.2]),
+      }),
+      model: "text-embedding-3-small",
+      providerId: "fake",
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      embedChunkBatch(testEmbeddingPayload(["chunk_1"]), {
+        db: createEmbeddingDatabaseStub({
+          repositoryOrgId: "org_1",
+          rows: [testCodeChunkRow("chunk_1")],
+        }),
+        provider,
+        usageLedger: {
+          record: async (event) => {
+            usageEvents.push(event);
+          },
+        },
+        usageRateCard: rateCard,
+      }),
+    ).resolves.toEqual({
+      embeddedChunkCount: 1,
+      skippedChunkIds: [],
+    });
+
+    expect(usageEvents).toEqual([
+      expect.objectContaining({
+        costMicros: estimateEmbeddingTokenCost({ rateCard, tokenCount: 42 }),
+        metadata: expect.objectContaining({
+          providerInputTokens: 41,
+          providerTotalTokens: 42,
+          tokenSource: "provider_total",
+        }),
+        quantity: 42,
+      }),
+    ]);
   });
 
   it("updates durable embedding job item and progress rows", async () => {
