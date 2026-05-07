@@ -1,3 +1,8 @@
+import {
+  parseWithSchema,
+  type RepositorySettings,
+  RepositorySettingsSchema,
+} from "@repo/contracts";
 import type { HeimdallDatabase } from "@repo/db";
 import {
   backgroundJobs,
@@ -14,7 +19,7 @@ import {
   readGitHubWebhookHeaders,
   verifyGitHubWebhookSignature,
 } from "@repo/github";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
 import {
@@ -177,7 +182,8 @@ export class GitHubWebhookHandler {
         eventName: normalized.headers.eventName,
         action,
         installation: normalized.installation,
-        repositories: normalized.repositories,
+        repositories: await loadRepositoriesForPlanning(tx, normalized.repositories),
+        repositorySettings: await loadPersistedRepositorySettings(tx, normalized.repositories),
         pullRequest: normalized.pullRequest,
       });
 
@@ -200,6 +206,95 @@ export class GitHubWebhookHandler {
 type Transaction = Parameters<HeimdallDatabase["transaction"]>[0] extends (tx: infer T) => unknown
   ? T
   : never;
+
+/** Returns unique repository IDs from normalized repository payloads. */
+function uniqueRepositoryIds(
+  normalizedRepositories: readonly NormalizedGitHubRepository[],
+): readonly string[] {
+  return [...new Set(normalizedRepositories.map((repository) => repository.repository.repoId))];
+}
+
+/** Applies persisted repository enablement to normalized repositories before job planning. */
+async function loadRepositoriesForPlanning(
+  tx: Transaction,
+  normalizedRepositories: readonly NormalizedGitHubRepository[],
+): Promise<readonly NormalizedGitHubRepository[]> {
+  const repoIds = uniqueRepositoryIds(normalizedRepositories);
+
+  if (repoIds.length === 0) {
+    return normalizedRepositories;
+  }
+
+  const rows = await tx
+    .select({ enabled: repositories.enabled, repoId: repositories.repoId })
+    .from(repositories)
+    .where(inArray(repositories.repoId, repoIds));
+  const enabledByRepoId = new Map(rows.map((row) => [row.repoId, row.enabled]));
+
+  return normalizedRepositories.map((normalizedRepository) => ({
+    ...normalizedRepository,
+    repository: {
+      ...normalizedRepository.repository,
+      enabled:
+        enabledByRepoId.get(normalizedRepository.repository.repoId) ??
+        normalizedRepository.repository.enabled,
+    },
+  }));
+}
+
+/** Loads persisted repository settings so trigger gating uses the current configured policy. */
+async function loadPersistedRepositorySettings(
+  tx: Transaction,
+  normalizedRepositories: readonly NormalizedGitHubRepository[],
+): Promise<readonly RepositorySettings[]> {
+  const repoIds = uniqueRepositoryIds(normalizedRepositories);
+
+  if (repoIds.length === 0) {
+    return [];
+  }
+
+  const rows = await tx
+    .select()
+    .from(repositorySettings)
+    .where(inArray(repositorySettings.repoId, repoIds));
+
+  return rows.map(parseRepositorySettingsRow);
+}
+
+/** Parses a repository settings database row into the public contract. */
+function parseRepositorySettingsRow(row: {
+  readonly repoId: string;
+  readonly reviewPolicy: string;
+  readonly severityThreshold: string;
+  readonly maxCommentsPerReview: number;
+  readonly ignoredPaths: unknown;
+  readonly ignoredAuthors: unknown;
+  readonly ignoredLabels: unknown;
+  readonly requireLabel: string | null;
+  readonly skipGeneratedFiles: boolean;
+  readonly skipDraftPullRequests: boolean;
+  readonly enabledLanguages: unknown;
+  readonly customInstructions: string | null;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}): RepositorySettings {
+  return parseWithSchema("RepositorySettings", RepositorySettingsSchema, {
+    repoId: row.repoId,
+    reviewPolicy: row.reviewPolicy,
+    severityThreshold: row.severityThreshold,
+    maxCommentsPerReview: row.maxCommentsPerReview,
+    ignoredPaths: row.ignoredPaths,
+    ignoredAuthors: row.ignoredAuthors,
+    ignoredLabels: row.ignoredLabels,
+    ...(row.requireLabel === null ? {} : { requireLabel: row.requireLabel }),
+    skipGeneratedFiles: row.skipGeneratedFiles,
+    skipDraftPullRequests: row.skipDraftPullRequests,
+    ...(row.enabledLanguages === null ? {} : { enabledLanguages: row.enabledLanguages }),
+    ...(row.customInstructions === null ? {} : { customInstructions: row.customInstructions }),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
+}
 
 async function persistInstallation(
   tx: Transaction,

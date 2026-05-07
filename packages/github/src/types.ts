@@ -31,6 +31,60 @@ export type GitHubProviderConfig = {
 /** Minimal fetch function used by tests and runtimes. */
 export type GitHubFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** Parsed rate-limit headers returned by the GitHub REST API. */
+export type GitHubRateLimitSnapshot = {
+  /** Total requests allowed in the current GitHub rate-limit window. */
+  readonly limit?: number;
+  /** Requests remaining in the current GitHub rate-limit window. */
+  readonly remaining?: number;
+  /** Unix epoch seconds when the current GitHub rate-limit window resets. */
+  readonly resetEpochSeconds?: number;
+  /** Requests used in the current GitHub rate-limit window. */
+  readonly used?: number;
+  /** GitHub rate-limit resource bucket, such as `core` or `search`. */
+  readonly resource?: string;
+  /** Retry delay in seconds when GitHub asks the caller to wait. */
+  readonly retryAfterSeconds?: number;
+};
+
+/** Authentication context used for a GitHub API request. */
+export type GitHubRequestAuthenticationKind = "app" | "installation";
+
+/** One observed GitHub API response captured at the provider boundary. */
+export type GitHubRequestObservation = {
+  /** Authentication context used for the request. */
+  readonly authenticationKind: GitHubRequestAuthenticationKind;
+  /** Request method sent to GitHub. */
+  readonly method: string;
+  /** GitHub REST API path requested without the configured base URL. */
+  readonly path: string;
+  /** HTTP status returned by GitHub. */
+  readonly status: number;
+  /** Whether GitHub returned a successful HTTP status. */
+  readonly ok: boolean;
+  /** Provider-measured response latency in milliseconds. */
+  readonly latencyMs: number;
+  /** ISO timestamp when the response was observed. */
+  readonly observedAt: string;
+  /** GitHub request identifier, when available. */
+  readonly requestId?: string;
+  /** Parsed GitHub rate-limit headers, when available. */
+  readonly rateLimit?: GitHubRateLimitSnapshot;
+};
+
+/** Callback invoked after each GitHub API response is received. */
+export type GitHubRequestObserver = (observation: GitHubRequestObservation) => void;
+
+/** Runtime dependencies used by the GitHub App provider. */
+export type GitHubProviderDependencies = {
+  /** Fetch implementation used for GitHub API calls. */
+  readonly fetch?: GitHubFetch;
+  /** Clock used for token caching and response observation timestamps. */
+  readonly now?: () => Date;
+  /** Optional request observer for metrics and diagnostics. */
+  readonly observeRequest?: GitHubRequestObserver;
+};
+
 /** GitHub installation reference. */
 export type GitHubInstallationRef = {
   /** Provider discriminator. */
@@ -208,6 +262,8 @@ export type PublishedSummaryComment = {
 export interface GitProvider {
   /** Provider discriminator. */
   readonly provider: "github";
+  /** Returns recently observed GitHub request metadata, when the provider supports it. */
+  readonly getRecentRequestObservations?: () => readonly GitHubRequestObservation[];
   /** Generates or returns a cached installation token. */
   getInstallationToken(
     input: GitHubInstallationRef,

@@ -1,11 +1,17 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { CheckRunAnnotation, GitHubFetch } from "../src";
+import type {
+  CheckRunAnnotation,
+  GitHubFetch,
+  GitHubRequestObservation,
+  GitHubRequestObserver,
+} from "../src";
 import {
   createFakeGitProvider,
   createGitHubProvider,
   GitHubNotFoundError,
   GitHubRateLimitError,
+  readGitHubRateLimitSnapshot,
 } from "../src";
 
 type MockRoute = {
@@ -22,10 +28,18 @@ const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKe
   type: "pkcs1",
 }) as string;
 
-const jsonResponse = (value: unknown, status = 200): Response =>
+const jsonResponse = (
+  value: unknown,
+  status = 200,
+  headers: Readonly<Record<string, string>> = {},
+): Response =>
   new Response(JSON.stringify(value), {
     status,
-    headers: { "content-type": "application/json", "x-github-request-id": "request-1" },
+    headers: {
+      "content-type": "application/json",
+      "x-github-request-id": "request-1",
+      ...headers,
+    },
   });
 
 const textResponse = (value: string, status = 200): Response =>
@@ -56,7 +70,7 @@ const dedupeMarker = (body: string, reviewRunId: string, findingId?: string): st
   return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
 };
 
-const createProvider = (fetcher: GitHubFetch) =>
+const createProvider = (fetcher: GitHubFetch, observeRequest?: GitHubRequestObserver) =>
   createGitHubProvider(
     {
       appId: "12345",
@@ -66,6 +80,7 @@ const createProvider = (fetcher: GitHubFetch) =>
     {
       fetch: fetcher,
       now: () => new Date("2026-05-05T12:00:00.000Z"),
+      ...(observeRequest ? { observeRequest } : {}),
     },
   );
 
@@ -88,7 +103,28 @@ const repositoryPayload = {
   updated_at: "2026-05-01T00:00:00.000Z",
 };
 
+const rateLimitHeaders = {
+  "retry-after": "60",
+  "x-ratelimit-limit": "5000",
+  "x-ratelimit-remaining": "4999",
+  "x-ratelimit-reset": "1770000000",
+  "x-ratelimit-resource": "core",
+  "x-ratelimit-used": "1",
+};
+
 describe("GitHubAppProvider", () => {
+  it("parses GitHub rate-limit headers", () => {
+    expect(readGitHubRateLimitSnapshot(new Headers(rateLimitHeaders))).toEqual({
+      limit: 5000,
+      remaining: 4999,
+      resetEpochSeconds: 1770000000,
+      used: 1,
+      resource: "core",
+      retryAfterSeconds: 60,
+    });
+    expect(readGitHubRateLimitSnapshot(new Headers())).toBeUndefined();
+  });
+
   it("generates and caches installation tokens", async () => {
     const fetcher = createMockFetch([tokenRoute]);
     const provider = createProvider(fetcher);
@@ -105,6 +141,44 @@ describe("GitHubAppProvider", () => {
     expect(fetcher.calls[0]?.init?.headers).toMatchObject({
       authorization: expect.stringMatching(/^Bearer /u),
     });
+  });
+
+  it("observes rate-limit headers from successful GitHub responses", async () => {
+    const observations: GitHubRequestObservation[] = [];
+    const fetcher = createMockFetch([
+      {
+        match: (url: string) => url.endsWith("/app/installations/99/access_tokens"),
+        response: jsonResponse(
+          { token: "ghs_token", expires_at: "2026-05-05T13:00:00.000Z" },
+          201,
+          rateLimitHeaders,
+        ),
+      },
+    ]);
+    const provider = createProvider(fetcher, (observation) => observations.push(observation));
+
+    await provider.getInstallationToken({ provider: "github", installationId: "99" });
+
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({
+      authenticationKind: "app",
+      method: "POST",
+      path: "/app/installations/99/access_tokens",
+      status: 201,
+      ok: true,
+      observedAt: "2026-05-05T12:00:00.000Z",
+      requestId: "request-1",
+      rateLimit: {
+        limit: 5000,
+        remaining: 4999,
+        resetEpochSeconds: 1770000000,
+        used: 1,
+        resource: "core",
+        retryAfterSeconds: 60,
+      },
+    });
+    expect(observations[0]?.latencyMs).toBeGreaterThanOrEqual(0);
+    expect(provider.getRecentRequestObservations?.()).toEqual(observations);
   });
 
   it("discovers installation repositories", async () => {
@@ -518,14 +592,28 @@ describe("GitHubAppProvider", () => {
       createMockFetch([
         {
           match: (url) => url.endsWith("/app/installations/99/access_tokens"),
-          response: jsonResponse({ message: "API rate limit exceeded" }, 403),
+          response: jsonResponse({ message: "API rate limit exceeded" }, 403, rateLimitHeaders),
         },
       ]),
     );
 
-    await expect(
-      provider.getInstallationToken({ provider: "github", installationId: "99" }),
-    ).rejects.toBeInstanceOf(GitHubRateLimitError);
+    const tokenRequest = provider.getInstallationToken({
+      provider: "github",
+      installationId: "99",
+    });
+    await expect(tokenRequest).rejects.toBeInstanceOf(GitHubRateLimitError);
+    await expect(tokenRequest).rejects.toMatchObject({
+      requestId: "request-1",
+      retryAfterSeconds: 60,
+      rateLimit: {
+        limit: 5000,
+        remaining: 4999,
+        resetEpochSeconds: 1770000000,
+        used: 1,
+        resource: "core",
+        retryAfterSeconds: 60,
+      },
+    });
 
     const notFoundProvider = createProvider(
       createMockFetch([

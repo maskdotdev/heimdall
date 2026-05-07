@@ -1,3 +1,5 @@
+import type { GitHubRateLimitSnapshot } from "./types";
+
 /** Product-facing GitHub integration error categories. */
 export type GitHubErrorCode =
   | "github_permission"
@@ -20,6 +22,8 @@ export class GitHubProviderError extends Error {
   public readonly requestId: string | undefined;
   /** Retry delay in seconds, when GitHub asks the caller to wait. */
   public readonly retryAfterSeconds: number | undefined;
+  /** Parsed GitHub rate-limit headers, when available. */
+  public readonly rateLimit: GitHubRateLimitSnapshot | undefined;
 
   /** Creates a GitHub provider error. */
   public constructor(
@@ -29,6 +33,7 @@ export class GitHubProviderError extends Error {
       readonly status?: number;
       readonly requestId?: string;
       readonly retryAfterSeconds?: number;
+      readonly rateLimit?: GitHubRateLimitSnapshot;
       readonly cause?: unknown;
     } = {},
   ) {
@@ -38,6 +43,7 @@ export class GitHubProviderError extends Error {
     this.status = options.status;
     this.requestId = options.requestId;
     this.retryAfterSeconds = options.retryAfterSeconds;
+    this.rateLimit = options.rateLimit;
   }
 }
 

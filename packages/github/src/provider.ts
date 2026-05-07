@@ -18,6 +18,7 @@ import {
   GitHubUnavailableError,
   GitHubValidationError,
 } from "./errors";
+import { readGitHubRateLimitSnapshot } from "./rate-limit";
 import type {
   CheckRunAnnotation,
   CloneAuth,
@@ -26,8 +27,13 @@ import type {
   GitHubFetch,
   GitHubInstallationRef,
   GitHubProviderConfig,
+  GitHubProviderDependencies,
   GitHubPullRequestRef,
+  GitHubRateLimitSnapshot,
   GitHubRepositoryRef,
+  GitHubRequestAuthenticationKind,
+  GitHubRequestObservation,
+  GitHubRequestObserver,
   GitProvider,
   ProviderCheckRun,
   PublishedReview,
@@ -51,11 +57,6 @@ type GitHubInstallationTokenResponse = {
   readonly expiresAt?: string;
 };
 
-type GitHubProviderDependencies = {
-  readonly fetch?: GitHubFetch;
-  readonly now?: () => Date;
-};
-
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_WEB_BASE_URL = "https://github.com";
 const DEFAULT_API_VERSION = "2022-11-28";
@@ -63,6 +64,7 @@ const DEFAULT_USER_AGENT = "heimdall/0.1.0";
 const DEFAULT_TOKEN_EXPIRY_BUFFER_SECONDS = 300;
 const DEFAULT_MAX_PR_FILES = 3000;
 const DEFAULT_MAX_DIFF_BYTES = 8_000_000;
+const MAX_RECENT_REQUEST_OBSERVATIONS = 50;
 
 const base64Url = (input: string | Buffer): string =>
   Buffer.from(input)
@@ -202,7 +204,9 @@ export class GitHubAppProvider implements GitProvider {
 
   private readonly fetcher: GitHubFetch;
   private readonly now: () => Date;
+  private readonly observeRequest: GitHubRequestObserver | undefined;
   private readonly tokenCache = new Map<string, CachedToken>();
+  private readonly recentRequestObservations: GitHubRequestObservation[] = [];
 
   /** Creates a GitHub App provider. */
   public constructor(config: GitHubProviderConfig, dependencies: GitHubProviderDependencies = {}) {
@@ -223,6 +227,12 @@ export class GitHubAppProvider implements GitProvider {
     };
     this.fetcher = dependencies.fetch ?? fetch;
     this.now = dependencies.now ?? (() => new Date());
+    this.observeRequest = dependencies.observeRequest;
+  }
+
+  /** Returns recently observed GitHub request metadata in observation order. */
+  public getRecentRequestObservations(): readonly GitHubRequestObservation[] {
+    return [...this.recentRequestObservations];
   }
 
   /** Generates or returns a cached installation token. */
@@ -637,14 +647,18 @@ export class GitHubAppProvider implements GitProvider {
   }
 
   private async requestApp<T>(path: string, init: RequestInit = {}): Promise<T> {
-    return this.request<T>(path, {
-      ...init,
-      headers: {
-        ...this.baseHeaders(),
-        authorization: `Bearer ${this.createAppJwt()}`,
-        ...init.headers,
+    return this.request<T>(
+      path,
+      {
+        ...init,
+        headers: {
+          ...this.baseHeaders(),
+          authorization: `Bearer ${this.createAppJwt()}`,
+          ...init.headers,
+        },
       },
-    });
+      "app",
+    );
   }
 
   private async requestInstallation<T>(
@@ -653,24 +667,26 @@ export class GitHubAppProvider implements GitProvider {
     init: RequestInit = {},
   ): Promise<T> {
     const token = await this.getInstallationToken(installation);
-    return this.request<T>(path, {
-      ...init,
-      headers: {
-        ...this.baseHeaders(),
-        authorization: `Bearer ${token.token}`,
-        ...init.headers,
+    return this.request<T>(
+      path,
+      {
+        ...init,
+        headers: {
+          ...this.baseHeaders(),
+          authorization: `Bearer ${token.token}`,
+          ...init.headers,
+        },
       },
-    });
+      "installation",
+    );
   }
 
-  private async request<T>(path: string, init: RequestInit): Promise<T> {
-    const response = await this.fetcher(`${this.config.apiBaseUrl}${path}`, {
-      ...init,
-      headers: {
-        ...this.baseHeaders(),
-        ...init.headers,
-      },
-    });
+  private async request<T>(
+    path: string,
+    init: RequestInit,
+    authenticationKind: GitHubRequestAuthenticationKind,
+  ): Promise<T> {
+    const response = await this.fetchGitHub(path, init, authenticationKind);
 
     if (!response.ok) {
       await raiseGitHubError(response);
@@ -681,6 +697,29 @@ export class GitHubAppProvider implements GitProvider {
     }
 
     return (await response.json()) as T;
+  }
+
+  private async fetchGitHub(
+    path: string,
+    init: RequestInit,
+    authenticationKind: GitHubRequestAuthenticationKind,
+  ): Promise<Response> {
+    const startedAt = this.now().getTime();
+    const response = await this.fetcher(`${this.config.apiBaseUrl}${path}`, {
+      ...init,
+      headers: {
+        ...this.baseHeaders(),
+        ...init.headers,
+      },
+    });
+    this.observeGitHubResponse({
+      authenticationKind,
+      latencyMs: Math.max(0, this.now().getTime() - startedAt),
+      method: init.method ?? "GET",
+      path,
+      response,
+    });
+    return response;
   }
 
   private async paginateInstallation<T extends JsonRecord>(
@@ -712,8 +751,8 @@ export class GitHubAppProvider implements GitProvider {
 
   private async fetchRawDiff(input: GitHubPullRequestRef): Promise<string> {
     const token = await this.getInstallationToken(input);
-    const response = await this.fetcher(
-      `${this.config.apiBaseUrl}/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
+    const response = await this.fetchGitHub(
+      `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
       {
         headers: {
           ...this.baseHeaders(),
@@ -721,6 +760,7 @@ export class GitHubAppProvider implements GitProvider {
           authorization: `Bearer ${token.token}`,
         },
       },
+      "installation",
     );
 
     if (!response.ok) {
@@ -879,6 +919,37 @@ export class GitHubAppProvider implements GitProvider {
         ...withOptional("htmlUrl", optionalString(comment, "html_url")),
       }));
   }
+
+  private observeGitHubResponse(input: {
+    readonly authenticationKind: GitHubRequestAuthenticationKind;
+    readonly method: string;
+    readonly path: string;
+    readonly response: Response;
+    readonly latencyMs: number;
+  }): void {
+    const observation: GitHubRequestObservation = {
+      authenticationKind: input.authenticationKind,
+      method: input.method.toUpperCase(),
+      path: input.path,
+      status: input.response.status,
+      ok: input.response.ok,
+      latencyMs: input.latencyMs,
+      observedAt: this.now().toISOString(),
+      ...withOptional("requestId", input.response.headers.get("x-github-request-id") ?? undefined),
+      ...withOptional("rateLimit", readGitHubRateLimitSnapshot(input.response.headers)),
+    };
+
+    this.recentRequestObservations.push(observation);
+    if (this.recentRequestObservations.length > MAX_RECENT_REQUEST_OBSERVATIONS) {
+      this.recentRequestObservations.shift();
+    }
+
+    try {
+      this.observeRequest?.(observation);
+    } catch {
+      // Request observation must not affect GitHub API behavior.
+    }
+  }
 }
 
 const asArray = (value: unknown, name: string): readonly unknown[] => {
@@ -1033,13 +1104,7 @@ function parsePatchLine(
 }
 
 const parseRetryAfter = (response: Response): number | undefined => {
-  const retryAfter = response.headers.get("retry-after");
-  if (!retryAfter) {
-    return undefined;
-  }
-
-  const seconds = Number.parseInt(retryAfter, 10);
-  return Number.isNaN(seconds) ? undefined : seconds;
+  return readGitHubRateLimitSnapshot(response.headers)?.retryAfterSeconds;
 };
 
 const readErrorMessage = async (response: Response): Promise<string> => {
@@ -1089,10 +1154,12 @@ const errorOptions = (
   readonly status: number;
   readonly requestId?: string;
   readonly retryAfterSeconds?: number;
+  readonly rateLimit?: GitHubRateLimitSnapshot;
 } => ({
   status: response.status,
   ...withOptional("requestId", response.headers.get("x-github-request-id") ?? undefined),
   ...withOptional("retryAfterSeconds", parseRetryAfter(response)),
+  ...withOptional("rateLimit", readGitHubRateLimitSnapshot(response.headers)),
 });
 
 /** Creates a GitHub App provider. */
