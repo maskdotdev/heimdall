@@ -18,6 +18,8 @@ import {
   candidateFindings,
   codeIndexVersions,
   debugExports,
+  embeddingJobItems,
+  embeddingJobs,
   type HeimdallDatabase,
   llmCalls,
   memoryCandidates,
@@ -108,6 +110,8 @@ export class AdminDebugConfirmationError extends Error {
 export type AdminFailureSource =
   | "webhook_event"
   | "background_job"
+  | "embedding_job"
+  | "embedding_job_item"
   | "review_run"
   | "review_stage_event"
   | "llm_call"
@@ -172,6 +176,90 @@ export type AdminBackgroundJobDebugSummary = {
   readonly failure?: AdminFailureDetail;
 };
 
+/** Debug summary for one durable embedding job row. */
+export type AdminEmbeddingJobDebugSummary = {
+  /** Durable embedding job row ID. */
+  readonly embeddingJobId: string;
+  /** Organization that owns the embedding job. */
+  readonly orgId: string;
+  /** Repository being embedded. */
+  readonly repoId: string;
+  /** Imported index version being embedded when available. */
+  readonly indexVersionId?: string;
+  /** Commit SHA being embedded when available. */
+  readonly commitSha?: string;
+  /** Current durable embedding job status. */
+  readonly status: string;
+  /** Reason the embedding job was planned. */
+  readonly reason: string;
+  /** Embedding profile version used by this job. */
+  readonly embeddingProfileVersion: string;
+  /** Embedding provider used by this job. */
+  readonly provider: string;
+  /** Embedding model used by this job. */
+  readonly model: string;
+  /** Vector dimension configured for this job. */
+  readonly dimensions: number;
+  /** Number of chunks planned for embedding. */
+  readonly chunkCountPlanned: number;
+  /** Number of chunks embedded so far. */
+  readonly chunkCountEmbedded: number;
+  /** Number of chunks skipped so far. */
+  readonly chunkCountSkipped: number;
+  /** Number of chunks failed so far. */
+  readonly chunkCountFailed: number;
+  /** Rounded completion percentage derived from chunk counters. */
+  readonly progressPercent: number;
+  /** Current durable attempt count. */
+  readonly attempts: number;
+  /** Worker or process that holds the job lock when available. */
+  readonly lockedBy?: string;
+  /** ISO timestamp for the current lock when available. */
+  readonly lockedAt?: string;
+  /** Machine-readable last error code when available. */
+  readonly lastErrorCode?: string;
+  /** Product-safe last error message when available. */
+  readonly lastErrorMessage?: string;
+  /** Stored metadata keys without raw metadata values. */
+  readonly metadataKeys: readonly string[];
+  /** ISO timestamp for row creation. */
+  readonly createdAt: string;
+  /** ISO timestamp for first start when available. */
+  readonly startedAt?: string;
+  /** ISO timestamp for terminal completion when available. */
+  readonly finishedAt?: string;
+  /** Structured embedding job failure when available. */
+  readonly failure?: AdminFailureDetail;
+};
+
+/** Debug summary for one sampled embedding job item row. */
+export type AdminEmbeddingJobItemDebugSummary = {
+  /** Durable embedding job item row ID. */
+  readonly embeddingJobItemId: string;
+  /** Durable embedding job row ID. */
+  readonly embeddingJobId: string;
+  /** Code chunk attached to this item. */
+  readonly chunkId: string;
+  /** Current per-chunk embedding status. */
+  readonly status: string;
+  /** Stable embedding cache key when known. */
+  readonly cacheKey?: string;
+  /** Current item attempt count. */
+  readonly attempts: number;
+  /** Machine-readable last error code when available. */
+  readonly lastErrorCode?: string;
+  /** Product-safe last error message when available. */
+  readonly lastErrorMessage?: string;
+  /** ISO timestamp for row creation. */
+  readonly createdAt: string;
+  /** ISO timestamp for first start when available. */
+  readonly startedAt?: string;
+  /** ISO timestamp for terminal completion when available. */
+  readonly finishedAt?: string;
+  /** Structured item failure when available. */
+  readonly failure?: AdminFailureDetail;
+};
+
 /** Debug summary for one webhook delivery row. */
 export type AdminWebhookEventDebugSummary = {
   /** Normalized webhook event ID. */
@@ -222,6 +310,10 @@ export type AdminWebhookDebugDetails = {
 export type AdminBackgroundJobDebugDetails = {
   /** Durable job summary. */
   readonly job: AdminBackgroundJobDebugSummary;
+  /** Embedding job referenced by an embedding batch payload when available. */
+  readonly embeddingJob?: AdminEmbeddingJobDebugSummary;
+  /** Sampled embedding job items for the referenced embedding job when available. */
+  readonly embeddingJobItems?: readonly AdminEmbeddingJobItemDebugSummary[];
   /** Replay decisions already audited for this background job. */
   readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Structured failures collected from the job. */
@@ -1571,19 +1663,29 @@ export async function getBackgroundJobDebugDetails(
   dependencies: AdminDebugServiceDependencies,
 ): Promise<AdminBackgroundJobDebugDetails> {
   const row = await getBackgroundJobRow(backgroundJobId, dependencies.db);
-  const [replayAudits] = await Promise.all([
+  const embeddingJobId = embeddingJobIdFromBackgroundJob(row);
+  const [replayAudits, embeddingJob, embeddingJobItems] = await Promise.all([
     listReplayAuditLogs(dependencies.db, {
       actions: ["job.requeue"],
       resourceType: "background_job",
       resourceId: backgroundJobId,
     }),
+    embeddingJobId
+      ? getEmbeddingJobDebugSummary(dependencies.db, embeddingJobId)
+      : Promise.resolve(undefined),
+    embeddingJobId
+      ? listEmbeddingJobItemDebugSummaries(dependencies.db, embeddingJobId)
+      : Promise.resolve([]),
   ]);
   const job = toBackgroundJobDebugSummary(row);
+  const itemFailures = embeddingJobItems.map((item) => item.failure);
 
   return {
     job,
+    ...(embeddingJob ? { embeddingJob } : {}),
+    ...(embeddingJobId ? { embeddingJobItems } : {}),
     replayAudits,
-    failures: collectFailures([job.failure]),
+    failures: collectFailures([job.failure, embeddingJob?.failure, ...itemFailures]),
   };
 }
 
@@ -3020,6 +3122,8 @@ type PublishedFindingRow = typeof publishedFindings.$inferSelect;
 type RepositoryRow = typeof repositories.$inferSelect;
 type MemoryFactRow = typeof memoryFacts.$inferSelect;
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
+type EmbeddingJobRow = typeof embeddingJobs.$inferSelect;
+type EmbeddingJobItemRow = typeof embeddingJobItems.$inferSelect;
 type HeimdallTransaction = Parameters<Parameters<HeimdallDatabase["transaction"]>[0]>[0];
 type HeimdallDbExecutor = HeimdallDatabase | HeimdallTransaction;
 
@@ -3098,6 +3202,34 @@ async function getBackgroundJobRow(
   }
 
   return row;
+}
+
+/** Gets one embedding job summary for background-job debug details. */
+async function getEmbeddingJobDebugSummary(
+  db: HeimdallDatabase,
+  embeddingJobId: string,
+): Promise<AdminEmbeddingJobDebugSummary | undefined> {
+  const [row] = await db
+    .select()
+    .from(embeddingJobs)
+    .where(eq(embeddingJobs.embeddingJobId, embeddingJobId))
+    .limit(1);
+
+  return row ? toEmbeddingJobDebugSummary(row) : undefined;
+}
+
+/** Lists a bounded sample of embedding job item summaries for debug details. */
+async function listEmbeddingJobItemDebugSummaries(
+  db: HeimdallDatabase,
+  embeddingJobId: string,
+): Promise<readonly AdminEmbeddingJobItemDebugSummary[]> {
+  const rows = await db
+    .select()
+    .from(embeddingJobItems)
+    .where(eq(embeddingJobItems.embeddingJobId, embeddingJobId))
+    .limit(50);
+
+  return rows.map(toEmbeddingJobItemDebugSummary);
 }
 
 /** Gets one repository row or raises an admin debug not-found error. */
@@ -3519,6 +3651,123 @@ function toBackgroundJobDebugSummary(row: BackgroundJobRow): AdminBackgroundJobD
     updatedAt: toIso(row.updatedAt),
     payload: row.payload,
     ...(row.status === "failed" || row.status === "dead_lettered" ? { failure } : {}),
+  };
+}
+
+/** Converts a durable embedding job row into an operator-facing summary. */
+function toEmbeddingJobDebugSummary(row: EmbeddingJobRow): AdminEmbeddingJobDebugSummary {
+  const metadata = asRecord(row.metadata);
+  const failure = embeddingJobFailure(row);
+
+  return {
+    embeddingJobId: row.embeddingJobId,
+    orgId: row.orgId,
+    repoId: row.repoId,
+    ...(row.indexVersionId ? { indexVersionId: row.indexVersionId } : {}),
+    ...(row.commitSha ? { commitSha: row.commitSha } : {}),
+    status: row.status,
+    reason: row.reason,
+    embeddingProfileVersion: row.embeddingProfileVersion,
+    provider: row.provider,
+    model: row.model,
+    dimensions: row.dimensions,
+    chunkCountPlanned: row.chunkCountPlanned,
+    chunkCountEmbedded: row.chunkCountEmbedded,
+    chunkCountSkipped: row.chunkCountSkipped,
+    chunkCountFailed: row.chunkCountFailed,
+    progressPercent: embeddingJobProgressPercent(row),
+    attempts: row.attempts,
+    ...(row.lockedBy ? { lockedBy: row.lockedBy } : {}),
+    ...(row.lockedAt ? { lockedAt: toIso(row.lockedAt) } : {}),
+    ...(row.lastErrorCode ? { lastErrorCode: row.lastErrorCode } : {}),
+    ...(row.lastErrorMessage ? { lastErrorMessage: row.lastErrorMessage } : {}),
+    metadataKeys: sortedRecordKeys(metadata),
+    createdAt: toIso(row.createdAt),
+    ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
+    ...(row.finishedAt ? { finishedAt: toIso(row.finishedAt) } : {}),
+    ...(failure ? { failure } : {}),
+  };
+}
+
+/** Converts a sampled embedding item row into an operator-facing summary. */
+function toEmbeddingJobItemDebugSummary(
+  row: EmbeddingJobItemRow,
+): AdminEmbeddingJobItemDebugSummary {
+  const failure = embeddingJobItemFailure(row);
+
+  return {
+    embeddingJobItemId: row.embeddingJobItemId,
+    embeddingJobId: row.embeddingJobId,
+    chunkId: row.chunkId,
+    status: row.status,
+    ...(row.cacheKey ? { cacheKey: row.cacheKey } : {}),
+    attempts: row.attempts,
+    ...(row.lastErrorCode ? { lastErrorCode: row.lastErrorCode } : {}),
+    ...(row.lastErrorMessage ? { lastErrorMessage: row.lastErrorMessage } : {}),
+    createdAt: toIso(row.createdAt),
+    ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
+    ...(row.finishedAt ? { finishedAt: toIso(row.finishedAt) } : {}),
+    ...(failure ? { failure } : {}),
+  };
+}
+
+/** Extracts an embedding job ID from a durable embedding batch job payload. */
+function embeddingJobIdFromBackgroundJob(row: BackgroundJobRow): string | undefined {
+  if (row.jobType !== JOB_TYPES.EmbeddingBatch) {
+    return undefined;
+  }
+
+  try {
+    const envelope = parseJobEnvelope(row.payload);
+    return stringField(asRecord(envelope.payload), "embeddingJobId");
+  } catch {
+    return undefined;
+  }
+}
+
+/** Computes a rounded embedding completion percentage from durable counters. */
+function embeddingJobProgressPercent(
+  row: Pick<EmbeddingJobRow, "chunkCountPlanned"> & {
+    readonly chunkCountEmbedded: number;
+    readonly chunkCountSkipped: number;
+    readonly chunkCountFailed: number;
+  },
+): number {
+  if (row.chunkCountPlanned <= 0) {
+    return 100;
+  }
+
+  const completed = row.chunkCountEmbedded + row.chunkCountSkipped + row.chunkCountFailed;
+  return Math.max(0, Math.min(100, Math.round((completed / row.chunkCountPlanned) * 100)));
+}
+
+/** Returns a structured failure for terminal embedding job rows. */
+function embeddingJobFailure(row: EmbeddingJobRow): AdminFailureDetail | undefined {
+  if (row.status !== "failed") {
+    return undefined;
+  }
+
+  return {
+    source: "embedding_job",
+    code: row.lastErrorCode ?? "embedding_job.failed",
+    message: row.lastErrorMessage ?? `Embedding job ${row.embeddingJobId} failed.`,
+    rowId: row.embeddingJobId,
+    occurredAt: row.finishedAt ? toIso(row.finishedAt) : toIso(row.createdAt),
+  };
+}
+
+/** Returns a structured failure for terminal embedding item rows. */
+function embeddingJobItemFailure(row: EmbeddingJobItemRow): AdminFailureDetail | undefined {
+  if (row.status !== "failed") {
+    return undefined;
+  }
+
+  return {
+    source: "embedding_job_item",
+    code: row.lastErrorCode ?? "embedding_job_item.failed",
+    message: row.lastErrorMessage ?? `Embedding item ${row.embeddingJobItemId} failed.`,
+    rowId: row.embeddingJobItemId,
+    occurredAt: row.finishedAt ? toIso(row.finishedAt) : toIso(row.createdAt),
   };
 }
 
