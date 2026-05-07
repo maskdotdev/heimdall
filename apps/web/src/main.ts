@@ -1431,10 +1431,44 @@ type AdminDashboardOverview = {
   readonly repositories: readonly AdminRepositorySummary[];
   /** Recent review runs available to the actor. */
   readonly recentReviews: readonly AdminReviewRunSummary[];
+  /** Durable review rollup metrics for the current actor scope. */
+  readonly reviewMetrics: AdminReviewMetricsSummary;
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
   /** Product-safe API readiness summary. */
   readonly runtimeHealth: ApiHealthResponse;
+};
+
+/** Durable review rollup metrics returned by the overview API. */
+type AdminReviewMetricsSummary = {
+  /** Total review runs in scope. */
+  readonly totalRuns: number;
+  /** Completed review runs in scope. */
+  readonly completedRuns: number;
+  /** Failed review runs in scope. */
+  readonly failedRuns: number;
+  /** Skipped review runs in scope. */
+  readonly skippedRuns: number;
+  /** Superseded review runs in scope. */
+  readonly supersededRuns: number;
+  /** Median end-to-end duration in milliseconds when metrics exist. */
+  readonly medianDurationMs?: number;
+  /** P95 end-to-end duration in milliseconds when metrics exist. */
+  readonly p95DurationMs?: number;
+  /** Candidate findings recorded by terminal review metrics. */
+  readonly candidateFindings: number;
+  /** Validated findings recorded by terminal review metrics. */
+  readonly validatedFindings: number;
+  /** Published findings recorded by terminal review metrics. */
+  readonly publishedFindings: number;
+  /** Rejected findings recorded by terminal review metrics. */
+  readonly rejectedFindings: number;
+  /** Average published findings per review run. */
+  readonly averagePublishedFindings: number;
+  /** Estimated review cost in USD as a decimal string. */
+  readonly estimatedCostUsd: string;
+  /** ISO timestamp when the rollup was generated. */
+  readonly generatedAt: string;
 };
 
 /** Product GitHub App setup returned by the public onboarding API. */
@@ -2030,6 +2064,8 @@ type OverviewViewState = {
   auditLogs: readonly AdminAuditLogSummary[];
   /** Latest product-safe runtime health returned by the overview endpoint. */
   runtimeHealth?: ApiHealthResponse | undefined;
+  /** Durable review rollup metrics returned by the overview endpoint. */
+  reviewMetrics?: AdminReviewMetricsSummary | undefined;
   /** Whether the overview route has returned at least once in this session. */
   loaded: boolean;
   /** Whether repository discovery has returned at least once in this session. */
@@ -4743,6 +4779,7 @@ async function loadOverview(): Promise<void> {
     state.overview.reviews = data.recentReviews;
     state.overview.auditLogs = data.recentAuditLogs;
     state.overview.runtimeHealth = data.runtimeHealth;
+    state.overview.reviewMetrics = data.reviewMetrics;
     state.overview.loaded = true;
     state.overview.repositoriesLoaded = true;
     state.overview.reviewsLoaded = true;
@@ -7087,28 +7124,51 @@ type OverviewStats = {
   readonly totalRepos: number;
   readonly enabledRepos: number;
   readonly recentReviews: number;
+  readonly completedReviews: number;
   readonly failedReviews: number;
+  readonly skippedReviews: number;
   readonly totalFindings: number;
   readonly publishedFindings: number;
+  readonly averagePublishedFindings: number;
+  readonly medianDurationMs?: number | undefined;
+  readonly p95DurationMs?: number | undefined;
+  readonly estimatedCostUsd?: string | undefined;
 };
 
 /** Computes statistics for the overview dashboard. */
 function computeOverviewStats(overview: OverviewViewState): OverviewStats {
   const enabledRepos = overview.repositories.filter((r) => r.enabled).length;
-  const failedReviews = overview.reviews.filter((r) => r.status === "failed").length;
-  const totalFindings = overview.reviews.reduce((sum, r) => sum + r.counts.validatedFindings, 0);
-  const publishedFindings = overview.reviews.reduce(
-    (sum, r) => sum + r.counts.publishedFindings,
-    0,
-  );
+  const metrics = overview.reviewMetrics;
+  const failedReviews =
+    metrics?.failedRuns ?? overview.reviews.filter((r) => r.status === "failed").length;
+  const totalFindings =
+    metrics?.validatedFindings ??
+    overview.reviews.reduce((sum, r) => sum + r.counts.validatedFindings, 0);
+  const publishedFindings =
+    metrics?.publishedFindings ??
+    overview.reviews.reduce((sum, r) => sum + r.counts.publishedFindings, 0);
 
   return {
     totalRepos: overview.repositories.length,
     enabledRepos,
-    recentReviews: overview.reviews.length,
+    recentReviews: metrics?.totalRuns ?? overview.reviews.length,
+    completedReviews:
+      metrics?.completedRuns ?? overview.reviews.filter((r) => r.status === "completed").length,
     failedReviews,
+    skippedReviews:
+      metrics?.skippedRuns ?? overview.reviews.filter((r) => r.status === "skipped").length,
     totalFindings,
     publishedFindings,
+    averagePublishedFindings:
+      metrics?.averagePublishedFindings ??
+      (overview.reviews.length > 0 ? publishedFindings / overview.reviews.length : 0),
+    ...(metrics?.medianDurationMs !== undefined
+      ? { medianDurationMs: metrics.medianDurationMs }
+      : {}),
+    ...(metrics?.p95DurationMs !== undefined ? { p95DurationMs: metrics.p95DurationMs } : {}),
+    ...(metrics?.estimatedCostUsd !== undefined
+      ? { estimatedCostUsd: metrics.estimatedCostUsd }
+      : {}),
   };
 }
 
@@ -7121,9 +7181,14 @@ function renderOverviewStats(stats: OverviewStats): string {
   return `
     <section class="summary-grid">
       ${renderMetric("Repositories", `${stats.enabledRepos}/${stats.totalRepos} enabled`)}
-      ${renderMetric("Recent Reviews", String(stats.recentReviews))}
+      ${renderMetric("Reviews", `${stats.completedReviews}/${stats.recentReviews} completed`)}
       ${renderMetric("Failed", String(stats.failedReviews), stats.failedReviews > 0)}
+      ${renderMetric("Skipped", String(stats.skippedReviews))}
       ${renderMetric("Findings", `${stats.publishedFindings} published`)}
+      ${renderMetric("Median Duration", formatDurationMs(stats.medianDurationMs))}
+      ${renderMetric("P95 Duration", formatDurationMs(stats.p95DurationMs))}
+      ${renderMetric("Avg Findings", stats.averagePublishedFindings.toFixed(2))}
+      ${renderMetric("Est. Cost", formatUsd(stats.estimatedCostUsd))}
     </section>
   `;
 }
@@ -11549,6 +11614,18 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Formats a millisecond duration for dashboard metric cards. */
+function formatDurationMs(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return "n/a";
+  }
+  if (value < 1000) {
+    return `${Math.round(value)} ms`;
+  }
+
+  return `${(value / 1000).toFixed(1)} s`;
+}
+
 /** Downloads a browser blob with a temporary object URL. */
 function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -11580,6 +11657,16 @@ function artifactDownloadName(
 /** Formats micro currency units for compact tables. */
 function formatMicros(value: number): string {
   return `$${(value / 1_000_000).toFixed(4)}`;
+}
+
+/** Formats a decimal USD string for compact dashboard metric cards. */
+function formatUsd(value: string | undefined): string {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return "n/a";
+  }
+
+  return `$${amount.toFixed(4)}`;
 }
 
 /** Formats a number for dense dashboard metrics. */

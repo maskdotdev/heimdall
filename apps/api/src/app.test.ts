@@ -73,6 +73,9 @@ type AdminReviewArtifactPayloadFixture = Awaited<
 type AdminReviewArtifactDownloadUrlFixture = Awaited<
   ReturnType<AdminControlPlaneService["createReviewArtifactDownloadUrl"]>
 >;
+type AdminReviewMetricsFixture = Awaited<
+  ReturnType<AdminControlPlaneService["getReviewMetricsSummary"]>
+>;
 type AdminReviewFindingFixture = Awaited<ReturnType<AdminControlPlaneService["getReviewFinding"]>>;
 type AdminFindingOutcomeRecordFixture = Awaited<
   ReturnType<AdminControlPlaneService["recordFindingOutcome"]>
@@ -5144,6 +5147,7 @@ describe("api app", () => {
   it("serves scoped repository and review discovery without pasted IDs", async () => {
     const repositoryQueries: unknown[] = [];
     const reviewQueries: unknown[] = [];
+    const reviewMetricQueries: unknown[] = [];
     const auditQueries: unknown[] = [];
     const app = createApiApp({
       adminControlPlaneAuth: auth,
@@ -5166,6 +5170,10 @@ describe("api app", () => {
         listReviewRuns: async (query) => {
           reviewQueries.push(query);
           return [reviewRunSummaryFixture];
+        },
+        getReviewMetricsSummary: async (query) => {
+          reviewMetricQueries.push(query);
+          return reviewMetricsFixture();
         },
       }),
       githubWebhookHandler: noopWebhookHandler(),
@@ -5202,6 +5210,12 @@ describe("api app", () => {
         recentAuditLogs: [{ action: "repo.settings.updated" }],
         recentReviews: [{ reviewRunId: "rrn_1", repoFullName: "octo-org/heimdall" }],
         repositories: [{ fullName: "octo-org/heimdall", latestReviewRunId: "rrn_1" }],
+        reviewMetrics: {
+          completedRuns: 2,
+          medianDurationMs: 1200,
+          p95DurationMs: 2800,
+          totalRuns: 4,
+        },
         runtimeHealth: {
           checks: [
             { name: "config", status: "pass" },
@@ -5213,6 +5227,9 @@ describe("api app", () => {
         },
       },
     });
+    expect(reviewMetricQueries).toEqual([
+      expect.objectContaining({ limit: 12, orgIds: ["org_1"] }),
+    ]);
     expect(repositoriesResponse.status).toBe(200);
     await expect(repositoriesResponse.json()).resolves.toMatchObject({
       data: {
@@ -5581,6 +5598,7 @@ function createMockControlPlaneService(
     listRepositoryMemoryFacts: async () => [memoryFactFixture()],
     getReviewArtifactPayload: async () => reviewArtifactPayloadFixture(),
     getReviewFinding: async () => reviewFindingFixture(),
+    getReviewMetricsSummary: async () => reviewMetricsFixture(),
     getReviewRun: async () => reviewRunSummaryFixture,
     listReviewArtifacts: async () => [reviewArtifactFixture()],
     listOrganizations: async () => [organizationFixture()],
@@ -6860,3 +6878,26 @@ const reviewRunSummaryFixture = {
   createdAt: "2026-05-05T12:00:00.000Z",
   updatedAt: "2026-05-05T12:30:00.000Z",
 };
+
+/** Review rollup fixture used by dashboard overview route tests. */
+function reviewMetricsFixture(
+  overrides: Partial<AdminReviewMetricsFixture> = {},
+): AdminReviewMetricsFixture {
+  return {
+    averagePublishedFindings: 0.5,
+    candidateFindings: 4,
+    completedRuns: 2,
+    estimatedCostUsd: "0.014000",
+    failedRuns: 1,
+    generatedAt: "2026-05-05T12:30:00.000Z",
+    medianDurationMs: 1_200,
+    p95DurationMs: 2_800,
+    publishedFindings: 2,
+    rejectedFindings: 1,
+    skippedRuns: 1,
+    supersededRuns: 0,
+    totalRuns: 4,
+    validatedFindings: 3,
+    ...overrides,
+  };
+}

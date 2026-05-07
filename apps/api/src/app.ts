@@ -106,6 +106,7 @@ import {
   repoRuleType,
   repositories,
   reviewArtifacts,
+  reviewRunMetrics,
   reviewRuns,
   subscriptions,
   usageEvents,
@@ -1775,10 +1776,44 @@ type AdminDashboardOverview = {
   readonly repositories: readonly AdminRepositorySummary[];
   /** Recent review runs available to the actor. */
   readonly recentReviews: readonly AdminReviewRunSummary[];
+  /** Durable review rollup metrics for the current actor scope. */
+  readonly reviewMetrics: AdminReviewMetricsSummary;
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
   /** Product-safe runtime readiness summary for dashboard visibility. */
   readonly runtimeHealth: ApiHealthResponse;
+};
+
+/** Durable review metrics returned by dashboard overview APIs. */
+type AdminReviewMetricsSummary = {
+  /** Total review runs in scope. */
+  readonly totalRuns: number;
+  /** Completed review runs in scope. */
+  readonly completedRuns: number;
+  /** Failed review runs in scope. */
+  readonly failedRuns: number;
+  /** Skipped review runs in scope. */
+  readonly skippedRuns: number;
+  /** Superseded review runs in scope. */
+  readonly supersededRuns: number;
+  /** Median end-to-end duration in milliseconds when metrics exist. */
+  readonly medianDurationMs?: number | undefined;
+  /** P95 end-to-end duration in milliseconds when metrics exist. */
+  readonly p95DurationMs?: number | undefined;
+  /** Candidate findings recorded by terminal review metrics. */
+  readonly candidateFindings: number;
+  /** Validated findings recorded by terminal review metrics. */
+  readonly validatedFindings: number;
+  /** Published findings recorded by terminal review metrics. */
+  readonly publishedFindings: number;
+  /** Rejected findings recorded by terminal review metrics. */
+  readonly rejectedFindings: number;
+  /** Average published findings per review run. */
+  readonly averagePublishedFindings: number;
+  /** Estimated review cost in USD as a decimal string. */
+  readonly estimatedCostUsd: string;
+  /** ISO timestamp when the rollup was generated. */
+  readonly generatedAt: string;
 };
 
 /** Query options for audit history search. */
@@ -2335,6 +2370,10 @@ export type AdminControlPlaneService = {
   readonly listReviewRuns: (
     query: AdminReviewRunListQuery,
   ) => Promise<readonly AdminReviewRunSummary[]>;
+  /** Gets durable review rollup metrics visible to an admin actor scope. */
+  readonly getReviewMetricsSummary: (
+    query: AdminReviewRunListQuery,
+  ) => Promise<AdminReviewMetricsSummary>;
   /** Lists persisted evaluation suites and latest run hints. */
   readonly listEvaluationSuites: (
     query: AdminEvaluationSuiteListQuery,
@@ -5557,21 +5596,25 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       const limit = listLimitFromUrl(url);
       const service = getAdminControlPlaneService();
       const repositoryQuery = scopedRepositoryListQuery(url, guardResult.actor, limit);
+      const reviewQuery = scopedReviewRunListQuery(url, guardResult.actor, limit);
       const auditQuery = actorHasPermission(guardResult.actor, "admin.audit.view")
         ? overviewAuditQueryForActor(guardResult.actor, limit)
         : undefined;
-      const [repositories, recentReviews, recentAuditLogs, runtimeHealth] = await Promise.all([
-        service.listRepositories(repositoryQuery),
-        service.listReviewRuns(scopedReviewRunListQuery(url, guardResult.actor, limit)),
-        auditQuery ? service.listAuditLogs(auditQuery) : Promise.resolve([]),
-        readinessCheck().then(createApiHealthResponse),
-      ]);
+      const [repositories, recentReviews, reviewMetrics, recentAuditLogs, runtimeHealth] =
+        await Promise.all([
+          service.listRepositories(repositoryQuery),
+          service.listReviewRuns(reviewQuery),
+          service.getReviewMetricsSummary(reviewQuery),
+          auditQuery ? service.listAuditLogs(auditQuery) : Promise.resolve([]),
+          readinessCheck().then(createApiHealthResponse),
+        ]);
 
       return {
         data: {
           repositories,
           recentAuditLogs,
           recentReviews,
+          reviewMetrics,
           runtimeHealth,
         } satisfies AdminDashboardOverview,
       };
@@ -6556,6 +6599,7 @@ function createAdminControlPlaneService(dependencies: {
         request,
       ),
     getReviewFinding: (findingId) => getReviewFinding(dependencies.db, findingId),
+    getReviewMetricsSummary: (query) => getReviewMetricsSummary(dependencies.db, query),
     getReviewRun: (reviewRunId) => getReviewRun(dependencies.db, reviewRunId),
     getEntitlementSummary: (query) => getEntitlementSummary(dependencies.db, query),
     listReviewArtifacts: (reviewRunId) => listReviewArtifacts(dependencies.db, reviewRunId),
@@ -8487,6 +8531,78 @@ async function listReviewRuns(
     .limit(boundedListLimit(query.limit));
 
   return rows.map(toAdminReviewRunSummary);
+}
+
+/** Gets dashboard review rollups for the same scope as review history discovery. */
+async function getReviewMetricsSummary(
+  db: HeimdallDatabase,
+  query: AdminReviewRunListQuery,
+): Promise<AdminReviewMetricsSummary> {
+  const conditions = reviewRunListConditions(query);
+  const [row] = await db
+    .select({
+      candidateFindings: sql<number>`coalesce(sum(${reviewRunMetrics.candidateFindings}), 0)::int`,
+      completedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'completed')::int`,
+      estimatedCostUsd: sql<string>`coalesce(sum(${reviewRunMetrics.estimatedCostUsd}), 0)::text`,
+      failedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'failed')::int`,
+      medianDurationMs: sql<number | null>`round(
+        percentile_cont(0.5) within group (order by ${reviewRunMetrics.totalDurationMs})
+        filter (where ${reviewRunMetrics.totalDurationMs} is not null)
+      )::int`,
+      p95DurationMs: sql<number | null>`round(
+        percentile_cont(0.95) within group (order by ${reviewRunMetrics.totalDurationMs})
+        filter (where ${reviewRunMetrics.totalDurationMs} is not null)
+      )::int`,
+      publishedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.publishedFindings}), 0)::int`,
+      rejectedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.rejectedFindings}), 0)::int`,
+      skippedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'skipped')::int`,
+      supersededRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'superseded')::int`,
+      totalRuns: sql<number>`count(*)::int`,
+      validatedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.validatedFindings}), 0)::int`,
+    })
+    .from(reviewRuns)
+    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+    .leftJoin(reviewRunMetrics, eq(reviewRuns.reviewRunId, reviewRunMetrics.reviewRunId))
+    .leftJoin(
+      pullRequestSnapshots,
+      eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
+    )
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .limit(1);
+  const metrics = row ?? {
+    candidateFindings: 0,
+    completedRuns: 0,
+    estimatedCostUsd: "0",
+    failedRuns: 0,
+    medianDurationMs: null,
+    p95DurationMs: null,
+    publishedFindings: 0,
+    rejectedFindings: 0,
+    skippedRuns: 0,
+    supersededRuns: 0,
+    totalRuns: 0,
+    validatedFindings: 0,
+  };
+
+  return {
+    averagePublishedFindings:
+      metrics.totalRuns > 0
+        ? roundToTwoDecimalPlaces(metrics.publishedFindings / metrics.totalRuns)
+        : 0,
+    candidateFindings: metrics.candidateFindings,
+    completedRuns: metrics.completedRuns,
+    estimatedCostUsd: metrics.estimatedCostUsd,
+    failedRuns: metrics.failedRuns,
+    generatedAt: new Date().toISOString(),
+    ...(metrics.medianDurationMs !== null ? { medianDurationMs: metrics.medianDurationMs } : {}),
+    ...(metrics.p95DurationMs !== null ? { p95DurationMs: metrics.p95DurationMs } : {}),
+    publishedFindings: metrics.publishedFindings,
+    rejectedFindings: metrics.rejectedFindings,
+    skippedRuns: metrics.skippedRuns,
+    supersededRuns: metrics.supersededRuns,
+    totalRuns: metrics.totalRuns,
+    validatedFindings: metrics.validatedFindings,
+  };
 }
 
 /** Lists persisted evaluation suites with latest run and active baseline hints. */
@@ -10569,6 +10685,11 @@ function compareBillingReconciliationIssues(
 /** Returns the sort rank for one reconciliation severity. */
 function reconciliationSeverityRank(severity: AdminBillingReconciliationSeverity): number {
   return severity === "critical" ? 2 : 1;
+}
+
+/** Rounds a finite number to two decimal places for compact dashboard metrics. */
+function roundToTwoDecimalPlaces(value: number): number {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
 }
 
 /** Returns a safe list limit. */
