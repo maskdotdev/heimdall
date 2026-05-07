@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildEvalHistoryWrite,
   compareEvalReports,
+  importEvalCaseIntoSuite,
   loadRegisteredEvalSuite,
   parseEvalCase,
+  parseEvalCaseImportSource,
   renderEvalComparisonMarkdown,
   renderEvalReportHtml,
   renderEvalReportJUnit,
@@ -89,6 +91,40 @@ describe("evaluation harness", () => {
       evalRunId: report.evalRunId,
     });
     expect(JSON.stringify(history)).not.toContain("The new branch can read session.expiresAt");
+  });
+
+  it("imports reviewed production eval drafts into suite fixtures", async () => {
+    const suite = await loadRegisteredEvalSuite("smoke-full-pipeline-v1");
+    const baseCase = suite.cases[0];
+    if (!baseCase) {
+      throw new Error("Smoke suite did not include a base case.");
+    }
+    const evalCase = {
+      ...baseCase,
+      caseId: "case_imported_review_regression",
+      tags: ["production-import", "redacted"],
+      title: "Imported review regression",
+    };
+    const draft = {
+      schemaVersion: "admin_eval_import_draft.v1",
+      evalCase,
+    };
+    const importedCase = parseEvalCaseImportSource(draft);
+    const result = importEvalCaseIntoSuite({ evalCase: importedCase, suite });
+
+    expect(importedCase.caseId).toBe("case_imported_review_regression");
+    expect(result.inserted).toBe(true);
+    expect(result.replaced).toBe(false);
+    expect(result.caseCount).toBe(suite.cases.length + 1);
+    expect(result.suite.cases.at(-1)?.caseId).toBe("case_imported_review_regression");
+    expect(() => importEvalCaseIntoSuite({ evalCase: baseCase, suite })).toThrow(/already exists/u);
+    expect(
+      importEvalCaseIntoSuite({
+        evalCase: { ...baseCase, title: "Reviewed replacement" },
+        replaceExisting: true,
+        suite,
+      }).replaced,
+    ).toBe(true);
   });
 
   it("reports lost true positives during baseline comparison", async () => {

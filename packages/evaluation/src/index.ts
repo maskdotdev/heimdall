@@ -310,6 +310,28 @@ export type EvalHistoryArtifactRef = {
   readonly uri: string;
 };
 
+/** Input for adding a reviewed eval case to a suite fixture. */
+export type ImportEvalCaseIntoSuiteInput = {
+  /** Suite that should receive the case. */
+  readonly suite: EvalSuite;
+  /** Reviewed eval case to add to the suite. */
+  readonly evalCase: EvalCase;
+  /** Whether an existing case with the same ID may be replaced. */
+  readonly replaceExisting?: boolean;
+};
+
+/** Result of importing an eval case into a suite fixture. */
+export type ImportEvalCaseIntoSuiteResult = {
+  /** Updated suite fixture. */
+  readonly suite: EvalSuite;
+  /** Whether the case was newly inserted. */
+  readonly inserted: boolean;
+  /** Whether an existing case was replaced. */
+  readonly replaced: boolean;
+  /** Number of cases in the updated suite. */
+  readonly caseCount: number;
+};
+
 /** Baseline comparison output for candidate and baseline reports. */
 export type EvalReportComparison = {
   /** Baseline report ID. */
@@ -433,6 +455,49 @@ export function parseEvalSuite(value: unknown): EvalSuite {
 /** Validates unknown data as one eval case. */
 export function parseEvalCase(value: unknown): EvalCase {
   return parseWithSchema("EvalCase", EvalCaseSchema, value);
+}
+
+/** Extracts an eval case from a raw case file or admin eval import draft. */
+export function parseEvalCaseImportSource(value: unknown): EvalCase {
+  const record = asRecord(value);
+  if (record?.schemaVersion === "admin_eval_import_draft.v1" && "evalCase" in record) {
+    return parseEvalCase(record.evalCase);
+  }
+
+  return parseEvalCase(value);
+}
+
+/** Adds a reviewed eval case to a suite fixture without mutating the input suite. */
+export function importEvalCaseIntoSuite(
+  input: ImportEvalCaseIntoSuiteInput,
+): ImportEvalCaseIntoSuiteResult {
+  const existingIndex = input.suite.cases.findIndex(
+    (evalCase) => evalCase.caseId === input.evalCase.caseId,
+  );
+  if (existingIndex >= 0 && !input.replaceExisting) {
+    throw new EvalValidationError(
+      "EvalCaseImport",
+      `caseId "${input.evalCase.caseId}" already exists; pass replaceExisting to overwrite it`,
+    );
+  }
+
+  const cases =
+    existingIndex >= 0
+      ? input.suite.cases.map((evalCase, index) =>
+          index === existingIndex ? input.evalCase : evalCase,
+        )
+      : [...input.suite.cases, input.evalCase];
+  const suite = parseEvalSuite({
+    ...input.suite,
+    cases,
+  });
+
+  return {
+    caseCount: suite.cases.length,
+    inserted: existingIndex < 0,
+    replaced: existingIndex >= 0,
+    suite,
+  };
 }
 
 /** Validates unknown data as an eval report. */
@@ -1386,6 +1451,13 @@ function parseWithSchema<T>(
     .map((error) => `${error.path || "/"} ${error.message}`)
     .join("; ");
   throw new EvalValidationError(schemaName, details);
+}
+
+/** Narrows unknown JSON data to an object record. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /** Resolves the default registered fixture path for a suite ID. */

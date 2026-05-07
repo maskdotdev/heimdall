@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
   assertEvalGate,
@@ -9,8 +9,10 @@ import {
   type EvalReportArtifacts,
   type EvalSuite,
   type EvalVariant,
+  importEvalCaseIntoSuite,
   loadEvalSuiteFromFile,
   loadRegisteredEvalSuite,
+  parseEvalCaseImportSource,
   renderEvalReportMarkdown,
   runEvaluation,
   writeEvalReportArtifacts,
@@ -48,14 +50,38 @@ type EvalCliOptions = {
   readonly failOnThreshold: boolean;
 };
 
+/** Parsed CLI options for importing a reviewed eval case into a suite fixture. */
+type EvalImportCaseCliOptions = {
+  /** Suite JSON file to update or use as the input. */
+  readonly suiteFile: string;
+  /** JSON file containing an EvalCase or admin eval import draft. */
+  readonly caseFile: string;
+  /** Optional output suite file. Defaults to suiteFile. */
+  readonly outputFile?: string;
+  /** Whether to replace an existing case with the same ID. */
+  readonly replaceExisting: boolean;
+};
+
 /** Entrypoint for the evaluation CLI. */
 async function main(args: readonly string[]): Promise<void> {
   const [command, ...rest] = args;
-  if (command !== "run") {
-    throw new Error(`Unknown evaluation command "${command ?? ""}". Expected "run".`);
+  if (command === "run") {
+    await runEvalCommand(rest);
+    return;
+  }
+  if (command === "import-case") {
+    await importCaseCommand(rest);
+    return;
   }
 
-  const options = parseRunOptions(rest);
+  throw new Error(
+    `Unknown evaluation command "${command ?? ""}". Expected "run" or "import-case".`,
+  );
+}
+
+/** Runs a deterministic eval suite and writes report artifacts. */
+async function runEvalCommand(args: readonly string[]): Promise<void> {
+  const options = parseRunOptions(args);
   const suite = options.suiteFile
     ? await loadEvalSuiteFromFile(options.suiteFile)
     : await loadRegisteredEvalSuite(options.suiteId);
@@ -85,6 +111,26 @@ async function main(args: readonly string[]): Promise<void> {
   if (options.failOnThreshold) {
     assertEvalGate(report);
   }
+}
+
+/** Imports a reviewed eval case or admin eval import draft into a suite fixture file. */
+async function importCaseCommand(args: readonly string[]): Promise<void> {
+  const options = parseImportCaseOptions(args);
+  const suitePath = resolveWorkspacePath(options.suiteFile);
+  const casePath = resolveWorkspacePath(options.caseFile);
+  const outputPath = resolveWorkspacePath(options.outputFile ?? options.suiteFile);
+  const suite = await loadEvalSuiteFromFile(suitePath);
+  const evalCase = parseEvalCaseImportSource(JSON.parse(await readFile(casePath, "utf8")));
+  const result = importEvalCaseIntoSuite({
+    evalCase,
+    replaceExisting: options.replaceExisting,
+    suite,
+  });
+
+  await writeFile(outputPath, `${JSON.stringify(result.suite, null, 2)}\n`, "utf8");
+  process.stdout.write(
+    `${result.replaced ? "Replaced" : "Imported"} eval case ${evalCase.caseId} in ${outputPath} (${result.caseCount} cases).\n`,
+  );
 }
 
 /** Input for persisting one eval run from the CLI. */
@@ -247,6 +293,51 @@ function parseRunOptions(args: readonly string[]): EvalCliOptions {
     ...(branch ? { branch } : {}),
     setActiveBaseline,
     failOnThreshold,
+  };
+}
+
+/** Parses `eval import-case` command options. */
+function parseImportCaseOptions(args: readonly string[]): EvalImportCaseCliOptions {
+  let suiteFile: string | undefined;
+  let caseFile: string | undefined;
+  let outputFile: string | undefined;
+  let replaceExisting = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--suite-file":
+        suiteFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--case-file":
+        caseFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--output-file":
+        outputFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--replace":
+        replaceExisting = true;
+        break;
+      default:
+        throw new Error(`Unknown evaluation import-case option "${arg}".`);
+    }
+  }
+
+  if (!suiteFile) {
+    throw new Error("Missing required --suite-file for eval import-case.");
+  }
+  if (!caseFile) {
+    throw new Error("Missing required --case-file for eval import-case.");
+  }
+
+  return {
+    caseFile,
+    ...(outputFile ? { outputFile } : {}),
+    replaceExisting,
+    suiteFile,
   };
 }
 
