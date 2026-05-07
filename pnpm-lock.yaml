@@ -343,6 +343,9 @@ importers:
       '@repo/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       '@repo/tool-runner':
         specifier: workspace:*
         version: link:../../packages/tool-runner
@@ -695,6 +698,9 @@ importers:
       '@repo/observability':
         specifier: workspace:*
         version: link:../observability
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../security
       '@sinclair/typebox':
         specifier: 'catalog:'
         version: 0.34.49

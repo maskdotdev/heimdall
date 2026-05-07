@@ -56,7 +56,11 @@ import {
   validateCandidateFindings,
 } from "@repo/review-engine";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
-import { type RetentionDecision, resolveArtifactRetention } from "@repo/security";
+import {
+  type RetentionDecision,
+  redactPromptSecrets,
+  resolveArtifactRetention,
+} from "@repo/security";
 import {
   runStaticAnalysis,
   type StaticAnalysisBudgets,
@@ -2544,32 +2548,34 @@ function createUsageRecordingLlmGateway(input: {
     generateObject: async (request) => {
       const callSequence = nextSequence();
       const startedAt = input.now().toISOString();
-      const output = await input.gateway.generateObject(request);
+      const redactedRequest = redactLlmGatewayRequestPrompt(request);
+      const output = await input.gateway.generateObject(redactedRequest);
       const completedAt = input.now().toISOString();
       await recordLlmUsage({
         ...input,
         completedAt,
-        ...(request.metadata ? { metadata: request.metadata } : {}),
+        ...(redactedRequest.metadata ? { metadata: redactedRequest.metadata } : {}),
         output,
-        prompt: request.prompt,
+        prompt: redactedRequest.prompt,
         sequence: callSequence,
         startedAt,
-        system: request.system,
-        task: request.task,
+        system: redactedRequest.system,
+        task: redactedRequest.task,
       });
       return output;
     },
     generateReviewFindings: async (request) => {
       const callSequence = nextSequence();
       const startedAt = input.now().toISOString();
-      const output = await input.gateway.generateReviewFindings(request);
+      const redactedRequest = redactReviewFindingPrompt(request);
+      const output = await input.gateway.generateReviewFindings(redactedRequest);
       const completedAt = input.now().toISOString();
       await recordLlmUsage({
         ...input,
         completedAt,
-        ...(request.metadata ? { metadata: request.metadata } : {}),
+        ...(redactedRequest.metadata ? { metadata: redactedRequest.metadata } : {}),
         output,
-        prompt: request.prompt,
+        prompt: redactedRequest.prompt,
         sequence: callSequence,
         startedAt,
         system:
@@ -2579,6 +2585,37 @@ function createUsageRecordingLlmGateway(input: {
       return output;
     },
   };
+}
+
+/** Redacts one generic LLM gateway request before provider execution and usage recording. */
+function redactLlmGatewayRequestPrompt<
+  TRequest extends {
+    readonly metadata?: Readonly<Record<string, unknown>>;
+    readonly prompt: string;
+  },
+>(request: TRequest): TRequest {
+  const redaction = redactPromptSecrets(request.prompt);
+  if (!redaction.redacted) {
+    return request;
+  }
+
+  return {
+    ...request,
+    metadata: {
+      ...(request.metadata ?? {}),
+      promptRedacted: true,
+      promptRedactionKinds: redaction.matchKinds,
+      promptRedactionReplacementCount: redaction.replacementCount,
+    },
+    prompt: redaction.value,
+  };
+}
+
+/** Redacts one review-finding prompt before provider execution and usage recording. */
+function redactReviewFindingPrompt(
+  request: Parameters<LLMGateway["generateReviewFindings"]>[0],
+): Parameters<LLMGateway["generateReviewFindings"]>[0] {
+  return redactLlmGatewayRequestPrompt(request);
 }
 
 /** Persists one successful model-call row and one matching token usage event. */

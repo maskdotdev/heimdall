@@ -19,7 +19,9 @@ import {
   productPermissionsForRole,
   productRoleHasPermission,
   recordSecurityEvent,
+  redactPromptSecrets,
   redactResolvedSecret,
+  redactString,
   resolveArtifactRetention,
   retentionClassForArtifactType,
   shouldAlertSecurityEvent,
@@ -284,6 +286,37 @@ describe("admin security", () => {
       manager.resolveSecret(parseSecretRef("aws:prod/github-app/private-key")),
     ).rejects.toMatchObject({
       code: "secret_provider_unsupported",
+    });
+  });
+
+  it("redacts secret patterns before prompt and log use", () => {
+    const prompt = [
+      'const token = "github_pat_1234567890abcdef1234567890abcdef";',
+      "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+      "DATABASE_URL=postgres://user:password@example.test/db",
+      "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----",
+    ].join("\n");
+
+    const redacted = redactPromptSecrets(prompt);
+
+    expect(redacted.redacted).toBe(true);
+    expect(redacted.matchKinds).toEqual(
+      expect.arrayContaining(["credential_url", "github_token", "openai_api_key", "private_key"]),
+    );
+    expect(redacted.value).toContain("[redacted-github-token]");
+    expect(redacted.value).toContain("[redacted-llm-api-key]");
+    expect(redacted.value).toContain("[redacted-private-key]");
+    expect(redacted.value).not.toContain("github_pat_1234567890abcdef");
+    expect(redacted.value).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz123456");
+    expect(redacted.value).not.toContain("user:password@example.test");
+
+    expect(
+      redactString("literal secret-value-123", {
+        additionalSecrets: ["secret-value-123"],
+      }),
+    ).toMatchObject({
+      matchKinds: ["literal_secret"],
+      value: "literal [redacted]",
     });
   });
 

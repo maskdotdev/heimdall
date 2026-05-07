@@ -164,6 +164,57 @@ describe("createLLMGateway", () => {
     });
   });
 
+  it("redacts secret-looking prompt content before provider calls", async () => {
+    const providerPrompts: string[] = [];
+    const providerMetadata: unknown[] = [];
+    const gateway = createLLMGateway({
+      id: "capture",
+      generateObject: async (input) => {
+        providerPrompts.push(input.prompt);
+        providerMetadata.push(input.metadata);
+        return { findings: [] };
+      },
+    });
+
+    await expect(
+      gateway.generateReviewFindings({
+        prompt: JSON.stringify({
+          changedFiles: [
+            {
+              path: "src/config.ts",
+              hunks: [
+                {
+                  lines: [
+                    {
+                      kind: "addition",
+                      newLine: 12,
+                      content: "const token = 'github_pat_1234567890abcdef1234567890abcdef';",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          retrievedContext: [
+            {
+              text: "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+            },
+          ],
+        }),
+      }),
+    ).resolves.toEqual({ findings: [] });
+
+    expect(providerPrompts).toHaveLength(1);
+    expect(providerPrompts[0]).toContain("[redacted-github-token]");
+    expect(providerPrompts[0]).toContain("[redacted-llm-api-key]");
+    expect(providerPrompts[0]).not.toContain("github_pat_1234567890abcdef");
+    expect(providerPrompts[0]).not.toContain("sk-proj-abcdefghijklmnopqrstuvwxyz123456");
+    expect(providerMetadata[0]).toMatchObject({
+      promptRedacted: true,
+      promptRedactionKinds: expect.arrayContaining(["github_token", "openai_api_key"]),
+    });
+  });
+
   it("records product-safe metrics and spans for successful calls", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];

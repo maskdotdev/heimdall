@@ -8,6 +8,7 @@ import {
   type TelemetrySpanHandle,
   type TelemetrySpanRecorder,
 } from "@repo/observability";
+import { redactPromptSecrets } from "@repo/security";
 import type { Static, TSchema } from "@sinclair/typebox";
 
 /** Task names supported by the gateway MVP. */
@@ -42,6 +43,8 @@ export type CreateLLMGatewayOptions = {
   readonly defaultModelProfile?: string;
   /** Optional metric recorder for product-safe aggregate LLM telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
+  /** Whether to redact secret-like data from prompts before provider calls. Defaults to true. */
+  readonly redactPrompts?: boolean | undefined;
   /** Optional bounded retry policy for transient provider failures. */
   readonly retryPolicy?: Partial<LLMGatewayRetryPolicy>;
   /** Optional span recorder for product-safe LLM call spans. */
@@ -211,12 +214,14 @@ export function createLLMGateway(
   const generateObject = async <TSchemaValue extends TSchema>(
     input: GenerateObjectInput<TSchemaValue>,
   ): Promise<Static<TSchemaValue>> => {
-    const telemetry = startLLMCallTelemetry(provider, input, options);
+    const providerInput =
+      options.redactPrompts === false ? input : redactGenerateObjectPrompt(input);
+    const telemetry = startLLMCallTelemetry(provider, providerInput, options);
     try {
-      const output = await executeProviderObject(provider, input, retryPolicy, {
+      const output = await executeProviderObject(provider, providerInput, retryPolicy, {
         onRetry: (error) => recordLLMRetryMetric(options.metrics, telemetry, error),
       });
-      const validated = validateObjectOutput(provider, input, output);
+      const validated = validateObjectOutput(provider, providerInput, output);
       finishLLMCallTelemetry(options.metrics, telemetry, { status: "succeeded" });
       return validated;
     } catch (error) {
@@ -237,6 +242,27 @@ export function createLLMGateway(
         prompt: input.prompt,
         ...(input.metadata ? { metadata: input.metadata } : {}),
       }),
+  };
+}
+
+/** Redacts secret-like data from the user prompt before an adapter sees it. */
+function redactGenerateObjectPrompt<TSchemaValue extends TSchema>(
+  input: GenerateObjectInput<TSchemaValue>,
+): GenerateObjectInput<TSchemaValue> {
+  const redaction = redactPromptSecrets(input.prompt);
+  if (!redaction.redacted) {
+    return input;
+  }
+
+  return {
+    ...input,
+    metadata: {
+      ...(input.metadata ?? {}),
+      promptRedacted: true,
+      promptRedactionKinds: redaction.matchKinds,
+      promptRedactionReplacementCount: redaction.replacementCount,
+    },
+    prompt: redaction.value,
   };
 }
 

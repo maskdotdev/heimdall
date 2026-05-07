@@ -9,6 +9,7 @@
   "exclude": ["dist", "node_modules"],
   "references": [
     { "path": "../contracts/tsconfig.build.json" },
-    { "path": "../observability/tsconfig.build.json" }
+    { "path": "../observability/tsconfig.build.json" },
+    { "path": "../security/tsconfig.build.json" }
   ]
 }

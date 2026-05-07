@@ -305,6 +305,40 @@ export type RedactedResolvedSecret = Omit<ResolvedSecret, "value"> & {
   readonly value: "[redacted-secret]";
 };
 
+/** Redaction modes used by logs, prompts, artifacts, and support views. */
+export type RedactionMode = "logs" | "prompt" | "artifact" | "support_view";
+
+/** Secret-like pattern categories recognized by the built-in redactor. */
+export type RedactionMatchKind =
+  | "aws_access_key_id"
+  | "credential_url"
+  | "github_token"
+  | "jwt"
+  | "literal_secret"
+  | "openai_api_key"
+  | "private_key"
+  | "secret_assignment";
+
+/** Options used when redacting text before logs, prompts, artifacts, or support views. */
+export type RedactionOptions = {
+  /** Caller context for the redaction operation. */
+  readonly mode?: RedactionMode | undefined;
+  /** Additional literal secret values to redact exactly when they are at least 8 characters. */
+  readonly additionalSecrets?: readonly string[] | undefined;
+};
+
+/** Text returned by the redaction boundary with product-safe match metadata. */
+export type RedactedString = {
+  /** Redacted text value. */
+  readonly value: string;
+  /** Whether any replacement was applied. */
+  readonly redacted: boolean;
+  /** Number of replacements applied. */
+  readonly replacementCount: number;
+  /** Product-safe categories that matched. */
+  readonly matchKinds: readonly RedactionMatchKind[];
+};
+
 /** Boundary used to resolve secrets from provider-specific storage. */
 export type SecretsManager = {
   /** Resolves one secret reference for a service context. */
@@ -484,6 +518,44 @@ export function redactResolvedSecret(secret: ResolvedSecret): RedactedResolvedSe
     value: "[redacted-secret]",
     ...(secret.version ? { version: secret.version } : {}),
   };
+}
+
+/** Redacts known secret patterns from text. */
+export function redactString(input: string, options: RedactionOptions = {}): RedactedString {
+  const matchedKinds = new Set<RedactionMatchKind>();
+  let replacementCount = 0;
+  let value = input;
+
+  for (const literalSecret of uniqueLiteralSecrets(options.additionalSecrets ?? [])) {
+    const occurrences = countLiteralOccurrences(value, literalSecret);
+    if (occurrences > 0) {
+      matchedKinds.add("literal_secret");
+      replacementCount += occurrences;
+      value = value.split(literalSecret).join("[redacted]");
+    }
+  }
+
+  for (const pattern of SECRET_REDACTION_PATTERNS) {
+    value = value.replace(pattern.pattern, (...args: unknown[]) => {
+      replacementCount += 1;
+      matchedKinds.add(pattern.kind);
+      return typeof pattern.replacement === "function"
+        ? pattern.replacement(args)
+        : pattern.replacement;
+    });
+  }
+
+  return {
+    matchKinds: [...matchedKinds],
+    redacted: replacementCount > 0,
+    replacementCount,
+    value,
+  };
+}
+
+/** Redacts secret-like data from model prompts before provider calls. */
+export function redactPromptSecrets(prompt: string): RedactedString {
+  return redactString(prompt, { mode: "prompt" });
 }
 
 /** Validates a structured secret reference. */
@@ -714,6 +786,56 @@ const sensitiveSecurityMetadataKeyPatterns = [
   "signed_url",
   "source",
   "token",
+] as const;
+
+/** Single built-in secret redaction pattern. */
+type SecretRedactionPattern = {
+  /** Product-safe category emitted when the pattern matches. */
+  readonly kind: RedactionMatchKind;
+  /** Global regular expression used to detect a secret-like value. */
+  readonly pattern: RegExp;
+  /** Replacement text or callback for the matched value. */
+  readonly replacement: string | ((args: readonly unknown[]) => string);
+};
+
+/** Secret-like patterns redacted from logs, prompts, artifacts, and support views. */
+const SECRET_REDACTION_PATTERNS: readonly SecretRedactionPattern[] = [
+  {
+    kind: "private_key",
+    pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
+    replacement: "[redacted-private-key]",
+  },
+  {
+    kind: "github_token",
+    pattern: /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/gu,
+    replacement: "[redacted-github-token]",
+  },
+  {
+    kind: "openai_api_key",
+    pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/gu,
+    replacement: "[redacted-llm-api-key]",
+  },
+  {
+    kind: "aws_access_key_id",
+    pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
+    replacement: "[redacted-aws-access-key-id]",
+  },
+  {
+    kind: "jwt",
+    pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gu,
+    replacement: "[redacted-jwt]",
+  },
+  {
+    kind: "credential_url",
+    pattern: /([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^@\s/]+)@/giu,
+    replacement: (args) => `${String(args[1] ?? "")}[redacted]@`,
+  },
+  {
+    kind: "secret_assignment",
+    pattern:
+      /((?:"|')?(?:api[_-]?key|access[_-]?key|auth[_-]?token|password|passwd|private[_-]?key|pwd|secret|token)(?:"|')?\s*[:=]\s*(?:"|')?)(?!\[redacted)([^"',\s;}]+)/giu,
+    replacement: (args) => `${String(args[1] ?? "")}[redacted]`,
+  },
 ] as const;
 
 /** Identity provider families that can back admin actors. */
@@ -1577,6 +1699,23 @@ function parseIdentityAssertion(encodedAssertion: string): AdminIdentityAssertio
 /** Returns a canonical secret provider for a user-facing provider string. */
 function secretProviderFromString(value: string): SecretRefProvider | undefined {
   return SECRET_REF_PROVIDER_ALIASES[value.trim().toLowerCase()];
+}
+
+/** Returns unique literal secrets that are long enough to redact safely. */
+function uniqueLiteralSecrets(values: readonly string[]): readonly string[] {
+  return [
+    ...new Set(
+      values
+        .map((value) => value.trim())
+        .filter((value) => value.length >= 8)
+        .sort((left, right) => right.length - left.length),
+    ),
+  ];
+}
+
+/** Counts non-overlapping literal occurrences in text. */
+function countLiteralOccurrences(value: string, literal: string): number {
+  return Math.max(0, value.split(literal).length - 1);
 }
 
 /** Returns whether a value contains ASCII control characters. */

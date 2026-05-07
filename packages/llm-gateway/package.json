@@ -23,7 +23,8 @@
     "@sinclair/typebox": "catalog:",
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
-    "@repo/observability": "workspace:*"
+    "@repo/observability": "workspace:*",
+    "@repo/security": "workspace:*"
   },
   "devDependencies": {
     "typescript": "catalog:",
