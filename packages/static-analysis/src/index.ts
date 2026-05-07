@@ -7,7 +7,12 @@ import {
   type PullRequestSnapshot,
 } from "@repo/contracts";
 import { type CodeLanguage, CodeLanguageSchema } from "@repo/contracts/enums/language";
-import type { ToolCommandSpec, ToolRunner, ToolRunnerResult } from "@repo/tool-runner";
+import type {
+  ToolCommandSpec,
+  ToolRunner,
+  ToolRunnerResult,
+  ToolRunnerSandboxContext,
+} from "@repo/tool-runner";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -593,6 +598,7 @@ export async function runStaticAnalysis(
 ): Promise<StaticAnalysisReport> {
   const startedAt = input.request.createdAt;
   const plan = planStaticAnalysis(input.request);
+  const sandboxContext = sandboxContextForStaticAnalysis(input.request);
   const toolRuns: ToolRunResultSummary[] = [];
   const diagnostics: NormalizedToolDiagnostic[] = [];
   const warnings: StaticAnalysisWarning[] = [...plan.warnings];
@@ -606,6 +612,7 @@ export async function runStaticAnalysis(
       command: runPlan.command,
       maxOutputBytes: runPlan.maxOutputBytes,
       planId: runPlan.planId,
+      sandboxContext,
       startedAt,
       timeoutMs: runPlan.timeoutMs,
     });
@@ -656,6 +663,21 @@ export async function runStaticAnalysis(
     toolRuns,
     warnings,
   });
+}
+
+/** Creates sandbox metadata for static-analysis tool runner requests. */
+function sandboxContextForStaticAnalysis(request: StaticAnalysisRequest): ToolRunnerSandboxContext {
+  return {
+    baseSha: request.snapshot.baseSha,
+    commitSha: request.workspace.commitSha,
+    headSha: request.snapshot.headSha,
+    orgId: request.orgId,
+    repoId: request.repoId,
+    reviewRunId: request.reviewRunId,
+    staticAnalysisRunId: stableId("star", [request.reviewRunId, request.workspace.commitSha]),
+    trustLevel: request.workspace.isTrusted ? "trusted_pr" : "untrusted_pr",
+    workspaceId: request.workspace.workspaceId,
+  };
 }
 
 /** Parses an unknown value as static-analysis budgets. */

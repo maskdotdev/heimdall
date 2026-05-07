@@ -1,10 +1,50 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import type {
+  SandboxExecutionCategory,
+  SandboxImageSpec,
+  SandboxNetworkPolicy,
+  SandboxRunner,
+  SandboxRunRequest,
+  SandboxRunResult,
+  SandboxTrustLevel,
+} from "@repo/sandbox";
+import {
+  DEFAULT_SANDBOX_ARTIFACT_POLICY,
+  DEFAULT_SANDBOX_ENVIRONMENT,
+  DEFAULT_SANDBOX_NETWORK_POLICY,
+  DEFAULT_SANDBOX_OUTPUT_POLICY,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
+  DEFAULT_SANDBOX_SECURITY_POLICY,
+} from "@repo/sandbox";
 
 /** Command network access policy. */
 export type ToolNetworkPolicy = "none" | "metadata_only" | "allow";
 
 /** Command filesystem access policy. */
 export type ToolFilesystemPolicy = "read_only" | "read_write_tmp";
+
+/** Review-owned sandbox metadata carried by tool executions. */
+export type ToolRunnerSandboxContext = {
+  /** Organization ID that owns the tool run. */
+  readonly orgId: string;
+  /** Repository ID that owns the tool run. */
+  readonly repoId: string;
+  /** Workspace lease ID available to the sandbox runner. */
+  readonly workspaceId?: string | undefined;
+  /** Review run ID that owns the tool run. */
+  readonly reviewRunId?: string | undefined;
+  /** Static-analysis run ID that owns the tool run. */
+  readonly staticAnalysisRunId?: string | undefined;
+  /** Commit SHA checked out in the workspace. */
+  readonly commitSha: string;
+  /** Optional base commit SHA for pull request analysis. */
+  readonly baseSha?: string | undefined;
+  /** Optional head commit SHA for pull request analysis. */
+  readonly headSha?: string | undefined;
+  /** Trust level assigned to the sandbox run. */
+  readonly trustLevel?: SandboxTrustLevel | undefined;
+};
 
 /** Safe command specification passed to a tool runner. */
 export type ToolCommandSpec = {
@@ -41,6 +81,8 @@ export type ToolRunnerInput = {
   readonly maxOutputBytes: number;
   /** Optional deterministic start timestamp. */
   readonly startedAt?: string | undefined;
+  /** Optional sandbox metadata for runners that delegate to sandbox execution. */
+  readonly sandboxContext?: ToolRunnerSandboxContext | undefined;
 };
 
 /** Result returned by a tool runner. */
@@ -87,6 +129,40 @@ export type LocalToolRunnerOptions = {
   readonly timeoutKillGraceMs?: number | undefined;
 };
 
+/** Options for the sandbox-backed tool runner adapter. */
+export type SandboxToolRunnerOptions = {
+  /** Sandbox runner implementation that executes translated requests. */
+  readonly runner: SandboxRunner;
+  /** Default organization ID when input sandbox context omits it. */
+  readonly orgId?: string | undefined;
+  /** Default repository ID when input sandbox context omits it. */
+  readonly repoId?: string | undefined;
+  /** Default workspace ID when input sandbox context omits it. */
+  readonly workspaceId?: string | undefined;
+  /** Default review run ID when input sandbox context omits it. */
+  readonly reviewRunId?: string | undefined;
+  /** Default static-analysis run ID when input sandbox context omits it. */
+  readonly staticAnalysisRunId?: string | undefined;
+  /** Default commit SHA when input sandbox context omits it. */
+  readonly commitSha?: string | undefined;
+  /** Default base commit SHA when input sandbox context omits it. */
+  readonly baseSha?: string | undefined;
+  /** Default head commit SHA when input sandbox context omits it. */
+  readonly headSha?: string | undefined;
+  /** Default sandbox trust level. */
+  readonly trustLevel?: SandboxTrustLevel | undefined;
+  /** Optional sandbox execution category override. */
+  readonly category?: SandboxExecutionCategory | undefined;
+  /** Optional sandbox image override. */
+  readonly image?: SandboxImageSpec | undefined;
+  /** Workspace mount path inside the sandbox. */
+  readonly mountPath?: string | undefined;
+  /** Writable output directory inside the sandbox. */
+  readonly outputDirectory?: string | undefined;
+  /** Exit codes that the sandbox runner should treat as expected. */
+  readonly expectedExitCodes?: readonly number[] | undefined;
+};
+
 /** Fixture consumed by the fake tool runner. */
 export type FakeToolRunnerFixture = {
   /** Optional plan ID to match. */
@@ -118,6 +194,13 @@ export function createFakeToolRunner(fixtures: readonly FakeToolRunnerFixture[] 
 export function createLocalToolRunner(options: LocalToolRunnerOptions = {}): ToolRunner {
   return {
     run: async (input) => runLocalTool(input, options),
+  };
+}
+
+/** Creates a sandbox-backed tool runner for isolated static tool execution. */
+export function createSandboxToolRunner(options: SandboxToolRunnerOptions): ToolRunner {
+  return {
+    run: async (input) => runSandboxTool(input, options),
   };
 }
 
@@ -205,6 +288,151 @@ function runLocalTool(
   });
 }
 
+/** Runs one command through the sandbox runner adapter. */
+async function runSandboxTool(
+  input: ToolRunnerInput,
+  options: SandboxToolRunnerOptions,
+): Promise<ToolRunnerResult> {
+  const request = sandboxRequestFromToolInput(input, options);
+  const result = await options.runner.run(request);
+
+  return toolResultFromSandboxResult(input, result);
+}
+
+/** Converts generic tool input into a sandbox run request. */
+function sandboxRequestFromToolInput(
+  input: ToolRunnerInput,
+  options: SandboxToolRunnerOptions,
+): SandboxRunRequest {
+  const createdAt = input.startedAt ?? new Date().toISOString();
+  const mountPath = options.mountPath ?? "/workspace";
+  const outputDirectory =
+    options.outputDirectory ?? DEFAULT_SANDBOX_ARTIFACT_POLICY.outputDirectory;
+  const context = resolveSandboxContext(input, options);
+
+  return {
+    artifacts: {
+      ...DEFAULT_SANDBOX_ARTIFACT_POLICY,
+      collectFiles: [...DEFAULT_SANDBOX_ARTIFACT_POLICY.collectFiles],
+      outputDirectory,
+    },
+    category: options.category ?? categoryFromToolCommand(input.command),
+    command: {
+      argv: [input.command.executable, ...input.command.args],
+      expectedExitCodes: [...(options.expectedExitCodes ?? [0, 1])],
+      shell: false,
+      stdin: sandboxStdin(input.command.stdin),
+      ...(input.command.stdin ? { stdinText: input.command.stdin } : {}),
+      workingDirectory: mountPath,
+    },
+    createdAt,
+    environment: {
+      env: { ...DEFAULT_SANDBOX_ENVIRONMENT, ...input.command.env },
+      inheritHostEnv: false,
+      redactedEnvKeys: redactedEnvKeys(input.command.env),
+    },
+    image: options.image ?? DEFAULT_SANDBOX_TOOL_IMAGE,
+    limits: {
+      ...DEFAULT_SANDBOX_RESOURCE_LIMITS,
+      maxStderrBytes: input.maxOutputBytes,
+      maxStdoutBytes: input.maxOutputBytes,
+      timeoutMs: input.timeoutMs,
+    },
+    mounts: [
+      {
+        purpose: "workspace",
+        readOnly: true,
+        source: input.command.cwd,
+        target: mountPath,
+        type: "bind",
+      },
+      {
+        purpose: "tmp",
+        readOnly: false,
+        sizeBytes: DEFAULT_SANDBOX_RESOURCE_LIMITS.maxDiskBytes,
+        source: "tmpfs",
+        target: "/tmp",
+        type: "tmpfs",
+      },
+      {
+        purpose: "output",
+        readOnly: false,
+        sizeBytes: DEFAULT_SANDBOX_RESOURCE_LIMITS.maxArtifactBytes,
+        source: "tmpfs",
+        target: outputDirectory,
+        type: "tmpfs",
+      },
+    ],
+    network: sandboxNetworkPolicy(input.command.networkPolicy),
+    orgId: context.orgId,
+    output: {
+      ...DEFAULT_SANDBOX_OUTPUT_POLICY,
+      maxStderrBytes: input.maxOutputBytes,
+      maxStdoutBytes: input.maxOutputBytes,
+    },
+    repoId: context.repoId,
+    requestId: stableToolRunnerId("sbr", [
+      input.planId,
+      input.command.displayCommand,
+      input.command.cwd,
+      createdAt,
+    ]),
+    schemaVersion: "sandbox_run_request.v1",
+    security: {
+      ...DEFAULT_SANDBOX_SECURITY_POLICY,
+      allowedCapabilities: [...DEFAULT_SANDBOX_SECURITY_POLICY.allowedCapabilities],
+    },
+    toolRunId: input.planId,
+    trustLevel: context.trustLevel,
+    workspace: {
+      allowedWritePaths: ["/tmp", outputDirectory],
+      commitSha: context.commitSha,
+      mode: "read_only",
+      mountPath,
+      workspaceId: context.workspaceId,
+      workspacePath: input.command.cwd,
+      ...(context.baseSha ? { baseSha: context.baseSha } : {}),
+      ...(context.headSha ? { headSha: context.headSha } : {}),
+    },
+    ...(context.reviewRunId ? { reviewRunId: context.reviewRunId } : {}),
+    ...(context.staticAnalysisRunId ? { staticAnalysisRunId: context.staticAnalysisRunId } : {}),
+  };
+}
+
+/** Maps sandbox output and status back to the generic tool runner result. */
+function toolResultFromSandboxResult(
+  input: ToolRunnerInput,
+  result: SandboxRunResult,
+): ToolRunnerResult {
+  const output = createOutputCapture(input.maxOutputBytes);
+  output.append("stdout", result.stdout.text);
+  output.append("stderr", result.stderr.text);
+
+  return {
+    durationMs: result.durationMs,
+    exitCode: result.exitCode,
+    finishedAt: result.finishedAt,
+    signal: result.signal ?? null,
+    startedAt: result.startedAt,
+    status: toolStatusFromSandboxStatus(result.status),
+    stderr: output.stderr(),
+    stderrBytes: output.stderrBytes(),
+    stdout: output.stdout(),
+    stdoutBytes: output.stdoutBytes(),
+    timedOut: result.status === "timed_out",
+    truncated: result.stdout.truncated || result.stderr.truncated || output.truncated(),
+  };
+}
+
+/** Maps sandbox run status values to generic tool runner status values. */
+function toolStatusFromSandboxStatus(status: SandboxRunResult["status"]): ToolRunnerStatus {
+  if (status === "succeeded") return "succeeded";
+  if (status === "timed_out") return "timed_out";
+  if (status === "killed") return "cancelled";
+
+  return "failed";
+}
+
 /** Runs one fake command fixture. */
 function fakeToolRun(
   input: ToolRunnerInput,
@@ -236,6 +464,138 @@ function fakeToolRun(
     timedOut: status === "timed_out",
     truncated: stdout.truncated || stderr.truncated,
   };
+}
+
+/** Sandbox image used for first-party static tool execution. */
+const DEFAULT_SANDBOX_TOOL_IMAGE = {
+  allowedImageClass: "first_party_static_tools",
+  image: "heimdall-static-tools:latest",
+  pullPolicy: "if_not_present",
+} as const satisfies SandboxImageSpec;
+
+/** Fully resolved sandbox context values needed by request translation. */
+type ResolvedSandboxContext = {
+  /** Organization ID that owns the sandbox run. */
+  readonly orgId: string;
+  /** Repository ID that owns the sandbox run. */
+  readonly repoId: string;
+  /** Workspace ID mounted into the sandbox. */
+  readonly workspaceId: string;
+  /** Optional review run ID that owns the sandbox run. */
+  readonly reviewRunId?: string | undefined;
+  /** Optional static-analysis run ID that owns the sandbox run. */
+  readonly staticAnalysisRunId?: string | undefined;
+  /** Commit SHA checked out in the workspace. */
+  readonly commitSha: string;
+  /** Optional base commit SHA for pull request analysis. */
+  readonly baseSha?: string | undefined;
+  /** Optional head commit SHA for pull request analysis. */
+  readonly headSha?: string | undefined;
+  /** Trust level assigned to the sandbox run. */
+  readonly trustLevel: SandboxTrustLevel;
+};
+
+/** Resolves sandbox context from per-run input and runner defaults. */
+function resolveSandboxContext(
+  input: ToolRunnerInput,
+  options: SandboxToolRunnerOptions,
+): ResolvedSandboxContext {
+  const context = input.sandboxContext;
+  const orgId = requiredSandboxValue("orgId", context?.orgId ?? options.orgId);
+  const repoId = requiredSandboxValue("repoId", context?.repoId ?? options.repoId);
+  const commitSha = requiredSandboxValue("commitSha", context?.commitSha ?? options.commitSha);
+  const workspaceId =
+    context?.workspaceId ??
+    options.workspaceId ??
+    stableToolRunnerId("ws", [repoId, input.command.cwd, commitSha]);
+
+  return {
+    orgId,
+    repoId,
+    workspaceId,
+    commitSha,
+    trustLevel: context?.trustLevel ?? options.trustLevel ?? "trusted_pr",
+    ...((context?.reviewRunId ?? options.reviewRunId)
+      ? { reviewRunId: context?.reviewRunId ?? options.reviewRunId }
+      : {}),
+    ...((context?.staticAnalysisRunId ?? options.staticAnalysisRunId)
+      ? { staticAnalysisRunId: context?.staticAnalysisRunId ?? options.staticAnalysisRunId }
+      : {}),
+    ...((context?.baseSha ?? options.baseSha)
+      ? { baseSha: context?.baseSha ?? options.baseSha }
+      : {}),
+    ...((context?.headSha ?? options.headSha)
+      ? { headSha: context?.headSha ?? options.headSha }
+      : {}),
+  };
+}
+
+/** Returns a required non-empty sandbox context value. */
+function requiredSandboxValue(name: string, value: string | undefined): string {
+  if (value && value.trim().length > 0) {
+    return value;
+  }
+
+  throw new Error(`Sandbox tool runner requires ${name}.`);
+}
+
+/** Maps a tool command executable to a sandbox execution category. */
+function categoryFromToolCommand(command: ToolCommandSpec): SandboxExecutionCategory {
+  const executable = command.executable.split("/").at(-1) ?? command.executable;
+  if (executable === "eslint" || executable === "biome" || executable === "ruff") {
+    return "lint";
+  }
+  if (executable === "tsc" || executable === "typescript" || executable === "pyright") {
+    return "type_check";
+  }
+  if (executable === "semgrep") {
+    return "security_scan";
+  }
+
+  return "static_tool";
+}
+
+/** Maps command network policy to the sandbox network contract. */
+function sandboxNetworkPolicy(policy: ToolNetworkPolicy): SandboxNetworkPolicy {
+  if (policy === "metadata_only") {
+    return {
+      ...DEFAULT_SANDBOX_NETWORK_POLICY,
+      allowedPorts: [443],
+      mode: "allowlist",
+    };
+  }
+
+  if (policy === "allow") {
+    return {
+      ...DEFAULT_SANDBOX_NETWORK_POLICY,
+      mode: "full_blocked_by_default",
+    };
+  }
+
+  return { ...DEFAULT_SANDBOX_NETWORK_POLICY };
+}
+
+/** Returns the sandbox stdin mode for a tool input payload. */
+function sandboxStdin(
+  stdin: string | undefined,
+): NonNullable<SandboxRunRequest["command"]["stdin"]> {
+  if (stdin === undefined) return "none";
+  if (stdin.length === 0) return "empty";
+
+  return "provided";
+}
+
+/** Returns environment keys whose values should be redacted from sandbox output. */
+function redactedEnvKeys(env: Readonly<Record<string, string>>): string[] {
+  return Object.keys(env).filter((key) => /token|secret|password|key/iu.test(key));
+}
+
+/** Creates a deterministic prefixed ID for tool-runner-owned records. */
+function stableToolRunnerId(prefix: string, parts: readonly unknown[]): string {
+  return `${prefix}_${createHash("sha256")
+    .update(parts.map((part) => String(part)).join("\0"))
+    .digest("base64url")
+    .slice(0, 24)}`;
 }
 
 /** Truncates text to a byte budget. */

@@ -19,6 +19,9 @@
     "format": "biome format --write .",
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
+  "dependencies": {
+    "@repo/sandbox": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
     "typescript": "catalog:",

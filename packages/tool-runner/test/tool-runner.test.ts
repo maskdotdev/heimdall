@@ -1,7 +1,9 @@
+import { createFakeSandboxRunner, type SandboxRunner, type SandboxRunRequest } from "@repo/sandbox";
 import { describe, expect, it } from "vitest";
 import {
   createFakeToolRunner,
   createLocalToolRunner,
+  createSandboxToolRunner,
   redactedDisplayCommand,
   type ToolCommandSpec,
 } from "../src/index";
@@ -129,5 +131,137 @@ describe("tool runner", () => {
       status: "failed",
     });
     expect(result.stderr).toContain("Failed to start command:");
+  });
+
+  it("runs sandbox commands through a sandbox runner and maps output", async () => {
+    const capturedRequests: SandboxRunRequest[] = [];
+    const fakeRunner = createFakeSandboxRunner([
+      { executable: "eslint", stderr: "warn", stdout: "[]" },
+    ]);
+    const sandboxRunner: SandboxRunner = {
+      run: async (request) => {
+        capturedRequests.push(request);
+        return fakeRunner.run(request);
+      },
+    };
+    const runner = createSandboxToolRunner({
+      commitSha: "abc123",
+      orgId: "org_1",
+      repoId: "repo_1",
+      reviewRunId: "rrn_1",
+      runner: sandboxRunner,
+      staticAnalysisRunId: "star_1",
+      workspaceId: "ws_1",
+    });
+
+    const result = await runner.run({
+      command,
+      maxOutputBytes: 1_000,
+      planId: "plan_sandbox",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toMatchObject({
+      exitCode: 0,
+      status: "succeeded",
+      stderr: "warn",
+      stdout: "[]",
+      truncated: false,
+    });
+    const request = capturedRequests[0];
+    expect(request).toBeDefined();
+    if (!request) throw new Error("Expected the sandbox request to be captured.");
+    expect(request).toMatchObject({
+      category: "lint",
+      command: {
+        argv: ["eslint", "--format", "json"],
+        expectedExitCodes: [0, 1],
+        shell: false,
+        stdin: "none",
+        workingDirectory: "/workspace",
+      },
+      environment: {
+        inheritHostEnv: false,
+      },
+      orgId: "org_1",
+      repoId: "repo_1",
+      reviewRunId: "rrn_1",
+      schemaVersion: "sandbox_run_request.v1",
+      staticAnalysisRunId: "star_1",
+      toolRunId: "plan_sandbox",
+      workspace: {
+        commitSha: "abc123",
+        mode: "read_only",
+        mountPath: "/workspace",
+        workspaceId: "ws_1",
+        workspacePath: "/workspace/repo",
+      },
+    });
+    expect(request.network.blockMetadataEndpoints).toBe(true);
+    expect(request.network.blockPrivateNetworks).toBe(true);
+    expect(request.output.maxStdoutBytes).toBe(1_000);
+    expect(request.security.noNewPrivileges).toBe(true);
+  });
+
+  it("maps sandbox timeouts to tool timeouts", async () => {
+    const runner = createSandboxToolRunner({
+      commitSha: "abc123",
+      orgId: "org_1",
+      repoId: "repo_1",
+      runner: createFakeSandboxRunner([
+        {
+          executable: "eslint",
+          exitCode: null,
+          status: "timed_out",
+        },
+      ]),
+    });
+
+    const result = await runner.run({
+      command,
+      maxOutputBytes: 1_000,
+      planId: "plan_sandbox_timeout",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toMatchObject({
+      exitCode: null,
+      status: "timed_out",
+      timedOut: true,
+    });
+  });
+
+  it("enforces the shared tool output budget on sandbox streams", async () => {
+    const runner = createSandboxToolRunner({
+      commitSha: "abc123",
+      orgId: "org_1",
+      repoId: "repo_1",
+      runner: createFakeSandboxRunner([
+        {
+          executable: "eslint",
+          stderr: "efgh",
+          stdout: "abcd",
+        },
+      ]),
+    });
+
+    const result = await runner.run({
+      command,
+      maxOutputBytes: 6,
+      planId: "plan_sandbox_truncated",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toMatchObject({
+      status: "succeeded",
+      stderr: "ef",
+      stderrBytes: 2,
+      stdout: "abcd",
+      stdoutBytes: 4,
+      truncated: true,
+    });
   });
 });
