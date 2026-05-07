@@ -39,6 +39,9 @@ import {
   publishedFindings,
   repositories,
   reviewRuns,
+  sandboxArtifacts,
+  sandboxPolicyDecisions,
+  sandboxRuns,
   validatedFindings,
 } from "@repo/db";
 import { createEmbeddingProviderFromEnvironment, embedChunkBatch } from "@repo/embedding";
@@ -95,6 +98,9 @@ import {
   createGVisorSandboxRunner,
   createLocalProcessSandboxRunner,
   type DockerContainerSandboxRunnerOptions,
+  type SandboxRunner,
+  type SandboxRunRequest,
+  type SandboxRunResult,
 } from "@repo/sandbox";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
@@ -148,6 +154,12 @@ export type WorkerIndexerDriverEnvironment = Readonly<Record<string, string | un
 
 /** Environment values used to select the worker static-analysis runner. */
 export type WorkerStaticAnalysisRunnerEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Runtime dependencies used while creating a worker static-analysis runner. */
+export type WorkerStaticAnalysisRunnerOptions = {
+  /** Optional database used to persist sandbox run results. */
+  readonly db?: HeimdallDatabase | undefined;
+};
 
 /** Runtime handle returned by the worker process bootstrap. */
 export type WorkerRuntime = {
@@ -525,7 +537,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ? createWorkerReviewSmokeGateway()
       : undefined;
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
-  const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env);
+  const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env, {
+    db: databaseClient.db,
+  });
   const publishThrottle = createRedisPublishThrottle(workerConnection);
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
@@ -596,7 +610,22 @@ export function createWorkerReviewArtifactPayloadStoreFromEnv():
 /** Creates the optional static-analysis runner selected by worker environment. */
 export function createWorkerStaticAnalysisRunnerFromEnvironment(
   env: WorkerStaticAnalysisRunnerEnvironment,
+  options: WorkerStaticAnalysisRunnerOptions = {},
 ): ToolRunner | undefined {
+  const sandboxRunner = createWorkerSandboxRunnerFromEnvironment(env);
+  if (!sandboxRunner) {
+    return undefined;
+  }
+
+  return createSandboxToolRunner({
+    runner: options.db ? createPersistingSandboxRunner(sandboxRunner, options.db) : sandboxRunner,
+  });
+}
+
+/** Creates the optional sandbox runner selected by worker environment. */
+function createWorkerSandboxRunnerFromEnvironment(
+  env: WorkerStaticAnalysisRunnerEnvironment,
+): SandboxRunner | undefined {
   const runnerName = (env.STATIC_ANALYSIS_RUNNER ?? env.SANDBOX_RUNNER ?? "off").trim();
   if (
     runnerName === "" ||
@@ -608,25 +637,19 @@ export function createWorkerStaticAnalysisRunnerFromEnvironment(
   }
 
   if (runnerName === "fake") {
-    return createSandboxToolRunner({ runner: createFakeSandboxRunner() });
+    return createFakeSandboxRunner();
   }
 
   if (runnerName === "local_process") {
-    return createSandboxToolRunner({
-      runner: createLocalProcessSandboxRunner({ nodeEnv: env.NODE_ENV }),
-    });
+    return createLocalProcessSandboxRunner({ nodeEnv: env.NODE_ENV });
   }
 
   if (runnerName === "docker") {
-    return createSandboxToolRunner({
-      runner: createDockerContainerSandboxRunner(createWorkerDockerRunnerOptions(env)),
-    });
+    return createDockerContainerSandboxRunner(createWorkerDockerRunnerOptions(env));
   }
 
   if (runnerName === "gvisor") {
-    return createSandboxToolRunner({
-      runner: createGVisorSandboxRunner(createWorkerDockerRunnerOptions(env)),
-    });
+    return createGVisorSandboxRunner(createWorkerDockerRunnerOptions(env));
   }
 
   throw new Error(`Unsupported SANDBOX_RUNNER: ${runnerName}`);
@@ -667,6 +690,162 @@ function nonEmptyEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
 
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Wraps a sandbox runner so completed runs are persisted to the worker database. */
+function createPersistingSandboxRunner(runner: SandboxRunner, db: HeimdallDatabase): SandboxRunner {
+  return {
+    run: async (request) => {
+      const result = await runner.run(request);
+      await persistSandboxRun(db, request, result);
+
+      return result;
+    },
+  };
+}
+
+/** Persists one sandbox request/result pair and replaces child rows idempotently. */
+async function persistSandboxRun(
+  db: HeimdallDatabase,
+  request: SandboxRunRequest,
+  result: SandboxRunResult,
+): Promise<void> {
+  await db.transaction(async (transaction) => {
+    await transaction
+      .insert(sandboxRuns)
+      .values(sandboxRunRowFromRequestResult(request, result))
+      .onConflictDoUpdate({
+        target: sandboxRuns.sandboxRunId,
+        set: sandboxRunUpdateFromRequestResult(request, result),
+      });
+    await transaction
+      .delete(sandboxArtifacts)
+      .where(eq(sandboxArtifacts.sandboxRunId, result.runId));
+    await transaction
+      .delete(sandboxPolicyDecisions)
+      .where(eq(sandboxPolicyDecisions.sandboxRunId, result.runId));
+
+    const artifactRows = result.artifacts.map((artifact) => ({
+      contentType: artifact.contentType ?? null,
+      name: artifact.name,
+      sandboxArtifactId: stableWorkerId("sart", [result.runId, artifact.name]),
+      sandboxRunId: result.runId,
+      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes,
+      truncated: artifact.truncated,
+      uri: artifact.uri,
+    }));
+    if (artifactRows.length > 0) {
+      await transaction.insert(sandboxArtifacts).values(artifactRows);
+    }
+
+    const policyDecisionRows = result.policyDecisions.map((decision, index) => ({
+      code: decision.code,
+      details: {
+        index,
+        requestId: request.requestId,
+      },
+      message: decision.message,
+      sandboxPolicyDecisionId: stableWorkerId("spol", [
+        result.runId,
+        index,
+        decision.status,
+        decision.code,
+      ]),
+      sandboxRunId: result.runId,
+      status: decision.status,
+    }));
+    if (policyDecisionRows.length > 0) {
+      await transaction.insert(sandboxPolicyDecisions).values(policyDecisionRows);
+    }
+  });
+}
+
+/** Creates the insert row for a sandbox run. */
+function sandboxRunRowFromRequestResult(request: SandboxRunRequest, result: SandboxRunResult) {
+  return {
+    category: request.category,
+    commandJson: request.command,
+    createdAt: new Date(request.createdAt),
+    errorJson: result.error ?? null,
+    exitCode: result.exitCode,
+    finishedAt: new Date(result.finishedAt),
+    image: request.image.image,
+    imageDigest: request.image.digest ?? null,
+    limitsJson: request.limits,
+    orgId: request.orgId,
+    policyJson: sandboxPolicyJsonFromRequest(request, result),
+    repoId: request.repoId,
+    requestId: request.requestId,
+    resourceUsageJson: result.resourceUsage ?? null,
+    reviewRunId: request.reviewRunId ?? null,
+    runnerKind: result.runner.kind,
+    sandboxRunId: result.runId,
+    signal: result.signal ?? null,
+    startedAt: new Date(result.startedAt),
+    staticAnalysisRunId: request.staticAnalysisRunId ?? null,
+    status: result.status,
+    stderrHash: result.stderr.hash,
+    stderrTruncated: result.stderr.truncated,
+    stdoutHash: result.stdout.hash,
+    stdoutTruncated: result.stdout.truncated,
+    toolRunId: request.toolRunId ?? null,
+    trustLevel: request.trustLevel,
+    updatedAt: new Date(result.finishedAt),
+    warningsJson: result.warnings,
+  };
+}
+
+/** Creates the update row for a sandbox run conflict. */
+function sandboxRunUpdateFromRequestResult(request: SandboxRunRequest, result: SandboxRunResult) {
+  const row = sandboxRunRowFromRequestResult(request, result);
+
+  return {
+    category: row.category,
+    commandJson: row.commandJson,
+    errorJson: row.errorJson,
+    exitCode: row.exitCode,
+    finishedAt: row.finishedAt,
+    image: row.image,
+    imageDigest: row.imageDigest,
+    limitsJson: row.limitsJson,
+    policyJson: row.policyJson,
+    resourceUsageJson: row.resourceUsageJson,
+    reviewRunId: row.reviewRunId,
+    runnerKind: row.runnerKind,
+    signal: row.signal,
+    startedAt: row.startedAt,
+    staticAnalysisRunId: row.staticAnalysisRunId,
+    status: row.status,
+    stderrHash: row.stderrHash,
+    stderrTruncated: row.stderrTruncated,
+    stdoutHash: row.stdoutHash,
+    stdoutTruncated: row.stdoutTruncated,
+    toolRunId: row.toolRunId,
+    trustLevel: row.trustLevel,
+    updatedAt: row.updatedAt,
+    warningsJson: row.warningsJson,
+  };
+}
+
+/** Returns product-safe sandbox policy metadata without environment values. */
+function sandboxPolicyJsonFromRequest(
+  request: SandboxRunRequest,
+  result: SandboxRunResult,
+): Record<string, unknown> {
+  return {
+    artifacts: request.artifacts,
+    environment: {
+      envKeys: Object.keys(request.environment.env).sort(),
+      redactedEnvKeys: request.environment.redactedEnvKeys,
+    },
+    mounts: request.mounts,
+    network: request.network,
+    output: request.output,
+    policyDecisions: result.policyDecisions,
+    security: request.security,
+    workspace: request.workspace,
+  };
 }
 
 /** Creates the optional worker indexer driver selected by environment configuration. */
