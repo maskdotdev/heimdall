@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateIndexArtifact } from "@repo/indexer-driver";
@@ -90,6 +90,31 @@ describe("indexTypeScriptRepository", () => {
     );
     expect(filePaths).toEqual(["src/app.ts"]);
     expect(artifact.manifest.fileCount).toBe(1);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("skips symlinked source files before resolving them", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    const outsidePath = join(await mkdtemp(join(tmpdir(), "heimdall-indexer-outside-")), "leak.ts");
+    await Promise.all([
+      writeFile(join(workspacePath, "safe.ts"), "export const safe = true;\n"),
+      writeFile(outsidePath, "export const leaked = true;\n"),
+    ]);
+    await symlink(outsidePath, join(workspacePath, "leak.ts"));
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const filePaths = artifact.records.flatMap((record) =>
+      record.type === "file" ? [record.path] : [],
+    );
+    expect(filePaths).toEqual(["safe.ts"]);
+    expect(artifact.records.some((record) => JSON.stringify(record).includes("leaked"))).toBe(
+      false,
+    );
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 });

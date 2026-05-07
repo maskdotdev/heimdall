@@ -156,6 +156,9 @@ async function findSourceFiles(root: string, directory = ""): Promise<string[]> 
   const files = await Promise.all(
     entries.map(async (entry) => {
       const path = join(directory, entry.name).split(sep).join("/");
+      if (entry.isSymbolicLink()) {
+        return [];
+      }
       if (entry.isDirectory()) {
         return shouldSkipDirectory(path) ? [] : findSourceFiles(root, path);
       }
@@ -163,7 +166,7 @@ async function findSourceFiles(root: string, directory = ""): Promise<string[]> 
         return [];
       }
       const info = await stat(join(root, path));
-      return info.size > MAX_FILE_BYTES ? [] : [path];
+      return info.isFile() && info.size <= MAX_FILE_BYTES ? [path] : [];
     }),
   );
 
