@@ -380,6 +380,9 @@ importers:
       '@repo/db':
         specifier: workspace:*
         version: link:../db
+      '@repo/embedding':
+        specifier: workspace:*
+        version: link:../embedding
       '@repo/evaluation':
         specifier: workspace:*
         version: link:../evaluation

@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "infra:db:prepare": "bun run src/prepare-local-infra.ts",
+    "smoke:embedding:openai": "bun run src/live-openai-embedding-smoke.ts",
     "smoke:github-provider-errors": "bun run src/live-github-provider-error-smoke.ts",
     "smoke:publisher:github": "bun run src/live-github-publisher-smoke.ts",
     "smoke:review:github": "bun run src/live-github-pr-review-smoke.ts",
@@ -27,6 +28,7 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
+    "@repo/embedding": "workspace:*",
     "@repo/evaluation": "workspace:*",
     "@repo/github": "workspace:*",
     "@repo/queue": "workspace:*",
