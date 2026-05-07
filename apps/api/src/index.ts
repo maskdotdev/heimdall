@@ -1,4 +1,4 @@
-import { createObservabilityRuntime } from "@repo/observability";
+import { createObservabilityRuntime, OBSERVABILITY_METRIC_NAMES } from "@repo/observability";
 import { createApiApp } from "./app";
 
 const observability = createObservabilityRuntime({
@@ -19,11 +19,17 @@ observability.logger.info("api service started", {
     "http.port": app.server?.port,
   },
 });
+observability.metrics.count(OBSERVABILITY_METRIC_NAMES.apiServiceStartsTotal, {
+  labels: { status: "started" },
+});
 
 /** Flushes observability providers before process shutdown. */
 const shutdown = async (): Promise<void> => {
   observability.logger.info("api service stopping", {
     attributes: { "event.name": "api.service.stopping" },
+  });
+  observability.metrics.count(OBSERVABILITY_METRIC_NAMES.apiServiceStopsTotal, {
+    labels: { status: "stopping" },
   });
   await observability.shutdown();
   process.exit(0);

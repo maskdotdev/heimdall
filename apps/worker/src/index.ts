@@ -72,7 +72,7 @@ import {
   type MemoryScope,
   MemoryScopeSchema,
 } from "@repo/memory";
-import { createObservabilityRuntime } from "@repo/observability";
+import { createObservabilityRuntime, OBSERVABILITY_METRIC_NAMES } from "@repo/observability";
 import {
   normalizePublishThrottleLimits,
   PUBLISH_THROTTLE_HOUR_WINDOW_MS,
@@ -608,12 +608,18 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       "queue.count": workers.length,
     },
   });
+  observability.metrics.count(OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal, {
+    labels: { status: "started" },
+  });
 
   return {
     close: async () => {
       clearInterval(dispatchInterval);
       observability.logger.info("worker service stopping", {
         attributes: { "event.name": "worker.service.stopping" },
+      });
+      observability.metrics.count(OBSERVABILITY_METRIC_NAMES.workerServiceStopsTotal, {
+        labels: { status: "stopping" },
       });
       await Promise.all(workers.map((worker) => worker.close()));
       await queueProducer.close();

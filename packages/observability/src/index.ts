@@ -140,6 +140,31 @@ export const StructuredTelemetryLogEntrySchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Telemetry metric instrument kind. */
+export const TelemetryMetricKindSchema = Type.Union([
+  Type.Literal("counter"),
+  Type.Literal("gauge"),
+  Type.Literal("histogram"),
+]);
+
+/** Structured metric point emitted by the observability metric recorder. */
+export const TelemetryMetricPointSchema = Type.Object(
+  {
+    kind: TelemetryMetricKindSchema,
+    labels: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    name: Type.String({ minLength: 1 }),
+    resource: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    timestamp: Type.String({ minLength: 1 }),
+    unit: Type.Optional(Type.String({ minLength: 1 })),
+    value: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+
 /** Scalar attribute value allowed in structured telemetry events. */
 export type TelemetryAttributeValue = Static<typeof TelemetryAttributeValueSchema>;
 
@@ -183,6 +208,12 @@ export type SerializedTelemetryError = Static<typeof SerializedTelemetryErrorSch
 
 /** Structured JSON log entry emitted by the observability logger. */
 export type StructuredTelemetryLogEntry = Static<typeof StructuredTelemetryLogEntrySchema>;
+
+/** Telemetry metric instrument kind. */
+export type TelemetryMetricKind = Static<typeof TelemetryMetricKindSchema>;
+
+/** Structured metric point emitted by the observability metric recorder. */
+export type TelemetryMetricPoint = Static<typeof TelemetryMetricPointSchema>;
 
 /** Admin control-plane telemetry event accepted before timestamp normalization. */
 export type AdminControlPlaneTelemetryEventInput = Omit<
@@ -249,6 +280,35 @@ export type StructuredTelemetryLogger = {
   readonly warn: (message: string, options?: StructuredTelemetryLogOptions) => void;
 };
 
+/** Options accepted when recording a metric point. */
+export type TelemetryMetricOptions = {
+  /** Low-cardinality metric labels. High-cardinality keys are dropped. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>>;
+  /** Optional deterministic timestamp for tests. */
+  readonly timestamp?: string;
+  /** Optional metric unit such as `ms`, `bytes`, or `1`. */
+  readonly unit?: string;
+};
+
+/** Sink that receives structured telemetry metric points. */
+export type TelemetryMetricSink = {
+  /** Writes one normalized metric point. */
+  readonly write: (point: TelemetryMetricPoint) => void;
+};
+
+/** Metric recorder facade used by application services. */
+export type TelemetryMetricRecorder = {
+  /** Records a monotonic counter increment. */
+  readonly count: (
+    name: string,
+    options?: TelemetryMetricOptions & { readonly value?: number },
+  ) => void;
+  /** Records a point-in-time gauge value. */
+  readonly gauge: (name: string, value: number, options?: TelemetryMetricOptions) => void;
+  /** Records a histogram sample. */
+  readonly histogram: (name: string, value: number, options?: TelemetryMetricOptions) => void;
+};
+
 /** Options accepted by the observability runtime bootstrap. */
 export type ObservabilityRuntimeOptions = {
   /** Optional preloaded config. Defaults to environment parsing. */
@@ -269,6 +329,8 @@ export type ObservabilityRuntime = {
   readonly config: ObservabilityConfig;
   /** Structured telemetry logger selected by config. */
   readonly logger: StructuredTelemetryLogger;
+  /** Metric recorder selected by config. */
+  readonly metrics: TelemetryMetricRecorder;
   /** Stable resource attributes attached to logs, spans, and metrics. */
   readonly resourceAttributes: ObservabilityResourceAttributes;
   /** Flushes and closes observability providers. No-op until OTel providers are wired. */
@@ -315,6 +377,14 @@ export const DEFAULT_OBSERVABILITY_CONFIG = {
   traceSlowJobSampleRate: 1,
   version: "dev",
 } as const satisfies ObservabilityConfig;
+
+/** Low-cardinality metric names emitted directly by service bootstrap code. */
+export const OBSERVABILITY_METRIC_NAMES = {
+  apiServiceStartsTotal: "code_review_agent.api.service_starts_total",
+  apiServiceStopsTotal: "code_review_agent.api.service_stops_total",
+  workerServiceStartsTotal: "code_review_agent.worker.service_starts_total",
+  workerServiceStopsTotal: "code_review_agent.worker.service_stops_total",
+} as const;
 
 /** Error raised when observability configuration is invalid. */
 export class ObservabilityConfigValidationError extends Error {
@@ -484,6 +554,23 @@ export function sanitizeTelemetryAttributes(
   }
 
   return sanitized;
+}
+
+/** Sanitizes metric labels and drops high-cardinality label keys. */
+export function sanitizeTelemetryMetricLabels(
+  labels: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+  redaction: ObservabilityRedactionConfig = DEFAULT_OBSERVABILITY_CONFIG.redaction,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  const sanitized = sanitizeTelemetryAttributes(labels, redaction);
+  const metricLabels: Record<string, TelemetryAttributeValue> = {};
+
+  for (const [key, value] of Object.entries(sanitized)) {
+    if (!shouldDropTelemetryMetricLabel(key)) {
+      metricLabels[key] = value;
+    }
+  }
+
+  return metricLabels;
 }
 
 /** Redacts secret-looking values from telemetry text. */
@@ -695,6 +782,117 @@ export function createStructuredTelemetryLogger(
   };
 }
 
+/** Builds a structured metric point with safe labels and resource attributes. */
+export function createTelemetryMetricPoint(
+  config: ObservabilityConfig,
+  input: TelemetryMetricOptions & {
+    /** Metric instrument kind. */
+    readonly kind: TelemetryMetricKind;
+    /** Low-cardinality metric name. */
+    readonly name: string;
+    /** Numeric metric value. */
+    readonly value: number;
+  },
+  env: EnvironmentRecord = getProcessEnvironment(),
+): TelemetryMetricPoint {
+  if (!/^code_review_agent\.[A-Za-z0-9_.]+$/u.test(input.name)) {
+    throw new Error("Telemetry metric name must use the code_review_agent prefix.");
+  }
+  if (!Number.isFinite(input.value)) {
+    throw new Error("Telemetry metric value must be finite.");
+  }
+  if (input.kind === "counter" && input.value < 0) {
+    throw new Error("Telemetry counter value must be non-negative.");
+  }
+
+  const point = withoutUndefinedValues({
+    kind: input.kind,
+    labels: input.labels
+      ? sanitizeTelemetryMetricLabels(input.labels, config.redaction)
+      : undefined,
+    name: input.name,
+    resource: createObservabilityResourceAttributes(config, env),
+    timestamp: input.timestamp ?? new Date().toISOString(),
+    unit: input.unit,
+    value: input.value,
+  });
+
+  if (!Value.Check(TelemetryMetricPointSchema, point)) {
+    throw new Error("Telemetry metric point does not match the schema.");
+  }
+  const timestamp = point.timestamp;
+  if (typeof timestamp !== "string" || Number.isNaN(Date.parse(timestamp))) {
+    throw new Error("Telemetry metric point timestamp must be parseable.");
+  }
+
+  return point as TelemetryMetricPoint;
+}
+
+/** Renders a structured telemetry metric point as one JSON line. */
+export function renderTelemetryMetricLine(point: TelemetryMetricPoint): string {
+  if (!Value.Check(TelemetryMetricPointSchema, point)) {
+    throw new Error("Telemetry metric point does not match the schema.");
+  }
+
+  return JSON.stringify({
+    level: "info",
+    metric: point,
+    target: "heimdall.metrics",
+  });
+}
+
+/** Creates a console-backed sink for structured telemetry metric points. */
+export function createConsoleTelemetryMetricSink(
+  logger: ObservabilityConsoleLogger = console,
+): TelemetryMetricSink {
+  return {
+    write: (point) => {
+      logger.info(renderTelemetryMetricLine(point));
+    },
+  };
+}
+
+/** Creates a metric recorder facade. */
+export function createTelemetryMetricRecorder(
+  config: ObservabilityConfig,
+  sink: TelemetryMetricSink = createConsoleTelemetryMetricSink(),
+  env: EnvironmentRecord = getProcessEnvironment(),
+): TelemetryMetricRecorder {
+  const record = (
+    kind: TelemetryMetricKind,
+    name: string,
+    value: number,
+    options?: TelemetryMetricOptions,
+  ) => {
+    if (!config.enabled || config.exporter !== "console") {
+      return;
+    }
+
+    try {
+      sink.write(
+        createTelemetryMetricPoint(
+          config,
+          {
+            ...options,
+            kind,
+            name,
+            value,
+          },
+          env,
+        ),
+      );
+    } catch {
+      return;
+    }
+  };
+
+  return {
+    count: (name, options) => record("counter", name, options?.value ?? 1, options),
+    gauge: (name, value, options) => record("gauge", name, value, options),
+    histogram: (name, value, options) => record("histogram", name, value, options),
+  };
+}
+
 /** Creates service-level observability handles from config or environment variables. */
 export function createObservabilityRuntime(
   options: ObservabilityRuntimeOptions = {},
@@ -719,11 +917,17 @@ export function createObservabilityRuntime(
     createConsoleStructuredTelemetryLogSink(consoleLogger),
     env,
   );
+  const metrics = createTelemetryMetricRecorder(
+    config,
+    createConsoleTelemetryMetricSink(consoleLogger),
+    env,
+  );
 
   return {
     adminControlPlaneSink,
     config,
     logger,
+    metrics,
     resourceAttributes: createObservabilityResourceAttributes(config, env),
     shutdown: async () => undefined,
   };
@@ -901,9 +1105,41 @@ function shouldDropTelemetryAttribute(
     normalizedKey.includes("token") ||
     normalizedKey.includes("secret") ||
     normalizedKey.includes("password") ||
+    normalizedKey.includes("private_key") ||
+    normalizedKey.includes("api_key") ||
     normalizedKey.includes("authorization") ||
     normalizedKey.includes("cookie") ||
+    normalizedKey.includes("connection_string") ||
+    normalizedKey.includes("database_url") ||
+    normalizedKey.includes("redis_url") ||
+    normalizedKey.includes("signed_url") ||
     normalizedKey.includes("email")
+  );
+}
+
+/** Returns whether a metric label key is too high-cardinality for default export. */
+function shouldDropTelemetryMetricLabel(key: string): boolean {
+  const normalizedKey = key.toLowerCase().replaceAll(/[.-]/gu, "_");
+  const highCardinalityKeys = [
+    "branch_name",
+    "commit_sha",
+    "file_path",
+    "finding_id",
+    "installation_id",
+    "job_id",
+    "org_id",
+    "pull_request_number",
+    "repo_id",
+    "repository_provider_id",
+    "review_run_id",
+    "span_id",
+    "trace_id",
+    "user_id",
+  ];
+
+  return highCardinalityKeys.some(
+    (highCardinalityKey) =>
+      normalizedKey === highCardinalityKey || normalizedKey.endsWith(`_${highCardinalityKey}`),
   );
 }
 

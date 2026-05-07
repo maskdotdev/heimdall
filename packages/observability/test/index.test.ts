@@ -4,13 +4,18 @@ import {
   createObservabilityResourceAttributes,
   createObservabilityRuntime,
   createStructuredTelemetryLogger,
+  createTelemetryMetricPoint,
+  createTelemetryMetricRecorder,
   DEFAULT_OBSERVABILITY_CONFIG,
   loadObservabilityConfig,
   normalizeAdminControlPlaneTelemetryEvent,
+  OBSERVABILITY_METRIC_NAMES,
   ObservabilityConfigValidationError,
   recordAdminControlPlaneTelemetryEvent,
   renderStructuredTelemetryLogLine,
+  renderTelemetryMetricLine,
   sanitizeTelemetryAttributes,
+  sanitizeTelemetryMetricLabels,
   serializeTelemetryError,
   summarizeAdminControlPlaneTelemetry,
 } from "../src";
@@ -176,6 +181,102 @@ describe("structured telemetry logging", () => {
   });
 });
 
+describe("structured telemetry metrics", () => {
+  it("sanitizes metric labels by redacting unsafe values and dropping high-cardinality keys", () => {
+    const labels = sanitizeTelemetryMetricLabels({
+      "app.review_run_id": "rrun_1",
+      "github.api_key": "sk-1234567890abcdef",
+      "http.route": "/api/v1/repositories/:repoId",
+      provider: "github",
+      repo_id: "repo_1",
+      status: "started",
+    });
+
+    expect(labels).toEqual({
+      "http.route": "/api/v1/repositories/:repoId",
+      provider: "github",
+      status: "started",
+    });
+  });
+
+  it("creates schema-valid metric points with resource attributes", () => {
+    const config = loadObservabilityConfig({
+      APP_VERSION: "sha-metric",
+      OBSERVABILITY_SERVICE_NAME: "code-review-api",
+    });
+    const point = createTelemetryMetricPoint(
+      config,
+      {
+        kind: "counter",
+        labels: {
+          review_run_id: "rrun_1",
+          status: "started",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.apiServiceStartsTotal,
+        timestamp: "2026-05-07T12:02:00.000Z",
+        value: 1,
+      },
+      { HOSTNAME: "api-1" },
+    );
+
+    expect(point).toMatchObject({
+      kind: "counter",
+      labels: { status: "started" },
+      name: OBSERVABILITY_METRIC_NAMES.apiServiceStartsTotal,
+      resource: {
+        "host.name": "api-1",
+        "service.name": "code-review-api",
+        "service.version": "sha-metric",
+      },
+      timestamp: "2026-05-07T12:02:00.000Z",
+      value: 1,
+    });
+    expect(renderTelemetryMetricLine(point)).toContain('"target":"heimdall.metrics"');
+  });
+
+  it("records console metrics only when observability is enabled", () => {
+    const lines: string[] = [];
+    const enabledConfig = loadObservabilityConfig({
+      OBSERVABILITY_ENABLED: "true",
+      OBSERVABILITY_EXPORTER: "console",
+      OBSERVABILITY_SERVICE_NAME: "code-review-worker",
+    });
+    const disabledConfig = loadObservabilityConfig({
+      OBSERVABILITY_ENABLED: "false",
+      OBSERVABILITY_EXPORTER: "console",
+    });
+    const sink = {
+      write: (point: ReturnType<typeof createTelemetryMetricPoint>) => {
+        lines.push(renderTelemetryMetricLine(point));
+      },
+    };
+
+    createTelemetryMetricRecorder(enabledConfig, sink).count(
+      OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal,
+      {
+        labels: { status: "started" },
+        timestamp: "2026-05-07T12:03:00.000Z",
+      },
+    );
+    createTelemetryMetricRecorder(disabledConfig, sink).count(
+      OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal,
+    );
+
+    const [entry] = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(entry).toMatchObject({
+      level: "info",
+      metric: {
+        kind: "counter",
+        labels: { status: "started" },
+        name: OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal,
+        value: 1,
+      },
+      target: "heimdall.metrics",
+    });
+  });
+});
+
 describe("observability runtime bootstrap", () => {
   it("creates no-op runtime handles when observability is disabled", async () => {
     const lines: string[] = [];
@@ -191,6 +292,7 @@ describe("observability runtime bootstrap", () => {
     });
 
     runtime.logger.info("hidden");
+    runtime.metrics.count(OBSERVABILITY_METRIC_NAMES.apiServiceStartsTotal);
     runtime.adminControlPlaneSink.record({
       name: "admin.auth.success",
       timestamp: "2026-05-07T12:00:00.000Z",
@@ -243,16 +345,22 @@ describe("observability runtime bootstrap", () => {
       name: "admin.replay.dispatched",
       timestamp: "2026-05-07T12:01:01.000Z",
     });
+    runtime.metrics.count(OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal, {
+      labels: { "app.review_run_id": "rrun_1", status: "started" },
+      timestamp: "2026-05-07T12:01:02.000Z",
+    });
 
     expect(runtime.resourceAttributes).toMatchObject({
       "host.name": "worker-1",
       "service.name": "heimdall-worker",
       "service.version": "sha-runtime",
     });
-    expect(lines).toHaveLength(2);
+    expect(lines).toHaveLength(3);
     expect(lines[0]).toContain('"level":"warn"');
     expect(lines[0]).toContain('"queue.name":"reviews"');
     expect(lines[1]).toContain('"target":"heimdall.admin_control_plane"');
+    expect(lines[2]).toContain('"target":"heimdall.metrics"');
+    expect(lines[2]).not.toContain("rrun_1");
   });
 });
 
