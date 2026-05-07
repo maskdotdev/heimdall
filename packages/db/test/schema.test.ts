@@ -19,6 +19,7 @@ import {
   findingValidationEvents,
   indexedFiles,
   invoices,
+  memoryCandidates,
   oauthStates,
   orgMemberships,
   publishedCheckRuns,
@@ -57,6 +58,10 @@ const duplicateGroupsMigrationPath = resolve(
   "../migrations/0011_rich_wind_dancer.sql",
 );
 const publishPlansMigrationPath = resolve(testDirectory, "../migrations/0012_smart_scarecrow.sql");
+const memoryCandidatesMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0013_glossy_proemial_gods.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -81,6 +86,7 @@ describe("database schema foundation", () => {
     );
     expect(findingDuplicateGroups.findingDuplicateGroupId.name).toBe("finding_duplicate_group_id");
     expect(publishPlans.publishPlanId.name).toBe("publish_plan_id");
+    expect(memoryCandidates.memoryCandidateId.name).toBe("memory_candidate_id");
     expect(publishedReviews.publishedReviewId.name).toBe("published_review_id");
     expect(publishedSummaryComments.publishedSummaryCommentId.name).toBe(
       "published_summary_comment_id",
@@ -119,6 +125,7 @@ describe("database schema foundation", () => {
     const validationEventsMigration = await readFile(validationEventsMigrationPath, "utf8");
     const duplicateGroupsMigration = await readFile(duplicateGroupsMigrationPath, "utf8");
     const publishPlansMigration = await readFile(publishPlansMigrationPath, "utf8");
+    const memoryCandidatesMigration = await readFile(memoryCandidatesMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -156,6 +163,7 @@ describe("database schema foundation", () => {
     expect(validationEventsMigration).toContain('CREATE TABLE "finding_validation_events"');
     expect(duplicateGroupsMigration).toContain('CREATE TABLE "finding_duplicate_groups"');
     expect(publishPlansMigration).toContain('CREATE TABLE "publish_plans"');
+    expect(memoryCandidatesMigration).toContain('CREATE TABLE "memory_candidates"');
   });
 });
 
@@ -305,6 +313,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('admin_actions')::text) AS admin_actions_table,
         (SELECT to_regclass('finding_duplicate_groups')::text) AS finding_duplicate_groups_table,
         (SELECT to_regclass('finding_validation_events')::text) AS finding_validation_events_table,
+        (SELECT to_regclass('memory_candidates')::text) AS memory_candidates_table,
         (SELECT to_regclass('publish_plans')::text) AS publish_plans_table,
         (SELECT to_regclass('replay_runs')::text) AS replay_runs_table,
         (SELECT to_regclass('users')::text) AS users_table,
@@ -318,6 +327,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       embeddings: 1,
       finding_duplicate_groups_table: "finding_duplicate_groups",
       finding_validation_events_table: "finding_validation_events",
+      memory_candidates_table: "memory_candidates",
       publish_plans_table: "publish_plans",
       oauth_states_table: "oauth_states",
       replay_runs_table: "replay_runs",

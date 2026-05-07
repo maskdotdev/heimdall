@@ -1296,6 +1296,42 @@ export const memoryFacts = pgTable("memory_facts", {
   ...timestamps,
 });
 
+/** Candidate memory facts proposed from maintainer feedback or automated signals. */
+export const memoryCandidates = pgTable(
+  "memory_candidates",
+  {
+    memoryCandidateId: text("memory_candidate_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    sourceKind: text("source_kind").notNull(),
+    candidateKind: text("candidate_kind").notNull(),
+    proposedContent: text("proposed_content").notNull(),
+    proposedScope: jsonb("proposed_scope").notNull().default(sql`'{}'::jsonb`),
+    proposedAppliesTo: jsonb("proposed_applies_to").notNull().default(sql`'{}'::jsonb`),
+    confidence: real("confidence").notNull(),
+    trustLevel: text("trust_level").notNull(),
+    status: text("status").notNull(),
+    createdByLogin: text("created_by_login"),
+    sourceFeedbackEventId: text("source_feedback_event_id"),
+    sourceFindingId: text("source_finding_id").references(() => publishedFindings.findingId),
+    approvedMemoryFactId: text("approved_memory_fact_id").references(
+      () => memoryFacts.memoryFactId,
+    ),
+    decidedByUserId: text("decided_by_user_id").references(() => users.userId),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    ...timestamps,
+  },
+  (table) => [
+    index("memory_candidates_org_repo_status_idx").on(table.orgId, table.repoId, table.status),
+    index("memory_candidates_source_finding_idx").on(table.sourceFindingId),
+    index("memory_candidates_approved_fact_idx").on(table.approvedMemoryFactId),
+  ],
+);
+
 /** Durable record of privileged internal admin actions. */
 export const adminActions = pgTable(
   "admin_actions",
