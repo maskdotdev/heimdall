@@ -605,6 +605,11 @@ export async function runPullRequestReview(
       orgId: repositoryRecord.orgId,
       repoId: snapshot.repoId,
     });
+    const previousPublishedFindings = await reviewRepository.listPublishedFindingsForPullRequest({
+      excludeReviewRunId: reviewRunId,
+      pullRequestNumber: snapshot.pullRequestNumber,
+      repoId: snapshot.repoId,
+    });
     const validationConfig = {
       memorySuppression: {
         memoryFacts: reviewMemoryFacts,
@@ -612,6 +617,7 @@ export async function runPullRequestReview(
         repoId: snapshot.repoId,
       },
       policy: policyResult.snapshot.effectivePolicy,
+      previousPublishedFindings,
     };
     const validationResult = validateCandidateFindings({
       snapshot,
@@ -779,6 +785,7 @@ export async function runPullRequestReview(
         rejectedFindingCount,
         validatedFindingCount: validatedFindings.length,
         memoryFactCount: reviewMemoryFacts.length,
+        previousPublishedFindingCount: previousPublishedFindings.length,
         duplicateGroupCount: validationResult.duplicateGroups.length,
         publishPlanId,
         publishPlanArtifactId: publishPlanArtifact.artifactId,

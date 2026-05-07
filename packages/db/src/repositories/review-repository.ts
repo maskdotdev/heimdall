@@ -5,12 +5,13 @@ import type {
   ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
   findingDuplicateGroups,
   findingValidationEvents,
+  publishedFindings,
   publishPlans,
   reviewArtifacts,
   reviewRunStageEvents,
@@ -109,6 +110,18 @@ export type PublishPlanInsert = {
   readonly createdAt?: Date | string;
 };
 
+/** Published finding fields used by validation to avoid duplicate comments on reruns. */
+export type PublishedFindingForValidation = {
+  /** Stable fingerprint emitted by the original finding. */
+  readonly fingerprint: string;
+  /** Published finding title. */
+  readonly title: string;
+  /** Published finding body. */
+  readonly body: string;
+  /** Published finding location. */
+  readonly location: ValidatedFinding["location"];
+};
+
 /** Query helper for review runs and candidate findings. */
 export class ReviewRepository {
   /** Creates a review query helper. */
@@ -197,6 +210,49 @@ export class ReviewRepository {
       .where(eq(validatedFindings.reviewRunId, reviewRunId));
 
     return rows.map(toValidatedFinding);
+  }
+
+  /** Lists previously published findings for a pull request. */
+  public async listPublishedFindingsForPullRequest(input: {
+    /** Repository that owns the pull request. */
+    readonly repoId: string;
+    /** Pull request number to inspect. */
+    readonly pullRequestNumber: number;
+    /** Review run to exclude from previous-publish matching. */
+    readonly excludeReviewRunId?: string;
+    /** Maximum rows to return. */
+    readonly limit?: number;
+  }): Promise<readonly PublishedFindingForValidation[]> {
+    const rows = await this.db
+      .select({
+        body: publishedFindings.body,
+        fingerprint: publishedFindings.fingerprint,
+        location: publishedFindings.location,
+        title: publishedFindings.title,
+      })
+      .from(publishedFindings)
+      .innerJoin(reviewRuns, eq(publishedFindings.reviewRunId, reviewRuns.reviewRunId))
+      .where(
+        input.excludeReviewRunId
+          ? and(
+              eq(reviewRuns.repoId, input.repoId),
+              eq(reviewRuns.pullRequestNumber, input.pullRequestNumber),
+              ne(reviewRuns.reviewRunId, input.excludeReviewRunId),
+            )
+          : and(
+              eq(reviewRuns.repoId, input.repoId),
+              eq(reviewRuns.pullRequestNumber, input.pullRequestNumber),
+            ),
+      )
+      .orderBy(desc(publishedFindings.publishedAt))
+      .limit(input.limit ?? 100);
+
+    return rows.map((row) => ({
+      body: row.body,
+      fingerprint: row.fingerprint,
+      location: row.location as ValidatedFinding["location"],
+      title: row.title,
+    }));
   }
 
   /** Inserts product-safe validation events and preserves existing event IDs. */

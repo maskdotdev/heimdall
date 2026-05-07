@@ -8,6 +8,7 @@ import type {
   Evidence,
   FindingRejectionReason,
   LLMFindingOutput,
+  PublishedFinding,
   ValidatedFinding,
 } from "@repo/contracts/review/finding";
 import type { LLMGateway } from "@repo/llm-gateway";
@@ -193,11 +194,19 @@ export type FindingValidationConfig = {
   readonly maxPublishableFindings?: number;
   /** Repo rule text used for basic suppression decisions. */
   readonly repoRules?: readonly string[];
+  /** Previously published findings on the same pull request used for comment dedupe. */
+  readonly previousPublishedFindings?: readonly PreviousPublishedFinding[];
   /** Active and inactive memory facts available for validation suppression. */
   readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
   readonly policy?: EffectiveReviewPolicy;
 };
+
+/** Published finding fields needed to suppress duplicate visible comments on reruns. */
+export type PreviousPublishedFinding = Pick<
+  PublishedFinding,
+  "fingerprint" | "title" | "body" | "location"
+>;
 
 /** Memory facts and repository scope used for finding suppression. */
 export type FindingMemorySuppressionConfig = {
@@ -221,6 +230,8 @@ type NormalizedFindingValidationConfig = {
   readonly maxPublishableFindings: number;
   /** Repo rule text used for basic suppression decisions. */
   readonly repoRules: readonly string[];
+  /** Previously published findings on the same pull request. */
+  readonly previousPublishedFindings: readonly PreviousPublishedFinding[];
   /** Active and inactive memory facts available for validation suppression. */
   readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
@@ -398,6 +409,7 @@ function normalizeFindingValidationConfig(
       config?.policy?.findings.allowStyleFindings ?? config?.allowStyleFindings ?? false,
     maxPublishableFindings:
       config?.policy?.findings.maxCommentsPerReview ?? config?.maxPublishableFindings ?? 10,
+    previousPublishedFindings: config?.previousPublishedFindings ?? [],
     repoRules: config?.repoRules ?? [],
     ...(config?.memorySuppression ? { memorySuppression: config.memorySuppression } : {}),
     ...(config?.policy ? { policy: config.policy } : {}),
@@ -787,6 +799,9 @@ function rejectionAnalysis(
   ) {
     pushReason(reasons, "duplicate_semantic");
   }
+  if (isDuplicatePreviousPublishedFinding(finding, config.previousPublishedFindings)) {
+    pushReason(reasons, "duplicate_previous_comment");
+  }
   if (isSuppressedByRepoRule(finding, config.repoRules)) {
     pushReason(reasons, "suppressed_by_repo_rule");
   }
@@ -973,6 +988,43 @@ function hasSemanticDuplicate(
 ): boolean {
   const signature = buildSemanticSignature(finding);
   return seenSignatures.some((seenSignature) => semanticSignaturesMatch(signature, seenSignature));
+}
+
+/** Returns whether this candidate duplicates a previously published visible finding. */
+function isDuplicatePreviousPublishedFinding(
+  finding: CandidateFinding,
+  previousFindings: readonly PreviousPublishedFinding[],
+): boolean {
+  if (previousFindings.length === 0) {
+    return false;
+  }
+
+  return previousFindings.some(
+    (previousFinding) =>
+      previousFinding.fingerprint === finding.fingerprint ||
+      previousPublishedFindingMatches(finding, previousFinding),
+  );
+}
+
+/** Compares a candidate against one previous published finding using product-safe fields. */
+function previousPublishedFindingMatches(
+  finding: CandidateFinding,
+  previousFinding: PreviousPublishedFinding,
+): boolean {
+  if (previousFinding.location.path !== finding.location.path) {
+    return false;
+  }
+
+  const sameLine = previousFinding.location.line === finding.location.line;
+  const candidateTokens = semanticTokens(`${finding.title}\n${finding.body}`);
+  const previousTokens = semanticTokens(`${previousFinding.title}\n${previousFinding.body}`);
+  const overlap = intersectionSize(candidateTokens, previousTokens);
+  if (overlap < SEMANTIC_DUPLICATE_MIN_OVERLAP) {
+    return false;
+  }
+
+  const union = candidateTokens.size + previousTokens.size - overlap;
+  return union > 0 && (sameLine || overlap / union >= SEMANTIC_DUPLICATE_SIMILARITY);
 }
 
 /** Builds a deterministic semantic signature from user-facing finding text. */

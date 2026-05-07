@@ -276,6 +276,69 @@ describe("validateAndRankCandidateFindings", () => {
     );
   });
 
+  it("rejects findings that duplicate previously published comments", () => {
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [
+        candidateFindingFixture({
+          findingId: "fnd_PREVIOUS",
+          fingerprint: "fp_current_review_run",
+        }),
+      ],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: {
+        previousPublishedFindings: [
+          {
+            body: validCandidateFindingFixture.body,
+            fingerprint: "fp_previous_review_run",
+            location: validCandidateFindingFixture.location,
+            title: validCandidateFindingFixture.title,
+          },
+        ],
+      },
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected[0]?.validation.reasons).toContain("duplicate_previous_comment");
+    expect(result.trace.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          candidateFindingId: "fnd_PREVIOUS",
+          reasons: ["duplicate_previous_comment"],
+          stage: "dedupe",
+          status: "rejected",
+        }),
+      ]),
+    );
+  });
+
+  it("preserves findings that do not match previous published comments", () => {
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [
+        candidateFindingFixture({
+          findingId: "fnd_NEW",
+          fingerprint: "fp_new_finding",
+          title: "Handle a separate arithmetic overflow",
+        }),
+      ],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: {
+        previousPublishedFindings: [
+          {
+            body: "The cache key can collide when user IDs are omitted.",
+            fingerprint: "fp_previous_cache_finding",
+            location: { ...validCandidateFindingFixture.location, line: 50 },
+            title: "Include user ID in the cache key",
+          },
+        ],
+      },
+    });
+
+    expect(result.accepted.map((finding) => finding.candidateFindingId)).toEqual(["fnd_NEW"]);
+    expect(result.rejected).toHaveLength(0);
+  });
+
   it("rejects findings suppressed by configured memory facts", () => {
     const memoryFact = memoryFactFixture({
       appliesTo: { findingFingerprints: [validCandidateFindingFixture.fingerprint] },
