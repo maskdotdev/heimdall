@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertSnapshotMatchesJob,
   checkReviewRunCurrent,
+  createStaticAnalysisRequestForReview,
   ReviewInputSnapshotMismatchError,
   type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
@@ -125,6 +126,39 @@ describe("reviewRunStatusForStage", () => {
     expect(reviewRunStatusForStage("review")).toBe("reviewing");
     expect(reviewRunStatusForStage("validation")).toBe("validating_findings");
     expect(reviewRunStatusForStage("publish")).toBe("publish_queued");
+  });
+});
+
+describe("createStaticAnalysisRequestForReview", () => {
+  it("creates a review-owned changed-files static-analysis request", () => {
+    const request = createStaticAnalysisRequestForReview({
+      orgId: "org_test",
+      repoId: pullRequestSnapshot.repoId,
+      reviewRunId: "rrn_test",
+      snapshot: pullRequestSnapshot,
+      timestamp: "2026-05-07T12:00:00.000Z",
+      workspace: {
+        checkedOutSha: pullRequestSnapshot.headSha,
+        cleanedUp: false,
+        workspacePath: "/tmp/heimdall-review",
+      },
+    });
+
+    expect(request).toMatchObject({
+      createdAt: "2026-05-07T12:00:00.000Z",
+      mode: "changed_files_fast",
+      orgId: "org_test",
+      reason: "review",
+      repoId: "repo_test",
+      reviewRunId: "rrn_test",
+      schemaVersion: "static_analysis_request.v1",
+      workspace: {
+        commitSha: pullRequestSnapshot.headSha,
+        isTrusted: true,
+        path: "/tmp/heimdall-review",
+      },
+    });
+    expect(request.workspace.workspaceId).toMatch(/^ws_[A-Za-z0-9_-]+$/u);
   });
 });
 

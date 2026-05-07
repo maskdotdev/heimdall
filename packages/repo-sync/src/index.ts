@@ -88,6 +88,11 @@ export async function syncRepositoryWorkspace(
   }
 }
 
+/** Removes a retained repository workspace. */
+export async function cleanupRepositoryWorkspace(workspacePath: string): Promise<void> {
+  await rm(workspacePath, { force: true, recursive: true });
+}
+
 /** Creates an HTTPS clone URL containing short-lived credentials for Git. */
 export function createAuthenticatedCloneUrl(input: {
   /** Sanitized HTTPS clone URL. */

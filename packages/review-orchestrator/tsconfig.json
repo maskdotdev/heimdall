@@ -21,6 +21,8 @@
     { "path": "../review-engine/tsconfig.build.json" },
     { "path": "../repo-sync/tsconfig.build.json" },
     { "path": "../rules/tsconfig.build.json" },
+    { "path": "../static-analysis/tsconfig.build.json" },
+    { "path": "../tool-runner/tsconfig.build.json" },
     { "path": "../usage/tsconfig.build.json" }
   ]
 }

@@ -33,10 +33,27 @@ import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
 import { createPublishPlan, hasPlannedPublishOperations, type PublishPlan } from "@repo/publisher";
-import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
+import {
+  cleanupRepositoryWorkspace,
+  type SyncRepositoryWorkspaceResult,
+  syncRepositoryWorkspace,
+} from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
-import { llmReviewPass, runReviewPasses, validateCandidateFindings } from "@repo/review-engine";
+import {
+  llmReviewPass,
+  runReviewPasses,
+  staticAnalysisReviewPass,
+  validateCandidateFindings,
+} from "@repo/review-engine";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
+import {
+  runStaticAnalysis,
+  type StaticAnalysisBudgets,
+  type StaticAnalysisMode,
+  type StaticAnalysisReport,
+  type StaticAnalysisRequest,
+} from "@repo/static-analysis";
+import type { ToolRunner } from "@repo/tool-runner";
 import {
   DefaultEntitlementService,
   DefaultQuotaService,
@@ -133,6 +150,12 @@ export type ReviewOrchestratorDependencies = {
   readonly usageLedger?: UsageLedger;
   /** Optional artifact payload store used for durable review artifact payloads. */
   readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
+  /** Optional static-analysis runner for changed-file tool diagnostics. */
+  readonly staticAnalysisRunner?: ToolRunner;
+  /** Optional static-analysis mode. Defaults to changed-files-fast. */
+  readonly staticAnalysisMode?: StaticAnalysisMode;
+  /** Optional static-analysis budgets. */
+  readonly staticAnalysisBudgets?: StaticAnalysisBudgets;
   /** Optional entitlement service for provider-free plan snapshots. */
   readonly entitlementService?: EntitlementService;
   /** Optional quota service for monthly review credit reservations. */
@@ -178,9 +201,30 @@ export type ReviewRunCurrentStatus = "current" | "superseded" | "closed" | "unkn
 export type SyncWorkspace = (
   input: GitHubRepositoryRef & {
     readonly commitSha: string;
+    readonly keepWorkspace?: boolean;
     readonly workspaceRoot?: string;
   },
 ) => Promise<SyncRepositoryWorkspaceResult>;
+
+/** Input for creating a review-owned static-analysis request. */
+export type CreateStaticAnalysisRequestForReviewInput = {
+  /** Organization ID that owns the review run. */
+  readonly orgId: string;
+  /** Repository ID being reviewed. */
+  readonly repoId: string;
+  /** Review run ID that owns the static-analysis report. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot being reviewed. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Synced workspace available to static-analysis tools. */
+  readonly workspace: SyncRepositoryWorkspaceResult;
+  /** Request creation timestamp. */
+  readonly timestamp: string;
+  /** Optional static-analysis mode. */
+  readonly mode?: StaticAnalysisMode | undefined;
+  /** Optional static-analysis budgets. */
+  readonly budgets?: StaticAnalysisBudgets | undefined;
+};
 
 /** Result returned after one review job is orchestrated. */
 export type ReviewOrchestrationResult = {
@@ -198,6 +242,14 @@ export type ReviewOrchestrationResult = {
 
 /** Durable review orchestration stages that map to review run statuses. */
 export type ReviewOrchestrationStage = "index" | "retrieval" | "review" | "validation" | "publish";
+
+/** Result from optional static-analysis orchestration. */
+type ReviewStaticAnalysisResult = {
+  /** Static-analysis report when execution completed. */
+  readonly report?: StaticAnalysisReport | undefined;
+  /** Whether the synced workspace has been removed. */
+  readonly workspaceCleanedUp: boolean;
+};
 
 /** Error raised when a fetched PR snapshot does not match the queued review job. */
 export class ReviewInputSnapshotMismatchError extends Error {
@@ -380,6 +432,7 @@ export async function runPullRequestReview(
         {
           ...repository,
           commitSha: snapshot.headSha,
+          keepWorkspace: Boolean(dependencies.staticAnalysisRunner),
         },
         dependencies.workspaceRoot,
       ),
@@ -394,6 +447,23 @@ export async function runPullRequestReview(
         workspacePath: workspace.workspacePath,
       },
     });
+    const staticAnalysis = await runStaticAnalysisForReview({
+      budgets: dependencies.staticAnalysisBudgets,
+      cleanupWorkspace:
+        Boolean(dependencies.staticAnalysisRunner) &&
+        !dependencies.syncWorkspace &&
+        !workspace.cleanedUp,
+      mode: dependencies.staticAnalysisMode,
+      now: now().toISOString(),
+      orgId: repositoryRecord.orgId,
+      repoId: snapshot.repoId,
+      reviewRepository,
+      reviewRunId,
+      runner: dependencies.staticAnalysisRunner,
+      snapshot,
+      workspace,
+    });
+    const staticAnalysisReport = staticAnalysis.report;
 
     const artifacts = [
       await persistArtifact(reviewRepository, artifactPayloadStore, {
@@ -448,6 +518,18 @@ export async function runPullRequestReview(
         payload: planSnapshot,
         createdAt: now().toISOString(),
       }),
+      ...(staticAnalysisReport
+        ? [
+            await persistArtifact(reviewRepository, artifactPayloadStore, {
+              reviewRunId,
+              repoId: snapshot.repoId,
+              kind: "static_analysis",
+              name: "static-analysis-report.json",
+              payload: staticAnalysisReport,
+              createdAt: now().toISOString(),
+            }),
+          ]
+        : []),
       await persistArtifact(reviewRepository, artifactPayloadStore, {
         reviewRunId,
         repoId: snapshot.repoId,
@@ -476,8 +558,18 @@ export async function runPullRequestReview(
             : {}),
           workspace: {
             checkedOutSha: workspace.checkedOutSha,
-            cleanedUp: workspace.cleanedUp,
+            cleanedUp: staticAnalysis.workspaceCleanedUp,
           },
+          ...(staticAnalysisReport
+            ? {
+                staticAnalysis: {
+                  diagnosticCount: staticAnalysisReport.summary.diagnosticCount,
+                  reportId: staticAnalysisReport.reportId,
+                  status: staticAnalysisReport.status,
+                  toolRunCount: staticAnalysisReport.summary.toolRunCount,
+                },
+              }
+            : {}),
           policy: policySnapshotMetadata(policyResult.snapshot),
           plan: planSnapshotMetadata(planSnapshot),
           generatedAt: now().toISOString(),
@@ -565,11 +657,12 @@ export async function runPullRequestReview(
     );
     currentStage = "review";
     const candidateFindings = await runReviewPasses({
-      passes: [llmReviewPass],
+      passes: staticAnalysisReport ? [staticAnalysisReviewPass, llmReviewPass] : [llmReviewPass],
       context: {
         reviewRunId,
         snapshot,
         contextBundle,
+        ...(staticAnalysisReport ? { staticAnalysisReport } : {}),
         llmGateway: createUsageRecordingLlmGateway({
           db: dependencies.db,
           gateway: dependencies.llmGateway ?? createStaticLLMGateway(),
@@ -931,7 +1024,7 @@ export async function runPullRequestReview(
           },
           workspace: {
             checkedOutSha: workspace.checkedOutSha,
-            cleanedUp: workspace.cleanedUp,
+            cleanedUp: staticAnalysis.workspaceCleanedUp,
           },
           currentStage: "completed",
           publishPlanId,
@@ -1043,7 +1136,7 @@ export async function runPullRequestReview(
         },
         workspace: {
           checkedOutSha: workspace.checkedOutSha,
-          cleanedUp: workspace.cleanedUp,
+          cleanedUp: staticAnalysis.workspaceCleanedUp,
         },
         currentStage: "completed",
         publishJobKey,
@@ -1473,6 +1566,128 @@ export function assertSnapshotMatchesJob(
     mismatches: mismatches.map(([field, expected, actual]) => ({ field, expected, actual })),
     snapshotId: snapshot.snapshotId,
   });
+}
+
+/** Creates the static-analysis request owned by one review run. */
+export function createStaticAnalysisRequestForReview(
+  input: CreateStaticAnalysisRequestForReviewInput,
+): StaticAnalysisRequest {
+  return {
+    budgets: input.budgets,
+    createdAt: input.timestamp,
+    mode: input.mode ?? "changed_files_fast",
+    orgId: input.orgId,
+    reason: "review",
+    repoId: input.repoId,
+    reviewRunId: input.reviewRunId,
+    schemaVersion: "static_analysis_request.v1",
+    snapshot: input.snapshot,
+    workspace: {
+      commitSha: input.workspace.checkedOutSha,
+      isTrusted: true,
+      path: input.workspace.workspacePath,
+      workspaceId: stableId("ws", [input.reviewRunId, input.workspace.workspacePath]),
+    },
+  };
+}
+
+/** Runs optional static analysis and records non-fatal stage events. */
+async function runStaticAnalysisForReview(input: {
+  /** Optional static-analysis budgets. */
+  readonly budgets?: StaticAnalysisBudgets | undefined;
+  /** Whether to remove the retained workspace after static-analysis execution. */
+  readonly cleanupWorkspace: boolean;
+  /** Optional static-analysis mode. */
+  readonly mode?: StaticAnalysisMode | undefined;
+  /** Timestamp used for the static-analysis request. */
+  readonly now: string;
+  /** Organization ID that owns the review run. */
+  readonly orgId: string;
+  /** Repository ID being reviewed. */
+  readonly repoId: string;
+  /** Review repository used for stage events. */
+  readonly reviewRepository: ReviewRepository;
+  /** Review run ID that owns the static-analysis report. */
+  readonly reviewRunId: string;
+  /** Optional static-analysis runner. */
+  readonly runner?: ToolRunner | undefined;
+  /** Pull request snapshot being reviewed. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Synced workspace for the review run. */
+  readonly workspace: SyncRepositoryWorkspaceResult;
+}): Promise<ReviewStaticAnalysisResult> {
+  let workspaceCleanedUp = input.workspace.cleanedUp;
+  if (!input.runner) {
+    return { workspaceCleanedUp };
+  }
+
+  if (input.workspace.cleanedUp) {
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: "static_analysis",
+      status: "skipped",
+      metadata: { reason: "workspace_already_cleaned_up" },
+    });
+    return { workspaceCleanedUp };
+  }
+
+  let report: StaticAnalysisReport | undefined;
+  try {
+    report = await runStaticAnalysis({
+      request: createStaticAnalysisRequestForReview({
+        budgets: input.budgets,
+        mode: input.mode,
+        orgId: input.orgId,
+        repoId: input.repoId,
+        reviewRunId: input.reviewRunId,
+        snapshot: input.snapshot,
+        timestamp: input.now,
+        workspace: input.workspace,
+      }),
+      runner: input.runner,
+    });
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: "static_analysis",
+      status: report.status,
+      metadata: {
+        diagnosticCount: report.summary.diagnosticCount,
+        reportId: report.reportId,
+        toolRunCount: report.summary.toolRunCount,
+        warningCount: report.warnings.length,
+      },
+    });
+  } catch (error) {
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: "static_analysis",
+      status: "degraded",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  if (input.cleanupWorkspace) {
+    try {
+      await cleanupRepositoryWorkspace(input.workspace.workspacePath);
+      workspaceCleanedUp = true;
+      await input.reviewRepository.insertStageEvent({
+        reviewRunId: input.reviewRunId,
+        stage: "workspace_cleanup",
+        status: "completed",
+        metadata: { workspacePath: input.workspace.workspacePath },
+      });
+    } catch (error) {
+      await input.reviewRepository.insertStageEvent({
+        reviewRunId: input.reviewRunId,
+        stage: "workspace_cleanup",
+        status: "failed",
+        message: error instanceof Error ? error.message : String(error),
+        metadata: { workspacePath: input.workspace.workspacePath },
+      });
+    }
+  }
+
+  return { report, workspaceCleanedUp };
 }
 
 /** Maps an orchestration stage to the persisted review run status for that stage. */

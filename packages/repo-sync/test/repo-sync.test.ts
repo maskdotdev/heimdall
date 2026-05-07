@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   type GitCommandRunner,
   syncRepositoryWorkspace,
@@ -75,5 +76,15 @@ describe("repo sync workspace", () => {
         password: "token:with@chars",
       }),
     ).toBe("https://x-access-token:token%3Awith%40chars@github.com/acme/api.git");
+  });
+
+  it("removes a retained workspace", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-cleanup-test-"));
+    workspaceRoots.push(workspaceRoot);
+    const workspacePath = await mkdtemp(join(workspaceRoot, "workspace-"));
+
+    await cleanupRepositoryWorkspace(workspacePath);
+
+    await expect(access(workspacePath)).rejects.toThrow();
   });
 });

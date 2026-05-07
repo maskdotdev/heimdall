@@ -32,6 +32,8 @@
     "@repo/review-engine": "workspace:*",
     "@repo/repo-sync": "workspace:*",
     "@repo/rules": "workspace:*",
+    "@repo/static-analysis": "workspace:*",
+    "@repo/tool-runner": "workspace:*",
     "@repo/usage": "workspace:*",
     "drizzle-orm": "catalog:",
     "postgres": "catalog:"

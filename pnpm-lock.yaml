@@ -899,6 +899,12 @@ importers:
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules
+      '@repo/static-analysis':
+        specifier: workspace:*
+        version: link:../static-analysis
+      '@repo/tool-runner':
+        specifier: workspace:*
+        version: link:../tool-runner
       '@repo/usage':
         specifier: workspace:*
         version: link:../usage
