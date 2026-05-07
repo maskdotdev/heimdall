@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+
 /** Command network access policy. */
 export type ToolNetworkPolicy = "none" | "metadata_only" | "allow";
 
@@ -75,6 +77,16 @@ export interface ToolRunner {
   run(input: ToolRunnerInput): Promise<ToolRunnerResult>;
 }
 
+/** Options for the local process-backed tool runner. */
+export type LocalToolRunnerOptions = {
+  /** Environment variables available to every local tool process. */
+  readonly baseEnv?: Readonly<Record<string, string>> | undefined;
+  /** Signal used when a tool exceeds its timeout. */
+  readonly timeoutSignal?: NodeJS.Signals | undefined;
+  /** Grace period before escalating timeout termination to SIGKILL. */
+  readonly timeoutKillGraceMs?: number | undefined;
+};
+
 /** Fixture consumed by the fake tool runner. */
 export type FakeToolRunnerFixture = {
   /** Optional plan ID to match. */
@@ -102,11 +114,95 @@ export function createFakeToolRunner(fixtures: readonly FakeToolRunnerFixture[] 
   };
 }
 
+/** Creates a local shell-free process runner for trusted worker environments. */
+export function createLocalToolRunner(options: LocalToolRunnerOptions = {}): ToolRunner {
+  return {
+    run: async (input) => runLocalTool(input, options),
+  };
+}
+
 /** Redacts a command for product-safe logs. */
 export function redactedDisplayCommand(command: ToolCommandSpec): string {
   return command.displayCommand
     .replace(/(token|secret|password|key)=\S+/giu, "$1=<redacted>")
     .replace(/--(token|secret|password|key)\s+\S+/giu, "--$1 <redacted>");
+}
+
+/** Runs one command as a local child process with bounded output capture. */
+function runLocalTool(
+  input: ToolRunnerInput,
+  options: LocalToolRunnerOptions,
+): Promise<ToolRunnerResult> {
+  const startedAt = input.startedAt ?? new Date().toISOString();
+  const startedTimeMs = Date.now();
+  const output = createOutputCapture(input.maxOutputBytes);
+  let timedOut = false;
+
+  return new Promise((resolve) => {
+    const child = spawn(input.command.executable, [...input.command.args], {
+      cwd: input.command.cwd,
+      env: localToolEnvironment(input.command.env, options.baseEnv),
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill(options.timeoutSignal ?? "SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (!settled) {
+          child.kill("SIGKILL");
+        }
+      }, options.timeoutKillGraceMs ?? 1_000);
+    }, input.timeoutMs);
+
+    const finish = (status: ToolRunnerStatus, exitCode: number | null, signal: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      const durationMs = Math.max(0, Date.now() - startedTimeMs);
+      const finishedAt = new Date(Date.parse(startedAt) + durationMs).toISOString();
+
+      resolve({
+        durationMs,
+        exitCode,
+        finishedAt,
+        signal,
+        startedAt,
+        status,
+        stderr: output.stderr(),
+        stderrBytes: output.stderrBytes(),
+        stdout: output.stdout(),
+        stdoutBytes: output.stdoutBytes(),
+        timedOut,
+        truncated: output.truncated(),
+      });
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      output.append("stdout", chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      output.append("stderr", chunk);
+    });
+    child.once("error", (error) => {
+      output.append("stderr", `Failed to start command: ${error.message}`);
+      finish("failed", null, null);
+    });
+    child.once("close", (exitCode, signal) => {
+      const status = timedOut ? "timed_out" : exitCode === 0 ? "succeeded" : "failed";
+      finish(status, exitCode, signal);
+    });
+
+    if (input.command.stdin !== undefined) {
+      child.stdin.end(input.command.stdin);
+    } else {
+      child.stdin.end();
+    }
+  });
 }
 
 /** Runs one fake command fixture. */
@@ -160,4 +256,87 @@ function truncate(
 /** Returns UTF-8 byte length for a string. */
 function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+
+/** Creates environment variables for local tool execution. */
+function localToolEnvironment(
+  commandEnv: Readonly<Record<string, string>>,
+  baseEnv: Readonly<Record<string, string>> | undefined,
+): NodeJS.ProcessEnv {
+  return {
+    ...defaultLocalToolEnvironment(),
+    ...baseEnv,
+    ...commandEnv,
+  };
+}
+
+/** Returns the default local environment allowlist. */
+function defaultLocalToolEnvironment(): Readonly<Record<string, string>> {
+  const path = process.env.PATH;
+  if (!path) {
+    return {};
+  }
+
+  return { PATH: path };
+}
+
+/** Stream name captured from a child process. */
+type OutputStreamName = "stdout" | "stderr";
+
+/** Bounded child-process output capture state. */
+type OutputCapture = {
+  /** Appends a chunk to one captured stream while honoring the shared byte budget. */
+  readonly append: (stream: OutputStreamName, chunk: Buffer | string) => void;
+  /** Returns captured stdout text. */
+  readonly stdout: () => string;
+  /** Returns captured stderr text. */
+  readonly stderr: () => string;
+  /** Returns captured stdout bytes. */
+  readonly stdoutBytes: () => number;
+  /** Returns captured stderr bytes. */
+  readonly stderrBytes: () => number;
+  /** Returns true when any stream exceeded the shared byte budget. */
+  readonly truncated: () => boolean;
+};
+
+/** Creates a shared byte-budget output capture for stdout and stderr. */
+function createOutputCapture(maxBytes: number): OutputCapture {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let consumedBytes = 0;
+  let truncated = false;
+
+  return {
+    append: (stream, chunk) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remainingBytes = Math.max(0, maxBytes - consumedBytes);
+      if (buffer.length === 0) return;
+      if (remainingBytes === 0) {
+        truncated = true;
+        return;
+      }
+
+      const captured = buffer.subarray(0, remainingBytes);
+      if (captured.length < buffer.length) {
+        truncated = true;
+      }
+      consumedBytes += captured.length;
+
+      if (stream === "stdout") {
+        stdout.push(captured);
+        stdoutBytes += captured.length;
+        return;
+      }
+
+      stderr.push(captured);
+      stderrBytes += captured.length;
+    },
+    stderr: () => Buffer.concat(stderr).toString("utf8"),
+    stderrBytes: () => stderrBytes,
+    stdout: () => Buffer.concat(stdout).toString("utf8"),
+    stdoutBytes: () => stdoutBytes,
+    truncated: () => truncated,
+  };
 }
