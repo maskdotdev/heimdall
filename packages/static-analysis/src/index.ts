@@ -513,6 +513,25 @@ type EslintJsonMessage = Static<typeof EslintJsonMessageSchema>;
 /** ESLint JSON formatter file result. */
 type EslintJsonFileResult = Static<typeof EslintJsonFileResultSchema>;
 
+type TypeScriptTextDiagnostic = {
+  /** TypeScript diagnostic code without the `TS` prefix. */
+  readonly code: string;
+  /** One-based column parsed from the diagnostic location. */
+  readonly column: number;
+  /** Repository or workspace path emitted by TypeScript. */
+  readonly filePath: string;
+  /** One-based line parsed from the diagnostic location. */
+  readonly line: number;
+  /** Diagnostic message emitted on the first line. */
+  readonly message: string;
+  /** TypeScript diagnostic severity. */
+  readonly severity: "error" | "warning";
+};
+
+/** Matches one `tsc --pretty false` diagnostic line with a concrete file location. */
+const TYPESCRIPT_TEXT_DIAGNOSTIC_PATTERN =
+  /^(?<filePath>.+?)\((?<line>\d+),(?<column>\d+)\): (?<severity>error|warning) TS(?<code>\d+): (?<message>.+)$/u;
+
 /** Built-in tool descriptors for MVP planning. */
 export const STATIC_TOOL_DESCRIPTORS = [
   descriptor("eslint", "ESLint", ["javascript", "typescript", "jsx", "tsx"], ["maintainability"]),
@@ -632,6 +651,9 @@ export function parseToolOutputDiagnostics(
 
   if (input.tool === "eslint") {
     return parseEslintJsonDiagnostics(input);
+  }
+  if (input.tool === "typescript") {
+    return parseTypeScriptTextDiagnostics(input);
   }
 
   return { diagnostics: [], warnings: [] };
@@ -1164,6 +1186,99 @@ function parseEslintJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses `tsc --pretty false` output into normalized diagnostics. */
+function parseTypeScriptTextDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = [input.result.stdout, input.result.stderr]
+    .map((stream) => stream.trim())
+    .filter((stream) => stream.length > 0)
+    .join("\n");
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedDiagnostics = rawOutput
+    .split(/\r?\n/u)
+    .map(parseTypeScriptDiagnosticLine)
+    .filter(isPresent)
+    .map((diagnostic) => typeScriptDiagnosticToNormalizedDiagnostic(input, diagnostic));
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings: StaticAnalysisWarning[] = [];
+
+  if (parsedDiagnostics.length === 0) {
+    warnings.push(
+      warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+        format: "typescript_text",
+        tool: input.tool,
+        toolRunId: input.toolRunId,
+      }),
+    );
+  }
+  if (parsedDiagnostics.length > diagnostics.length) {
+    warnings.push(
+      warning(
+        "tool_output_diagnostic_budget_truncated",
+        "Static analysis tool output diagnostics were truncated.",
+        {
+          diagnosticCount: parsedDiagnostics.length,
+          maxDiagnostics: input.maxDiagnostics,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        },
+      ),
+    );
+  }
+
+  return { diagnostics, warnings };
+}
+
+/** Parses one TypeScript text diagnostic line. */
+function parseTypeScriptDiagnosticLine(line: string): TypeScriptTextDiagnostic | undefined {
+  const match = TYPESCRIPT_TEXT_DIAGNOSTIC_PATTERN.exec(line.trim());
+  const groups = match?.groups;
+  if (!groups) {
+    return undefined;
+  }
+
+  return {
+    code: groups.code ?? "",
+    column: Math.max(1, Number.parseInt(groups.column ?? "1", 10)),
+    filePath: groups.filePath ?? "",
+    line: Math.max(1, Number.parseInt(groups.line ?? "1", 10)),
+    message: groups.message ?? "",
+    severity: groups.severity === "warning" ? "warning" : "error",
+  };
+}
+
+/** Converts one parsed TypeScript diagnostic into the normalized report shape. */
+function typeScriptDiagnosticToNormalizedDiagnostic(
+  input: ParseToolOutputDiagnosticsInput,
+  diagnostic: TypeScriptTextDiagnostic,
+): NormalizedToolDiagnostic {
+  const filePath = normalizeToolFilePath(diagnostic.filePath, input.workspacePath);
+  const ruleId = `TS${diagnostic.code}`;
+
+  return createNormalizedToolDiagnostic({
+    category: "correctness",
+    location: {
+      filePath,
+      startColumn: diagnostic.column,
+      startLine: diagnostic.line,
+      ...(filePath === diagnostic.filePath ? {} : { originalPath: diagnostic.filePath }),
+    },
+    message: diagnostic.message,
+    metadata: { diagnosticCode: ruleId },
+    rawMessage: diagnostic.message,
+    ruleId,
+    severity: diagnostic.severity,
+    snapshot: input.snapshot,
+    sourceTrust: "parsed_text",
+    tool: "typescript",
+    toolRunId: input.toolRunId,
+  });
+}
+
 /** Converts one ESLint JSON message into a normalized diagnostic. */
 function eslintMessageToDiagnostic(input: {
   readonly fileResult: EslintJsonFileResult;
@@ -1307,7 +1422,7 @@ function descriptor(
     mutatesWorkspace: false,
     name,
     outputFormats: ["json", "text"],
-    preferredOutputFormat: "json",
+    preferredOutputFormat: name === "typescript" ? "text" : "json",
     requiresDependencies: name !== "semgrep",
     supportsBaseHeadDelta: true,
     supportsChangedFiles: true,

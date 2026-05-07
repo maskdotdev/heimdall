@@ -269,6 +269,49 @@ describe("static analysis", () => {
     expect(report.toolRuns[0]?.diagnosticCount).toBe(1);
   });
 
+  it("parses TypeScript text output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 2,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout:
+          "/workspace/repo/src/math.ts(2,10): error TS2322: Type 'string' is not assignable to type 'number'.",
+        stdoutBytes: 101,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "typescript",
+      toolRunId: "str_ts",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        filePath: "src/math.ts",
+        originalPath: "/workspace/repo/src/math.ts",
+        startColumn: 10,
+        startLine: 2,
+      },
+      metadata: { diagnosticCode: "TS2322" },
+      ruleId: "TS2322",
+      severity: "error",
+      sourceTrust: "parsed_text",
+      tool: "typescript",
+    });
+  });
+
   it("returns product-safe warnings for invalid ESLint JSON output", () => {
     const parsed = parseToolOutputDiagnostics({
       maxDiagnostics: 10,
