@@ -165,6 +165,17 @@ export const TelemetryMetricPointSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Trace context propagated between requests, durable jobs, and workers. */
+export const TelemetryTraceContextSchema = Type.Object(
+  {
+    parentEventId: Type.Optional(Type.String({ minLength: 1 })),
+    requestId: Type.Optional(Type.String({ minLength: 1 })),
+    traceparent: Type.Optional(Type.String({ minLength: 55 })),
+    tracestate: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
 /** Scalar attribute value allowed in structured telemetry events. */
 export type TelemetryAttributeValue = Static<typeof TelemetryAttributeValueSchema>;
 
@@ -214,6 +225,24 @@ export type TelemetryMetricKind = Static<typeof TelemetryMetricKindSchema>;
 
 /** Structured metric point emitted by the observability metric recorder. */
 export type TelemetryMetricPoint = Static<typeof TelemetryMetricPointSchema>;
+
+/** Trace context propagated between requests, durable jobs, and workers. */
+export type TelemetryTraceContext = Static<typeof TelemetryTraceContextSchema>;
+
+/** Input accepted when normalizing trace context. */
+export type TelemetryTraceContextInput = {
+  /** Optional parent durable event ID used to link related operations. */
+  readonly parentEventId?: string | undefined;
+  /** Optional request ID used in logs and product-safe support flows. */
+  readonly requestId?: string | undefined;
+  /** Optional W3C traceparent header value. */
+  readonly traceparent?: string | undefined;
+  /** Optional W3C tracestate header value. */
+  readonly tracestate?: string | undefined;
+};
+
+/** Header source used for trace context extraction. */
+export type TelemetryTraceHeaderSource = Headers | Readonly<Record<string, string | undefined>>;
 
 /** Admin control-plane telemetry event accepted before timestamp normalization. */
 export type AdminControlPlaneTelemetryEventInput = Omit<
@@ -893,6 +922,59 @@ export function createTelemetryMetricRecorder(
   };
 }
 
+/** Normalizes product-safe trace context fields for propagation. */
+export function normalizeTelemetryTraceContext(
+  input: TelemetryTraceContextInput,
+): TelemetryTraceContext {
+  const context = withoutUndefinedValues({
+    parentEventId: normalizeTraceContextText(input.parentEventId, 120),
+    requestId: normalizeTraceContextText(input.requestId, 120),
+    traceparent: normalizeTraceparent(input.traceparent),
+    tracestate: normalizeTracestate(input.tracestate),
+  });
+
+  if (!Value.Check(TelemetryTraceContextSchema, context)) {
+    throw new Error("Telemetry trace context does not match the schema.");
+  }
+
+  return context as TelemetryTraceContext;
+}
+
+/** Extracts trace context from HTTP-style headers. */
+export function createTelemetryTraceContextFromHeaders(
+  headers: TelemetryTraceHeaderSource,
+): TelemetryTraceContext {
+  return normalizeTelemetryTraceContext({
+    parentEventId: readTelemetryHeader(headers, "x-heimdall-parent-event-id"),
+    requestId: readTelemetryHeader(headers, "x-request-id"),
+    traceparent: readTelemetryHeader(headers, "traceparent"),
+    tracestate: readTelemetryHeader(headers, "tracestate"),
+  });
+}
+
+/** Creates HTTP-style headers for an already normalized trace context. */
+export function createTelemetryTraceHeaders(
+  context: TelemetryTraceContextInput,
+): Readonly<Record<string, string>> {
+  const normalizedContext = normalizeTelemetryTraceContext(context);
+  const headers: Record<string, string> = {};
+
+  if (normalizedContext.parentEventId) {
+    headers["x-heimdall-parent-event-id"] = normalizedContext.parentEventId;
+  }
+  if (normalizedContext.requestId) {
+    headers["x-request-id"] = normalizedContext.requestId;
+  }
+  if (normalizedContext.traceparent) {
+    headers.traceparent = normalizedContext.traceparent;
+  }
+  if (normalizedContext.tracestate) {
+    headers.tracestate = normalizedContext.tracestate;
+  }
+
+  return headers;
+}
+
 /** Creates service-level observability handles from config or environment variables. */
 export function createObservabilityRuntime(
   options: ObservabilityRuntimeOptions = {},
@@ -1141,6 +1223,64 @@ function shouldDropTelemetryMetricLabel(key: string): boolean {
     (highCardinalityKey) =>
       normalizedKey === highCardinalityKey || normalizedKey.endsWith(`_${highCardinalityKey}`),
   );
+}
+
+/** Reads a header value from a Headers object or plain record. */
+function readTelemetryHeader(
+  headers: TelemetryTraceHeaderSource,
+  name: string,
+): string | undefined {
+  if (headers instanceof Headers) {
+    return headers.get(name) ?? undefined;
+  }
+
+  return headers[name] ?? headers[name.toLowerCase()];
+}
+
+/** Normalizes bounded trace context text fields. */
+function normalizeTraceContextText(
+  value: string | undefined,
+  maxLength: number,
+): string | undefined {
+  const normalizedValue = emptyToUndefined(value);
+  if (!normalizedValue || /[\r\n]/u.test(normalizedValue)) {
+    return undefined;
+  }
+
+  return normalizedValue.slice(0, maxLength);
+}
+
+/** Normalizes a W3C traceparent header value. */
+function normalizeTraceparent(value: string | undefined): string | undefined {
+  const normalizedValue = emptyToUndefined(value)?.toLowerCase();
+  if (!normalizedValue) {
+    return undefined;
+  }
+
+  const match =
+    /^(?<version>[0-9a-f]{2})-(?<traceId>[0-9a-f]{32})-(?<spanId>[0-9a-f]{16})-(?<flags>[0-9a-f]{2})$/u.exec(
+      normalizedValue,
+    );
+  if (!match?.groups || match.groups.version === "ff") {
+    return undefined;
+  }
+  const traceId = match.groups.traceId;
+  const spanId = match.groups.spanId;
+  if (!traceId || !spanId || /^0+$/u.test(traceId) || /^0+$/u.test(spanId)) {
+    return undefined;
+  }
+
+  return normalizedValue;
+}
+
+/** Normalizes a bounded W3C tracestate header value. */
+function normalizeTracestate(value: string | undefined): string | undefined {
+  const normalizedValue = emptyToUndefined(value);
+  if (!normalizedValue || normalizedValue.length > 512 || /[\r\n]/u.test(normalizedValue)) {
+    return undefined;
+  }
+
+  return normalizedValue;
 }
 
 /** Returns a product-safe fallback message for an error class. */

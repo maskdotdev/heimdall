@@ -6,9 +6,12 @@ import {
   createStructuredTelemetryLogger,
   createTelemetryMetricPoint,
   createTelemetryMetricRecorder,
+  createTelemetryTraceContextFromHeaders,
+  createTelemetryTraceHeaders,
   DEFAULT_OBSERVABILITY_CONFIG,
   loadObservabilityConfig,
   normalizeAdminControlPlaneTelemetryEvent,
+  normalizeTelemetryTraceContext,
   OBSERVABILITY_METRIC_NAMES,
   ObservabilityConfigValidationError,
   recordAdminControlPlaneTelemetryEvent,
@@ -273,6 +276,57 @@ describe("structured telemetry metrics", () => {
         value: 1,
       },
       target: "heimdall.metrics",
+    });
+  });
+});
+
+describe("telemetry trace context", () => {
+  it("normalizes valid trace context fields", () => {
+    const context = normalizeTelemetryTraceContext({
+      parentEventId: " webhook_1 ",
+      requestId: " req_1 ",
+      traceparent: "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01",
+      tracestate: "vendor=value",
+    });
+
+    expect(context).toEqual({
+      parentEventId: "webhook_1",
+      requestId: "req_1",
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "vendor=value",
+    });
+  });
+
+  it("drops invalid trace context fields instead of propagating them", () => {
+    const context = normalizeTelemetryTraceContext({
+      parentEventId: "bad\nheader",
+      requestId: "req_1",
+      traceparent: "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+      tracestate: "bad\rstate",
+    });
+
+    expect(context).toEqual({
+      requestId: "req_1",
+    });
+  });
+
+  it("extracts and injects trace context headers", () => {
+    const headers = createTelemetryTraceHeaders(
+      createTelemetryTraceContextFromHeaders(
+        new Headers({
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          tracestate: "vendor=value",
+          "x-heimdall-parent-event-id": "webhook_1",
+          "x-request-id": "req_1",
+        }),
+      ),
+    );
+
+    expect(headers).toEqual({
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "vendor=value",
+      "x-heimdall-parent-event-id": "webhook_1",
+      "x-request-id": "req_1",
     });
   });
 });
