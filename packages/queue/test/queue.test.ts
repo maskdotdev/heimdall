@@ -41,6 +41,13 @@ const syncInstallationEnvelope = {
   },
 } as const;
 
+/** Creates a sync installation envelope with a unique durable identity. */
+const syncInstallationEnvelopeForKey = (idempotencyKey: string) => ({
+  ...syncInstallationEnvelope,
+  jobId: `job_${idempotencyKey.replaceAll(":", "_")}`,
+  idempotencyKey,
+});
+
 const durableJob = (overrides: Partial<DurableJob> = {}): DurableJob => ({
   backgroundJobId: "job_row_test",
   queueName: QUEUE_NAMES.repoSync,
@@ -87,6 +94,78 @@ describe("durable outbox dispatcher", () => {
     await dispatchPendingJobs({ store, queueProducer: producer });
 
     expect(producer.jobs).toHaveLength(1);
+  });
+});
+
+describe("durable job recovery", () => {
+  it("repairs stale running jobs and leaves fresh jobs untouched", async () => {
+    const now = new Date("2026-01-01T01:00:00.000Z");
+    const staleTimestamp = new Date("2026-01-01T00:00:00.000Z");
+    const freshTimestamp = new Date("2026-01-01T00:45:00.000Z");
+    const retryableEnvelope = syncInstallationEnvelopeForKey("sync:retryable");
+    const exhaustedEnvelope = syncInstallationEnvelopeForKey("sync:exhausted");
+    const freshEnvelope = syncInstallationEnvelopeForKey("sync:fresh");
+    const unknownAgeEnvelope = syncInstallationEnvelopeForKey("sync:unknown_age");
+    const store = new InMemoryDurableJobStore([
+      durableJob({
+        attempts: 1,
+        backgroundJobId: "job_retryable",
+        envelope: retryableEnvelope,
+        startedAt: staleTimestamp,
+        status: "running",
+        updatedAt: staleTimestamp,
+      }),
+      durableJob({
+        attempts: 3,
+        backgroundJobId: "job_exhausted",
+        envelope: exhaustedEnvelope,
+        maxAttempts: 3,
+        startedAt: staleTimestamp,
+        status: "running",
+        updatedAt: staleTimestamp,
+      }),
+      durableJob({
+        attempts: 1,
+        backgroundJobId: "job_fresh",
+        envelope: freshEnvelope,
+        startedAt: freshTimestamp,
+        status: "running",
+        updatedAt: freshTimestamp,
+      }),
+      durableJob({
+        attempts: 1,
+        backgroundJobId: "job_unknown_age",
+        envelope: unknownAgeEnvelope,
+        status: "running",
+      }),
+    ]);
+
+    await expect(
+      store.recoverStaleRunningJobs({
+        now,
+        staleAfterMs: 30 * 60 * 1_000,
+      }),
+    ).resolves.toEqual({
+      deadLettered: 1,
+      inspected: 2,
+      jobIds: ["job_retryable", "job_exhausted"],
+      requeued: 1,
+    });
+
+    const jobs = new Map(store.list().map((job) => [job.backgroundJobId, job]));
+    expect(jobs.get("job_retryable")).toMatchObject({
+      error: expect.objectContaining({ name: "StaleDurableJobError" }),
+      status: "queued",
+      updatedAt: now,
+    });
+    expect(jobs.get("job_exhausted")).toMatchObject({
+      completedAt: now,
+      error: expect.objectContaining({ name: "StaleDurableJobError" }),
+      status: "dead_lettered",
+      updatedAt: now,
+    });
+    expect(jobs.get("job_fresh")?.status).toBe("running");
+    expect(jobs.get("job_unknown_age")?.status).toBe("running");
   });
 });
 

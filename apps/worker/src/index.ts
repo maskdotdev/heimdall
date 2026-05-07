@@ -145,6 +145,12 @@ import IORedis from "ioredis";
 const DEFAULT_INDEX_ARTIFACT_ROOT = ".heimdall/index-artifacts";
 /** Default maximum time allowed for one indexer run. */
 const DEFAULT_INDEXER_TIMEOUT_MS = 120_000;
+/** Default age after which a running durable job is considered stale. */
+const DEFAULT_STALE_RUNNING_JOB_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
+/** Default delay between stale running job recovery passes. */
+const DEFAULT_STALE_RUNNING_JOB_RECOVERY_INTERVAL_MS = 60_000;
+/** Default stale running rows repaired by one worker maintenance pass. */
+const DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE = 100;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
 const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
 /** Maximum chunk IDs placed in one repair-triggered embedding batch. */
@@ -216,6 +222,16 @@ export type WorkerLlmGatewayEnvironment = Readonly<Record<string, string | undef
 
 /** Environment values used to select the worker embedding provider. */
 export type WorkerEmbeddingProviderEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Worker queue maintenance settings derived from environment values. */
+type WorkerQueueMaintenanceConfig = {
+  /** Maximum stale running rows to repair in one pass. */
+  readonly recoveryBatchSize: number;
+  /** Milliseconds between stale running recovery passes. */
+  readonly recoveryIntervalMs: number;
+  /** Running duration after which a durable job is considered stale. */
+  readonly staleRunningTimeoutMs: number;
+};
 
 /** Runtime dependencies used while creating a worker static-analysis runner. */
 export type WorkerStaticAnalysisRunnerOptions = {
@@ -1074,6 +1090,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;
+  const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
   const indexerDriver =
     createWorkerIndexerDriverFromEnvironment(process.env, {
       indexArtifactRoot,
@@ -1101,6 +1118,22 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     metrics: observability.metrics,
     traces: observability.traces,
   });
+  const recoverStaleRunningJobs = async () => {
+    const result = await store.recoverStaleRunningJobs({
+      limit: queueMaintenance.recoveryBatchSize,
+      staleAfterMs: queueMaintenance.staleRunningTimeoutMs,
+    });
+    if (result.requeued > 0 || result.deadLettered > 0) {
+      observability.logger.warn("stale durable jobs recovered", {
+        attributes: {
+          "event.name": "worker.queue.stale_jobs_recovered",
+          "job.dead_lettered": result.deadLettered,
+          "job.inspected": result.inspected,
+          "job.requeued": result.requeued,
+        },
+      });
+    }
+  };
   const workers = [
     QUEUE_NAMES.repoSync,
     QUEUE_NAMES.indexing,
@@ -1118,7 +1151,13 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       console.error("outbox dispatch failed", error);
     });
   }, 5_000);
+  const staleRunningRecoveryInterval = setInterval(() => {
+    recoverStaleRunningJobs().catch((error: unknown) => {
+      console.error("stale running job recovery failed", error);
+    });
+  }, queueMaintenance.recoveryIntervalMs);
 
+  await recoverStaleRunningJobs();
   await dispatch();
   observability.logger.info("worker service started", {
     attributes: {
@@ -1133,6 +1172,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   return {
     close: async () => {
       clearInterval(dispatchInterval);
+      clearInterval(staleRunningRecoveryInterval);
       observability.logger.info("worker service stopping", {
         attributes: { "event.name": "worker.service.stopping" },
       });
@@ -1732,6 +1772,23 @@ export async function verifyWorkerIndexerCapabilities(
   );
 
   return capabilities;
+}
+
+/** Creates queue maintenance settings from worker environment values. */
+function createWorkerQueueMaintenanceConfig(
+  env: Readonly<Record<string, string | undefined>>,
+): WorkerQueueMaintenanceConfig {
+  return {
+    recoveryBatchSize:
+      optionalPositiveInteger(env.HEIMDALL_QUEUE_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE) ??
+      DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE,
+    recoveryIntervalMs:
+      optionalPositiveInteger(env.HEIMDALL_QUEUE_STALE_RUNNING_JOB_RECOVERY_INTERVAL_MS) ??
+      DEFAULT_STALE_RUNNING_JOB_RECOVERY_INTERVAL_MS,
+    staleRunningTimeoutMs:
+      optionalPositiveInteger(env.HEIMDALL_QUEUE_STALE_RUNNING_JOB_TIMEOUT_MS) ??
+      DEFAULT_STALE_RUNNING_JOB_TIMEOUT_MS,
+  };
 }
 
 /** Parses a positive integer environment value. */

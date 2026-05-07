@@ -17,7 +17,7 @@ import {
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import { type Job as BullMqJob, Queue } from "bullmq";
-import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Queue names used by Heimdall workers. */
@@ -52,6 +52,14 @@ export type DurableJob<TPayload extends JobPayload = JobPayload> = QueueJobInten
   readonly attempts: number;
   /** Maximum attempts allowed for the job. */
   readonly maxAttempts: number;
+  /** Time the durable worker last started this job. */
+  readonly startedAt?: Date;
+  /** Time the durable job reached a terminal state. */
+  readonly completedAt?: Date;
+  /** Last durable job row update time known to the store. */
+  readonly updatedAt?: Date;
+  /** Last JSON-safe error recorded for this durable job. */
+  readonly error?: SerializedJobError;
 };
 
 /** Minimal queue producer interface used by ingestion code. */
@@ -70,6 +78,28 @@ export type ClaimPendingJobsOptions = {
   readonly now: Date;
 };
 
+/** Options used to repair durable jobs stuck in the running state. */
+export type RecoverStaleRunningJobsOptions = {
+  /** Maximum stale running rows to repair in one pass. */
+  readonly limit?: number;
+  /** Current time used to calculate the stale cutoff. */
+  readonly now?: Date;
+  /** Running duration after which a job is considered stale. */
+  readonly staleAfterMs: number;
+};
+
+/** Result returned by one stale running job recovery pass. */
+export type RecoverStaleRunningJobsResult = {
+  /** Number of stale running jobs considered for repair. */
+  readonly inspected: number;
+  /** Number of stale jobs moved back to queued for another BullMQ attempt. */
+  readonly requeued: number;
+  /** Number of stale jobs moved to dead-lettered after exhausting attempts. */
+  readonly deadLettered: number;
+  /** Durable job row IDs that were repaired. */
+  readonly jobIds: readonly string[];
+};
+
 /** Durable lifecycle state returned when a worker starts a job. */
 export type DurableJobRunState = "running" | "already_completed" | "missing";
 
@@ -77,6 +107,10 @@ export type DurableJobRunState = "running" | "already_completed" | "missing";
 export type DurableJobStore = {
   /** Returns pending jobs eligible for enqueue. */
   readonly claimPending: (options: ClaimPendingJobsOptions) => Promise<readonly DurableJob[]>;
+  /** Repairs stale running jobs after worker crashes or lost BullMQ attempts. */
+  readonly recoverStaleRunningJobs: (
+    options: RecoverStaleRunningJobsOptions,
+  ) => Promise<RecoverStaleRunningJobsResult>;
   /** Marks a pending durable job as queued after BullMQ accepts it. */
   readonly markQueued: (job: DurableJob) => Promise<void>;
   /** Marks a queued durable job as running and records a handler attempt. */
@@ -134,7 +168,10 @@ export type DurableJobProcessorOptions = {
 };
 
 const jobEnvelopeSchema = JobEnvelopeSchema(JobPayloadSchema);
+const defaultStaleRunningJobRecoveryLimit = 100;
+const maxStaleRunningJobRecoveryLimit = 1_000;
 const queueNameValues = new Set<string>(Object.values(QUEUE_NAMES));
+const staleRunningJobErrorName = "StaleDurableJobError";
 
 /** Parses and validates a durable job envelope. */
 export function parseJobEnvelope(input: unknown): JobEnvelope<JobPayload> {
@@ -199,6 +236,48 @@ export class InMemoryDurableJobStore implements DurableJobStore {
       .slice(0, options.limit);
   }
 
+  /** Repairs stale running jobs after worker crashes or lost BullMQ attempts. */
+  public async recoverStaleRunningJobs(
+    options: RecoverStaleRunningJobsOptions,
+  ): Promise<RecoverStaleRunningJobsResult> {
+    const now = options.now ?? new Date();
+    const cutoff = staleRunningJobCutoff(now, options.staleAfterMs);
+    const error = staleRunningJobError(cutoff);
+    const staleJobs = this.list()
+      .filter((job) => isStaleRunningJob(job, cutoff))
+      .slice(0, normalizeStaleRunningJobRecoveryLimit(options.limit));
+    let requeued = 0;
+    let deadLettered = 0;
+
+    for (const job of staleJobs) {
+      if (job.attempts < job.maxAttempts) {
+        this.jobs.set(this.key(job.envelope), {
+          ...job,
+          error,
+          status: "queued",
+          updatedAt: now,
+        });
+        requeued += 1;
+      } else {
+        this.jobs.set(this.key(job.envelope), {
+          ...job,
+          completedAt: now,
+          error,
+          status: "dead_lettered",
+          updatedAt: now,
+        });
+        deadLettered += 1;
+      }
+    }
+
+    return {
+      deadLettered,
+      inspected: staleJobs.length,
+      jobIds: staleJobs.map((job) => job.backgroundJobId),
+      requeued,
+    };
+  }
+
   /** Marks a pending durable job as queued. */
   public async markQueued(job: DurableJob): Promise<void> {
     const existing = this.jobs.get(this.key(job.envelope));
@@ -206,7 +285,11 @@ export class InMemoryDurableJobStore implements DurableJobStore {
       return;
     }
 
-    this.jobs.set(this.key(job.envelope), { ...existing, status: "queued" });
+    this.jobs.set(this.key(job.envelope), {
+      ...existing,
+      status: "queued",
+      updatedAt: new Date(),
+    });
   }
 
   /** Marks a queued durable job as running. */
@@ -219,10 +302,13 @@ export class InMemoryDurableJobStore implements DurableJobStore {
       return "already_completed";
     }
 
+    const now = new Date();
     this.jobs.set(this.key(envelope), {
       ...existing,
       attempts: existing.attempts + 1,
+      startedAt: now,
       status: "running",
+      updatedAt: now,
     });
     return "running";
   }
@@ -231,29 +317,46 @@ export class InMemoryDurableJobStore implements DurableJobStore {
   public async markCompleted(envelope: JobEnvelope<JobPayload>): Promise<void> {
     const existing = this.jobs.get(this.key(envelope));
     if (existing) {
-      this.jobs.set(this.key(envelope), { ...existing, status: "completed" });
+      const now = new Date();
+      this.jobs.set(this.key(envelope), {
+        ...existing,
+        completedAt: now,
+        status: "completed",
+        updatedAt: now,
+      });
     }
   }
 
   /** Marks a durable job as queued for retry. */
   public async markRetrying(
     envelope: JobEnvelope<JobPayload>,
-    _error: SerializedJobError,
+    error: SerializedJobError,
   ): Promise<void> {
     const existing = this.jobs.get(this.key(envelope));
     if (existing) {
-      this.jobs.set(this.key(envelope), { ...existing, status: "queued" });
+      this.jobs.set(this.key(envelope), {
+        ...existing,
+        error,
+        status: "queued",
+        updatedAt: new Date(),
+      });
     }
   }
 
   /** Marks a durable job as permanently failed. */
   public async markFailed(
     envelope: JobEnvelope<JobPayload>,
-    _error: SerializedJobError,
+    error: SerializedJobError,
   ): Promise<void> {
     const existing = this.jobs.get(this.key(envelope));
     if (existing) {
-      this.jobs.set(this.key(envelope), { ...existing, status: "failed" });
+      this.jobs.set(this.key(envelope), {
+        ...existing,
+        completedAt: new Date(),
+        error,
+        status: "failed",
+        updatedAt: new Date(),
+      });
     }
   }
 
@@ -288,7 +391,53 @@ export class DrizzleDurableJobStore implements DurableJobStore {
       status: row.status as JobStatus,
       attempts: row.attempts,
       maxAttempts: row.maxAttempts,
+      ...(row.startedAt ? { startedAt: row.startedAt } : {}),
+      ...(row.completedAt ? { completedAt: row.completedAt } : {}),
+      updatedAt: row.updatedAt,
     }));
+  }
+
+  /** Repairs stale running jobs after worker crashes or lost BullMQ attempts. */
+  public async recoverStaleRunningJobs(
+    options: RecoverStaleRunningJobsOptions,
+  ): Promise<RecoverStaleRunningJobsResult> {
+    const now = options.now ?? new Date();
+    const cutoff = staleRunningJobCutoff(now, options.staleAfterMs);
+    const limit = normalizeStaleRunningJobRecoveryLimit(options.limit);
+    const error = staleRunningJobError(cutoff);
+    const rows = await this.db
+      .select({
+        attempts: backgroundJobs.attempts,
+        backgroundJobId: backgroundJobs.backgroundJobId,
+        maxAttempts: backgroundJobs.maxAttempts,
+      })
+      .from(backgroundJobs)
+      .where(
+        and(
+          eq(backgroundJobs.status, "running"),
+          or(
+            lte(backgroundJobs.startedAt, cutoff),
+            and(isNull(backgroundJobs.startedAt), lte(backgroundJobs.updatedAt, cutoff)),
+          ),
+        ),
+      )
+      .orderBy(asc(backgroundJobs.updatedAt))
+      .limit(limit);
+    const retryableIds = rows
+      .filter((row) => row.attempts < row.maxAttempts)
+      .map((row) => row.backgroundJobId);
+    const exhaustedIds = rows
+      .filter((row) => row.attempts >= row.maxAttempts)
+      .map((row) => row.backgroundJobId);
+    const requeued = await this.requeueStaleRunningJobs(retryableIds, error, now);
+    const deadLettered = await this.deadLetterStaleRunningJobs(exhaustedIds, error, now);
+
+    return {
+      deadLettered: deadLettered.length,
+      inspected: rows.length,
+      jobIds: [...requeued, ...deadLettered],
+      requeued: requeued.length,
+    };
   }
 
   /** Marks a pending durable job as queued. */
@@ -400,6 +549,65 @@ export class DrizzleDurableJobStore implements DurableJobStore {
           eq(backgroundJobs.jobKey, envelope.idempotencyKey),
         ),
       );
+  }
+
+  /** Moves retryable stale running rows back to queued. */
+  private async requeueStaleRunningJobs(
+    backgroundJobIds: readonly string[],
+    error: SerializedJobError,
+    now: Date,
+  ): Promise<readonly string[]> {
+    if (backgroundJobIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .update(backgroundJobs)
+      .set({
+        completedAt: null,
+        error,
+        startedAt: null,
+        status: "queued",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(backgroundJobs.status, "running"),
+          inArray(backgroundJobs.backgroundJobId, backgroundJobIds),
+        ),
+      )
+      .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
+
+    return rows.map((row) => row.backgroundJobId);
+  }
+
+  /** Moves exhausted stale running rows to the dead-letter state. */
+  private async deadLetterStaleRunningJobs(
+    backgroundJobIds: readonly string[],
+    error: SerializedJobError,
+    now: Date,
+  ): Promise<readonly string[]> {
+    if (backgroundJobIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .update(backgroundJobs)
+      .set({
+        completedAt: now,
+        error,
+        status: "dead_lettered",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(backgroundJobs.status, "running"),
+          inArray(backgroundJobs.backgroundJobId, backgroundJobIds),
+        ),
+      )
+      .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
+
+    return rows.map((row) => row.backgroundJobId);
   }
 }
 
@@ -686,6 +894,43 @@ function queueNameFromBullMqJob(job: BullMqJob<unknown>): QueueName | "unknown" 
   }
 
   return "unknown";
+}
+
+/** Returns whether a durable job is running beyond the configured cutoff. */
+function isStaleRunningJob(job: DurableJob, cutoff: Date): boolean {
+  const runningTimestamp = job.startedAt ?? job.updatedAt;
+
+  return (
+    job.status === "running" &&
+    runningTimestamp !== undefined &&
+    runningTimestamp.getTime() <= cutoff.getTime()
+  );
+}
+
+/** Calculates the stale running cutoff from a current time and duration. */
+function staleRunningJobCutoff(now: Date, staleAfterMs: number): Date {
+  const normalizedStaleAfterMs =
+    Number.isFinite(staleAfterMs) && staleAfterMs > 0 ? Math.trunc(staleAfterMs) : 1;
+
+  return new Date(now.getTime() - normalizedStaleAfterMs);
+}
+
+/** Builds a durable error payload for stale running job repair. */
+function staleRunningJobError(cutoff: Date): SerializedJobError {
+  return {
+    message: `Durable job exceeded the running timeout before ${cutoff.toISOString()}.`,
+    name: staleRunningJobErrorName,
+  };
+}
+
+/** Normalizes stale running recovery limits to a bounded positive integer. */
+function normalizeStaleRunningJobRecoveryLimit(limit: number | undefined): number {
+  const requestedLimit =
+    limit === undefined || !Number.isFinite(limit) || limit <= 0
+      ? defaultStaleRunningJobRecoveryLimit
+      : Math.trunc(limit);
+
+  return Math.min(maxStaleRunningJobRecoveryLimit, Math.max(1, requestedLimit));
 }
 
 function toQueueName(value: string): QueueName {

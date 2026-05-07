@@ -42,6 +42,14 @@ work without a network provider. For OpenAI-compatible embeddings, set `EMBEDDIN
 `EMBEDDING_DIMENSIONS=1536` unless the database vector schema and selected model are changed
 together.
 
+## Queue Maintenance
+
+Workers periodically repair durable jobs that stay in `running` after a crash or lost BullMQ
+attempt. Configure `HEIMDALL_QUEUE_STALE_RUNNING_JOB_TIMEOUT_MS`,
+`HEIMDALL_QUEUE_STALE_RUNNING_JOB_RECOVERY_INTERVAL_MS`, and
+`HEIMDALL_QUEUE_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE` to tune the timeout, sweep interval, and
+batch size. The default timeout is six hours.
+
 ## Repository Structure
 
 ```text
