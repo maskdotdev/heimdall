@@ -141,9 +141,38 @@ export type OpenAIEmbeddingProviderOptions = {
   readonly organization?: string;
   /** Optional OpenAI project header value. */
   readonly project?: string;
+  /** Optional bounded retry policy for transient provider failures. */
+  readonly retryPolicy?: Partial<OpenAIEmbeddingRetryPolicy>;
+  /** Optional retry delay hook for tests or alternate runtimes. */
+  readonly retryDelay?: OpenAIEmbeddingRetryDelay;
   /** Optional request timeout in milliseconds. */
   readonly timeoutMs?: number;
 };
+
+/** Retry policy used by the OpenAI-compatible embeddings provider. */
+export type OpenAIEmbeddingRetryPolicy = {
+  /** Maximum number of total attempts, including the first request. */
+  readonly maxAttempts: number;
+  /** Base exponential backoff delay in milliseconds. */
+  readonly baseDelayMs: number;
+  /** Maximum backoff delay in milliseconds. */
+  readonly maxDelayMs: number;
+  /** Jitter ratio applied to the exponential delay. */
+  readonly jitterRatio: number;
+  /** Error codes that may be retried when the error is marked retryable. */
+  readonly retryableErrorCodes: readonly EmbeddingProviderErrorCode[];
+};
+
+/** Retry delay hook used between OpenAI-compatible embedding attempts. */
+export type OpenAIEmbeddingRetryDelay = (
+  delayMs: number,
+  context: {
+    /** One-based failed attempt number before the delay. */
+    readonly attempt: number;
+    /** Normalized provider error that caused the retry. */
+    readonly error: EmbeddingProviderError;
+  },
+) => Promise<void>;
 
 /** Normalized embedding provider failure codes. */
 export type EmbeddingProviderErrorCode =
@@ -156,6 +185,22 @@ export type EmbeddingProviderErrorCode =
   | "timeout"
   | "schema_validation_failed"
   | "unknown";
+
+/** Retryable OpenAI-compatible embedding provider error codes. */
+const OPENAI_EMBEDDING_RETRYABLE_ERROR_CODES = [
+  "provider_unavailable",
+  "provider_rate_limited",
+  "timeout",
+] as const satisfies readonly EmbeddingProviderErrorCode[];
+
+/** Default bounded retry policy for OpenAI-compatible embedding requests. */
+const DEFAULT_OPENAI_EMBEDDING_RETRY_POLICY = {
+  baseDelayMs: 250,
+  jitterRatio: 0.2,
+  maxAttempts: 3,
+  maxDelayMs: 5_000,
+  retryableErrorCodes: OPENAI_EMBEDDING_RETRYABLE_ERROR_CODES,
+} as const satisfies OpenAIEmbeddingRetryPolicy;
 
 /** Details used to construct a normalized embedding provider error. */
 export type EmbeddingProviderErrorOptions = {
@@ -916,6 +961,12 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   /** Optional project header value. */
   private readonly project: string | undefined;
 
+  /** Bounded retry policy used for transient provider failures. */
+  private readonly retryPolicy: OpenAIEmbeddingRetryPolicy;
+
+  /** Delay hook used between retry attempts. */
+  private readonly retryDelay: OpenAIEmbeddingRetryDelay;
+
   /** Optional request timeout in milliseconds. */
   private readonly timeoutMs: number | undefined;
 
@@ -929,6 +980,8 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     this.model = requireOpenAIProviderString(options.model, "model");
     this.organization = optionalProviderString(options.organization);
     this.project = optionalProviderString(options.project);
+    this.retryPolicy = normalizeOpenAIEmbeddingRetryPolicy(options.retryPolicy);
+    this.retryDelay = options.retryDelay ?? waitForOpenAIEmbeddingRetry;
     this.timeoutMs = optionalPositiveNumber(options.timeoutMs);
   }
 
@@ -954,10 +1007,6 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     }
 
     const response = await this.fetchEmbeddings(texts);
-    if (!response.ok) {
-      throw await openAIEmbeddingsHttpError(response, this.model);
-    }
-
     const body = await readOpenAIEmbeddingsJsonResponse(response, this.model);
     const embeddings = parseOpenAIEmbeddingsResponse(body, this.model);
 
@@ -967,8 +1016,41 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     };
   }
 
-  /** Sends one embeddings request with optional timeout handling. */
+  /** Sends one embeddings request with bounded retries for transient failures. */
   private async fetchEmbeddings(texts: readonly string[]): Promise<Response> {
+    for (let attempt = 1; attempt <= this.retryPolicy.maxAttempts; attempt += 1) {
+      try {
+        const response = await this.fetchEmbeddingsOnce(texts);
+        if (response.ok) {
+          return response;
+        }
+
+        throw await openAIEmbeddingsHttpError(response, this.model);
+      } catch (error) {
+        const providerError = normalizeOpenAIEmbeddingError(error, this.model, this.providerId);
+        if (!canRetryOpenAIEmbeddingError(providerError, attempt, this.retryPolicy)) {
+          throw providerError;
+        }
+
+        await this.retryDelay(
+          retryDelayMsForOpenAIEmbeddingError(providerError, attempt, this.retryPolicy),
+          {
+            attempt,
+            error: providerError,
+          },
+        );
+      }
+    }
+
+    throw new EmbeddingProviderError("OpenAI embeddings retry loop exited without a result.", {
+      code: "unknown",
+      model: this.model,
+      provider: this.providerId,
+    });
+  }
+
+  /** Sends one embeddings request with optional timeout handling. */
+  private async fetchEmbeddingsOnce(texts: readonly string[]): Promise<Response> {
     const controller = this.timeoutMs ? new AbortController() : undefined;
     const timeout =
       controller && this.timeoutMs
@@ -1548,6 +1630,23 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/** Returns a positive integer value or a safe fallback. */
+function boundedPositiveInteger(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+/** Returns a non-negative integer value or a safe fallback. */
+function boundedNonNegativeInteger(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+/** Returns a bounded retry jitter ratio or a safe fallback. */
+function boundedRetryJitterRatio(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : fallback;
+}
+
 /** Parses provider token counts without accepting negative or unsafe values. */
 function optionalNonNegativeInteger(value: number | undefined): number | undefined {
   if (value === undefined) {
@@ -1610,6 +1709,92 @@ function normalizeEmbeddingCachePart(value: string | undefined, fallback: string
 /** Returns whether an embedding provider error code is retryable by default. */
 function isRetryableEmbeddingProviderErrorCode(code: EmbeddingProviderErrorCode): boolean {
   return code === "provider_unavailable" || code === "provider_rate_limited" || code === "timeout";
+}
+
+/** Normalizes a partial retry policy into bounded provider retry settings. */
+function normalizeOpenAIEmbeddingRetryPolicy(
+  policy: Partial<OpenAIEmbeddingRetryPolicy> | undefined,
+): OpenAIEmbeddingRetryPolicy {
+  const baseDelayMs = boundedNonNegativeInteger(
+    policy?.baseDelayMs,
+    DEFAULT_OPENAI_EMBEDDING_RETRY_POLICY.baseDelayMs,
+  );
+  const maxDelayMs = Math.max(
+    baseDelayMs,
+    boundedNonNegativeInteger(policy?.maxDelayMs, DEFAULT_OPENAI_EMBEDDING_RETRY_POLICY.maxDelayMs),
+  );
+
+  return {
+    baseDelayMs,
+    jitterRatio: boundedRetryJitterRatio(
+      policy?.jitterRatio,
+      DEFAULT_OPENAI_EMBEDDING_RETRY_POLICY.jitterRatio,
+    ),
+    maxAttempts: boundedPositiveInteger(
+      policy?.maxAttempts,
+      DEFAULT_OPENAI_EMBEDDING_RETRY_POLICY.maxAttempts,
+    ),
+    maxDelayMs,
+    retryableErrorCodes:
+      policy?.retryableErrorCodes && policy.retryableErrorCodes.length > 0
+        ? policy.retryableErrorCodes
+        : DEFAULT_OPENAI_EMBEDDING_RETRY_POLICY.retryableErrorCodes,
+  };
+}
+
+/** Normalizes unknown embedding request failures to the provider error model. */
+function normalizeOpenAIEmbeddingError(
+  error: unknown,
+  model: string,
+  provider: string,
+): EmbeddingProviderError {
+  if (error instanceof EmbeddingProviderError) {
+    return error;
+  }
+
+  return new EmbeddingProviderError("OpenAI embeddings request failed.", {
+    cause: error,
+    code: "provider_unavailable",
+    model,
+    provider,
+    retryable: true,
+  });
+}
+
+/** Returns whether an OpenAI-compatible embeddings request should be retried. */
+function canRetryOpenAIEmbeddingError(
+  error: EmbeddingProviderError,
+  attempt: number,
+  policy: OpenAIEmbeddingRetryPolicy,
+): boolean {
+  return (
+    attempt < policy.maxAttempts &&
+    error.retryable &&
+    policy.retryableErrorCodes.includes(error.code)
+  );
+}
+
+/** Computes exponential backoff with jitter and bounded Retry-After support. */
+function retryDelayMsForOpenAIEmbeddingError(
+  error: EmbeddingProviderError,
+  attempt: number,
+  policy: OpenAIEmbeddingRetryPolicy,
+): number {
+  const exponentialDelayMs = policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
+  const jitterMs =
+    policy.jitterRatio > 0 ? Math.ceil(exponentialDelayMs * policy.jitterRatio * Math.random()) : 0;
+  const retryAfterMs = numberDetail(error.details, "retryAfterMs") ?? 0;
+
+  return Math.min(policy.maxDelayMs, Math.max(exponentialDelayMs + jitterMs, retryAfterMs));
+}
+
+/** Sleeps between OpenAI-compatible embedding retry attempts. */
+async function waitForOpenAIEmbeddingRetry(delayMs: number): Promise<void> {
+  if (delayMs <= 0) {
+    return;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 /** Returns whether a provider selector names an OpenAI-compatible embeddings provider. */
@@ -1807,6 +1992,7 @@ async function openAIEmbeddingsHttpErrorDetails(
     optionalProviderString(response.headers.get("x-request-id")) ??
     optionalProviderString(response.headers.get("openai-request-id"));
   const errorCode = openAIErrorCodeString(error?.code);
+  const retryAfterMs = openAIRetryAfterMs(response.headers.get("retry-after"));
 
   return {
     ...(errorCode ? { errorCode } : {}),
@@ -1814,6 +2000,7 @@ async function openAIEmbeddingsHttpErrorDetails(
       ? { errorType: optionalProviderString(error?.type) }
       : {}),
     ...(requestId ? { requestId } : {}),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
     status: response.status,
     statusFamily: `${Math.trunc(response.status / 100)}xx`,
   };
@@ -1849,6 +2036,26 @@ function openAIErrorCodeString(value: string | number | null | undefined): strin
   }
 
   return undefined;
+}
+
+/** Parses an OpenAI Retry-After header into bounded milliseconds. */
+function openAIRetryAfterMs(value: string | null): number | undefined {
+  const normalized = optionalProviderString(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  const seconds = Number(normalized);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(60_000, Math.ceil(seconds * 1_000));
+  }
+
+  const retryAtMs = Date.parse(normalized);
+  if (!Number.isFinite(retryAtMs)) {
+    return undefined;
+  }
+
+  return Math.min(60_000, Math.max(0, retryAtMs - Date.now()));
 }
 
 /** Maps OpenAI embeddings HTTP statuses into the provider error model. */
@@ -1887,4 +2094,13 @@ function openAIEmbeddingsErrorMappingForStatus(
 function stringDetail(details: Readonly<Record<string, unknown>>, key: string): string | undefined {
   const value = details[key];
   return typeof value === "string" ? value : undefined;
+}
+
+/** Reads one finite non-negative number field from a product-safe detail record. */
+function numberDetail(
+  details: Readonly<Record<string, unknown>> | undefined,
+  key: string,
+): number | undefined {
+  const value = details?.[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }

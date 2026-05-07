@@ -145,11 +145,66 @@ describe("createOpenAIEmbeddingProvider", () => {
     });
   });
 
-  it("normalizes OpenAI embeddings HTTP errors without exposing provider bodies", async () => {
+  it("retries retryable OpenAI embeddings failures with bounded backoff", async () => {
+    const retryDelays: number[] = [];
+    const responses = [
+      new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), {
+        headers: { "retry-after": "0.2" },
+        status: 429,
+      }),
+      new Response(JSON.stringify({ error: { code: "server_error" } }), { status: 500 }),
+      new Response(
+        JSON.stringify({
+          data: [{ embedding: [0.1, 0.2], index: 0 }],
+          usage: {
+            prompt_tokens: 3,
+            total_tokens: 3,
+          },
+        }),
+        { status: 200 },
+      ),
+    ];
     const provider = createOpenAIEmbeddingProvider({
       apiKey: "sk-test-openai-key",
-      fetch: async () =>
-        new Response(
+      fetch: async () => {
+        const response = responses.shift();
+        if (!response) {
+          throw new Error("Unexpected extra OpenAI embeddings call.");
+        }
+
+        return response;
+      },
+      model: "text-embedding-3-small",
+      retryDelay: async (delayMs) => {
+        retryDelays.push(delayMs);
+      },
+      retryPolicy: {
+        baseDelayMs: 10,
+        jitterRatio: 0,
+        maxAttempts: 3,
+        maxDelayMs: 1_000,
+      },
+    });
+
+    if (!provider.embedTextsWithUsage) {
+      throw new Error("Expected OpenAI provider to expose usage-aware embeddings.");
+    }
+    await expect(provider.embedTextsWithUsage(["first"])).resolves.toEqual({
+      usage: { inputTokens: 3, totalTokens: 3 },
+      vectors: [[0.1, 0.2]],
+    });
+    expect(retryDelays).toEqual([200, 20]);
+    expect(responses).toHaveLength(0);
+  });
+
+  it("normalizes OpenAI embeddings HTTP errors without exposing provider bodies", async () => {
+    const calls: RecordedOpenAIEmbeddingsFetchCall[] = [];
+    const provider = createOpenAIEmbeddingProvider({
+      apiKey: "sk-test-openai-key",
+      fetch: async (url, init) => {
+        calls.push({ ...(init ? { init } : {}), url: String(url) });
+
+        return new Response(
           JSON.stringify({
             error: {
               code: "invalid_api_key",
@@ -161,7 +216,8 @@ describe("createOpenAIEmbeddingProvider", () => {
             headers: { "x-request-id": "req_embedding_auth" },
             status: 401,
           },
-        ),
+        );
+      },
       model: "text-embedding-3-small",
     });
 
@@ -184,6 +240,7 @@ describe("createOpenAIEmbeddingProvider", () => {
       retryable: false,
     });
     expect(caughtError).not.toMatchObject({ message: expect.stringContaining("sk-secret-value") });
+    expect(calls).toHaveLength(1);
   });
 });
 
