@@ -18,8 +18,11 @@ type SmokeConfig = {
   readonly owner: string;
   readonly repo: string;
   readonly pullRequestNumber: number;
+  readonly mode: SmokeMode;
   readonly allowWrite: boolean;
 };
+
+type SmokeMode = "publish" | "stale_head";
 
 /** Serializes a value for explicit jsonb casts in Bun-compatible postgres.js bindings. */
 const toJsonb = (value: unknown): string => JSON.stringify(value);
@@ -129,8 +132,21 @@ const loadConfig = (): SmokeConfig => {
     owner: owner ?? "",
     repo: repo ?? "",
     pullRequestNumber: Number(pullRequestNumber),
+    mode: smokeMode(optionalEnv("HEIMDALL_GITHUB_SMOKE_MODE")),
     allowWrite: process.env.HEIMDALL_GITHUB_SMOKE_ALLOW_WRITE === "true",
   };
+};
+
+/** Parses the live publisher smoke mode. */
+const smokeMode = (value: string | undefined): SmokeMode => {
+  if (!value || value === "publish") {
+    return "publish";
+  }
+  if (value === "stale_head") {
+    return value;
+  }
+
+  throw new Error("HEIMDALL_GITHUB_SMOKE_MODE must be publish or stale_head.");
 };
 
 async function main(): Promise<void> {
@@ -170,9 +186,11 @@ async function main(): Promise<void> {
       pullRequestNumber: config.pullRequestNumber,
     });
     const smokeId = randomUUID().replaceAll("-", "").slice(0, 16);
+    const reviewHeadSha =
+      config.mode === "stale_head" ? `stale-${pullRequest.headSha}` : pullRequest.headSha;
     const orgId = `org_smoke_${smokeIdPart(config.providerInstallationId)}`;
     const repoId = `repo_smoke_${smokeIdPart(repository.providerRepoId)}`;
-    const snapshotId = `prs_smoke_${smokeIdPart(pullRequest.providerPullRequestId)}`;
+    const snapshotId = `prs_smoke_${smokeId}`;
     const reviewRunId = `rrn_smoke_${smokeId}`;
     const candidateFindingId = `fnd_smoke_candidate_${smokeId}`;
     const validatedFindingId = `fnd_smoke_validated_${smokeId}`;
@@ -297,7 +315,7 @@ async function main(): Promise<void> {
           ${pullRequest.baseRef},
           ${pullRequest.baseSha},
           ${pullRequest.headRef},
-          ${pullRequest.headSha},
+          ${reviewHeadSha},
           ${toJsonb(pullRequest.changedFiles)}::jsonb,
           ${pullRequest.diffHash},
           ${pullRequest.additions},
@@ -348,7 +366,7 @@ async function main(): Promise<void> {
           ${snapshotId},
           ${pullRequest.pullRequestNumber},
           ${pullRequest.baseSha},
-          ${pullRequest.headSha},
+          ${reviewHeadSha},
           'manual',
           'completed',
           ${now.toISOString()},
@@ -449,11 +467,18 @@ async function main(): Promise<void> {
         gitProvider: provider,
       },
     );
+    if (config.mode === "stale_head" && !result.staleHead) {
+      throw new Error("Expected stale-head publisher smoke to skip external publishing.");
+    }
+    if (config.mode === "publish" && result.staleHead) {
+      throw new Error("Expected publisher smoke to publish, but the PR head was stale.");
+    }
 
     console.log(
       JSON.stringify(
         {
           status: "completed",
+          mode: config.mode,
           owner: config.owner,
           repo: config.repo,
           pullRequestNumber: pullRequest.pullRequestNumber,

@@ -246,6 +246,11 @@ and set `HEIMDALL_GITHUB_SMOKE_ALLOW_WRITE=true` only when you intend to publish
 `HEIMDALL_GITHUB_SMOKE_INSTALLATION_ID` only when the local installation ID differs from the
 GitHub provider installation ID.
 
+Set `HEIMDALL_GITHUB_SMOKE_MODE=stale_head` to run the guarded stale-head path. That mode still
+seeds smoke rows in the configured database and reads the PR from GitHub, but it expects the
+publisher to skip external writes because the stored review head intentionally differs from the
+current PR head.
+
 See `docs/runbooks/github-dev-app.md` for the full app setup, permission checklist, and expected
 smoke evidence.
 

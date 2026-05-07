@@ -99,6 +99,18 @@ Expected result:
 - The smoke exits with status `0`.
 - The PR does not receive duplicate comments for the same smoke review run.
 
+Run the stale-head smoke mode:
+
+```bash
+HEIMDALL_GITHUB_SMOKE_MODE=stale_head pnpm --filter @repo/admin-tools smoke:publisher:github
+```
+
+Expected result:
+
+- The command exits with status `0`.
+- The JSON output includes `"mode": "stale_head"` and `"staleHead": true`.
+- GitHub does not receive a new check run, PR review, or summary comment for that smoke run.
+
 ## Verify Webhook-To-Publish
 
 Run the full guarded smoke:
