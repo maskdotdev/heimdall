@@ -33,6 +33,7 @@ import {
   type UpdateMemoryJobPayload,
 } from "@repo/contracts";
 import {
+  backgroundJobs,
   billingProviderRequests,
   createDatabaseClient,
   findingOutcomes,
@@ -144,6 +145,8 @@ const DEFAULT_INDEX_ARTIFACT_ROOT = ".heimdall/index-artifacts";
 const DEFAULT_INDEXER_TIMEOUT_MS = 120_000;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
 const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
+/** Maximum chunk IDs placed in one repair-triggered embedding batch. */
+const EMBEDDING_REPAIR_BATCH_SIZE = 128;
 
 /** Environment map used by worker runtime secret resolution. */
 type WorkerSecretEnvironment = Readonly<Record<string, string | undefined>>;
@@ -586,14 +589,17 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       }
 
       if (payload.embeddingJobId) {
-        await reconcileEmbeddingJob({
+        const result = await reconcileEmbeddingJob({
           db: options.db,
           embeddingJobId: payload.embeddingJobId,
         });
+        if (result && payload.model) {
+          await enqueueEmbeddingRepairBatches(options.db, payload, result.missingChunkIds);
+        }
         return;
       }
 
-      await repairEmbeddingJobs({
+      const result = await repairEmbeddingJobs({
         db: options.db,
         ...(payload.dimensions ? { dimensions: payload.dimensions } : {}),
         embeddingProfileVersion: payload.embeddingProfileVersion,
@@ -603,6 +609,17 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(payload.provider ? { provider: payload.provider } : {}),
         repoId: payload.repoId,
       });
+      if (payload.model) {
+        await Promise.all(
+          result.jobs.map((job) =>
+            enqueueEmbeddingRepairBatches(
+              options.db,
+              { ...payload, embeddingJobId: job.embeddingJobId },
+              job.missingChunkIds,
+            ),
+          ),
+        );
+      }
     },
     [JOB_TYPES.ReviewPullRequest]: async (envelope) => {
       const payload = asReviewPullRequestPayload(envelope.payload);
@@ -681,6 +698,59 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       );
     },
   };
+}
+
+/** Enqueues missing chunks discovered by an embedding repair pass as bounded batch jobs. */
+async function enqueueEmbeddingRepairBatches(
+  db: HeimdallDatabase,
+  payload: EmbeddingRepairJobPayload,
+  chunkIds: readonly string[],
+): Promise<void> {
+  if (!payload.embeddingJobId || !payload.model || chunkIds.length === 0) {
+    return;
+  }
+
+  for (let index = 0; index < chunkIds.length; index += EMBEDDING_REPAIR_BATCH_SIZE) {
+    const batchChunkIds = chunkIds.slice(index, index + EMBEDDING_REPAIR_BATCH_SIZE);
+    const batchIndex = index / EMBEDDING_REPAIR_BATCH_SIZE;
+    const jobKey = `embedding:repair:${payload.embeddingJobId}:batch:${batchIndex}`;
+    const batchPayload: EmbeddingBatchJobPayload = {
+      chunkIds: batchChunkIds,
+      embeddingJobId: payload.embeddingJobId,
+      embeddingModel: payload.model,
+      embeddingProfileVersion: payload.embeddingProfileVersion,
+      indexVersionId: payload.indexVersionId,
+      repoId: payload.repoId,
+    };
+    const now = new Date().toISOString();
+
+    await db
+      .insert(backgroundJobs)
+      .values({
+        backgroundJobId: stableWorkerId("job", ["embedding_repair_batch", jobKey]),
+        jobKey,
+        jobType: JOB_TYPES.EmbeddingBatch,
+        maxAttempts: 3,
+        metadata: {
+          embeddingRepairJobId: payload.embeddingJobId,
+          source: "embedding_repair",
+        },
+        payload: {
+          attempt: 0,
+          createdAt: now,
+          idempotencyKey: jobKey,
+          jobId: stableWorkerId("job", ["embedding_repair_batch", jobKey, "envelope"]),
+          jobType: JOB_TYPES.EmbeddingBatch,
+          maxAttempts: 3,
+          payload: batchPayload,
+          schemaVersion: "job_envelope.v1",
+        },
+        queueName: QUEUE_NAMES.embedding,
+        repoId: payload.repoId,
+        status: "pending",
+      })
+      .onConflictDoNothing();
+  }
 }
 
 /** Resolves the GitHub App private key through the security secret boundary. */

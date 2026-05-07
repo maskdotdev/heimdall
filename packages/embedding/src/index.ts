@@ -418,10 +418,14 @@ export type ReconcileEmbeddingJobInput = {
 export type ReconcileEmbeddingJobResult = {
   /** Durable embedding job row ID. */
   readonly embeddingJobId: string;
+  /** Chunk IDs that still lack matching stored vector rows after reconciliation. */
+  readonly missingChunkIds: readonly string[];
   /** Item rows changed from stale state to embedded. */
   readonly repairedItemCount: number;
   /** Recomputed parent progress after repairs. */
   readonly progress: EmbeddingJobProgressSnapshot;
+  /** Item rows reset from embedded because the matching vector row was missing. */
+  readonly resetItemCount: number;
 };
 
 /** Input used to repair a scoped set of durable embedding jobs. */
@@ -454,8 +458,12 @@ export type RepairEmbeddingJobsResult = {
   readonly embeddingJobCount: number;
   /** Per-job reconciliation results. */
   readonly jobs: readonly ReconcileEmbeddingJobResult[];
+  /** Chunk IDs that still lack matching stored vector rows after repair. */
+  readonly missingChunkIds: readonly string[];
   /** Total number of stale item rows repaired from stored vector rows. */
   readonly repairedItemCount: number;
+  /** Total number of stale embedded item rows reset to pending. */
+  readonly resetItemCount: number;
 };
 
 /** Result produced after embedding one chunk batch. */
@@ -750,7 +758,9 @@ export async function reconcileEmbeddingJob(
     .where(eq(embeddingJobItems.embeddingJobId, input.embeddingJobId));
   const chunkIds = items.map((item) => item.chunkId);
   const now = input.now?.() ?? new Date();
+  let missingChunkIds: string[] = [];
   let repairedItemCount = 0;
+  let resetItemCount = 0;
 
   if (chunkIds.length > 0) {
     const embeddedRows = await input.db
@@ -760,6 +770,12 @@ export async function reconcileEmbeddingJob(
     const embeddedChunkIds = new Set(embeddedRows.map((row) => row.chunkId));
     const repairableChunkIds = items
       .filter((item) => item.status !== "embedded" && embeddedChunkIds.has(item.chunkId))
+      .map((item) => item.chunkId);
+    const resetChunkIds = items
+      .filter((item) => item.status === "embedded" && !embeddedChunkIds.has(item.chunkId))
+      .map((item) => item.chunkId);
+    missingChunkIds = items
+      .filter((item) => item.status !== "skipped" && !embeddedChunkIds.has(item.chunkId))
       .map((item) => item.chunkId);
 
     if (repairableChunkIds.length > 0) {
@@ -779,12 +795,31 @@ export async function reconcileEmbeddingJob(
         );
       repairedItemCount = repairableChunkIds.length;
     }
+    if (resetChunkIds.length > 0) {
+      await input.db
+        .update(embeddingJobItems)
+        .set({
+          finishedAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          status: "pending",
+        })
+        .where(
+          and(
+            eq(embeddingJobItems.embeddingJobId, input.embeddingJobId),
+            inArray(embeddingJobItems.chunkId, resetChunkIds),
+          ),
+        );
+      resetItemCount = resetChunkIds.length;
+    }
   }
 
   return {
     embeddingJobId: input.embeddingJobId,
+    missingChunkIds,
     repairedItemCount,
     progress: await refreshEmbeddingJobProgress(input.db, input.embeddingJobId, now),
+    resetItemCount,
   };
 }
 
@@ -813,7 +848,9 @@ export async function repairEmbeddingJobs(
   return {
     embeddingJobCount: jobs.length,
     jobs,
+    missingChunkIds: jobs.flatMap((job) => job.missingChunkIds),
     repairedItemCount: jobs.reduce((sum, job) => sum + job.repairedItemCount, 0),
+    resetItemCount: jobs.reduce((sum, job) => sum + job.resetItemCount, 0),
   };
 }
 

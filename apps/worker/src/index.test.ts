@@ -428,6 +428,51 @@ describe("createWorkerHandlers", () => {
     expect(payloads).toEqual([validEmbeddingRepairJobPayloadFixture]);
   });
 
+  it("enqueues missing chunks discovered by embedding repair jobs", async () => {
+    const insertedRows: unknown[] = [];
+    const updatedValues: unknown[] = [];
+    const payload = {
+      ...validEmbeddingRepairJobPayloadFixture,
+      embeddingJobId: "embjob_1",
+      model: "text-embedding-3-small",
+    };
+    const handlers = createWorkerHandlers({
+      db: createWorkerEmbeddingRepairDatabaseStub({ insertedRows, updatedValues }),
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.EmbeddingRepair]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "embedding:repair:embjob_1",
+      jobId: "job_embedding_repair",
+      jobType: JOB_TYPES.EmbeddingRepair,
+      maxAttempts: 3,
+      payload,
+      schemaVersion: "embedding_repair_job.v1",
+    });
+
+    expect(updatedValues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "pending" })]),
+    );
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        jobKey: "embedding:repair:embjob_1:batch:0",
+        jobType: JOB_TYPES.EmbeddingBatch,
+        payload: expect.objectContaining({
+          payload: expect.objectContaining({
+            chunkIds: ["chunk_missing"],
+            embeddingJobId: "embjob_1",
+            embeddingModel: "text-embedding-3-small",
+          }),
+        }),
+        queueName: "embedding",
+        repoId: payload.repoId,
+        status: "pending",
+      }),
+    ]);
+  });
+
   it("dispatches sandbox cleanup jobs through the configured cleaner", async () => {
     const payloads: unknown[] = [];
     const handlers = createWorkerHandlers({
@@ -1298,6 +1343,66 @@ function createWorkerEmbeddingDatabaseStub(chunkIds: readonly string[]): never {
       }),
     }),
     transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(transaction),
+  };
+
+  return db as never;
+}
+
+/** Creates a database stub that supports the embedding repair handler path. */
+function createWorkerEmbeddingRepairDatabaseStub(options: {
+  /** Captures durable job rows inserted by repair requeue handling. */
+  readonly insertedRows: unknown[];
+  /** Captures progress and item updates from repair reconciliation. */
+  readonly updatedValues: unknown[];
+}): never {
+  const selectedRows: readonly (readonly unknown[])[] = [
+    [
+      {
+        dimensions: 2,
+        embeddingJobId: "embjob_1",
+        embeddingProfileVersion: "code_embedding_profile.v1",
+        indexVersionId: "idx_01HREVIEW",
+        model: "text-embedding-3-small",
+        provider: "hash",
+        repoId: "repo_01HREVIEW",
+      },
+    ],
+    [{ chunkId: "chunk_missing", status: "embedded" }],
+    [],
+    [{ embedded: 0, failed: 0, skipped: 0, total: 1 }],
+  ];
+  let selectIndex = 0;
+  const db = {
+    insert: (_table: unknown) => ({
+      values: (values: unknown) => {
+        options.insertedRows.push(values);
+
+        return {
+          onConflictDoNothing: async () => undefined,
+        };
+      },
+    }),
+    select: () => ({
+      from: (_table: unknown) => ({
+        where: (_condition: unknown) => {
+          const rows = selectedRows[selectIndex] ?? [];
+          selectIndex += 1;
+
+          return Object.assign(Promise.resolve(rows), {
+            limit: async (count: number) => rows.slice(0, count),
+          });
+        },
+      }),
+    }),
+    update: (_table: unknown) => ({
+      set: (values: unknown) => {
+        options.updatedValues.push(values);
+
+        return {
+          where: async (_condition: unknown) => undefined,
+        };
+      },
+    }),
   };
 
   return db as never;
