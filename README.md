@@ -254,6 +254,20 @@ current PR head.
 See `docs/runbooks/github-dev-app.md` for the full app setup, permission checklist, and expected
 smoke evidence.
 
+## Live GitHub Provider-Error Smoke
+
+Run the read-only provider-error smoke against a development GitHub App installation:
+
+```bash
+pnpm smoke:github-provider-errors
+```
+
+The default `not_found` case reads a deliberately missing repository and expects a typed
+`github_not_found` provider error plus the matching publisher error serialization. Set
+`HEIMDALL_GITHUB_ERROR_SMOKE_CASES=not_found,validation` and
+`HEIMDALL_GITHUB_ERROR_SMOKE_ALLOW_INVALID_WRITE=true` only when you also want GitHub to reject an
+invalid check-run head SHA.
+
 ## Live PR Review Smoke
 
 Run the full webhook-to-publish smoke only against a development GitHub App installation and a

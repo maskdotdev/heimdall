@@ -111,6 +111,35 @@ Expected result:
 - The JSON output includes `"mode": "stale_head"` and `"staleHead": true`.
 - GitHub does not receive a new check run, PR review, or summary comment for that smoke run.
 
+## Verify Provider Errors
+
+Run the read-only provider-error smoke:
+
+```bash
+pnpm smoke:github-provider-errors
+```
+
+Expected result:
+
+- The command exits with status `0`.
+- The JSON output includes a `not_found` case with `"observedCode": "github_not_found"`.
+- The JSON output includes the provider error serialized through the publisher error metadata path.
+- The request observations include GitHub status, path, request ID when present, and rate-limit
+  values when GitHub returns them.
+
+Optionally run the validation probe:
+
+```bash
+HEIMDALL_GITHUB_ERROR_SMOKE_CASES=not_found,validation \
+  HEIMDALL_GITHUB_ERROR_SMOKE_ALLOW_INVALID_WRITE=true \
+  pnpm smoke:github-provider-errors
+```
+
+Expected result:
+
+- The validation case observes `"github_validation"` from GitHub.
+- GitHub rejects the invalid check-run head SHA, so no valid check run is created.
+
 ## Verify Webhook-To-Publish
 
 Run the full guarded smoke:
