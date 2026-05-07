@@ -31,6 +31,13 @@ import {
 import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
+import {
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContext,
+} from "@repo/observability";
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
 import { createPublishPlan, hasPlannedPublishOperations, type PublishPlan } from "@repo/publisher";
 import {
@@ -168,6 +175,10 @@ export type ReviewOrchestratorDependencies = {
   readonly indexPollIntervalMs?: number;
   /** Optional clock for deterministic tests. */
   readonly now?: () => Date;
+  /** Optional trace context propagated from the durable review job. */
+  readonly traceContext?: TelemetryTraceContext;
+  /** Optional span recorder used for review pipeline instrumentation. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** PR snapshot fetch result used by review orchestration. */
@@ -242,6 +253,44 @@ export type ReviewOrchestrationResult = {
 
 /** Durable review orchestration stages that map to review run statuses. */
 export type ReviewOrchestrationStage = "index" | "retrieval" | "review" | "validation" | "publish";
+
+/** Review pipeline stages emitted as product-safe telemetry span attributes. */
+export type ReviewTelemetryStage =
+  | "quota"
+  | "snapshot"
+  | "workspace"
+  | "static_analysis"
+  | "index"
+  | "retrieval"
+  | "review"
+  | "validation"
+  | "staleness"
+  | "publish";
+
+/** Input used to start a product-safe review stage span. */
+export type ReviewTelemetryStageSpanInput = {
+  /** Low-cardinality attributes attached to the stage span. */
+  readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Review pipeline stage represented by the span. */
+  readonly stage: ReviewTelemetryStage;
+  /** Optional trace context propagated from the durable review job. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
+  /** Optional span recorder selected by the worker observability runtime. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
+};
+
+/** Review orchestration outcomes emitted on the top-level review span. */
+type ReviewTelemetryOutcome = "completed" | "failed" | "skipped" | "superseded";
+
+/** Options used while running a traced review stage operation. */
+type ReviewTelemetryStageOperationOptions<T> = {
+  /** Low-cardinality attributes attached when the stage starts. */
+  readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Builds low-cardinality attributes from the stage result before the span ends. */
+  readonly endAttributes?:
+    | ((result: T) => Readonly<Record<string, TelemetryAttributeValue | undefined>>)
+    | undefined;
+};
 
 /** Result from optional static-analysis orchestration. */
 type ReviewStaticAnalysisResult = {
@@ -345,16 +394,19 @@ export async function runPullRequestReview(
   let quotaReservation: ReserveQuotaResult | undefined;
   let quotaReservationFinalized = false;
   let currentStage = "snapshot";
+  const reviewSpan = startPullRequestReviewTelemetrySpan(input, dependencies);
 
   try {
     currentStage = "quota";
-    quotaReservation = await reserveReviewCreditQuota({
-      now: startedAt,
-      orgId: repositoryRecord.orgId,
-      planSnapshot,
-      quotaService,
-      reviewRunId,
-    });
+    quotaReservation = await runReviewTelemetryStage(dependencies, "quota", () =>
+      reserveReviewCreditQuota({
+        now: startedAt,
+        orgId: repositoryRecord.orgId,
+        planSnapshot,
+        quotaService,
+        reviewRunId,
+      }),
+    );
     if (!quotaReservation.decision.allowed || !quotaReservation.reservation) {
       const skippedAt = now().toISOString();
       reviewRun = await reviewRepository.upsertReviewRun({
@@ -384,12 +436,19 @@ export async function runPullRequestReview(
         metadata: { decision: quotaReservation.decision },
       });
 
-      return {
+      const result = {
         reviewRunId: reviewRun.reviewRunId,
         snapshotId: snapshot.snapshotId,
         candidateFindingCount: 0,
         validatedFindingCount: 0,
       };
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage,
+        outcome: "skipped",
+        result,
+      });
+
+      return result;
     }
     await reviewRepository.insertStageEvent({
       reviewRunId,
@@ -402,40 +461,62 @@ export async function runPullRequestReview(
       },
     });
     currentStage = "snapshot";
-    await reviewRepository.insertStageEvent({
-      reviewRunId,
-      stage: "snapshot",
-      status: "completed",
-      metadata: {
-        changedFileCount: snapshot.changedFileCount,
-        changedPathCount: snapshotDerivedArtifacts.changeSet.changedPathSet.length,
-        diffHash: snapshot.diffHash,
-        fileAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.files.length,
-        lineAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.lines.length,
-        ...(snapshotFetch.rawDiffBytes !== undefined
-          ? { rawDiffBytes: snapshotFetch.rawDiffBytes }
-          : {}),
-        ...(snapshotFetch.rawDiffHash !== undefined
-          ? { rawDiffHash: snapshotFetch.rawDiffHash }
-          : {}),
-        snapshotId: snapshot.snapshotId,
+    await runReviewTelemetryStage(
+      dependencies,
+      "snapshot",
+      async () => {
+        await reviewRepository.insertStageEvent({
+          reviewRunId,
+          stage: "snapshot",
+          status: "completed",
+          metadata: {
+            changedFileCount: snapshot.changedFileCount,
+            changedPathCount: snapshotDerivedArtifacts.changeSet.changedPathSet.length,
+            diffHash: snapshot.diffHash,
+            fileAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.files.length,
+            lineAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.lines.length,
+            ...(snapshotFetch.rawDiffBytes !== undefined
+              ? { rawDiffBytes: snapshotFetch.rawDiffBytes }
+              : {}),
+            ...(snapshotFetch.rawDiffHash !== undefined
+              ? { rawDiffHash: snapshotFetch.rawDiffHash }
+              : {}),
+            snapshotId: snapshot.snapshotId,
+          },
+        });
       },
-    });
+      {
+        endAttributes: () => ({
+          "review.changed_file_count": snapshot.changedFileCount,
+          "review.raw_diff_available": snapshotFetch.rawDiffBytes !== undefined,
+        }),
+      },
+    );
 
     const syncWorkspace =
       dependencies.syncWorkspace ??
       ((workspaceInput: GitHubRepositoryRef & { readonly commitSha: string }) =>
         syncRepositoryWorkspace(workspaceInput, { gitProvider: dependencies.gitProvider }));
     currentStage = "workspace";
-    const workspace = await syncWorkspace(
-      withOptionalWorkspaceRoot(
-        {
-          ...repository,
-          commitSha: snapshot.headSha,
-          keepWorkspace: Boolean(dependencies.staticAnalysisRunner),
-        },
-        dependencies.workspaceRoot,
-      ),
+    const workspace = await runReviewTelemetryStage(
+      dependencies,
+      "workspace",
+      () =>
+        syncWorkspace(
+          withOptionalWorkspaceRoot(
+            {
+              ...repository,
+              commitSha: snapshot.headSha,
+              keepWorkspace: Boolean(dependencies.staticAnalysisRunner),
+            },
+            dependencies.workspaceRoot,
+          ),
+        ),
+      {
+        endAttributes: (syncedWorkspace) => ({
+          "review.workspace_cleaned_up": syncedWorkspace.cleanedUp,
+        }),
+      },
     );
     await reviewRepository.insertStageEvent({
       reviewRunId,
@@ -447,22 +528,36 @@ export async function runPullRequestReview(
         workspacePath: workspace.workspacePath,
       },
     });
-    const staticAnalysis = await runStaticAnalysisForReview({
-      budgets: dependencies.staticAnalysisBudgets,
-      cleanupWorkspace:
-        Boolean(dependencies.staticAnalysisRunner) &&
-        !dependencies.syncWorkspace &&
-        !workspace.cleanedUp,
-      mode: dependencies.staticAnalysisMode,
-      now: now().toISOString(),
-      orgId: repositoryRecord.orgId,
-      repoId: snapshot.repoId,
-      reviewRepository,
-      reviewRunId,
-      runner: dependencies.staticAnalysisRunner,
-      snapshot,
-      workspace,
-    });
+    const staticAnalysis = await runReviewTelemetryStage(
+      dependencies,
+      "static_analysis",
+      () =>
+        runStaticAnalysisForReview({
+          budgets: dependencies.staticAnalysisBudgets,
+          cleanupWorkspace:
+            Boolean(dependencies.staticAnalysisRunner) &&
+            !dependencies.syncWorkspace &&
+            !workspace.cleanedUp,
+          mode: dependencies.staticAnalysisMode,
+          now: now().toISOString(),
+          orgId: repositoryRecord.orgId,
+          repoId: snapshot.repoId,
+          reviewRepository,
+          reviewRunId,
+          runner: dependencies.staticAnalysisRunner,
+          snapshot,
+          workspace,
+        }),
+      {
+        attributes: {
+          "review.static_analysis_configured": Boolean(dependencies.staticAnalysisRunner),
+        },
+        endAttributes: (result) => ({
+          "review.static_analysis_reported": result.report !== undefined,
+          "review.workspace_cleaned_up": result.workspaceCleanedUp,
+        }),
+      },
+    );
     const staticAnalysisReport = staticAnalysis.report;
 
     const artifacts = [
@@ -585,12 +680,22 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "index";
-    const indexVersionId = await waitForReadyIndexVersionId(dependencies.db, {
-      repoId: snapshot.repoId,
-      commitSha: snapshot.headSha,
-      timeoutMs: dependencies.indexWaitTimeoutMs ?? DEFAULT_INDEX_WAIT_TIMEOUT_MS,
-      pollIntervalMs: dependencies.indexPollIntervalMs ?? DEFAULT_INDEX_POLL_INTERVAL_MS,
-    });
+    const indexVersionId = await runReviewTelemetryStage(
+      dependencies,
+      "index",
+      () =>
+        waitForReadyIndexVersionId(dependencies.db, {
+          repoId: snapshot.repoId,
+          commitSha: snapshot.headSha,
+          timeoutMs: dependencies.indexWaitTimeoutMs ?? DEFAULT_INDEX_WAIT_TIMEOUT_MS,
+          pollIntervalMs: dependencies.indexPollIntervalMs ?? DEFAULT_INDEX_POLL_INTERVAL_MS,
+        }),
+      {
+        endAttributes: (readyIndexVersionId) => ({
+          "review.index_ready": readyIndexVersionId !== undefined,
+        }),
+      },
+    );
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "index",
@@ -613,13 +718,28 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "retrieval";
-    const contextBundle = await retrieveContext({
-      reviewRunId,
-      snapshot,
-      indexAvailable: Boolean(retrievalIndex) || (dependencies.indexAvailable ?? false),
-      ...(retrievalIndex ? { index: retrievalIndex } : {}),
-      timestamp: now().toISOString(),
-    });
+    const contextBundle = await runReviewTelemetryStage(
+      dependencies,
+      "retrieval",
+      () =>
+        retrieveContext({
+          reviewRunId,
+          snapshot,
+          indexAvailable: Boolean(retrievalIndex) || (dependencies.indexAvailable ?? false),
+          ...(retrievalIndex ? { index: retrievalIndex } : {}),
+          timestamp: now().toISOString(),
+        }),
+      {
+        attributes: {
+          "review.index_available":
+            Boolean(retrievalIndex) || (dependencies.indexAvailable ?? false),
+        },
+        endAttributes: (bundle) => ({
+          "review.context_item_count": bundle.items.length,
+          "review.estimated_context_tokens": bundle.tokenBudget.estimatedTokens,
+        }),
+      },
+    );
     const contextArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
       repoId: snapshot.repoId,
@@ -656,26 +776,41 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "review";
-    const candidateFindings = await runReviewPasses({
-      passes: staticAnalysisReport ? [staticAnalysisReviewPass, llmReviewPass] : [llmReviewPass],
-      context: {
-        reviewRunId,
-        snapshot,
-        contextBundle,
-        ...(staticAnalysisReport ? { staticAnalysisReport } : {}),
-        llmGateway: createUsageRecordingLlmGateway({
-          db: dependencies.db,
-          gateway: dependencies.llmGateway ?? createStaticLLMGateway(),
-          now,
-          orgId: repositoryRecord.orgId,
-          rateCard: dependencies.llmUsageRateCard ?? ZERO_COST_LLM_RATE_CARD,
-          repoId: snapshot.repoId,
-          reviewRunId,
-          usageLedger,
+    const candidateFindings = await runReviewTelemetryStage(
+      dependencies,
+      "review",
+      () =>
+        runReviewPasses({
+          passes: staticAnalysisReport
+            ? [staticAnalysisReviewPass, llmReviewPass]
+            : [llmReviewPass],
+          context: {
+            reviewRunId,
+            snapshot,
+            contextBundle,
+            ...(staticAnalysisReport ? { staticAnalysisReport } : {}),
+            llmGateway: createUsageRecordingLlmGateway({
+              db: dependencies.db,
+              gateway: dependencies.llmGateway ?? createStaticLLMGateway(),
+              now,
+              orgId: repositoryRecord.orgId,
+              rateCard: dependencies.llmUsageRateCard ?? ZERO_COST_LLM_RATE_CARD,
+              repoId: snapshot.repoId,
+              reviewRunId,
+              usageLedger,
+            }),
+            timestamp: now().toISOString(),
+          },
         }),
-        timestamp: now().toISOString(),
+      {
+        attributes: {
+          "review.static_analysis_reported": staticAnalysisReport !== undefined,
+        },
+        endAttributes: (findings) => ({
+          "review.candidate_finding_count": findings.length,
+        }),
       },
-    });
+    );
     for (const finding of candidateFindings) {
       await reviewRepository.insertCandidateFinding(finding);
     }
@@ -693,32 +828,54 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "validation";
-    const reviewMemoryFacts = await loadReviewMemoryFacts(dependencies.db, {
-      now: now(),
-      orgId: repositoryRecord.orgId,
-      repoId: snapshot.repoId,
-    });
-    const previousPublishedFindings = await reviewRepository.listPublishedFindingsForPullRequest({
-      excludeReviewRunId: reviewRunId,
-      pullRequestNumber: snapshot.pullRequestNumber,
-      repoId: snapshot.repoId,
-    });
-    const validationConfig = {
-      contextBundle,
-      memorySuppression: {
-        memoryFacts: reviewMemoryFacts,
-        orgId: repositoryRecord.orgId,
-        repoId: snapshot.repoId,
+    const validationTelemetryResult = await runReviewTelemetryStage(
+      dependencies,
+      "validation",
+      async () => {
+        const reviewMemoryFacts = await loadReviewMemoryFacts(dependencies.db, {
+          now: now(),
+          orgId: repositoryRecord.orgId,
+          repoId: snapshot.repoId,
+        });
+        const previousPublishedFindings =
+          await reviewRepository.listPublishedFindingsForPullRequest({
+            excludeReviewRunId: reviewRunId,
+            pullRequestNumber: snapshot.pullRequestNumber,
+            repoId: snapshot.repoId,
+          });
+        const validationConfig = {
+          contextBundle,
+          memorySuppression: {
+            memoryFacts: reviewMemoryFacts,
+            orgId: repositoryRecord.orgId,
+            repoId: snapshot.repoId,
+          },
+          policy: policyResult.snapshot.effectivePolicy,
+          previousPublishedFindings,
+        };
+        const validationResult = validateCandidateFindings({
+          snapshot,
+          findings: candidateFindings,
+          timestamp: now().toISOString(),
+          config: validationConfig,
+        });
+
+        return {
+          previousPublishedFindings,
+          reviewMemoryFacts,
+          validationResult,
+        };
       },
-      policy: policyResult.snapshot.effectivePolicy,
-      previousPublishedFindings,
-    };
-    const validationResult = validateCandidateFindings({
-      snapshot,
-      findings: candidateFindings,
-      timestamp: now().toISOString(),
-      config: validationConfig,
-    });
+      {
+        endAttributes: (result) => ({
+          "review.memory_fact_count": result.reviewMemoryFacts.length,
+          "review.previous_published_finding_count": result.previousPublishedFindings.length,
+          "review.validated_finding_count": result.validationResult.validated.length,
+        }),
+      },
+    );
+    const { previousPublishedFindings, reviewMemoryFacts, validationResult } =
+      validationTelemetryResult;
     const validatedFindings = validationResult.validated;
     for (const finding of validatedFindings) {
       await reviewRepository.insertValidatedFinding(finding);
@@ -889,10 +1046,20 @@ export async function runPullRequestReview(
         validationStats: validationResult.stats,
       },
     });
-    const currentStatus = await checkReviewRunCurrent(dependencies.gitProvider, {
-      ...pullRequestRef,
-      expectedHeadSha: snapshot.headSha,
-    });
+    const currentStatus = await runReviewTelemetryStage(
+      dependencies,
+      "staleness",
+      () =>
+        checkReviewRunCurrent(dependencies.gitProvider, {
+          ...pullRequestRef,
+          expectedHeadSha: snapshot.headSha,
+        }),
+      {
+        endAttributes: (status) => ({
+          "review.staleness_status": status,
+        }),
+      },
+    );
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "staleness",
@@ -937,15 +1104,27 @@ export async function runPullRequestReview(
         },
       });
 
-      return {
+      const result = {
         reviewRunId: reviewRun.reviewRunId,
         snapshotId: snapshot.snapshotId,
         candidateFindingCount: candidateFindings.length,
         validatedFindingCount: publishedFindingCount,
       };
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage: "staleness",
+        outcome: currentStatus === "superseded" ? "superseded" : "skipped",
+        result,
+      });
+
+      return result;
     }
 
     if (!publishPlanHasExternalWrites) {
+      recordReviewTelemetryStage(dependencies, "publish", {
+        "review.publish_enqueued": false,
+        "review.publish_mode": publishPlanModeLabel,
+        "review.stage_status": "skipped",
+      });
       await reviewRepository.insertStageEvent({
         reviewRunId,
         stage: "publish",
@@ -1035,12 +1214,19 @@ export async function runPullRequestReview(
         },
       });
 
-      return {
+      const result = {
         reviewRunId: reviewRun.reviewRunId,
         snapshotId: snapshot.snapshotId,
         candidateFindingCount: candidateFindings.length,
         validatedFindingCount: publishedFindingCount,
       };
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage: "publish",
+        outcome: "completed",
+        result,
+      });
+
+      return result;
     }
 
     const publishJobKey = createPublishJobKey(reviewRunId);
@@ -1051,14 +1237,26 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "publish";
-    await enqueuePublishJob(dependencies.db, {
-      reviewRunId,
-      repoId: snapshot.repoId,
-      publishPlanId,
-      publishPlanArtifactId: publishPlanArtifact.artifactId,
-      pullRequestNumber: snapshot.pullRequestNumber,
-      timestamp: now().toISOString(),
-    });
+    await runReviewTelemetryStage(
+      dependencies,
+      "publish",
+      () =>
+        enqueuePublishJob(dependencies.db, {
+          reviewRunId,
+          repoId: snapshot.repoId,
+          publishPlanId,
+          publishPlanArtifactId: publishPlanArtifact.artifactId,
+          pullRequestNumber: snapshot.pullRequestNumber,
+          timestamp: now().toISOString(),
+          traceContext: dependencies.traceContext,
+        }),
+      {
+        endAttributes: () => ({
+          "review.publish_enqueued": true,
+          "review.publish_mode": publishPlanModeLabel,
+        }),
+      },
+    );
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "publish",
@@ -1145,13 +1343,20 @@ export async function runPullRequestReview(
       },
     });
 
-    return {
+    const result = {
       reviewRunId: reviewRun.reviewRunId,
       snapshotId: snapshot.snapshotId,
       candidateFindingCount: candidateFindings.length,
       validatedFindingCount: publishedFindingCount,
       publishJobKey,
     };
+    endPullRequestReviewTelemetrySpan(reviewSpan, {
+      currentStage: "publish",
+      outcome: "completed",
+      result,
+    });
+
+    return result;
   } catch (error) {
     const failedAt = now().toISOString();
     if (quotaReservation?.reservation?.status === "reserved" && !quotaReservationFinalized) {
@@ -1187,6 +1392,118 @@ export async function runPullRequestReview(
       stage: currentStage,
       status: "failed",
       message: error instanceof Error ? error.message : String(error),
+    });
+    endPullRequestReviewTelemetrySpan(reviewSpan, {
+      currentStage,
+      error,
+      outcome: "failed",
+    });
+    throw error;
+  }
+}
+
+/** Input used to end the top-level pull request review telemetry span. */
+type EndPullRequestReviewTelemetrySpanInput = {
+  /** Last known review pipeline stage when the review span ended. */
+  readonly currentStage: string;
+  /** Optional error that caused the review span to fail. */
+  readonly error?: unknown;
+  /** Product-safe review outcome label. */
+  readonly outcome: ReviewTelemetryOutcome;
+  /** Optional orchestration result returned by the review run. */
+  readonly result?: ReviewOrchestrationResult;
+};
+
+/** Starts the top-level pull request review span when tracing is configured. */
+function startPullRequestReviewTelemetrySpan(
+  input: ReviewPullRequestInput,
+  dependencies: Pick<ReviewOrchestratorDependencies, "traceContext" | "traces">,
+): TelemetrySpanHandle | undefined {
+  return dependencies.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.pullRequestReview, {
+    attributes: { "review.trigger": input.trigger },
+    kind: "internal",
+    ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
+  });
+}
+
+/** Ends the top-level pull request review span with product-safe summary attributes. */
+function endPullRequestReviewTelemetrySpan(
+  span: TelemetrySpanHandle | undefined,
+  input: EndPullRequestReviewTelemetrySpanInput,
+): void {
+  span?.end({
+    attributes: {
+      "review.candidate_finding_count": input.result?.candidateFindingCount,
+      "review.current_stage": input.currentStage,
+      "review.outcome": input.outcome,
+      "review.publish_enqueued": input.result?.publishJobKey !== undefined,
+      "review.validated_finding_count": input.result?.validatedFindingCount,
+    },
+    ...(input.error !== undefined ? { error: input.error } : {}),
+  });
+}
+
+/** Starts a product-safe telemetry span for one review pipeline stage. */
+export function startReviewTelemetryStageSpan(
+  input: ReviewTelemetryStageSpanInput,
+): TelemetrySpanHandle | undefined {
+  return input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewPipelineStage, {
+    attributes: {
+      ...(input.attributes ?? {}),
+      "review.stage": input.stage,
+    },
+    kind: "internal",
+    ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+  });
+}
+
+/** Records an instantaneous review stage span for skipped or decision-only stages. */
+function recordReviewTelemetryStage(
+  dependencies: Pick<ReviewOrchestratorDependencies, "traceContext" | "traces">,
+  stage: ReviewTelemetryStage,
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+): void {
+  const span = startReviewTelemetryStageSpan({
+    attributes,
+    stage,
+    traceContext: dependencies.traceContext,
+    traces: dependencies.traces,
+  });
+  span?.end({
+    attributes: {
+      "review.stage_status": "completed",
+      ...attributes,
+    },
+  });
+}
+
+/** Runs one review stage operation and records success or failure as a telemetry span. */
+async function runReviewTelemetryStage<T>(
+  dependencies: Pick<ReviewOrchestratorDependencies, "traceContext" | "traces">,
+  stage: ReviewTelemetryStage,
+  operation: () => Promise<T>,
+  options: ReviewTelemetryStageOperationOptions<T> = {},
+): Promise<T> {
+  const span = startReviewTelemetryStageSpan({
+    attributes: options.attributes,
+    stage,
+    traceContext: dependencies.traceContext,
+    traces: dependencies.traces,
+  });
+
+  try {
+    const result = await operation();
+    span?.end({
+      attributes: {
+        ...(options.endAttributes?.(result) ?? {}),
+        "review.stage_status": "completed",
+      },
+    });
+    return result;
+  } catch (error) {
+    span?.end({
+      attributes: { "review.stage_status": "failed" },
+      error,
     });
     throw error;
   }
@@ -2006,6 +2323,7 @@ async function enqueuePublishJob(
     readonly publishPlanArtifactId: string;
     readonly pullRequestNumber: number;
     readonly timestamp: string;
+    readonly traceContext?: TelemetryTraceContext | undefined;
   },
 ): Promise<string> {
   const idempotencyKey = createPublishJobKey(input.reviewRunId);
@@ -2024,6 +2342,7 @@ async function enqueuePublishJob(
       repoId: input.repoId,
       pullRequestNumber: input.pullRequestNumber,
     },
+    ...(input.traceContext ? { traceContext: input.traceContext } : {}),
   };
 
   await db

@@ -1,4 +1,10 @@
 import type { PullRequestSnapshot } from "@repo/contracts";
+import {
+  createMemoryTelemetrySpanSink,
+  createTelemetrySpanRecorder,
+  loadObservabilityConfig,
+  OBSERVABILITY_SPAN_NAMES,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import {
   assertSnapshotMatchesJob,
@@ -9,6 +15,7 @@ import {
   type ReviewPullRequestInput,
   reviewMemoryFactFromRow,
   reviewRunStatusForStage,
+  startReviewTelemetryStageSpan,
 } from "../src";
 
 const reviewInput = {
@@ -126,6 +133,55 @@ describe("reviewRunStatusForStage", () => {
     expect(reviewRunStatusForStage("review")).toBe("reviewing");
     expect(reviewRunStatusForStage("validation")).toBe("validating_findings");
     expect(reviewRunStatusForStage("publish")).toBe("publish_queued");
+  });
+});
+
+describe("startReviewTelemetryStageSpan", () => {
+  it("records product-safe stage spans with propagated trace context", () => {
+    const sink = createMemoryTelemetrySpanSink();
+    const traces = createTelemetrySpanRecorder(
+      loadObservabilityConfig({
+        OBSERVABILITY_ENABLED: "true",
+        OBSERVABILITY_EXPORTER: "console",
+        OBSERVABILITY_SERVICE_NAME: "code-review-worker",
+      }),
+      sink,
+    );
+    const span = startReviewTelemetryStageSpan({
+      attributes: {
+        "review.index_available": true,
+      },
+      stage: "retrieval",
+      traceContext: {
+        requestId: "req_1",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
+      traces,
+    });
+
+    span?.end({
+      attributes: {
+        "review.context_item_count": 3,
+        "review.stage_status": "completed",
+      },
+    });
+
+    expect(sink.spans()).toEqual([
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          "review.context_item_count": 3,
+          "review.index_available": true,
+          "review.stage": "retrieval",
+          "review.stage_status": "completed",
+        }),
+        kind: "internal",
+        name: OBSERVABILITY_SPAN_NAMES.reviewPipelineStage,
+        traceContext: {
+          requestId: "req_1",
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        },
+      }),
+    ]);
   });
 });
 

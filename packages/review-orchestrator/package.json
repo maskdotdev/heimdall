@@ -26,6 +26,7 @@
     "@repo/github": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
     "@repo/memory": "workspace:*",
+    "@repo/observability": "workspace:*",
     "@repo/pr-snapshot": "workspace:*",
     "@repo/publisher": "workspace:*",
     "@repo/retrieval": "workspace:*",

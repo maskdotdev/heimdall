@@ -72,7 +72,11 @@ import {
   type MemoryScope,
   MemoryScopeSchema,
 } from "@repo/memory";
-import { createObservabilityRuntime, OBSERVABILITY_METRIC_NAMES } from "@repo/observability";
+import {
+  createObservabilityRuntime,
+  OBSERVABILITY_METRIC_NAMES,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import {
   normalizePublishThrottleLimits,
   PUBLISH_THROTTLE_HOUR_WINDOW_MS,
@@ -151,6 +155,8 @@ export type CreateWorkerHandlersOptions = {
   readonly indexerDriver?: CodeIndexerDriver;
   /** Maximum time allowed for one indexer run. */
   readonly indexerTimeoutMs?: number;
+  /** Optional span recorder passed into review orchestration. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Environment values used to select the worker indexer driver. */
@@ -486,6 +492,8 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.staticAnalysisRunner
           ? { staticAnalysisRunner: options.staticAnalysisRunner }
           : {}),
+        ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+        ...(options.traces ? { traces: options.traces } : {}),
         ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       });
     },
@@ -581,6 +589,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       indexArtifactRoot,
       indexerDriver,
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
+      traces: observability.traces,
     }),
     traces: observability.traces,
   });

@@ -538,6 +538,8 @@ export const OBSERVABILITY_METRIC_NAMES = {
 /** Stable span names emitted directly by service and queue boundaries. */
 export const OBSERVABILITY_SPAN_NAMES = {
   durableJobProcess: "code_review_agent.durable_job.process",
+  pullRequestReview: "code_review_agent.review.pull_request",
+  reviewPipelineStage: "code_review_agent.review.pipeline_stage",
 } as const;
 
 /** Error raised when observability configuration is invalid. */

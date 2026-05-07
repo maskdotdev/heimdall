@@ -284,6 +284,14 @@ describe("structured telemetry metrics", () => {
 });
 
 describe("structured telemetry spans", () => {
+  it("exposes stable review pipeline span names", () => {
+    expect(OBSERVABILITY_SPAN_NAMES).toMatchObject({
+      durableJobProcess: "code_review_agent.durable_job.process",
+      pullRequestReview: "code_review_agent.review.pull_request",
+      reviewPipelineStage: "code_review_agent.review.pipeline_stage",
+    });
+  });
+
   it("records console spans with resource attributes and trace context", () => {
     const lines: string[] = [];
     const config = loadObservabilityConfig({
