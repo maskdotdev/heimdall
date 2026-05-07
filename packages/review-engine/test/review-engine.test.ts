@@ -5,6 +5,7 @@ import {
   validPullRequestSnapshotFixture,
 } from "@repo/contracts/fixtures/pull-request.fixture";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
+import type { CandidateFinding } from "@repo/contracts/review/finding";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
 import type { MemoryFact } from "@repo/memory";
 import { createPolicyFixture } from "@repo/rules";
@@ -320,7 +321,228 @@ describe("validateAndRankCandidateFindings", () => {
       ]),
     );
   });
+
+  it("rejects core validator failures with canonical reasons", () => {
+    const missingEvidence = candidateFindingFixture({
+      evidence: [],
+      findingId: "fnd_MISSING_EVIDENCE",
+      fingerprint: "fp_missing_evidence",
+    });
+    const lowConfidence = candidateFindingFixture({
+      confidence: 0.2,
+      findingId: "fnd_LOW_CONFIDENCE",
+      fingerprint: "fp_low_confidence",
+      location: { ...validCandidateFindingFixture.location, line: 4 },
+    });
+    const disabledCategory = candidateFindingFixture({
+      category: "documentation",
+      findingId: "fnd_DISABLED_CATEGORY",
+      fingerprint: "fp_disabled_category",
+      location: { ...validCandidateFindingFixture.location, line: 5 },
+    });
+    const leftSideFinding = candidateFindingFixture({
+      findingId: "fnd_LEFT_SIDE",
+      fingerprint: "fp_left_side",
+      location: { ...validCandidateFindingFixture.location, line: 6, side: "LEFT" },
+    });
+
+    const result = validateCandidateFindings({
+      snapshot: snapshotWithAddedLines([2, 4, 5, 6]),
+      findings: [missingEvidence, lowConfidence, disabledCategory, leftSideFinding],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: { enabledCategories: ["correctness"] },
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(rejectionReasonsByCandidateId(result.rejected)).toMatchObject({
+      fnd_DISABLED_CATEGORY: expect.arrayContaining(["category_disabled"]),
+      fnd_LEFT_SIDE: expect.arrayContaining(["wrong_diff_side"]),
+      fnd_LOW_CONFIDENCE: expect.arrayContaining(["low_confidence"]),
+      fnd_MISSING_EVIDENCE: expect.arrayContaining(["missing_evidence"]),
+    });
+  });
+
+  it("rejects generated, deleted, and binary files before publishing", () => {
+    const generatedFinding = candidateFindingFixture({
+      findingId: "fnd_GENERATED",
+      fingerprint: "fp_generated",
+      location: { ...validCandidateFindingFixture.location, path: "src/generated/client.ts" },
+    });
+    const deletedFinding = candidateFindingFixture({
+      findingId: "fnd_DELETED",
+      fingerprint: "fp_deleted",
+      location: { ...validCandidateFindingFixture.location, path: "src/deleted.ts" },
+    });
+    const binaryFinding = candidateFindingFixture({
+      findingId: "fnd_BINARY",
+      fingerprint: "fp_binary",
+      location: { ...validCandidateFindingFixture.location, path: "assets/logo.png" },
+    });
+
+    const result = validateCandidateFindings({
+      snapshot: {
+        ...validPullRequestSnapshotFixture,
+        changedFiles: [
+          {
+            ...validChangedFileFixture,
+            isGenerated: true,
+            path: "src/generated/client.ts",
+          },
+          {
+            ...validChangedFileFixture,
+            additions: 0,
+            path: "src/deleted.ts",
+            status: "deleted",
+          },
+          {
+            ...validChangedFileFixture,
+            isBinary: true,
+            path: "assets/logo.png",
+          },
+        ],
+      },
+      findings: [generatedFinding, deletedFinding, binaryFinding],
+      timestamp: validCandidateFindingFixture.createdAt,
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(rejectionReasonsByCandidateId(result.rejected)).toMatchObject({
+      fnd_BINARY: expect.arrayContaining(["binary_file"]),
+      fnd_DELETED: expect.arrayContaining(["file_deleted"]),
+      fnd_GENERATED: expect.arrayContaining(["generated_file"]),
+    });
+  });
+
+  it("rejects secret-like values in visible finding text", () => {
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [
+        candidateFindingFixture({
+          body: "The patch exposes token=ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD in logs.",
+          findingId: "fnd_SECRET",
+          fingerprint: "fp_secret",
+        }),
+      ],
+      timestamp: validCandidateFindingFixture.createdAt,
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected[0]?.validation.reasons).toContain("contains_secret");
+    expect(result.trace.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          candidateFindingId: "fnd_SECRET",
+          reasons: ["contains_secret"],
+          stage: "evidence",
+          status: "rejected",
+        }),
+      ]),
+    );
+  });
+
+  it("keeps ranking deterministic and enforces the publishable finding budget", () => {
+    const findings = [
+      candidateFindingFixture({
+        body: "The changed arithmetic still needs a finite-value guard before returning.",
+        confidence: 0.8,
+        findingId: "fnd_MEDIUM",
+        fingerprint: "fp_medium",
+        location: { ...validCandidateFindingFixture.location, line: 2 },
+        severity: "medium",
+        title: "Guard arithmetic result",
+      }),
+      candidateFindingFixture({
+        body: "The changed parser can throw for valid user input and should handle failures.",
+        confidence: 0.7,
+        findingId: "fnd_HIGH",
+        fingerprint: "fp_high",
+        location: { ...validCandidateFindingFixture.location, line: 4 },
+        severity: "high",
+        title: "Handle parser failures",
+      }),
+      candidateFindingFixture({
+        body: "The changed authorization path can allow requests without checking the session.",
+        category: "security",
+        confidence: 0.95,
+        findingId: "fnd_SECURITY",
+        fingerprint: "fp_security",
+        location: { ...validCandidateFindingFixture.location, line: 5 },
+        severity: "medium",
+        title: "Check session authorization",
+      }),
+    ];
+    const input = {
+      snapshot: snapshotWithAddedLines([2, 4, 5]),
+      findings,
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: { maxPublishableFindings: 2 },
+    };
+
+    const firstResult = validateCandidateFindings(input);
+    const secondResult = validateCandidateFindings(input);
+
+    expect(firstResult.accepted.map((finding) => finding.candidateFindingId)).toEqual([
+      "fnd_HIGH",
+      "fnd_SECURITY",
+    ]);
+    expect(secondResult.accepted.map((finding) => finding.candidateFindingId)).toEqual([
+      "fnd_HIGH",
+      "fnd_SECURITY",
+    ]);
+    expect(firstResult.rejected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          candidateFindingId: "fnd_MEDIUM",
+          validation: expect.objectContaining({ reasons: ["budget_exceeded"] }),
+        }),
+      ]),
+    );
+  });
 });
+
+/** Creates a candidate finding with deterministic defaults for validation tests. */
+function candidateFindingFixture(overrides: Partial<CandidateFinding> = {}): CandidateFinding {
+  return {
+    ...validCandidateFindingFixture,
+    ...overrides,
+  };
+}
+
+/** Creates a snapshot whose reviewable file has the requested added lines. */
+function snapshotWithAddedLines(lines: readonly number[]): PullRequestSnapshot {
+  return {
+    ...validPullRequestSnapshotFixture,
+    changedFiles: [
+      {
+        ...validChangedFileFixture,
+        additions: lines.length,
+        hunks: [
+          {
+            ...validDiffHunkFixture,
+            lines: lines.map((line) => ({
+              content: `  changed line ${line};`,
+              kind: "addition",
+              newLine: line,
+            })),
+            newLines: Math.max(...lines),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Indexes rejected validation reasons by candidate finding ID. */
+function rejectionReasonsByCandidateId(
+  findings: readonly {
+    readonly candidateFindingId: string;
+    readonly validation: { readonly reasons: readonly string[] };
+  }[],
+): Record<string, readonly string[]> {
+  return Object.fromEntries(
+    findings.map((finding) => [finding.candidateFindingId, finding.validation.reasons]),
+  );
+}
 
 function memoryFactFixture(overrides: Partial<MemoryFact> = {}): MemoryFact {
   return {

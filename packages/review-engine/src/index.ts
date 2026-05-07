@@ -768,6 +768,7 @@ function rejectionAnalysis(
   if (!finding.location.line) pushReason(reasons, "line_missing");
   if (!addedLines?.has(finding.location.line)) pushReason(reasons, "line_not_in_diff");
   if (finding.evidence.length === 0) pushReason(reasons, "missing_evidence");
+  if (containsSecretLikeValue(finding)) pushReason(reasons, "contains_secret");
   if (finding.confidence < 0.55) pushReason(reasons, "low_confidence");
   if (severityRank(finding.severity) < severityRank(config.minimumSeverity)) {
     pushReason(reasons, "below_severity_threshold");
@@ -1056,6 +1057,20 @@ function isSuppressedByRepoRule(finding: CandidateFinding, repoRules: readonly s
   });
 }
 
+/** Detects high-confidence secret-like values in user-visible finding text. */
+function containsSecretLikeValue(finding: CandidateFinding): boolean {
+  const visibleText = [
+    finding.title,
+    finding.body,
+    finding.suggestedFix,
+    ...finding.evidence.flatMap((evidence) => [evidence.summary, evidence.quote]),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return SECRET_LIKE_PATTERNS.some((pattern) => pattern.test(visibleText));
+}
+
 function applyPassBudget(
   passes: readonly ReviewPassId[],
   budgets: ReviewBudgets,
@@ -1150,6 +1165,14 @@ const API_CONTRACT_PATH_TERMS = [
   "openapi",
   "schema",
   "types",
+] as const;
+
+const SECRET_LIKE_PATTERNS = [
+  /\bAKIA[0-9A-Z]{16}\b/u,
+  /\bgh[pousr]_[A-Za-z0-9_]{36,}\b/u,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/u,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+  /\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{16,}/iu,
 ] as const;
 
 const VALIDATION_EVENT_STAGES = [
