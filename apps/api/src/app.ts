@@ -435,6 +435,16 @@ const MEMORY_FACT_SOURCES = new Set<MemoryFactSource>([
 /** Supported memory fact statuses accepted by the scoped API. */
 const MEMORY_FACT_STATUSES = new Set<MemoryFactStatus>(["active", "disabled", "expired"]);
 
+/** Supported memory candidate statuses accepted by the scoped API. */
+const MEMORY_CANDIDATE_STATUSES = new Set([
+  "pending",
+  "approved",
+  "rejected",
+  "auto_activated",
+  "expired",
+  "superseded",
+]);
+
 /** Supported usage event types accepted by the scoped API. */
 const USAGE_EVENT_TYPES = new Set<UsageEventType>([
   "review.run",
@@ -1246,6 +1256,18 @@ type AdminMemoryFactListQuery = {
   readonly kind?: MemoryFactKind | undefined;
   /** Whether organization-scoped facts should be included with repository facts. */
   readonly includeOrgFacts?: boolean | undefined;
+  /** Maximum rows to return. */
+  readonly limit?: number | undefined;
+};
+
+/** Query options for repository memory candidate discovery. */
+type AdminMemoryCandidateListQuery = {
+  /** Memory candidate lifecycle status filter. */
+  readonly status?: string | undefined;
+  /** Candidate kind filter. */
+  readonly candidateKind?: string | undefined;
+  /** Whether organization-scoped candidates should be included with repository candidates. */
+  readonly includeOrgCandidates?: boolean | undefined;
   /** Maximum rows to return. */
   readonly limit?: number | undefined;
 };
@@ -2226,6 +2248,11 @@ export type AdminControlPlaneService = {
     repoId: string,
     query: AdminMemoryFactListQuery,
   ) => Promise<readonly AdminMemoryFactSummary[]>;
+  /** Lists pending and decided memory candidates that apply to one repository. */
+  readonly listRepositoryMemoryCandidates: (
+    repoId: string,
+    query: AdminMemoryCandidateListQuery,
+  ) => Promise<readonly AdminMemoryCandidateSummary[]>;
   /** Gets one memory fact by ID. */
   readonly getMemoryFact: (memoryFactId: string) => Promise<AdminMemoryFactSummary>;
   /** Gets one memory candidate by ID. */
@@ -3001,12 +3028,19 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           return authorizationResponse;
         }
 
-        const memoryFacts = await getAdminControlPlaneService().listRepositoryMemoryFacts(
-          params.repoId,
-          memoryFactListQueryFromUrl(new URL(request.url)),
-        );
+        const url = new URL(request.url);
+        const [memoryFacts, memoryCandidates] = await Promise.all([
+          getAdminControlPlaneService().listRepositoryMemoryFacts(
+            params.repoId,
+            memoryFactListQueryFromUrl(url),
+          ),
+          getAdminControlPlaneService().listRepositoryMemoryCandidates(
+            params.repoId,
+            memoryCandidateListQueryFromUrl(url),
+          ),
+        ]);
 
-        return { data: { memoryFacts, repository: settings.repository } };
+        return { data: { memoryCandidates, memoryFacts, repository: settings.repository } };
       } catch (error) {
         return handleAdminControlPlaneError(error, set);
       }
@@ -6055,6 +6089,8 @@ function createAdminControlPlaneService(dependencies: {
     getEntitlementSummary: (query) => getEntitlementSummary(dependencies.db, query),
     listReviewArtifacts: (reviewRunId) => listReviewArtifacts(dependencies.db, reviewRunId),
     listBillingMeterEvents: (query) => listBillingMeterEvents(dependencies.db, query),
+    listRepositoryMemoryCandidates: (repoId, query) =>
+      listRepositoryMemoryCandidates(dependencies.db, repoId, query),
     listRepositoryMemoryFacts: (repoId, query) =>
       listRepositoryMemoryFacts(dependencies.db, repoId, query),
     listOrganizations: (query) => listOrganizations(dependencies.db, query),
@@ -9021,6 +9057,45 @@ async function listRepositoryMemoryFacts(
     .limit(boundedListLimit(query.limit));
 
   return rows.map(toAdminMemoryFactSummary);
+}
+
+/** Lists memory candidates that apply to one repository. */
+async function listRepositoryMemoryCandidates(
+  db: HeimdallDatabase,
+  repoId: string,
+  query: AdminMemoryCandidateListQuery,
+): Promise<readonly AdminMemoryCandidateSummary[]> {
+  const settings = await getRepositorySettings(db, repoId);
+  const scopeCondition =
+    query.includeOrgCandidates === false
+      ? eq(memoryCandidates.repoId, repoId)
+      : or(
+          eq(memoryCandidates.repoId, repoId),
+          and(
+            eq(memoryCandidates.orgId, settings.repository.orgId),
+            isNull(memoryCandidates.repoId),
+          ),
+        );
+  const conditions: SQL[] = [scopeCondition ?? sql`false`];
+  if (query.status) {
+    conditions.push(eq(memoryCandidates.status, query.status));
+  }
+  if (query.candidateKind) {
+    conditions.push(eq(memoryCandidates.candidateKind, query.candidateKind));
+  }
+
+  const rows = await db
+    .select()
+    .from(memoryCandidates)
+    .where(and(...conditions))
+    .orderBy(
+      asc(memoryCandidates.status),
+      desc(memoryCandidates.updatedAt),
+      asc(memoryCandidates.memoryCandidateId),
+    )
+    .limit(boundedListLimit(query.limit));
+
+  return rows.map(toAdminMemoryCandidateSummary);
 }
 
 /** Gets one memory fact row by ID. */
@@ -13500,6 +13575,11 @@ function isMemoryFactStatus(value: string): value is MemoryFactStatus {
   return MEMORY_FACT_STATUSES.has(value as MemoryFactStatus);
 }
 
+/** Returns whether a string is a supported memory candidate status. */
+function isMemoryCandidateStatus(value: string): boolean {
+  return MEMORY_CANDIDATE_STATUSES.has(value);
+}
+
 /** Returns whether a string is a supported usage summary grouping dimension. */
 function isProductUsageGroupBy(value: string): value is ProductUsageSummaryGroupBy {
   return value === "day" || value === "week" || value === "month" || value === "repo";
@@ -13988,6 +14068,25 @@ function memoryFactListQueryFromUrl(url: URL): AdminMemoryFactListQuery {
     ...(memoryKind ? { kind: memoryKind } : {}),
     limit: listLimitFromUrl(url),
     ...(memoryStatus ? { status: memoryStatus } : {}),
+  };
+}
+
+/** Converts a URL into a repository memory candidate discovery query. */
+function memoryCandidateListQueryFromUrl(url: URL): AdminMemoryCandidateListQuery {
+  const status = optionalQueryString(url, "candidateStatus");
+  if (status && !isMemoryCandidateStatus(status)) {
+    throw new AdminRequestValidationError(
+      "memory_candidate.status_invalid",
+      "Memory candidate status is not supported.",
+      400,
+    );
+  }
+
+  return {
+    candidateKind: optionalQueryString(url, "candidateKind"),
+    includeOrgCandidates: optionalBooleanQuery(url, "includeOrgCandidates"),
+    limit: listLimitFromUrl(url),
+    ...(status ? { status } : {}),
   };
 }
 

@@ -358,14 +358,26 @@ describe("api app", () => {
         headers: { cookie: "car_session=opaque" },
       }),
     );
+    const memoryResponse = await app.handle(
+      new Request("http://localhost/api/v1/repositories/repo_1/memory?candidateStatus=pending", {
+        headers: { cookie: "car_session=opaque" },
+      }),
+    );
 
     expect(orgsResponse.status).toBe(200);
     expect(repositoriesResponse.status).toBe(200);
+    expect(memoryResponse.status).toBe(200);
     await expect(orgsResponse.json()).resolves.toMatchObject({
       data: { orgs: [{ orgId: "org_1", slug: "octo-org" }] },
     });
     await expect(repositoriesResponse.json()).resolves.toMatchObject({
       data: { repositories: [{ fullName: "octo-org/heimdall", repoId: "repo_1" }] },
+    });
+    await expect(memoryResponse.json()).resolves.toMatchObject({
+      data: {
+        memoryCandidates: [{ memoryCandidateId: "mcand_1", status: "pending" }],
+        memoryFacts: [{ memoryFactId: "mem_1" }],
+      },
     });
     expect(listOrgQueries).toEqual([
       expect.objectContaining({ limit: 5, orgIds: ["org_1"], search: "octo" }),
@@ -2601,8 +2613,11 @@ describe("api app", () => {
     });
   });
 
-  it("serves scoped API v1 repository memory facts", async () => {
+  it("serves scoped API v1 repository memory facts and candidates", async () => {
     const listQueries: Parameters<AdminControlPlaneService["listRepositoryMemoryFacts"]>[1][] = [];
+    const candidateQueries: Parameters<
+      AdminControlPlaneService["listRepositoryMemoryCandidates"]
+    >[1][] = [];
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({
@@ -2615,6 +2630,10 @@ describe("api app", () => {
           listQueries.push(query);
           return [memoryFactFixture()];
         },
+        listRepositoryMemoryCandidates: async (_repoId, query) => {
+          candidateQueries.push(query);
+          return [memoryCandidateFixture()];
+        },
       }),
       githubWebhookHandler: noopWebhookHandler(),
     });
@@ -2626,7 +2645,7 @@ describe("api app", () => {
 
     const listResponse = await app.handle(
       new Request(
-        "http://localhost/api/v1/repositories/repo_1/memory?kind=repo_convention&status=active",
+        "http://localhost/api/v1/repositories/repo_1/memory?kind=repo_convention&status=active&candidateStatus=pending&candidateKind=repo_fact",
         {
           headers: { cookie: login.cookie },
         },
@@ -2642,6 +2661,13 @@ describe("api app", () => {
     expect(detailResponse.status).toBe(200);
     await expect(listResponse.json()).resolves.toMatchObject({
       data: {
+        memoryCandidates: [
+          {
+            candidateKind: "repo_fact",
+            memoryCandidateId: "mcand_1",
+            status: "pending",
+          },
+        ],
         memoryFacts: [
           {
             kind: "repo_convention",
@@ -2664,6 +2690,12 @@ describe("api app", () => {
       expect.objectContaining({
         kind: "repo_convention",
         status: "active",
+      }),
+    ]);
+    expect(candidateQueries).toEqual([
+      expect.objectContaining({
+        candidateKind: "repo_fact",
+        status: "pending",
       }),
     ]);
   });
@@ -5020,6 +5052,7 @@ function createMockControlPlaneService(
     getProductUsageSummary: async () => productUsageSummaryFixture(),
     getProviderInstallation: async () => providerInstallationFixture(),
     listBillingMeterEvents: async () => billingMeterEventsFixture(),
+    listRepositoryMemoryCandidates: async () => [memoryCandidateFixture()],
     listRepositoryMemoryFacts: async () => [memoryFactFixture()],
     getReviewArtifactPayload: async () => reviewArtifactPayloadFixture(),
     getReviewFinding: async () => reviewFindingFixture(),

@@ -962,6 +962,16 @@ button.small {
   gap: 1rem;
 }
 
+.product-memory-panel {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.product-memory-facts {
+  margin-top: 0;
+}
+
 .product-review-detail {
   margin-top: 1rem;
   padding-top: 1rem;

@@ -815,6 +815,58 @@ type AdminMemoryCandidateDebugSummary = {
   readonly updatedAt: string;
 };
 
+/** Memory fact row returned by product repository memory routes. */
+type ProductMemoryFactSummary = {
+  /** Durable memory fact row ID. */
+  readonly memoryFactId: string;
+  /** Memory fact kind shown to product users. */
+  readonly kind: string;
+  /** Human-readable memory text. */
+  readonly text: string;
+  /** Durable memory status. */
+  readonly status: string;
+  /** Memory fact scope. */
+  readonly scope: "organization" | "repository";
+  /** Confidence score assigned to the fact. */
+  readonly confidence: number;
+  /** Fact update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Memory candidate row returned by product repository memory routes. */
+type ProductMemoryCandidateSummary = {
+  /** Durable memory candidate row ID. */
+  readonly memoryCandidateId: string;
+  /** Source that proposed the candidate. */
+  readonly sourceKind: string;
+  /** Candidate kind proposed by feedback processing. */
+  readonly candidateKind: string;
+  /** Proposed durable memory text. */
+  readonly proposedContent: string;
+  /** Candidate lifecycle status. */
+  readonly status: string;
+  /** Candidate confidence score. */
+  readonly confidence: number;
+  /** Trust level assigned to the proposing signal. */
+  readonly trustLevel: string;
+  /** Source finding ID when known. */
+  readonly sourceFindingId?: string;
+  /** Memory fact created from this candidate when approved. */
+  readonly approvedMemoryFactId?: string;
+  /** Moderation decision timestamp when present. */
+  readonly decidedAt?: string;
+  /** Candidate update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Product repository memory response. */
+type ProductRepositoryMemoryResponse = {
+  /** Stored memory facts that can apply to the repository. */
+  readonly memoryFacts: readonly ProductMemoryFactSummary[];
+  /** Proposed memory candidates that can apply to the repository. */
+  readonly memoryCandidates: readonly ProductMemoryCandidateSummary[];
+};
+
 /** Effective rule row returned by the memory and rules inspector. */
 type AdminRepoRuleDebugSummary = {
   /** Rule ID used by typed policy snapshots. */
@@ -1574,6 +1626,10 @@ type ProductRepositorySettingsState = {
   ruleForm: RuleFormState;
   /** Latest effective policy preview for the current form state. */
   preview?: ControlPlanePolicyPreview | undefined;
+  /** Stored memory facts that can apply to the repository. */
+  memoryFacts: readonly ProductMemoryFactSummary[];
+  /** Proposed memory candidates that can apply to the repository. */
+  memoryCandidates: readonly ProductMemoryCandidateSummary[];
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -2665,6 +2721,40 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "approve-product-memory-candidate") {
+    await moderateProductMemoryCandidate(
+      requiredDatasetValue(element, "memoryCandidateId"),
+      "approve",
+    );
+    return;
+  }
+
+  if (action === "reject-product-memory-candidate") {
+    await moderateProductMemoryCandidate(
+      requiredDatasetValue(element, "memoryCandidateId"),
+      "reject",
+    );
+    return;
+  }
+
+  if (action === "refresh-product-memory") {
+    const settings = state.product.repositorySettings;
+    if (settings) {
+      settings.loading = "Refreshing repository memory";
+      settings.error = undefined;
+      render();
+      try {
+        await refreshProductRepositoryMemory(settings.repoId);
+      } catch (error) {
+        settings.error = errorMessage(error);
+      } finally {
+        settings.loading = undefined;
+        render();
+      }
+    }
+    return;
+  }
+
   if (action === "logout-product") {
     await logoutProductSession();
     return;
@@ -3229,6 +3319,8 @@ async function setProductRepositoryEnabled(repoId: string, enabled: boolean): Pr
 /** Loads product repository settings, rules, and effective policy preview. */
 async function loadProductRepositorySettings(repoId: string): Promise<void> {
   state.product.repositorySettings = {
+    memoryCandidates: [],
+    memoryFacts: [],
     repoId,
     ruleForm: defaultRuleForm(),
     rules: [],
@@ -3237,18 +3329,21 @@ async function loadProductRepositorySettings(repoId: string): Promise<void> {
   render();
 
   try {
-    const [data, rulesData] = await Promise.all([
+    const [data, rulesData, memoryData] = await Promise.all([
       requestProductData<ControlPlaneSettingsResponse>(
         `/api/v1/repositories/${encodeURIComponent(repoId)}`,
       ),
       requestProductData<{ readonly rules: readonly AdminRepoRuleSummary[] }>(
         `/api/v1/repositories/${encodeURIComponent(repoId)}/rules`,
       ),
+      requestProductRepositoryMemory(repoId),
     ]);
     const form = settingsFormFromResponse(data);
     state.product.repositorySettings = {
       data,
       form,
+      memoryCandidates: memoryData.memoryCandidates,
+      memoryFacts: memoryData.memoryFacts,
       preview: await requestProductPolicyPreview(repoId, form),
       repoId,
       ruleForm: defaultRuleForm(),
@@ -3256,6 +3351,8 @@ async function loadProductRepositorySettings(repoId: string): Promise<void> {
     };
   } catch (error) {
     state.product.repositorySettings = {
+      memoryCandidates: [],
+      memoryFacts: [],
       repoId,
       ruleForm: defaultRuleForm(),
       rules: [],
@@ -3434,6 +3531,18 @@ async function refreshProductRepositoryRulesAndPreview(repoId: string): Promise<
   }
 }
 
+/** Refreshes product memory facts and candidates after a moderation decision. */
+async function refreshProductRepositoryMemory(repoId: string): Promise<void> {
+  const settings = state.product.repositorySettings;
+  if (!settings) {
+    return;
+  }
+
+  const data = await requestProductRepositoryMemory(repoId);
+  settings.memoryCandidates = data.memoryCandidates;
+  settings.memoryFacts = data.memoryFacts;
+}
+
 /** Requests product repository and organization rules for one repository. */
 async function requestProductRepositoryRules(
   repoId: string,
@@ -3442,6 +3551,15 @@ async function requestProductRepositoryRules(
     `/api/v1/repositories/${encodeURIComponent(repoId)}/rules`,
   );
   return data.rules;
+}
+
+/** Requests product repository memory facts and candidates for one repository. */
+async function requestProductRepositoryMemory(
+  repoId: string,
+): Promise<ProductRepositoryMemoryResponse> {
+  return requestProductData<ProductRepositoryMemoryResponse>(
+    `/api/v1/repositories/${encodeURIComponent(repoId)}/memory`,
+  );
 }
 
 /** Loads product review details and validated findings for one review run. */
@@ -3772,6 +3890,65 @@ async function suppressProductFindingSimilar(findingId: string): Promise<void> {
     detail.error = errorMessage(error);
   } finally {
     detail.loading = undefined;
+    render();
+  }
+}
+
+/** Moderates one pending memory candidate from the product repository view. */
+async function moderateProductMemoryCandidate(
+  memoryCandidateId: string,
+  decision: MemoryCandidateModerationDecision,
+): Promise<void> {
+  const settings = state.product.repositorySettings;
+  if (!settings) {
+    return;
+  }
+
+  const candidate = settings.memoryCandidates.find(
+    (row) => row.memoryCandidateId === memoryCandidateId,
+  );
+  if (!candidate) {
+    settings.error = `Memory candidate ${memoryCandidateId} is not in the loaded repository data.`;
+    render();
+    return;
+  }
+
+  const reason = window.prompt(decision === "approve" ? "Approval reason" : "Rejection reason", "");
+  if (reason === null) {
+    return;
+  }
+
+  settings.loading =
+    decision === "approve" ? "Approving memory candidate" : "Rejecting memory candidate";
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+
+  try {
+    await requestProductData<unknown>(
+      `/api/v1/memory-candidates/${encodeURIComponent(memoryCandidateId)}/${decision}`,
+      {
+        body: JSON.stringify({
+          metadata: {
+            candidateKind: candidate.candidateKind,
+            repoId: settings.repoId,
+            source: "product_repository_memory",
+          },
+          ...(reason.trim() ? { reason: reason.trim() } : {}),
+        }),
+        headers: {
+          "idempotency-key": `product-memory-candidate-${decision}-${memoryCandidateId}-${crypto.randomUUID()}`,
+        },
+        method: "POST",
+      },
+    );
+    await refreshProductRepositoryMemory(settings.repoId);
+    settings.saved =
+      decision === "approve" ? "Memory candidate approved." : "Memory candidate rejected.";
+  } catch (error) {
+    settings.error = errorMessage(error);
+  } finally {
+    settings.loading = undefined;
     render();
   }
 }
@@ -5014,6 +5191,8 @@ function renderProductWorkspace(): string {
   );
   const canManageRepositories = Boolean(membership?.capabilities.canManageRepositorySettings);
   const canManageRules = Boolean(membership?.permissions.includes("rule:write"));
+  const canManageMemory = Boolean(membership?.permissions.includes("memory:write"));
+  const canReadMemory = Boolean(membership?.permissions.includes("memory:read"));
   const canWriteFindings = Boolean(membership?.permissions.includes("finding:write"));
   const canSuppressFindings = Boolean(membership?.permissions.includes("rule:write"));
   const canRerunReviews = Boolean(membership?.capabilities.canRerunReviews);
@@ -5041,7 +5220,12 @@ function renderProductWorkspace(): string {
               ${renderAuthenticatedProductRepositories(resources.repositories, canManageRepositories)}
             ${renderAuthenticatedProductReviews(resources.reviews)}
             </div>
-            ${renderProductRepositorySettingsPanel(canManageRepositories, canManageRules)}
+            ${renderProductRepositorySettingsPanel(
+              canManageRepositories,
+              canManageRules,
+              canReadMemory,
+              canManageMemory,
+            )}
             ${renderProductReviewDetailPanel(
               canWriteFindings,
               canSuppressFindings,
@@ -5171,6 +5355,8 @@ function renderAuthenticatedProductRepository(
 function renderProductRepositorySettingsPanel(
   canManageSettings: boolean,
   canManageRules: boolean,
+  canReadMemory: boolean,
+  canManageMemory: boolean,
 ): string {
   const settings = state.product.repositorySettings;
   if (!settings) {
@@ -5222,7 +5408,150 @@ function renderProductRepositorySettingsPanel(
             )
           : `<p class="inline-empty">Select Settings on a repository to load review policy controls.</p>`
       }
+      ${renderProductRepositoryMemoryPanel(settings, canReadMemory, canManageMemory)}
     </section>
+  `;
+}
+
+/** Renders product-facing memory facts and pending candidates for one repository. */
+function renderProductRepositoryMemoryPanel(
+  settings: ProductRepositorySettingsState,
+  canReadMemory: boolean,
+  canManageMemory: boolean,
+): string {
+  if (!canReadMemory) {
+    return `<p class="inline-empty">This role cannot view repository memory.</p>`;
+  }
+
+  const pendingCandidates = settings.memoryCandidates.filter(
+    (candidate) => candidate.status === "pending",
+  );
+  const activeFacts = settings.memoryFacts.filter((fact) => fact.status === "active");
+
+  return `
+    <section class="settings-inline-panel product-memory-panel">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Memory</p>
+          <h4>Repository guidance</h4>
+        </div>
+        <div class="row-actions">
+          <span class="status ${pendingCandidates.length > 0 ? "warn" : "ok"}">
+            ${pendingCandidates.length} pending
+          </span>
+          <button class="ghost small" data-action="refresh-product-memory" type="button">
+            Refresh
+          </button>
+        </div>
+      </div>
+      ${renderProductMemoryCandidateRows(pendingCandidates, canManageMemory)}
+      ${renderProductMemoryFactRows(activeFacts)}
+    </section>
+  `;
+}
+
+/** Renders pending product memory candidate rows. */
+function renderProductMemoryCandidateRows(
+  candidates: readonly ProductMemoryCandidateSummary[],
+  canManageMemory: boolean,
+): string {
+  if (candidates.length === 0) {
+    return `<p class="inline-empty">No pending memory candidates currently apply to this repository.</p>`;
+  }
+
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr><th>Candidate</th><th>Trust</th><th>Confidence</th><th>Updated</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          ${candidates
+            .map((candidate) => renderProductMemoryCandidateRow(candidate, canManageMemory))
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders one pending product memory candidate row. */
+function renderProductMemoryCandidateRow(
+  candidate: ProductMemoryCandidateSummary,
+  canManageMemory: boolean,
+): string {
+  const disabled = canManageMemory ? "" : "disabled";
+
+  return `
+    <tr>
+      <td>
+        <strong>${escapeHtml(candidate.candidateKind)}</strong>
+        <p class="muted-text">${escapeHtml(candidate.proposedContent)}</p>
+        <small>${escapeHtml(candidate.sourceKind)}${candidate.sourceFindingId ? ` · ${escapeHtml(candidate.sourceFindingId)}` : ""}</small>
+      </td>
+      <td>${escapeHtml(candidate.trustLevel)}</td>
+      <td>${formatPercent(candidate.confidence)}</td>
+      <td>${formatTime(candidate.updatedAt)}</td>
+      <td>
+        <div class="row-actions">
+          <button
+            class="small"
+            data-action="approve-product-memory-candidate"
+            data-memory-candidate-id="${escapeAttribute(candidate.memoryCandidateId)}"
+            type="button"
+            ${disabled}
+          >
+            Approve
+          </button>
+          <button
+            class="danger small"
+            data-action="reject-product-memory-candidate"
+            data-memory-candidate-id="${escapeAttribute(candidate.memoryCandidateId)}"
+            type="button"
+            ${disabled}
+          >
+            Reject
+          </button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+/** Renders active product memory fact rows. */
+function renderProductMemoryFactRows(facts: readonly ProductMemoryFactSummary[]): string {
+  if (facts.length === 0) {
+    return "";
+  }
+
+  return `
+    <details class="finding-json product-memory-facts">
+      <summary class="finding-json-summary">Active memory</summary>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead>
+            <tr><th>Fact</th><th>Scope</th><th>Confidence</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            ${facts
+              .map(
+                (fact) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(fact.kind)}</strong>
+                      <p class="muted-text">${escapeHtml(fact.text)}</p>
+                    </td>
+                    <td>${escapeHtml(fact.scope)}</td>
+                    <td>${formatPercent(fact.confidence)}</td>
+                    <td>${formatTime(fact.updatedAt)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </details>
   `;
 }
 
