@@ -9,7 +9,13 @@ import {
   parseWithSchema,
 } from "@repo/contracts";
 import { backgroundJobs, type HeimdallDatabase } from "@repo/db";
-import { OBSERVABILITY_SPAN_NAMES, type TelemetrySpanRecorder } from "@repo/observability";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { type Job as BullMqJob, Queue } from "bullmq";
 import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import IORedis from "ioredis";
@@ -121,6 +127,8 @@ export type DurableJobProcessorOptions = {
   readonly store: DurableJobStore;
   /** Registered job handlers keyed by job type. */
   readonly handlers: DurableJobHandlerMap;
+  /** Optional metric recorder used to aggregate durable job processing. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder used to trace durable job processing. */
   readonly traces?: TelemetrySpanRecorder;
 };
@@ -473,8 +481,10 @@ export async function dispatchPendingJobs(options: {
 export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
   return async (job: BullMqJob<unknown>): Promise<void> => {
     const envelope = parseJobEnvelope(job.data);
+    const queueName = queueNameFromBullMqJob(job);
+    const startedAtMs = Date.now();
     const span = options.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.durableJobProcess, {
-      attributes: durableJobSpanAttributes(envelope),
+      attributes: durableJobSpanAttributes(envelope, queueName),
       kind: "consumer",
       ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
     });
@@ -482,6 +492,14 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
     try {
       runState = await options.store.markRunning(envelope);
     } catch (error) {
+      recordDurableJobFailureMetrics(
+        options.metrics,
+        envelope,
+        queueName,
+        "mark_running_failed",
+        Date.now() - startedAtMs,
+        error,
+      );
       span?.end({ attributes: { "job.run_state": "mark_running_failed" }, error });
       throw error;
     }
@@ -493,9 +511,18 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       const error = new Error(
         `Durable job ${envelope.jobType}:${envelope.idempotencyKey} was not found or is not runnable.`,
       );
+      recordDurableJobFailureMetrics(
+        options.metrics,
+        envelope,
+        queueName,
+        runState,
+        Date.now() - startedAtMs,
+        error,
+      );
       span?.end({ attributes: { "job.run_state": runState }, error });
       throw error;
     }
+    recordDurableJobStartedMetric(options.metrics, envelope, queueName);
 
     const handler = options.handlers[envelope.jobType];
     if (!handler) {
@@ -503,6 +530,14 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       try {
         await options.store.markFailed(envelope, serializeJobError(error));
       } finally {
+        recordDurableJobFailureMetrics(
+          options.metrics,
+          envelope,
+          queueName,
+          "missing_handler",
+          Date.now() - startedAtMs,
+          error,
+        );
         span?.end({ attributes: { "job.run_state": "missing_handler" }, error });
       }
       throw error;
@@ -511,6 +546,12 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
     try {
       await handler(envelope);
       await options.store.markCompleted(envelope);
+      recordDurableJobCompletedMetrics(
+        options.metrics,
+        envelope,
+        queueName,
+        Date.now() - startedAtMs,
+      );
       span?.end({ attributes: { "job.run_state": "completed" } });
     } catch (error) {
       const serialized = serializeJobError(error);
@@ -522,6 +563,24 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
           await options.store.markRetrying(envelope, serialized);
         }
       } finally {
+        if (isFinalAttempt) {
+          recordDurableJobFailureMetrics(
+            options.metrics,
+            envelope,
+            queueName,
+            "failed",
+            Date.now() - startedAtMs,
+            error,
+          );
+        } else {
+          recordDurableJobRetryMetrics(
+            options.metrics,
+            envelope,
+            queueName,
+            Date.now() - startedAtMs,
+            error,
+          );
+        }
         span?.end({
           attributes: { "job.run_state": isFinalAttempt ? "failed" : "retrying" },
           error,
@@ -535,12 +594,98 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
 /** Returns low-cardinality span attributes for one durable job envelope. */
 function durableJobSpanAttributes(
   envelope: JobEnvelope<JobPayload>,
+  queueName: QueueName | "unknown",
 ): Readonly<Record<string, string | number>> {
   return {
     "job.attempt": envelope.attempt,
     "job.max_attempts": envelope.maxAttempts,
     "job.type": envelope.jobType,
+    "queue.name": queueName,
   };
+}
+
+/** Records a durable job start counter. */
+function recordDurableJobStartedMetric(
+  metrics: TelemetryMetricRecorder | undefined,
+  envelope: JobEnvelope<JobPayload>,
+  queueName: QueueName | "unknown",
+): void {
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.queueJobsStartedTotal, {
+    labels: durableJobMetricLabels(envelope, queueName, "started"),
+  });
+}
+
+/** Records durable job completion counters and duration histograms. */
+function recordDurableJobCompletedMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  envelope: JobEnvelope<JobPayload>,
+  queueName: QueueName | "unknown",
+  durationMs: number,
+): void {
+  const labels = durableJobMetricLabels(envelope, queueName, "completed");
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.queueJobsCompletedTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.queueJobDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+}
+
+/** Records durable job final failure counters and duration histograms. */
+function recordDurableJobFailureMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  envelope: JobEnvelope<JobPayload>,
+  queueName: QueueName | "unknown",
+  status: string,
+  durationMs: number,
+  error: unknown,
+): void {
+  const labels = durableJobMetricLabels(envelope, queueName, status, error);
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.queueJobsFailedTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.queueJobDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+}
+
+/** Records durable job retry counters and duration histograms. */
+function recordDurableJobRetryMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  envelope: JobEnvelope<JobPayload>,
+  queueName: QueueName | "unknown",
+  durationMs: number,
+  error: unknown,
+): void {
+  const labels = durableJobMetricLabels(envelope, queueName, "retrying", error);
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.queueRetriesTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.queueJobDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+}
+
+/** Returns low-cardinality metric labels for one durable job event. */
+function durableJobMetricLabels(
+  envelope: JobEnvelope<JobPayload>,
+  queueName: QueueName | "unknown",
+  status: string,
+  error?: unknown,
+): Readonly<Record<string, string>> {
+  return {
+    ...(error === undefined ? {} : { error_class: classifyTelemetryError(error) }),
+    job_type: envelope.jobType,
+    queue_name: queueName,
+    status,
+  };
+}
+
+/** Reads a BullMQ queue name without trusting untyped test doubles. */
+function queueNameFromBullMqJob(job: BullMqJob<unknown>): QueueName | "unknown" {
+  const queueName = (job as { readonly queueName?: unknown }).queueName;
+  if (typeof queueName === "string" && queueNameValues.has(queueName)) {
+    return queueName as QueueName;
+  }
+
+  return "unknown";
 }
 
 function toQueueName(value: string): QueueName {

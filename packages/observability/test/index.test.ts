@@ -196,6 +196,18 @@ describe("structured telemetry logging", () => {
 });
 
 describe("structured telemetry metrics", () => {
+  it("exposes stable API and queue metric names", () => {
+    expect(OBSERVABILITY_METRIC_NAMES).toMatchObject({
+      apiRequestDurationMs: "code_review_agent.api.request_duration_ms",
+      apiRequestsTotal: "code_review_agent.api.requests_total",
+      queueJobDurationMs: "code_review_agent.queue.job_duration_ms",
+      queueJobsCompletedTotal: "code_review_agent.queue.jobs_completed_total",
+      queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
+      queueJobsStartedTotal: "code_review_agent.queue.jobs_started_total",
+      queueRetriesTotal: "code_review_agent.queue.retries_total",
+    });
+  });
+
   it("sanitizes metric labels by redacting unsafe values and dropping high-cardinality keys", () => {
     const labels = sanitizeTelemetryMetricLabels({
       "app.review_run_id": "rrun_1",

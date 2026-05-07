@@ -586,6 +586,11 @@ export const OBSERVABILITY_METRIC_NAMES = {
   apiRequestsTotal: "code_review_agent.api.requests_total",
   apiServiceStartsTotal: "code_review_agent.api.service_starts_total",
   apiServiceStopsTotal: "code_review_agent.api.service_stops_total",
+  queueJobDurationMs: "code_review_agent.queue.job_duration_ms",
+  queueJobsCompletedTotal: "code_review_agent.queue.jobs_completed_total",
+  queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
+  queueJobsStartedTotal: "code_review_agent.queue.jobs_started_total",
+  queueRetriesTotal: "code_review_agent.queue.retries_total",
   workerServiceStartsTotal: "code_review_agent.worker.service_starts_total",
   workerServiceStopsTotal: "code_review_agent.worker.service_stops_total",
 } as const;

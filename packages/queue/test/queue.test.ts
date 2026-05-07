@@ -1,8 +1,11 @@
 import { JOB_TYPES } from "@repo/contracts";
 import {
+  createTelemetryMetricRecorder,
   createTelemetrySpanRecorder,
   DEFAULT_OBSERVABILITY_CONFIG,
+  OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricPoint,
   type TelemetrySpanRecord,
 } from "@repo/observability";
 import { Queue } from "bullmq";
@@ -135,6 +138,7 @@ describe("durable worker processor", () => {
           "job.max_attempts": 3,
           "job.run_state": "completed",
           "job.type": JOB_TYPES.SyncInstallation,
+          "queue.name": "unknown",
         },
         kind: "consumer",
         name: OBSERVABILITY_SPAN_NAMES.durableJobProcess,
@@ -144,8 +148,70 @@ describe("durable worker processor", () => {
     ]);
   });
 
+  it("records durable job metrics with low-cardinality labels", async () => {
+    const store = new InMemoryDurableJobStore([durableJob({ status: "queued" })]);
+    const metricPoints: TelemetryMetricPoint[] = [];
+    const processor = createDurableJobProcessor({
+      store,
+      handlers: {
+        [JOB_TYPES.SyncInstallation]: async () => undefined,
+      },
+      metrics: createTelemetryMetricRecorder(
+        {
+          ...DEFAULT_OBSERVABILITY_CONFIG,
+          enabled: true,
+          exporter: "console",
+          serviceName: "code-review-worker",
+        },
+        {
+          write: (point) => {
+            metricPoints.push(point);
+          },
+        },
+      ),
+    });
+
+    await processor({
+      attemptsMade: 0,
+      data: syncInstallationEnvelope,
+      queueName: QUEUE_NAMES.repoSync,
+    } as never);
+
+    const labels = {
+      job_type: JOB_TYPES.SyncInstallation,
+      queue_name: QUEUE_NAMES.repoSync,
+      status: "completed",
+    };
+    expect(metricPoints).toEqual([
+      expect.objectContaining({
+        kind: "counter",
+        labels: {
+          job_type: JOB_TYPES.SyncInstallation,
+          queue_name: QUEUE_NAMES.repoSync,
+          status: "started",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.queueJobsStartedTotal,
+        value: 1,
+      }),
+      expect.objectContaining({
+        kind: "counter",
+        labels,
+        name: OBSERVABILITY_METRIC_NAMES.queueJobsCompletedTotal,
+        value: 1,
+      }),
+      expect.objectContaining({
+        kind: "histogram",
+        labels,
+        name: OBSERVABILITY_METRIC_NAMES.queueJobDurationMs,
+        unit: "ms",
+      }),
+    ]);
+    expect(metricPoints[2]?.value).toBeGreaterThanOrEqual(0);
+  });
+
   it("keeps retryable failures queued and marks final failures failed", async () => {
     const store = new InMemoryDurableJobStore([durableJob({ status: "queued" })]);
+    const metricPoints: TelemetryMetricPoint[] = [];
     const processor = createDurableJobProcessor({
       store,
       handlers: {
@@ -153,17 +219,60 @@ describe("durable worker processor", () => {
           throw new Error("transient");
         },
       },
+      metrics: createTelemetryMetricRecorder(
+        {
+          ...DEFAULT_OBSERVABILITY_CONFIG,
+          enabled: true,
+          exporter: "console",
+          serviceName: "code-review-worker",
+        },
+        {
+          write: (point) => {
+            metricPoints.push(point);
+          },
+        },
+      ),
     });
 
     await expect(
-      processor({ data: syncInstallationEnvelope, attemptsMade: 0 } as never),
+      processor({
+        attemptsMade: 0,
+        data: syncInstallationEnvelope,
+        queueName: QUEUE_NAMES.repoSync,
+      } as never),
     ).rejects.toThrow("transient");
     expect(store.list()[0]).toMatchObject({ attempts: 1, status: "queued" });
 
     await expect(
-      processor({ data: syncInstallationEnvelope, attemptsMade: 2 } as never),
+      processor({
+        attemptsMade: 2,
+        data: syncInstallationEnvelope,
+        queueName: QUEUE_NAMES.repoSync,
+      } as never),
     ).rejects.toThrow("transient");
     expect(store.list()[0]).toMatchObject({ attempts: 2, status: "failed" });
+    expect(metricPoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: expect.objectContaining({
+            error_class: "unknown_error",
+            job_type: JOB_TYPES.SyncInstallation,
+            queue_name: QUEUE_NAMES.repoSync,
+            status: "retrying",
+          }),
+          name: OBSERVABILITY_METRIC_NAMES.queueRetriesTotal,
+        }),
+        expect.objectContaining({
+          labels: expect.objectContaining({
+            error_class: "unknown_error",
+            job_type: JOB_TYPES.SyncInstallation,
+            queue_name: QUEUE_NAMES.repoSync,
+            status: "failed",
+          }),
+          name: OBSERVABILITY_METRIC_NAMES.queueJobsFailedTotal,
+        }),
+      ]),
+    );
   });
 
   it("does not run handlers when the durable row is missing", async () => {

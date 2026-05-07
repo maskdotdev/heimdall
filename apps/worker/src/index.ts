@@ -591,6 +591,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
       traces: observability.traces,
     }),
+    metrics: observability.metrics,
     traces: observability.traces,
   });
   const workers = [
