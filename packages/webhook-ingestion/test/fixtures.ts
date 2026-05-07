@@ -81,13 +81,16 @@ export const issueCommentPayload = {
   },
   comment: {
     id: 888,
+    author_association: "MEMBER",
     body: "@heimdall false positive on finding fnd_123",
     user: {
       login: "maintainer",
+      type: "User",
     },
   },
   sender: {
     login: "maintainer",
+    type: "User",
   },
 } as const;
 

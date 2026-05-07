@@ -102,6 +102,34 @@ export const UpdateMemoryReasonSchema = Type.Union([
 ]);
 export type UpdateMemoryReason = Static<typeof UpdateMemoryReasonSchema>;
 
+/** Command kinds recognized from provider feedback comments. */
+export const UpdateMemoryFeedbackCommandKindSchema = Type.Union([
+  Type.Literal("mark_false_positive"),
+  Type.Literal("mark_not_useful"),
+  Type.Literal("suppress_exact"),
+  Type.Literal("suppress_similar"),
+  Type.Literal("remember_fact"),
+  Type.Literal("disable_category_in_scope"),
+  Type.Literal("set_review_preference"),
+]);
+export type UpdateMemoryFeedbackCommandKind = Static<typeof UpdateMemoryFeedbackCommandKindSchema>;
+
+/** Redacted command metadata carried by provider feedback memory jobs. */
+export const UpdateMemoryFeedbackCommandPayloadSchema = Type.Object(
+  {
+    commandKind: UpdateMemoryFeedbackCommandKindSchema,
+    commandHash: Type.String({ pattern: "^sha256:[a-f0-9]{64}$" }),
+    confidence: Type.Number({ minimum: 0, maximum: 1 }),
+    content: Type.Optional(Type.String({ minLength: 1 })),
+    proposedScope: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    proposedAppliesTo: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
+export type UpdateMemoryFeedbackCommandPayload = Static<
+  typeof UpdateMemoryFeedbackCommandPayloadSchema
+>;
+
 export const UpdateMemoryJobPayloadSchema = Type.Object(
   {
     repoId: RepoIdSchema,
@@ -117,6 +145,7 @@ export const UpdateMemoryJobPayloadSchema = Type.Object(
     actorLogin: Type.Optional(Type.String({ minLength: 1 })),
     bodyHash: Type.Optional(Type.String({ pattern: "^sha256:[a-f0-9]{64}$" })),
     pullRequestNumber: Type.Optional(Type.Integer({ minimum: 1 })),
+    feedbackCommand: Type.Optional(UpdateMemoryFeedbackCommandPayloadSchema),
   },
   { additionalProperties: false },
 );

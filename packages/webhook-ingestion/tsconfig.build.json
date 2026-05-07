@@ -16,6 +16,7 @@
     { "path": "../contracts/tsconfig.build.json" },
     { "path": "../db/tsconfig.build.json" },
     { "path": "../github/tsconfig.build.json" },
+    { "path": "../memory/tsconfig.build.json" },
     { "path": "../queue/tsconfig.build.json" },
     { "path": "../rules/tsconfig.build.json" }
   ]

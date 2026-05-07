@@ -1,5 +1,13 @@
 import type { PullRequestSnapshot, Repository, RepositorySettings } from "@repo/contracts";
 import { DEFAULT_REPOSITORY_SETTINGS } from "@repo/contracts";
+import {
+  actorCanRunCommand,
+  type FeedbackActor,
+  type FeedbackCommandKind,
+  type MemoryAppliesTo,
+  type MemoryScope,
+  parseFeedbackCommand,
+} from "@repo/memory";
 import { sha256, stableId } from "../ids";
 import { WebhookPayloadError } from "../types";
 
@@ -97,6 +105,22 @@ export type NormalizedGitHubPullRequest = {
 };
 
 /** Provider feedback event normalized from GitHub PR comments or reactions. */
+export type NormalizedGitHubFeedbackCommand = {
+  /** Supported command kind parsed from comment text. */
+  readonly commandKind: FeedbackCommandKind;
+  /** Hash of the full comment text that carried the command. */
+  readonly commandHash: `sha256:${string}`;
+  /** Optional structured content parsed from the command. */
+  readonly content?: string | undefined;
+  /** Proposed scope parsed by the memory command parser. */
+  readonly proposedScope?: MemoryScope | undefined;
+  /** Proposed finding dimensions parsed by the memory command parser. */
+  readonly proposedAppliesTo?: MemoryAppliesTo | undefined;
+  /** Deterministic parser confidence. */
+  readonly confidence: number;
+};
+
+/** Provider feedback event normalized from GitHub PR comments or reactions. */
 export type NormalizedGitHubFeedback = {
   /** Stable feedback event ID derived from provider-owned identifiers. */
   readonly feedbackEventId: string;
@@ -127,6 +151,8 @@ export type NormalizedGitHubFeedback = {
   readonly actorLogin?: string | undefined;
   /** SHA-256 hash of comment text when available. */
   readonly bodyHash?: `sha256:${string}` | undefined;
+  /** Trusted command parsed from comment text, if present. */
+  readonly command?: NormalizedGitHubFeedbackCommand | undefined;
 };
 
 /** Extracts a GitHub installation account. */
@@ -334,11 +360,25 @@ function normalizeIssueCommentFeedback(payload: JsonRecord): NormalizedGitHubFee
   const action = optionalString(payload, "action") ?? "unknown";
   const externalCommentId = stringValue(comment, "id");
   const body = optionalString(comment, "body");
+  const actor = feedbackActor(payload, comment);
 
   return {
     action,
     ...withOptional("actorLogin", actorLogin(payload, comment)),
     ...withOptional("bodyHash", body ? sha256(body) : undefined),
+    ...withOptional(
+      "command",
+      body
+        ? normalizeFeedbackCommand(body, actor, {
+            orgId: installation.orgId,
+            repoId: repository.repoId,
+            target: {
+              externalCommentId,
+              pullRequestNumber: numberValue(issue, "number"),
+            },
+          })
+        : undefined,
+    ),
     eventName: "issue_comment",
     externalCommentId,
     feedbackEventId: stableId("fb", ["github", "issue_comment", action, externalCommentId]),
@@ -358,11 +398,26 @@ function normalizeReviewCommentFeedback(payload: JsonRecord): NormalizedGitHubFe
   const externalCommentId = stringValue(comment, "id");
   const parentCommentId = optionalProviderId(comment, "in_reply_to_id");
   const body = optionalString(comment, "body");
+  const actor = feedbackActor(payload, comment);
+  const pullRequestNumber = pullRequest ? numberValue(pullRequest, "number") : undefined;
 
   return {
     action,
     ...withOptional("actorLogin", actorLogin(payload, comment)),
     ...withOptional("bodyHash", body ? sha256(body) : undefined),
+    ...withOptional(
+      "command",
+      body
+        ? normalizeFeedbackCommand(body, actor, {
+            orgId: installation.orgId,
+            repoId: repository.repoId,
+            target: {
+              externalCommentId: parentCommentId ?? externalCommentId,
+              ...(pullRequestNumber ? { pullRequestNumber } : {}),
+            },
+          })
+        : undefined,
+    ),
     eventName: "pull_request_review_comment",
     externalCommentId,
     ...withOptional("externalParentCommentId", parentCommentId),
@@ -374,10 +429,7 @@ function normalizeReviewCommentFeedback(payload: JsonRecord): NormalizedGitHubFe
     ]),
     feedbackKind: commentFeedbackKind(action),
     installationId: installation.installationId,
-    ...withOptional(
-      "pullRequestNumber",
-      pullRequest ? numberValue(pullRequest, "number") : undefined,
-    ),
+    ...withOptional("pullRequestNumber", pullRequestNumber),
     repoId: repository.repoId,
   };
 }
@@ -417,6 +469,90 @@ function actorLogin(payload: JsonRecord, fallbackSource: JsonRecord): string | u
   const sender = optionalRecord(payload.sender);
   const user = optionalRecord(fallbackSource.user);
   return (sender && optionalString(sender, "login")) ?? (user && optionalString(user, "login"));
+}
+
+function feedbackActor(payload: JsonRecord, fallbackSource: JsonRecord): FeedbackActor | undefined {
+  const login = actorLogin(payload, fallbackSource);
+  if (!login) {
+    return undefined;
+  }
+
+  const sender = optionalRecord(payload.sender);
+  const user = optionalRecord(fallbackSource.user) ?? sender;
+  const association = feedbackActorAssociation(
+    optionalString(fallbackSource, "author_association"),
+  );
+
+  return {
+    providerLogin: login,
+    ...(association ? { association } : {}),
+    ...(association ? { permission: feedbackActorPermission(association) } : {}),
+    isBot: isBotUser(login, user),
+  };
+}
+
+function normalizeFeedbackCommand(
+  body: string,
+  actor: FeedbackActor | undefined,
+  context: Parameters<typeof parseFeedbackCommand>[1],
+): NormalizedGitHubFeedbackCommand | undefined {
+  const command = parseFeedbackCommand(body, context);
+  if (!command || !actor || !actorCanRunCommand(actor, command)) {
+    return undefined;
+  }
+
+  return {
+    commandHash: sha256(command.rawText),
+    commandKind: command.commandKind,
+    confidence: command.confidence,
+    ...(command.content ? { content: command.content } : {}),
+    ...(command.scope ? { proposedScope: command.scope } : {}),
+    ...(command.appliesTo ? { proposedAppliesTo: command.appliesTo } : {}),
+  };
+}
+
+function feedbackActorAssociation(
+  value: string | undefined,
+): NonNullable<FeedbackActor["association"]> | undefined {
+  switch (value?.toUpperCase()) {
+    case "OWNER":
+      return "owner";
+    case "MEMBER":
+      return "member";
+    case "COLLABORATOR":
+      return "collaborator";
+    case "CONTRIBUTOR":
+      return "contributor";
+    case "FIRST_TIMER":
+    case "FIRST_TIME_CONTRIBUTOR":
+      return "first_time_contributor";
+    case "NONE":
+    case "MANNEQUIN":
+      return "unknown";
+    default:
+      return undefined;
+  }
+}
+
+function feedbackActorPermission(
+  association: NonNullable<FeedbackActor["association"]>,
+): NonNullable<FeedbackActor["permission"]> {
+  switch (association) {
+    case "owner":
+      return "admin";
+    case "member":
+      return "maintain";
+    case "collaborator":
+      return "write";
+    case "contributor":
+      return "read";
+    default:
+      return "none";
+  }
+}
+
+function isBotUser(login: string, user: JsonRecord | undefined): boolean {
+  return optionalString(user ?? {}, "type")?.toLowerCase() === "bot" || login.endsWith("[bot]");
 }
 
 function commentFeedbackKind(

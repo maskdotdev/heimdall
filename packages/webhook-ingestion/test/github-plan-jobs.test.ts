@@ -157,6 +157,9 @@ describe("GitHub webhook job planning", () => {
     expect(commentJobs[0]?.envelope.jobType).toBe(JOB_TYPES.UpdateMemory);
     expect(commentJobs[0]?.envelope.payload).toMatchObject({
       actorLogin: "maintainer",
+      feedbackCommand: {
+        commandKind: "mark_false_positive",
+      },
       feedbackKind: "comment_reply",
       reason: "comment_reply",
     });

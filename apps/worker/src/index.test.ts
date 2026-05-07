@@ -233,6 +233,111 @@ describe("createWorkerHandlers", () => {
       }),
     );
   });
+
+  it("creates pending memory candidates from trusted provider feedback commands", async () => {
+    const selectRows: unknown[][] = [
+      [
+        {
+          publishedFindingId: "pub_1",
+          reviewRunId: "rrn_1",
+          validatedFindingId: "vf_1",
+        },
+      ],
+      [
+        {
+          body: "This pattern is noisy for this repository.",
+          candidateFindingId: "cf_1",
+          category: "maintainability",
+          confidence: 0.88,
+          findingId: "vf_1",
+          fingerprint: "fp_command_1",
+          location: { path: "src/generated/client.ts" },
+          reviewRunId: "rrn_1",
+          severity: "low",
+          title: "Generated client method is missing docs",
+        },
+      ],
+      [{ repoId: "repo_1" }],
+      [{ orgId: "org_1" }],
+    ];
+    const insertedRows: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedRows.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => selectRows.shift() ?? [],
+          }),
+        }),
+      }),
+    };
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.UpdateMemory]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "github:memory:fb_command",
+      jobId: "job_memory_feedback_command",
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      payload: {
+        actorLogin: "maintainer",
+        bodyHash: `sha256:${"a".repeat(64)}`,
+        externalCommentId: "889",
+        externalEventId: "fb_command",
+        feedbackCommand: {
+          commandHash: `sha256:${"b".repeat(64)}`,
+          commandKind: "suppress_similar",
+          confidence: 0.94,
+          content: "generated client documentation noise",
+          proposedAppliesTo: {
+            titlePatterns: ["generated client documentation noise"],
+          },
+          proposedScope: {
+            level: "repo",
+            orgId: "org_1",
+            repoId: "repo_1",
+          },
+        },
+        feedbackKind: "comment_reply",
+        provider: "github",
+        reason: "comment_reply",
+        repoId: "repo_1",
+      },
+      schemaVersion: "job_envelope.v1",
+    });
+
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        outcome: "dismissed",
+        publishedFindingId: "pub_1",
+        source: "provider_webhook",
+      }),
+      expect.objectContaining({
+        candidateKind: "suppress_similar_finding",
+        createdByLogin: "maintainer",
+        proposedAppliesTo: {
+          titlePatterns: ["generated client documentation noise"],
+        },
+        proposedContent: "generated client documentation noise",
+        sourceFeedbackEventId: "fb_command",
+        sourceFindingId: "pub_1",
+        sourceKind: "command",
+        status: "pending",
+        trustLevel: "explicit_maintainer",
+      }),
+    ]);
+  });
 });
 
 describe("createRedisPublishThrottle", () => {

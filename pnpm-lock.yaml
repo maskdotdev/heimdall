@@ -295,6 +295,9 @@ importers:
       '@repo/llm-gateway':
         specifier: workspace:*
         version: link:../../packages/llm-gateway
+      '@repo/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
       '@repo/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -1030,6 +1033,9 @@ importers:
       '@repo/github':
         specifier: workspace:*
         version: link:../github
+      '@repo/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@repo/queue':
         specifier: workspace:*
         version: link:../queue

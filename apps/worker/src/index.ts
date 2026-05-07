@@ -60,6 +60,15 @@ import {
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 import type { LLMGateway } from "@repo/llm-gateway";
 import {
+  createMemoryCandidatesFromCommand,
+  type FeedbackCommand,
+  type MemoryAppliesTo,
+  MemoryAppliesToSchema,
+  type MemoryCandidate,
+  type MemoryScope,
+  MemoryScopeSchema,
+} from "@repo/memory";
+import {
   normalizePublishThrottleLimits,
   PUBLISH_THROTTLE_HOUR_WINDOW_MS,
   PUBLISH_THROTTLE_MINUTE_WINDOW_MS,
@@ -460,7 +469,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     [JOB_TYPES.UpdateMemory]: async (envelope) => {
       const payload = asUpdateMemoryPayload(envelope.payload);
       await updateMemoryFromFindingOutcome(options.db, payload);
-      await recordOutcomeFromProviderFeedback(options.db, payload);
+      await recordOutcomeFromProviderFeedback(options.db, payload, envelope.createdAt);
     },
     [JOB_TYPES.BillingReconcile]: async (envelope) => {
       const payload = asBillingReconcilePayload(envelope.payload);
@@ -955,6 +964,7 @@ async function findPublishedFindingIdForValidatedFinding(
 async function recordOutcomeFromProviderFeedback(
   db: HeimdallDatabase,
   payload: UpdateMemoryJobPayload,
+  receivedAt: string,
 ): Promise<void> {
   if (
     (payload.reason !== "comment_reply" && payload.reason !== "provider_reaction") ||
@@ -963,8 +973,11 @@ async function recordOutcomeFromProviderFeedback(
     return;
   }
 
-  const outcome = outcomeFromProviderFeedbackKind(payload.feedbackKind);
-  if (!outcome) {
+  const outcome = outcomeFromProviderFeedbackKind(
+    payload.feedbackKind,
+    payload.feedbackCommand?.commandKind,
+  );
+  if (!outcome && !payload.feedbackCommand) {
     return;
   }
 
@@ -973,26 +986,30 @@ async function recordOutcomeFromProviderFeedback(
     return;
   }
 
-  await db
-    .insert(findingOutcomes)
-    .values({
-      candidateFindingId: published.candidateFindingId,
-      findingOutcomeId: stableWorkerId("out", [
-        "provider_feedback",
-        payload.externalEventId ??
-          payload.externalReactionId ??
-          payload.externalParentCommentId ??
-          payload.externalCommentId,
-      ]),
-      metadata: providerFeedbackOutcomeMetadata(payload),
-      occurredAt: new Date(),
-      orgId: published.orgId,
-      outcome,
-      publishedFindingId: published.publishedFindingId,
-      repoId: published.repoId,
-      source: "provider_webhook",
-    })
-    .onConflictDoNothing();
+  if (outcome) {
+    await db
+      .insert(findingOutcomes)
+      .values({
+        candidateFindingId: published.candidateFindingId,
+        findingOutcomeId: stableWorkerId("out", [
+          "provider_feedback",
+          payload.externalEventId ??
+            payload.externalReactionId ??
+            payload.externalParentCommentId ??
+            payload.externalCommentId,
+        ]),
+        metadata: providerFeedbackOutcomeMetadata(payload),
+        occurredAt: new Date(receivedAt),
+        orgId: published.orgId,
+        outcome,
+        publishedFindingId: published.publishedFindingId,
+        repoId: published.repoId,
+        source: "provider_webhook",
+      })
+      .onConflictDoNothing();
+  }
+
+  await createMemoryCandidatesFromProviderCommand(db, payload, published, receivedAt);
 }
 
 /** Finds a published finding row from provider feedback metadata. */
@@ -1002,6 +1019,17 @@ async function findPublishedFindingForProviderFeedback(
 ): Promise<
   | {
       readonly candidateFindingId: string;
+      readonly finding: {
+        readonly body: string;
+        readonly category: string;
+        readonly confidence: number;
+        readonly findingId: string;
+        readonly fingerprint: string;
+        readonly location: unknown;
+        readonly reviewRunId: string;
+        readonly severity: string;
+        readonly title: string;
+      };
       readonly orgId: string;
       readonly publishedFindingId: string;
       readonly repoId: string;
@@ -1031,7 +1059,18 @@ async function findPublishedFindingForProviderFeedback(
     }
 
     const [finding] = await db
-      .select({ candidateFindingId: validatedFindings.candidateFindingId })
+      .select({
+        body: validatedFindings.body,
+        candidateFindingId: validatedFindings.candidateFindingId,
+        category: validatedFindings.category,
+        confidence: validatedFindings.confidence,
+        findingId: validatedFindings.findingId,
+        fingerprint: validatedFindings.fingerprint,
+        location: validatedFindings.location,
+        reviewRunId: validatedFindings.reviewRunId,
+        severity: validatedFindings.severity,
+        title: validatedFindings.title,
+      })
       .from(validatedFindings)
       .where(eq(validatedFindings.findingId, published.validatedFindingId))
       .limit(1);
@@ -1057,6 +1096,17 @@ async function findPublishedFindingForProviderFeedback(
 
     return {
       candidateFindingId: finding.candidateFindingId,
+      finding: {
+        body: finding.body,
+        category: finding.category,
+        confidence: finding.confidence,
+        findingId: finding.findingId,
+        fingerprint: finding.fingerprint,
+        location: finding.location,
+        reviewRunId: finding.reviewRunId,
+        severity: finding.severity,
+        title: finding.title,
+      },
       orgId: repository.orgId,
       publishedFindingId: published.publishedFindingId,
       repoId: reviewRun.repoId,
@@ -1067,7 +1117,23 @@ async function findPublishedFindingForProviderFeedback(
 }
 
 /** Maps provider feedback kind to the durable finding outcome vocabulary. */
-function outcomeFromProviderFeedbackKind(feedbackKind: string | undefined): string | undefined {
+function outcomeFromProviderFeedbackKind(
+  feedbackKind: string | undefined,
+  commandKind: string | undefined,
+): string | undefined {
+  if (commandKind === "mark_false_positive") {
+    return "rejected";
+  }
+  if (commandKind === "mark_not_useful") {
+    return "ignored";
+  }
+  if (
+    commandKind === "suppress_exact" ||
+    commandKind === "suppress_similar" ||
+    commandKind === "disable_category_in_scope"
+  ) {
+    return "dismissed";
+  }
   if (feedbackKind === "positive_reaction") {
     return "positive_reaction";
   }
@@ -1084,6 +1150,188 @@ function outcomeFromProviderFeedbackKind(feedbackKind: string | undefined): stri
   return undefined;
 }
 
+/** Creates pending memory candidates from a trusted provider feedback command. */
+async function createMemoryCandidatesFromProviderCommand(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+  published: {
+    readonly finding: {
+      readonly body: string;
+      readonly category: string;
+      readonly confidence: number;
+      readonly findingId: string;
+      readonly fingerprint: string;
+      readonly location: unknown;
+      readonly reviewRunId: string;
+      readonly severity: string;
+      readonly title: string;
+    };
+    readonly orgId: string;
+    readonly publishedFindingId: string;
+    readonly repoId: string;
+  },
+  receivedAt: string,
+): Promise<void> {
+  const command = feedbackCommandFromPayload(payload);
+  if (!command) {
+    return;
+  }
+
+  if (command.commandKind === "mark_false_positive") {
+    await db
+      .insert(memoryCandidates)
+      .values(memoryCandidateFromProviderFalsePositiveCommand({ command, payload, published }))
+      .onConflictDoNothing();
+    return;
+  }
+
+  const candidates = createMemoryCandidatesFromCommand({
+    command,
+    createdAt: receivedAt,
+    createdByLogin: payload.actorLogin,
+    findingFingerprint: published.finding.fingerprint,
+    orgId: published.orgId,
+    repoId: published.repoId,
+  });
+
+  for (const candidate of candidates) {
+    await db
+      .insert(memoryCandidates)
+      .values(memoryCandidateFromCommandCandidate({ candidate, payload, published }))
+      .onConflictDoNothing();
+  }
+}
+
+/** Rebuilds the memory-package command contract from redacted job payload metadata. */
+function feedbackCommandFromPayload(payload: UpdateMemoryJobPayload): FeedbackCommand | undefined {
+  const command = payload.feedbackCommand;
+  if (!command) {
+    return undefined;
+  }
+
+  return {
+    commandKind: command.commandKind,
+    rawText: command.commandHash,
+    confidence: command.confidence,
+    ...(command.content ? { content: command.content } : {}),
+    ...(command.proposedScope
+      ? {
+          scope: parseWithSchema(
+            "MemoryScope",
+            MemoryScopeSchema,
+            command.proposedScope,
+          ) as MemoryScope,
+        }
+      : {}),
+    ...(command.proposedAppliesTo
+      ? {
+          appliesTo: parseWithSchema(
+            "MemoryAppliesTo",
+            MemoryAppliesToSchema,
+            command.proposedAppliesTo,
+          ) as MemoryAppliesTo,
+        }
+      : {}),
+  };
+}
+
+/** Converts a memory-package candidate into the durable database insert shape. */
+function memoryCandidateFromCommandCandidate(input: {
+  /** Memory-package candidate created from a parsed command. */
+  readonly candidate: MemoryCandidate;
+  /** Provider feedback job payload. */
+  readonly payload: UpdateMemoryJobPayload;
+  /** Published finding that the provider feedback was correlated to. */
+  readonly published: {
+    readonly publishedFindingId: string;
+  };
+}): typeof memoryCandidates.$inferInsert {
+  return {
+    candidateKind: input.candidate.candidateKind,
+    confidence: input.candidate.confidence,
+    memoryCandidateId: input.candidate.id,
+    metadata: providerFeedbackCommandMetadata(input.payload),
+    orgId: input.candidate.orgId,
+    proposedAppliesTo: input.candidate.proposedAppliesTo,
+    proposedContent: input.candidate.proposedContent,
+    proposedScope: input.candidate.proposedScope,
+    ...(input.candidate.repoId ? { repoId: input.candidate.repoId } : {}),
+    ...(input.candidate.createdByLogin ? { createdByLogin: input.candidate.createdByLogin } : {}),
+    sourceFeedbackEventId: input.payload.externalEventId,
+    sourceFindingId: input.published.publishedFindingId,
+    sourceKind: input.candidate.sourceKind,
+    status: input.candidate.status,
+    trustLevel: input.candidate.trustLevel,
+  };
+}
+
+/** Builds a pending suppression candidate for an explicit provider false-positive command. */
+function memoryCandidateFromProviderFalsePositiveCommand(input: {
+  /** Rebuilt memory command. */
+  readonly command: FeedbackCommand;
+  /** Provider feedback job payload. */
+  readonly payload: UpdateMemoryJobPayload;
+  /** Published finding that the provider feedback was correlated to. */
+  readonly published: {
+    readonly finding: {
+      readonly category: string;
+      readonly confidence: number;
+      readonly findingId: string;
+      readonly fingerprint: string;
+      readonly location: unknown;
+      readonly reviewRunId: string;
+      readonly severity: string;
+      readonly title: string;
+    };
+    readonly orgId: string;
+    readonly publishedFindingId: string;
+    readonly repoId: string;
+  };
+}): typeof memoryCandidates.$inferInsert {
+  const path = pathFromFindingLocation(input.published.finding.location);
+  return {
+    candidateKind: "suppress_similar_finding",
+    confidence: Math.max(0.5, Math.min(0.98, input.command.confidence)),
+    ...(input.payload.actorLogin ? { createdByLogin: input.payload.actorLogin } : {}),
+    memoryCandidateId: stableWorkerId("mcand", [
+      "provider_command",
+      input.payload.externalEventId ??
+        input.payload.externalCommentId ??
+        input.published.publishedFindingId,
+      input.command.commandKind,
+    ]),
+    metadata: {
+      ...providerFeedbackCommandMetadata(input.payload),
+      category: input.published.finding.category,
+      findingId: input.published.finding.findingId,
+      reviewRunId: input.published.finding.reviewRunId,
+      severity: input.published.finding.severity,
+      title: input.published.finding.title,
+      ...(path ? { path } : {}),
+    },
+    orgId: input.published.orgId,
+    proposedAppliesTo: {
+      categories: [input.published.finding.category],
+      findingFingerprints: [input.published.finding.fingerprint],
+      ...(path ? { pathGlobs: [path] } : {}),
+      titlePatterns: [input.published.finding.title],
+    },
+    proposedContent: `Suppress similar findings: ${input.published.finding.title}`,
+    proposedScope: {
+      findingFingerprints: [input.published.finding.fingerprint],
+      level: "finding_fingerprint",
+      orgId: input.published.orgId,
+      repoId: input.published.repoId,
+    },
+    repoId: input.published.repoId,
+    sourceFeedbackEventId: input.payload.externalEventId,
+    sourceFindingId: input.published.publishedFindingId,
+    sourceKind: "command",
+    status: "pending",
+    trustLevel: "explicit_maintainer",
+  };
+}
+
 /** Builds redacted metadata for provider feedback outcome rows. */
 function providerFeedbackOutcomeMetadata(payload: UpdateMemoryJobPayload): Record<string, unknown> {
   return {
@@ -1096,9 +1344,26 @@ function providerFeedbackOutcomeMetadata(payload: UpdateMemoryJobPayload): Recor
       : {}),
     ...(payload.externalReactionId ? { externalReactionId: payload.externalReactionId } : {}),
     ...(payload.feedbackKind ? { feedbackKind: payload.feedbackKind } : {}),
+    ...(payload.feedbackCommand
+      ? {
+          feedbackCommand: {
+            commandHash: payload.feedbackCommand.commandHash,
+            commandKind: payload.feedbackCommand.commandKind,
+            confidence: payload.feedbackCommand.confidence,
+          },
+        }
+      : {}),
     ...(payload.provider ? { provider: payload.provider } : {}),
     ...(payload.pullRequestNumber ? { pullRequestNumber: payload.pullRequestNumber } : {}),
     reason: payload.reason,
+  };
+}
+
+/** Builds redacted metadata for memory candidates proposed from provider commands. */
+function providerFeedbackCommandMetadata(payload: UpdateMemoryJobPayload): Record<string, unknown> {
+  return {
+    ...providerFeedbackOutcomeMetadata(payload),
+    source: "provider_feedback_command",
   };
 }
 

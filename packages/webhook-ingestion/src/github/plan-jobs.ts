@@ -181,6 +181,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           ...(options.feedback.pullRequestNumber
             ? { pullRequestNumber: options.feedback.pullRequestNumber }
             : {}),
+          ...(options.feedback.command ? { feedbackCommand: options.feedback.command } : {}),
         },
       ),
     });

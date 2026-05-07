@@ -39,11 +39,15 @@ describe("GitHub webhook normalization", () => {
 
     expect(comment).toMatchObject({
       actorLogin: "maintainer",
+      command: {
+        commandKind: "mark_false_positive",
+      },
       eventName: "issue_comment",
       feedbackKind: "comment_reply",
       pullRequestNumber: 7,
     });
     expect(comment?.bodyHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(comment?.command?.commandHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
     expect(reaction).toMatchObject({
       actorLogin: "maintainer",
       eventName: "reaction",
