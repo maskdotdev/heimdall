@@ -27,6 +27,7 @@
     "@sinclair/typebox": "catalog:"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

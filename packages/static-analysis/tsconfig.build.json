@@ -12,11 +12,7 @@
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"],
   "references": [
-    { "path": "../artifacts/tsconfig.build.json" },
     { "path": "../contracts/tsconfig.build.json" },
-    { "path": "../db/tsconfig.build.json" },
-    { "path": "../index-schema/tsconfig.build.json" },
-    { "path": "../indexer-driver/tsconfig.build.json" },
-    { "path": "../queue/tsconfig.build.json" }
+    { "path": "../tool-runner/tsconfig.build.json" }
   ]
 }

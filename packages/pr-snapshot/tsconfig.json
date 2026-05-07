@@ -2,11 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
-    "noEmit": true,
     "types": ["node"],
+    "noEmit": true,
     "tsBuildInfoFile": "./.tsbuildinfo/typecheck.tsbuildinfo"
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts"],
   "exclude": ["dist", "node_modules"],
-  "references": [{ "path": "../index-schema/tsconfig.build.json" }]
+  "references": [{ "path": "../contracts/tsconfig.build.json" }]
 }

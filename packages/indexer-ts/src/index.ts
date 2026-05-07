@@ -12,8 +12,12 @@ import {
   type SymbolKind,
   type SymbolRecord,
 } from "@repo/index-schema";
-import type { CodeIndexerDriver, IndexArtifact } from "@repo/indexer-driver";
-import { toIndexerFailure, validateIndexArtifact } from "@repo/indexer-driver";
+import type { CodeIndexerDriver, IndexArtifact, IndexerCapabilities } from "@repo/indexer-driver";
+import {
+  INDEX_REQUEST_SCHEMA_VERSION,
+  toIndexerFailure,
+  validateIndexArtifact,
+} from "@repo/indexer-driver";
 import ts from "typescript";
 
 export const packageName = "@repo/indexer-ts" as const;
@@ -28,6 +32,7 @@ export function createTypeScriptIndexerDriver(): CodeIndexerDriver {
   return {
     name: INDEXER_NAME,
     version: INDEXER_VERSION,
+    getCapabilities: async () => getTypeScriptIndexerCapabilities(),
     indexRepository: async (input) => {
       try {
         const artifact = await indexTypeScriptRepository(input);
@@ -49,6 +54,24 @@ export function createTypeScriptIndexerDriver(): CodeIndexerDriver {
         return { ok: false, error: toIndexerFailure(error, "filesystem_error"), diagnostics: [] };
       }
     },
+  };
+}
+
+/** Returns the schema, language, record, and feature support of the TypeScript indexer. */
+export function getTypeScriptIndexerCapabilities(): IndexerCapabilities {
+  return {
+    driverName: INDEXER_NAME,
+    driverVersion: INDEXER_VERSION,
+    maxFileBytes: MAX_FILE_BYTES,
+    supportedArtifactSchemaVersions: [INDEX_ARTIFACT_SCHEMA_VERSION],
+    supportedLanguages: ["typescript", "javascript", "tsx", "jsx"],
+    supportedRecordTypes: ["file", "symbol", "edge", "chunk"],
+    supportedRequestSchemaVersions: [INDEX_REQUEST_SCHEMA_VERSION],
+    supportsCancellation: false,
+    supportsIncremental: true,
+    supportsPreviousArtifact: false,
+    supportsRemoteArtifacts: false,
+    supportsStreamingProgress: false,
   };
 }
 

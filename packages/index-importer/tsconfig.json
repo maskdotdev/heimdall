@@ -9,6 +9,7 @@
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"],
   "exclude": ["dist", "node_modules"],
   "references": [
+    { "path": "../artifacts/tsconfig.build.json" },
     { "path": "../contracts/tsconfig.build.json" },
     { "path": "../db/tsconfig.build.json" },
     { "path": "../index-schema/tsconfig.build.json" },

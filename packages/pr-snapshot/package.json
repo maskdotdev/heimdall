@@ -1,5 +1,5 @@
 {
-  "name": "@repo/index-importer",
+  "name": "@repo/pr-snapshot",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,12 +20,7 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
-    "@repo/artifacts": "workspace:*",
-    "@repo/contracts": "workspace:*",
-    "@repo/db": "workspace:*",
-    "@repo/index-schema": "workspace:*",
-    "@repo/indexer-driver": "workspace:*",
-    "@repo/queue": "workspace:*"
+    "@repo/contracts": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

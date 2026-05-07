@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { type ReviewArtifactFetch, S3CompatibleReviewArtifactPayloadStore } from "@repo/artifacts";
 import { type EmbeddingBatchJobPayload, JOB_TYPES } from "@repo/contracts";
 import {
   backgroundJobs,
@@ -16,6 +20,43 @@ import { QUEUE_NAMES } from "@repo/queue";
 
 export const packageName = "@repo/index-importer" as const;
 
+/** Resolver that loads an index artifact from a durable URI or local path. */
+export type IndexArtifactResolver = {
+  /** Reads and parses an index artifact from the provided URI. */
+  readonly readArtifact: (artifactUri: string) => Promise<IndexArtifact>;
+};
+
+/** Options for the default filesystem-backed artifact resolver. */
+export type FileSystemIndexArtifactResolverOptions = {
+  /** Optional root directory that resolved local paths must stay inside. */
+  readonly rootPath?: string;
+};
+
+/** Options for S3/R2-compatible whole-artifact JSON resolution. */
+export type S3CompatibleIndexArtifactResolverOptions = {
+  /** Bucket that owns index artifact objects. */
+  readonly bucket: string;
+  /** AWS-compatible region for request signing. */
+  readonly region: string;
+  /** Access key ID for SigV4 signing. */
+  readonly accessKeyId: string;
+  /** Secret access key for SigV4 signing. */
+  readonly secretAccessKey: string;
+  /** Optional session token for temporary credentials. */
+  readonly sessionToken?: string;
+  /** Optional S3-compatible endpoint, such as an R2 endpoint. */
+  readonly endpoint?: string;
+  /** Whether to address objects as endpoint/bucket/key instead of bucket.endpoint/key. */
+  readonly forcePathStyle?: boolean;
+  /** Optional fetch implementation for tests. */
+  readonly fetch?: ReviewArtifactFetch;
+  /** Optional clock for deterministic signing tests. */
+  readonly now?: () => Date;
+};
+
+/** Environment values used to choose the runtime index artifact resolver. */
+export type IndexArtifactResolverEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Options for importing a validated artifact. */
 export type ImportIndexArtifactOptions = {
   /** Database used for idempotent persistence. */
@@ -28,6 +69,12 @@ export type ImportIndexArtifactOptions = {
   readonly embeddingModel?: string;
   /** Maximum chunk IDs per embedding job. */
   readonly embeddingBatchSize?: number;
+};
+
+/** Options for importing an artifact by resolving its URI first. */
+export type ImportIndexArtifactFromUriOptions = ImportIndexArtifactOptions & {
+  /** Optional resolver for non-filesystem artifact stores. */
+  readonly artifactResolver?: IndexArtifactResolver;
 };
 
 /** Summary returned after importing an index artifact. */
@@ -45,6 +92,98 @@ export type ImportIndexArtifactResult = {
   /** Number of queued embedding jobs. */
   readonly embeddingJobCount: number;
 };
+
+/** Creates a resolver that reads whole-artifact JSON files from file URLs or local paths. */
+export function createFileSystemIndexArtifactResolver(
+  options: FileSystemIndexArtifactResolverOptions = {},
+): IndexArtifactResolver {
+  const rootPath = options.rootPath ? resolve(options.rootPath) : undefined;
+
+  return {
+    readArtifact: async (artifactUri) => {
+      const artifactPath = resolveLocalArtifactPath(artifactUri, rootPath);
+      const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
+
+      return artifact;
+    },
+  };
+}
+
+/** Creates an S3/R2-compatible resolver for whole-artifact JSON objects. */
+export function createS3CompatibleIndexArtifactResolver(
+  options: S3CompatibleIndexArtifactResolverOptions,
+): IndexArtifactResolver {
+  const store = new S3CompatibleReviewArtifactPayloadStore(options);
+
+  return {
+    readArtifact: async (artifactUri) => {
+      const result = await store.getJson({
+        metadata: {},
+        uri: normalizeObjectArtifactUri(artifactUri),
+      });
+      if (!result.exists) {
+        throw new Error(`Index artifact object was not found: ${artifactUri}`);
+      }
+
+      return result.payload as IndexArtifact;
+    },
+  };
+}
+
+/** Creates the configured index artifact resolver from environment variables. */
+export function createIndexArtifactResolverFromEnvironment(
+  env: IndexArtifactResolverEnvironment,
+): IndexArtifactResolver {
+  const rootPath = env.HEIMDALL_INDEX_ARTIFACT_ROOT ?? env.INDEX_ARTIFACT_ROOT;
+  if (rootPath && rootPath.trim().length > 0) {
+    return createFileSystemIndexArtifactResolver({ rootPath });
+  }
+
+  const bucket = env.HEIMDALL_INDEX_ARTIFACT_BUCKET ?? env.OBJECT_STORAGE_BUCKET;
+  const accessKeyId = env.HEIMDALL_INDEX_ARTIFACT_ACCESS_KEY_ID ?? env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey =
+    env.HEIMDALL_INDEX_ARTIFACT_SECRET_ACCESS_KEY ?? env.AWS_SECRET_ACCESS_KEY;
+  if (bucket && accessKeyId && secretAccessKey) {
+    const forcePathStyle = booleanEnv(env.HEIMDALL_INDEX_ARTIFACT_FORCE_PATH_STYLE);
+    const sessionToken = env.HEIMDALL_INDEX_ARTIFACT_SESSION_TOKEN ?? env.AWS_SESSION_TOKEN;
+
+    return createS3CompatibleIndexArtifactResolver({
+      accessKeyId,
+      bucket,
+      region:
+        env.HEIMDALL_INDEX_ARTIFACT_REGION ??
+        env.AWS_REGION ??
+        env.AWS_DEFAULT_REGION ??
+        "us-east-1",
+      secretAccessKey,
+      ...(env.HEIMDALL_INDEX_ARTIFACT_ENDPOINT
+        ? { endpoint: env.HEIMDALL_INDEX_ARTIFACT_ENDPOINT }
+        : {}),
+      ...(forcePathStyle === undefined ? {} : { forcePathStyle }),
+      ...(sessionToken ? { sessionToken } : {}),
+    });
+  }
+
+  return createFileSystemIndexArtifactResolver();
+}
+
+/** Reads a whole-artifact JSON file from a file URL or local path. */
+export async function readIndexArtifactFromUri(
+  artifactUri: string,
+  options: FileSystemIndexArtifactResolverOptions = {},
+): Promise<IndexArtifact> {
+  return createFileSystemIndexArtifactResolver(options).readArtifact(artifactUri);
+}
+
+/** Resolves an artifact URI and imports the loaded artifact into normalized DB tables. */
+export async function importIndexArtifactFromUri(
+  options: ImportIndexArtifactFromUriOptions,
+): Promise<ImportIndexArtifactResult> {
+  const resolver = options.artifactResolver ?? createFileSystemIndexArtifactResolver();
+  const artifact = await resolver.readArtifact(options.artifactUri);
+
+  return importIndexArtifact(artifact, options);
+}
 
 /** Imports a validated index artifact into normalized DB tables idempotently. */
 export async function importIndexArtifact(
@@ -222,6 +361,7 @@ export async function importIndexArtifact(
   };
 }
 
+/** Enqueues durable embedding batch jobs for imported chunks. */
 async function enqueueEmbeddingBatches(
   indexVersionId: string,
   repoId: string,
@@ -265,10 +405,70 @@ async function enqueueEmbeddingBatches(
   return count;
 }
 
+/** Resolves and bounds a local artifact path against an optional root directory. */
+function resolveLocalArtifactPath(artifactUri: string, rootPath: string | undefined): string {
+  const artifactPath = localPathFromArtifactUri(artifactUri, rootPath);
+  if (rootPath && !isPathInsideRoot(rootPath, artifactPath)) {
+    throw new Error("Index artifact path is outside the configured artifact root.");
+  }
+
+  return artifactPath;
+}
+
+/** Converts R2 object URIs to S3-compatible URIs for the shared object reader. */
+function normalizeObjectArtifactUri(artifactUri: string): string {
+  if (artifactUri.startsWith("r2://")) {
+    return `s3://${artifactUri.slice("r2://".length)}`;
+  }
+
+  return artifactUri;
+}
+
+/** Converts a supported artifact URI or local path to an absolute filesystem path. */
+function localPathFromArtifactUri(artifactUri: string, rootPath: string | undefined): string {
+  if (hasUriScheme(artifactUri)) {
+    const url = new URL(artifactUri);
+    if (url.protocol !== "file:") {
+      throw new Error(`Unsupported index artifact URI scheme: ${url.protocol}`);
+    }
+
+    return fileURLToPath(url);
+  }
+
+  if (isAbsolute(artifactUri)) {
+    return resolve(artifactUri);
+  }
+
+  return resolve(rootPath ?? process.cwd(), artifactUri);
+}
+
+/** Returns whether a value starts with a URI scheme. */
+function hasUriScheme(value: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+}
+
+/** Returns whether a path is inside a configured root directory. */
+function isPathInsideRoot(rootPath: string, targetPath: string): boolean {
+  const relativePath = relative(resolve(rootPath), resolve(targetPath));
+
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+/** Parses an environment boolean where undefined means caller default. */
+function booleanEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined || value.trim().length === 0) {
+    return undefined;
+  }
+
+  return value === "true" || value === "1";
+}
+
+/** Computes a stable SHA-256 hash for an index artifact payload. */
 function hashArtifact(artifact: IndexArtifact): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(JSON.stringify(artifact)).digest("hex")}`;
 }
 
+/** Creates a deterministic ID from ordered stringable parts. */
 function stableId(prefix: string, parts: readonly unknown[]): string {
   return `${prefix}_${createHash("sha256")
     .update(parts.map((part) => String(part)).join(":"))

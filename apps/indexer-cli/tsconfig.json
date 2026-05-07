@@ -7,5 +7,10 @@
     "tsBuildInfoFile": "./.tsbuildinfo/typecheck.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["dist", "node_modules"],
+  "references": [
+    { "path": "../../packages/index-schema/tsconfig.build.json" },
+    { "path": "../../packages/indexer-driver/tsconfig.build.json" },
+    { "path": "../../packages/indexer-ts/tsconfig.build.json" }
+  ]
 }
