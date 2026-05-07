@@ -124,10 +124,12 @@ Use this checklist for production and for every gateway configuration change:
 | --- | --- |
 | Org allowlist | Require active membership in `HEIMDALL_ADMIN_GITHUB_ORG` and keep `HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS` explicit. Leave `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=false` unless the GitHub org is itself the admin access group and the security owner approves it. |
 | Scope grants | Grant only the required `HEIMDALL_ADMIN_GATEWAY_ORG_IDS`, optional `HEIMDALL_ADMIN_GATEWAY_REPO_IDS`, and `admin.*` permissions for the release. Avoid `*` scopes unless the release ticket documents why global access is required. |
-| Session policy | Gateway sessions use signed, `HttpOnly`, `Secure`, `SameSite=Lax` cookies with `HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS<=28800`. OAuth state uses `SameSite=Lax` and `HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS<=900`. API admin sessions use signed, `HttpOnly`, `Secure` cookies with CSRF on unsafe methods. |
+| Session policy | Gateway sessions use signed, `HttpOnly`, `Secure`, `SameSite=Lax` cookies with `HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS<=28800`. OAuth state uses `SameSite=Lax` and `HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS<=900`. API admin sessions use signed, `HttpOnly`, `Secure` cookies with CSRF on unsafe methods and API-side admin route rate limits enabled. |
+| Support-session references | Privileged raw eval import requests from support actors must include `x-heimdall-support-session-id` with an opaque `supp_` ID from the support ticket or approval workflow. The API records that ID in debug/eval audit actor metadata. Full support-session approval persistence remains future work. |
+| Operator rationale | Eval import draft mutations must include a non-empty `reason` that links the action to a support ticket, incident, release drill, or eval maintenance task. |
 | OAuth app settings | Use a dedicated production GitHub OAuth app. Configure only the production gateway callback URL, request `read:org`, disable signup in the authorization request, and store the client secret only in the deployment secret store. |
 | Origin checks | Set exact HTTPS dashboard origins in both `HEIMDALL_ADMIN_ALLOWED_ORIGINS` and `HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS`. Do not use wildcard origins. Verify credentialed CORS with the preflight command before and after changes. |
-| Failure modes | Disabled admin routes return 404. Misconfigured API auth returns 503. Missing or expired sessions return 401. Origin, CSRF, scope, and login denials return 403. GitHub token or API validation failures return 502. Logs must include error codes but not secrets, OAuth codes, assertion payloads, or cookies. |
+| Failure modes | Disabled admin routes return 404. Misconfigured API auth returns 503. Missing or expired sessions return 401. Malformed support-session headers and missing mutation reasons return 400. Origin, CSRF, scope, support-session, and login denials return 403. Admin rate limits return 429 with `Retry-After`. GitHub token or API validation failures return 502. Logs must include error codes but not secrets, OAuth codes, assertion payloads, or cookies. |
 
 ## Production Release Gates
 
@@ -311,6 +313,31 @@ Run the repository-wide check before handoff:
 pnpm check
 ```
 
+## Local Admin CLI
+
+Use the admin CLI for local fixture inspection and controlled operational drills:
+
+```sh
+pnpm admin:inspect-review <reviewRunId>
+pnpm admin:export-debug-bundle <reviewRunId>
+pnpm admin:replay-review <reviewRunId>
+pnpm admin:replay-retrieval <reviewRunId>
+pnpm admin:replay-validation <reviewRunId>
+pnpm admin:publisher-dry-run <reviewRunId>
+```
+
+The replay command prints a confirmation token by default. Dispatch requires the explicit
+`--execute --confirmation-token <token>` flags, and dispatch writes `admin_actions`, `replay_runs`,
+`replay_stage_runs`, and `audit_logs` rows. The retrieval replay command is a dry-run that
+re-runs deterministic context retrieval against the stored pull request snapshot and compares the
+result with the stored context bundle without mutating review state. The validation replay command
+is a dry-run that re-runs deterministic finding validation against the stored pull request snapshot
+and persisted candidate findings, then compares the result with stored validated findings without
+mutating review state. The review inspector dashboard exposes the same dry-runs through
+**Retrieve Dry-Run** and **Validate Dry-Run** for scoped operators with replay planning permission.
+The direct database CLI refuses production mode unless `HEIMDALL_ADMIN_CLI_ALLOW_PRODUCTION_DB=true`
+is set for a documented break-glass operation.
+
 ## Required Production Settings
 
 Set these variables before enabling admin routes:
@@ -324,6 +351,9 @@ Set these variables before enabling admin routes:
 | `HEIMDALL_ADMIN_SESSION_SECRET` | A distinct 32+ character session signing secret |
 | `HEIMDALL_ADMIN_ALLOWED_ORIGINS` | Comma-separated dashboard origins |
 | `HEIMDALL_ADMIN_GITHUB_ORG` | Required when `HEIMDALL_ADMIN_IDENTITY_PROVIDER=github_org` |
+| `HEIMDALL_ADMIN_RATE_LIMIT_MAX_REQUESTS` | Optional. Defaults to `120` requests per client window |
+| `HEIMDALL_ADMIN_RATE_LIMIT_WINDOW_SECONDS` | Optional. Defaults to `60` seconds |
+| `HEIMDALL_ADMIN_RATE_LIMIT_MAX_ENTRIES` | Optional. Defaults to `10000` tracked client keys per API process |
 | `VITE_HEIMDALL_API_BASE_URL` | Admin API origin built into the dashboard bundle |
 | `VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL` | Admin gateway origin built into the dashboard bundle |
 
@@ -392,8 +422,13 @@ create equivalent alerts before moving to a formal infrastructure target.
 | Gateway health | `GET <GATEWAY_URL>/healthz` returns `{ "ok": true, "service": "admin-gateway" }` | Two consecutive failures or any 5xx during rollout |
 | Dashboard health | `GET <WEB_URL>/` returns the dashboard shell built with the production API URL | 4xx/5xx or missing production API URL in the bundle |
 | Auth failures | Count API `admin.access.denied` telemetry by `attributes.code` and gateway `admin_gateway.*` rejection codes in logs | More than 5 failures in 10 minutes after excluding a planned negative test |
-| Replay audit visibility | Search `audit_logs` for `webhook.requeue_jobs`, `review.requeue`, and `publish.review` after any `admin.replay.dispatched` event | Replay dispatch returns without a matching audit row |
+| Replay/export audit visibility | Search `audit_logs` for `webhook.requeue_jobs`, `job.requeue`, `review.requeue`, `publish.review`, `debug_bundle.export`, and `eval_import.draft_created` after any matching telemetry event | Replay dispatch, debug bundle export, or eval import draft creation returns without a matching audit row |
+| Replay/eval action durability | Search `admin_actions` for `replay.dispatch` and `eval_import.draft_create`, and search `replay_runs`/`replay_stage_runs` after replay dispatches, then compare row IDs with API responses and audit metadata | Replay dispatch or eval import draft creation returns without a completed admin action row linked from the audit row, or replay dispatch lacks a replay run row |
+| Debug export durability | Search `admin_actions` and `debug_exports` after a debug bundle export and compare the row IDs with the API response and `debug_bundle.export` audit metadata | A debug bundle export returns without a completed admin action row, debug export row, expiration timestamp, or audit metadata link |
+| Raw eval import gating | Review `admin.access.denied` telemetry for `admin.support_session_required` and confirm approved raw eval imports include `supportSessionId` in the `eval_import.draft_created` audit actor metadata | Raw eval imports succeed without an admin actor or support-session reference, or denied raw requests lack telemetry |
+| Memory/rules inspection | Count `admin.memory_rules.inspected` telemetry by repository and compare against support tickets or release drills | Unexpected inspection spikes or inspection outside an approved support/release window |
 | Settings audit visibility | Search `audit_logs` for `repo.settings.updated` after any `admin.settings.updated` event | Settings update returns without a matching audit row |
+| Admin action metrics | Count `admin.action.completed` telemetry by `attributes.actionKind` and compare with specific action telemetry and audit rows | Completed action telemetry disappears for replay, debug export, eval import, settings, rules, billing, or support inspection actions |
 | Admin action volume | Count `audit_logs` by action each hour | Zero rows after a known manual drill, or more than 3 settings/replay mutations outside a release or incident |
 | Emergency disable | API admin routes return 404 after `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled` deploy | Disable cannot complete and verify within 10 minutes |
 
@@ -455,7 +490,7 @@ After any rollback or emergency disable:
 ## Emergency Replay
 
 1. Open the dashboard and refresh the admin session.
-2. Load the failing webhook, review run, or publisher run in the inspector.
+2. Load the failing webhook, durable job, review run, or publisher run in the inspector.
 3. Select **Plan replay**.
 4. Review blocked jobs, missing jobs, dry-run output, and failure codes.
 5. Copy the confirmation token into the confirmation field.

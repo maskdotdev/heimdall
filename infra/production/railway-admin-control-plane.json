@@ -1,5 +1,12 @@
 {
   "environment": "production",
+  "artifactStorage": {
+    "bucketAccess": "private",
+    "encryption": "provider-managed",
+    "provider": "s3-compatible",
+    "publicAccess": "blocked",
+    "rawDownloadAccess": "support-session-gated"
+  },
   "observability": {
     "alerts": [
       {
@@ -109,7 +116,12 @@
         "HEIMDALL_ADMIN_SESSION_SECRET",
         "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
         "HEIMDALL_ADMIN_GITHUB_ORG",
-        "WEB_URL"
+        "WEB_URL",
+        "HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+        "HEIMDALL_REVIEW_ARTIFACT_ENDPOINT",
+        "HEIMDALL_REVIEW_ARTIFACT_REGION",
+        "HEIMDALL_REVIEW_ARTIFACT_ACCESS_KEY_ID",
+        "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY"
       ]
     },
     {
@@ -153,7 +165,12 @@
         "REDIS_URL",
         "GITHUB_APP_ID",
         "GITHUB_PRIVATE_KEY",
-        "GITHUB_WEBHOOK_SECRET"
+        "GITHUB_WEBHOOK_SECRET",
+        "HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+        "HEIMDALL_REVIEW_ARTIFACT_ENDPOINT",
+        "HEIMDALL_REVIEW_ARTIFACT_REGION",
+        "HEIMDALL_REVIEW_ARTIFACT_ACCESS_KEY_ID",
+        "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY"
       ]
     },
     {

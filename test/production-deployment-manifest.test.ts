@@ -6,6 +6,15 @@ import {
 
 type ProductionDeploymentAuditInput = Parameters<typeof buildProductionDeploymentAuditReport>[0];
 
+/** Required object-storage environment variables for review artifact payloads. */
+const REQUIRED_REVIEW_ARTIFACT_ENV = [
+  "HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+  "HEIMDALL_REVIEW_ARTIFACT_ENDPOINT",
+  "HEIMDALL_REVIEW_ARTIFACT_REGION",
+  "HEIMDALL_REVIEW_ARTIFACT_ACCESS_KEY_ID",
+  "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY",
+];
+
 describe("production deployment manifest", () => {
   it("accepts a complete Railway production manifest", () => {
     const report = buildProductionDeploymentAuditReport(productionDeploymentInput());
@@ -59,6 +68,57 @@ describe("production deployment manifest", () => {
     );
   });
 
+  it("reports missing review artifact storage and worker runtime environment", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        services: validManifest().services.map((serviceRecord) => {
+          if (serviceRecord.name === "api") {
+            return removeRequiredEnv(serviceRecord, "HEIMDALL_REVIEW_ARTIFACT_BUCKET");
+          }
+          if (serviceRecord.name === "worker") {
+            return removeRequiredEnv(
+              removeRequiredEnv(serviceRecord, "GITHUB_APP_ID"),
+              "HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+            );
+          }
+
+          return serviceRecord;
+        }),
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining([
+        "api requiredEnv must include HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+        "worker requiredEnv must include GITHUB_APP_ID",
+        "worker requiredEnv must include HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+      ]),
+    );
+  });
+
+  it("reports unsafe review artifact object-storage policy", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        artifactStorage: {
+          ...validManifest().artifactStorage,
+          bucketAccess: "public",
+          encryption: "none",
+          publicAccess: "allowed",
+        },
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining([
+        "artifactStorage.bucketAccess must be private",
+        "artifactStorage.encryption must be provider-managed",
+        "artifactStorage.publicAccess must be blocked",
+      ]),
+    );
+  });
+
   it("rejects missing service Dockerfiles when file existence is supplied", () => {
     const input = productionDeploymentInput({
       fileExists: () => false,
@@ -95,6 +155,13 @@ function productionDeploymentInput(
 /** Creates a complete production manifest fixture. */
 function validManifest() {
   return {
+    artifactStorage: {
+      bucketAccess: "private",
+      encryption: "provider-managed",
+      provider: "s3-compatible",
+      publicAccess: "blocked",
+      rawDownloadAccess: "support-session-gated",
+    },
     environment: "production",
     observability: {
       alerts: [
@@ -136,6 +203,7 @@ function validManifest() {
           "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
           "HEIMDALL_ADMIN_GITHUB_ORG",
           "WEB_URL",
+          ...REQUIRED_REVIEW_ARTIFACT_ENV,
         ],
         "infra/staging/Dockerfile.api",
         "infra/railway/api.railway.json",
@@ -165,7 +233,14 @@ function validManifest() {
       ),
       service(
         "worker",
-        ["DATABASE_URL", "REDIS_URL"],
+        [
+          "DATABASE_URL",
+          "REDIS_URL",
+          "GITHUB_APP_ID",
+          "GITHUB_PRIVATE_KEY",
+          "GITHUB_WEBHOOK_SECRET",
+          ...REQUIRED_REVIEW_ARTIFACT_ENV,
+        ],
         "infra/staging/Dockerfile.worker",
         "infra/railway/worker.railway.json",
       ),
@@ -214,5 +289,13 @@ function service(
     package: name,
     ...(railwayConfig ? { railwayConfig } : {}),
     requiredEnv,
+  };
+}
+
+/** Removes one required environment variable from a service fixture. */
+function removeRequiredEnv(serviceRecord: ReturnType<typeof service>, envName: string) {
+  return {
+    ...serviceRecord,
+    requiredEnv: serviceRecord.requiredEnv.filter((requiredEnv) => requiredEnv !== envName),
   };
 }

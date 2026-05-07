@@ -13,6 +13,7 @@
     "NODE_ENV",
     "LOG_LEVEL",
     "DATABASE_URL",
+    "HEIMDALL_DB_TEST_URL",
     "REDIS_URL",
     "GITHUB_APP_ID",
     "GITHUB_APP_PRIVATE_KEY",

@@ -22,6 +22,15 @@ const REQUIRED_ALERT_IDS = [
 /** Services that must use Railway config-as-code. */
 const REQUIRED_RAILWAY_CONFIG_SERVICES = ["api", "dashboard", "admin-gateway", "worker"];
 
+/** Required production artifact-storage policy fields. */
+const REQUIRED_ARTIFACT_STORAGE_POLICY = {
+  bucketAccess: "private",
+  encryption: "provider-managed",
+  provider: "s3-compatible",
+  publicAccess: "blocked",
+  rawDownloadAccess: "support-session-gated",
+};
+
 /** Required workspace scripts that back the production release gates. */
 const REQUIRED_PACKAGE_SCRIPTS = [
   "check",
@@ -36,6 +45,15 @@ const REQUIRED_PACKAGE_SCRIPTS = [
 /** Required release-gate commands in the production deployment manifest. */
 const REQUIRED_RELEASE_GATE_COMMANDS = REQUIRED_PACKAGE_SCRIPTS.map((script) => `pnpm ${script}`);
 
+/** Required object-storage environment variables for immutable review artifact payloads. */
+const REQUIRED_REVIEW_ARTIFACT_ENV = [
+  "HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+  "HEIMDALL_REVIEW_ARTIFACT_ENDPOINT",
+  "HEIMDALL_REVIEW_ARTIFACT_REGION",
+  "HEIMDALL_REVIEW_ARTIFACT_ACCESS_KEY_ID",
+  "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY",
+];
+
 /** Required API environment variables for production admin routes. */
 const REQUIRED_API_ENV = [
   "DATABASE_URL",
@@ -49,6 +67,7 @@ const REQUIRED_API_ENV = [
   "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
   "HEIMDALL_ADMIN_GITHUB_ORG",
   "WEB_URL",
+  ...REQUIRED_REVIEW_ARTIFACT_ENV,
 ];
 
 /** Required dashboard build-time environment variables for production login. */
@@ -69,6 +88,16 @@ const REQUIRED_GATEWAY_ENV = [
   "HEIMDALL_ADMIN_GATEWAY_PERMISSIONS",
   "HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET",
   "HEIMDALL_ADMIN_GITHUB_ORG",
+];
+
+/** Required worker environment variables for review orchestration and artifact writes. */
+const REQUIRED_WORKER_ENV = [
+  "DATABASE_URL",
+  "REDIS_URL",
+  "GITHUB_APP_ID",
+  "GITHUB_PRIVATE_KEY",
+  "GITHUB_WEBHOOK_SECRET",
+  ...REQUIRED_REVIEW_ARTIFACT_ENV,
 ];
 
 /** JSON object shape used by deployment manifests. */
@@ -141,6 +170,7 @@ export function productionDeploymentIssues(
   const apiService = serviceByName(services, "api");
   const dashboardService = serviceByName(services, "dashboard");
   const gatewayService = serviceByName(services, "admin-gateway");
+  const workerService = serviceByName(services, "worker");
   const scripts = recordField(input.packageJson, "scripts");
 
   return [
@@ -162,6 +192,10 @@ export function productionDeploymentIssues(
     ...REQUIRED_GATEWAY_ENV.filter((envName) => !requiredEnv(gatewayService).includes(envName)).map(
       (envName) => `admin-gateway requiredEnv must include ${envName}`,
     ),
+    ...REQUIRED_WORKER_ENV.filter((envName) => !requiredEnv(workerService).includes(envName)).map(
+      (envName) => `worker requiredEnv must include ${envName}`,
+    ),
+    ...artifactStoragePolicyIssues(input.manifest),
     ...REQUIRED_RELEASE_GATE_COMMANDS.filter(
       (command) => !releaseGateCommands(input.manifest).includes(command),
     ).map((command) => `release gate ${command} is required`),
@@ -180,6 +214,17 @@ export function productionDeploymentIssues(
       ? "rollback checks are required"
       : undefined,
   ].filter((issue): issue is string => typeof issue === "string");
+}
+
+/** Returns issues for the production review artifact-storage policy. */
+function artifactStoragePolicyIssues(manifest: JsonRecord): readonly string[] {
+  const artifactStorage = recordField(manifest, "artifactStorage");
+
+  return Object.entries(REQUIRED_ARTIFACT_STORAGE_POLICY)
+    .filter(
+      ([fieldName, expectedValue]) => stringField(artifactStorage, fieldName) !== expectedValue,
+    )
+    .map(([fieldName, expectedValue]) => `artifactStorage.${fieldName} must be ${expectedValue}`);
 }
 
 /** Returns issues for required Railway config-as-code files that do not exist. */

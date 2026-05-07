@@ -48,8 +48,11 @@ packages/review-engine
 packages/llm-gateway
 packages/publisher
 packages/artifacts
+packages/billing
 packages/evaluation
 packages/memory
+packages/rules
+packages/usage
 packages/observability
 packages/security
 packages/admin-tools
@@ -66,9 +69,64 @@ pnpm build
 pnpm typecheck
 pnpm lint
 pnpm test
+pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models
 pnpm infra:up
 pnpm infra:down
 ```
+
+## Evaluation Gate
+
+Run the deterministic MVP evaluation suite before changing indexing, retrieval, review prompts,
+validation, or ranking:
+
+```bash
+pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models
+```
+
+The command writes CI-safe Markdown and JSON reports under `.heimdall/eval-runs/`. The report omits
+raw code and retrieved context text. `pnpm check` runs the same suite in CI mode and fails if recall,
+precision, false-positive, anchor, retrieval, latency, or cost thresholds regress.
+
+## Rules and Policy Snapshots
+
+Repository review settings compile through `@repo/rules` into immutable policy snapshots. The
+rules package validates policy objects with TypeBox, classifies repository paths, evaluates PR
+trigger decisions, applies finding thresholds and suppressions, and maps review policy modes to
+publishing decisions. Webhook ingestion uses the trigger decision before it persists PR index and
+review jobs. Review orchestration stores a `policy_snapshot` artifact for each run and passes the
+compiled policy to finding validation. The publisher reads the stored publishing policy for new
+review runs and routes check runs, inline comments, configured summaries, fallback summaries, and
+comment budgets from that immutable snapshot. The admin settings API and dashboard can compile an
+effective policy preview for the current draft settings before saving. Operators can also create,
+edit, disable, and delete repository-scoped rules from the same settings screen. Stored active
+rules feed both preview compilation and review-run policy snapshots.
+
+## Usage Ledger
+
+`@repo/usage` owns the append-only internal usage ledger boundary. It creates validated usage
+events with deterministic idempotency keys, supports correction events, provides in-memory and
+Postgres-backed stores, summarizes rollups, evaluates basic quota decisions, and estimates LLM
+token cost from versioned rate cards. It also compiles seeded free, team, business, and internal
+plans plus active entitlement overrides into stable provider-free plan snapshots, and it reserves,
+consumes, or releases monthly review credit quota for expensive review starts. It keeps local
+billing account, subscription, credit grant, and invoice mirrors as product truth before Stripe is
+required. It plans, persists, retries, and sends usage-based meter events for billable review
+credits from ledger rollups. `@repo/billing` defines the provider-neutral billing adapter, a fake
+provider for local tests, and a Stripe adapter for customer creation, subscription Checkout
+Sessions, Customer Portal Sessions, subscription reads, meter events, Stripe webhook parsing, and
+outbound provider request logging. The API records Stripe webhook deliveries and idempotently syncs
+subscription, invoice, and payment-status mirrors. Completed PR reviews now emit idempotent
+`review.run` and `review.credit` usage events from review orchestration, and each review-model call
+persists an `llm_calls` row plus an idempotent `llm.token` usage event with input tokens, output
+tokens, model, provider, rate-card, and cost metadata. The admin API exposes scoped usage rollups,
+plan snapshots, entitlement decisions, billing account summaries, billing meter event debug rows,
+billing reconciliation issues, and billing checkout/portal session creation. The operator dashboard
+includes usage, plan, and billing views for review counts, LLM tokens, internal cost, current
+limits, quota warnings, subscription mirrors, portal links, credit grants, invoices, provider
+meter-event sync state, and billing drift alerts for failed webhooks, failed provider requests,
+meter lag, quota counter drift, and usage-cost anomalies. Billing managers can enqueue a durable
+reconciliation repair job that refreshes provider subscription mirrors, repairs review-credit quota
+counters from the immutable usage ledger, and retries pending or failed meter events.
 
 ## Product GitHub App Flow
 
@@ -92,6 +150,9 @@ VITE_HEIMDALL_API_BASE_URL="https://api.example.com"
 `HEIMDALL_GITHUB_APP_INSTALL_URL` can replace `HEIMDALL_GITHUB_APP_SLUG` when you need a custom
 installation URL. The dashboard reads `/app/onboarding` without an admin session and uses the
 configured install URL as the primary call to action.
+
+Use `docs/runbooks/github-dev-app.md` to create a development GitHub App and run the guarded live
+publisher and webhook-to-publish smoke checks against a disposable test repository.
 
 ## Admin Control Plane
 
@@ -117,9 +178,11 @@ Control-plane permissions are granular: `admin.inspect`, `admin.replay.plan`,
 `admin.replay.execute`, `admin.settings.manage`, and `admin.audit.view`. Actors are scoped by
 organization and repository IDs from the identity assertion.
 
-The dashboard supports replay inspection, repository review settings, repository enablement, and
-searchable audit history. Replay execution and settings changes write `audit_logs` rows with actor
-identity, request IDs, session IDs, and before/after mutation data where applicable.
+The dashboard supports replay inspection, redacted review debug bundle export, eval import draft
+creation, memory and rules inspection, repository review settings, repository enablement, and
+searchable audit history. Replay execution, debug bundle exports, eval import drafts, and settings
+changes write `audit_logs` rows with actor identity, request IDs, session IDs, and before/after
+mutation data where applicable.
 
 Run the web dashboard with `pnpm dev:web`. In development, configure `VITE_HEIMDALL_API_BASE_URL`
 and `VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL`, or proxy `/admin` routes to `http://localhost:3000`
@@ -183,6 +246,9 @@ and set `HEIMDALL_GITHUB_SMOKE_ALLOW_WRITE=true` only when you intend to publish
 `HEIMDALL_GITHUB_SMOKE_INSTALLATION_ID` only when the local installation ID differs from the
 GitHub provider installation ID.
 
+See `docs/runbooks/github-dev-app.md` for the full app setup, permission checklist, and expected
+smoke evidence.
+
 ## Live PR Review Smoke
 
 Run the full webhook-to-publish smoke only against a development GitHub App installation and a
@@ -217,6 +283,9 @@ set.
 
 Set `HEIMDALL_GITHUB_REVIEW_SMOKE_GH_TOKEN_FALLBACK=true` only when you explicitly want the smoke
 to use the active `gh auth token` for throwaway branch writes after GitHub App writes are denied.
+
+See `docs/runbooks/github-dev-app.md` for the full manual verification flow and troubleshooting
+table.
 
 ## Database Migrations
 
