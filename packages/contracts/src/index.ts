@@ -33,6 +33,7 @@ export * from "./primitives/paths";
 export * from "./primitives/ranges";
 export * from "./primitives/result";
 export * from "./primitives/time";
+export * from "./pull-request/change-set";
 export * from "./pull-request/changed-symbol";
 export * from "./pull-request/diff";
 export * from "./pull-request/pull-request";

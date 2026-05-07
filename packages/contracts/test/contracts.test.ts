@@ -63,7 +63,10 @@ import {
   validUsageEventFixture,
   validWebhookEventFixture,
 } from "#contracts/fixtures/operations.fixture";
-import { validPullRequestSnapshotFixture } from "#contracts/fixtures/pull-request.fixture";
+import {
+  validChangeSetFixture,
+  validPullRequestSnapshotFixture,
+} from "#contracts/fixtures/pull-request.fixture";
 import {
   validRepositoryFixture,
   validRepositorySettingsFixture,
@@ -100,6 +103,7 @@ import { FindingOutcomeSchema } from "#contracts/memory/finding-outcome";
 import { MemoryFactSchema } from "#contracts/memory/memory-fact";
 import { RepoRuleSchema } from "#contracts/memory/repo-rule";
 import { RepoPathSchema } from "#contracts/primitives/paths";
+import { ChangeSetSchema } from "#contracts/pull-request/change-set";
 import { PullRequestSnapshotSchema } from "#contracts/pull-request/pull-request";
 import { RepositorySchema } from "#contracts/repository/repository";
 import { RepositorySettingsSchema } from "#contracts/repository/settings";
@@ -179,6 +183,9 @@ describe("contract validation", () => {
         validPullRequestSnapshotFixture,
       ),
     ).toEqual(validPullRequestSnapshotFixture);
+    expect(parseWithSchema("ChangeSet", ChangeSetSchema, validChangeSetFixture)).toEqual(
+      validChangeSetFixture,
+    );
   });
 
   it("validates identity and repository contract fixtures", () => {

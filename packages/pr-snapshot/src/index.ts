@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import type { ChangedFile, DiffHunk, DiffLine, FileChangeStatus } from "@repo/contracts";
+import type {
+  ChangedFile,
+  ChangedFileChangeSet,
+  ChangedRange,
+  ChangeSet,
+  DiffHunk,
+  DiffLine,
+  FileChangeStatus,
+  LineRange,
+  ModifiedBlock,
+} from "@repo/contracts";
 
 export const packageName = "@repo/pr-snapshot" as const;
 
@@ -44,6 +54,24 @@ export type GitHubReviewCommentAnchor = {
   readonly startLine?: number;
   /** Optional first diff side for multiline comments. */
   readonly startSide?: DiffAnchorSide;
+};
+
+/** Metadata and parsed files used to extract a deterministic pull request change set. */
+export type ExtractChangeSetInput = {
+  /** Parsed changed files from a provider raw diff. */
+  readonly files: readonly ChangedFile[];
+  /** Timestamp supplied by the caller for deterministic artifact creation. */
+  readonly createdAt: string;
+  /** Optional repository identifier to include in the change-set artifact. */
+  readonly repoId?: string;
+  /** Optional pull request number to include in the change-set artifact. */
+  readonly pullRequestNumber?: number;
+  /** Optional base commit SHA for the parsed change set. */
+  readonly baseSha?: string;
+  /** Optional head commit SHA for the parsed change set. */
+  readonly headSha?: string;
+  /** Optional merge-base commit SHA for the parsed change set. */
+  readonly mergeBaseSha?: string;
 };
 
 type MutableChangedFile = {
@@ -198,6 +226,39 @@ export function toGitHubReviewCommentAnchor(
   };
 }
 
+/** Extracts changed ranges, modified blocks, and path sets from parsed changed files. */
+export function extractChangeSet(input: ExtractChangeSetInput): ChangeSet {
+  const files = input.files.map(extractChangedFileChangeSet);
+
+  return {
+    schemaVersion: "change_set.v1",
+    ...(input.repoId !== undefined ? { repoId: input.repoId } : {}),
+    ...(input.pullRequestNumber !== undefined
+      ? { pullRequestNumber: input.pullRequestNumber }
+      : {}),
+    ...(input.baseSha !== undefined ? { baseSha: input.baseSha } : {}),
+    ...(input.headSha !== undefined ? { headSha: input.headSha } : {}),
+    ...(input.mergeBaseSha !== undefined ? { mergeBaseSha: input.mergeBaseSha } : {}),
+    addedPathSet: uniquePaths(
+      input.files.filter((file) => file.status === "added").map((file) => file.path),
+    ),
+    changedPathSet: uniquePaths(input.files.map((file) => file.path)),
+    createdAt: input.createdAt,
+    deletedPathSet: uniquePaths(
+      input.files.filter((file) => file.status === "deleted").map((file) => file.path),
+    ),
+    files,
+    renamedPathPairs: input.files.flatMap((file) =>
+      file.status === "renamed" && file.oldPath
+        ? [{ newPath: file.path, oldPath: file.oldPath }]
+        : [],
+    ),
+    totalAddedLines: sumChangedLines(input.files, "addition"),
+    totalContextLines: sumChangedLines(input.files, "context"),
+    totalDeletedLines: sumChangedLines(input.files, "deletion"),
+  };
+}
+
 /** Converts a parsed changed file into a minimal patch text. */
 export function patchForChangedFile(file: ChangedFile): string {
   return patchForHunks(file.hunks);
@@ -344,6 +405,152 @@ function commentableLineForDiffLine(
   }
 
   return [];
+}
+
+/** Extracts range and block metadata for one parsed changed file. */
+function extractChangedFileChangeSet(file: ChangedFile): ChangedFileChangeSet {
+  const addedRanges = file.hunks.flatMap((hunk) => rangesForDiffLineKind(hunk, "addition"));
+  const deletedRanges = file.hunks.flatMap((hunk) => rangesForDiffLineKind(hunk, "deletion"));
+
+  return {
+    addedRanges,
+    changedRanges: [...addedRanges, ...deletedRanges],
+    deletedRanges,
+    hasInlineCommentableLines: buildCommentableLineIndex([file]).length > 0,
+    hasOnlyMetadataChanges:
+      !file.isBinary && file.hunks.length === 0 && file.additions === 0 && file.deletions === 0,
+    hunkIds: file.hunks.map((hunk) => hunk.hunkId),
+    isBinary: file.isBinary,
+    modifiedBlocks: file.hunks.flatMap(modifiedBlocksForHunk),
+    ...(file.oldPath ? { oldPath: file.oldPath } : {}),
+    path: file.path,
+    status: file.status,
+  };
+}
+
+/** Collapses contiguous added or deleted lines from one hunk into changed ranges. */
+function rangesForDiffLineKind(
+  hunk: DiffHunk,
+  kind: Extract<DiffLine["kind"], "addition" | "deletion">,
+): ChangedRange[] {
+  const ranges: ChangedRange[] = [];
+  let startLine: number | undefined;
+  let endLine: number | undefined;
+
+  const flushRange = (): void => {
+    if (startLine === undefined || endLine === undefined) {
+      return;
+    }
+
+    ranges.push({
+      endLine,
+      hunkId: hunk.hunkId,
+      kind: kind === "addition" ? "added" : "deleted",
+      side: kind === "addition" ? "RIGHT" : "LEFT",
+      startLine,
+    });
+    startLine = undefined;
+    endLine = undefined;
+  };
+
+  for (const line of hunk.lines) {
+    const lineNumber = kind === "addition" ? line.newLine : line.oldLine;
+    if (line.kind !== kind || lineNumber === undefined) {
+      flushRange();
+      continue;
+    }
+
+    if (endLine !== undefined && lineNumber === endLine + 1) {
+      endLine = lineNumber;
+      continue;
+    }
+
+    flushRange();
+    startLine = lineNumber;
+    endLine = lineNumber;
+  }
+
+  flushRange();
+
+  return ranges;
+}
+
+/** Groups adjacent additions and deletions in one hunk into conservative modified blocks. */
+function modifiedBlocksForHunk(hunk: DiffHunk): ModifiedBlock[] {
+  const blocks: ModifiedBlock[] = [];
+  let addedLines: string[] = [];
+  let deletedLines: string[] = [];
+  let oldStart: number | undefined;
+  let oldEnd: number | undefined;
+  let newStart: number | undefined;
+  let newEnd: number | undefined;
+
+  const flushBlock = (): void => {
+    if (addedLines.length > 0 && deletedLines.length > 0) {
+      blocks.push({
+        addedLines,
+        deletedLines,
+        hunkId: hunk.hunkId,
+        ...(oldStart !== undefined && oldEnd !== undefined
+          ? { oldRange: lineRange(oldStart, oldEnd) }
+          : {}),
+        ...(newStart !== undefined && newEnd !== undefined
+          ? { newRange: lineRange(newStart, newEnd) }
+          : {}),
+      });
+    }
+
+    addedLines = [];
+    deletedLines = [];
+    oldStart = undefined;
+    oldEnd = undefined;
+    newStart = undefined;
+    newEnd = undefined;
+  };
+
+  for (const line of hunk.lines) {
+    if (line.kind === "addition" && line.newLine !== undefined) {
+      addedLines.push(line.content);
+      newStart = newStart ?? line.newLine;
+      newEnd = line.newLine;
+      continue;
+    }
+    if (line.kind === "deletion" && line.oldLine !== undefined) {
+      deletedLines.push(line.content);
+      oldStart = oldStart ?? line.oldLine;
+      oldEnd = line.oldLine;
+      continue;
+    }
+
+    flushBlock();
+  }
+
+  flushBlock();
+
+  return blocks;
+}
+
+/** Creates a line range with inclusive bounds. */
+function lineRange(startLine: number, endLine: number): LineRange {
+  return { endLine, startLine };
+}
+
+/** Counts parsed diff lines of one kind across all files. */
+function sumChangedLines(files: readonly ChangedFile[], kind: DiffLine["kind"]): number {
+  return files.reduce(
+    (total, file) =>
+      total +
+      file.hunks.reduce(
+        (fileTotal, hunk) => fileTotal + hunk.lines.filter((line) => line.kind === kind).length,
+        0,
+      ),
+    0,
+  );
+}
+
+/** Returns paths in first-seen order without duplicates. */
+function uniquePaths(paths: readonly string[]): string[] {
+  return [...new Set(paths)];
 }
 
 /** Checks whether every line in a same-side review range can receive a comment. */

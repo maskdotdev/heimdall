@@ -1,3 +1,4 @@
+import type { ChangeSet } from "#contracts/pull-request/change-set";
 import type { ChangedFile, DiffHunk } from "#contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "#contracts/pull-request/pull-request";
 import { hashA, hashB, ids, now } from "./common";
@@ -66,3 +67,73 @@ export const validPullRequestSnapshotFixture = {
   changedFileCount: 1,
   fetchedAt: now,
 } satisfies PullRequestSnapshot;
+
+export const validChangeSetFixture = {
+  schemaVersion: "change_set.v1",
+  repoId: ids.repoId,
+  pullRequestNumber: 42,
+  baseSha: "1111111",
+  headSha: "2222222",
+  mergeBaseSha: "1111111",
+  files: [
+    {
+      path: "src/math.ts",
+      status: "modified",
+      hunkIds: ["hunk_1"],
+      changedRanges: [
+        {
+          hunkId: "hunk_1",
+          side: "RIGHT",
+          startLine: 2,
+          endLine: 2,
+          kind: "added",
+        },
+        {
+          hunkId: "hunk_1",
+          side: "LEFT",
+          startLine: 2,
+          endLine: 2,
+          kind: "deleted",
+        },
+      ],
+      addedRanges: [
+        {
+          hunkId: "hunk_1",
+          side: "RIGHT",
+          startLine: 2,
+          endLine: 2,
+          kind: "added",
+        },
+      ],
+      deletedRanges: [
+        {
+          hunkId: "hunk_1",
+          side: "LEFT",
+          startLine: 2,
+          endLine: 2,
+          kind: "deleted",
+        },
+      ],
+      modifiedBlocks: [
+        {
+          hunkId: "hunk_1",
+          oldRange: { startLine: 2, endLine: 2 },
+          newRange: { startLine: 2, endLine: 2 },
+          deletedLines: ["  return a + b"],
+          addedLines: ["  return Number(a) + Number(b);"],
+        },
+      ],
+      hasInlineCommentableLines: true,
+      hasOnlyMetadataChanges: false,
+      isBinary: false,
+    },
+  ],
+  totalAddedLines: 1,
+  totalDeletedLines: 1,
+  totalContextLines: 2,
+  changedPathSet: ["src/math.ts"],
+  deletedPathSet: [],
+  addedPathSet: [],
+  renamedPathPairs: [],
+  createdAt: now,
+} satisfies ChangeSet;

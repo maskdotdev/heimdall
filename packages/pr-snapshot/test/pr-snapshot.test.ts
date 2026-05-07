@@ -1,7 +1,8 @@
-import { ChangedFileSchema, parseWithSchema } from "@repo/contracts";
+import { ChangedFileSchema, ChangeSetSchema, parseWithSchema } from "@repo/contracts";
 import { describe, expect, it } from "vitest";
 import {
   buildCommentableLineIndex,
+  extractChangeSet,
   hashRawDiff,
   isLineCommentable,
   parseUnifiedDiff,
@@ -185,5 +186,70 @@ describe("line anchors", () => {
 describe("hashRawDiff", () => {
   it("hashes raw diff text with the repository hash prefix", () => {
     expect(hashRawDiff("diff --git a/a b/a\n")).toMatch(/^sha256:[a-f0-9]{64}$/u);
+  });
+});
+
+describe("extractChangeSet", () => {
+  it("extracts changed ranges, modified blocks, and path sets", () => {
+    const files = parseUnifiedDiff(`diff --git a/src/math.ts b/src/math.ts
+--- a/src/math.ts
++++ b/src/math.ts
+@@ -1,4 +1,5 @@
+ const one = 1;
+-const value = one;
+-const result = value;
++const value = Number(one);
++const result = value + 1;
+ return result;
++export const extra = result;
+diff --git a/src/old-name.ts b/src/new-name.ts
+similarity index 100%
+rename from src/old-name.ts
+rename to src/new-name.ts
+`);
+
+    const changeSet = extractChangeSet({
+      baseSha: "1111111",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      files,
+      headSha: "2222222",
+      pullRequestNumber: 7,
+      repoId: "repo_123",
+    });
+
+    expect(parseWithSchema("ChangeSet", ChangeSetSchema, changeSet)).toEqual(changeSet);
+    expect(changeSet).toMatchObject({
+      addedPathSet: [],
+      changedPathSet: ["src/math.ts", "src/new-name.ts"],
+      deletedPathSet: [],
+      renamedPathPairs: [{ newPath: "src/new-name.ts", oldPath: "src/old-name.ts" }],
+      totalAddedLines: 3,
+      totalContextLines: 2,
+      totalDeletedLines: 2,
+    });
+    expect(changeSet.files[0]).toMatchObject({
+      addedRanges: [
+        { endLine: 3, kind: "added", side: "RIGHT", startLine: 2 },
+        { endLine: 5, kind: "added", side: "RIGHT", startLine: 5 },
+      ],
+      deletedRanges: [{ endLine: 3, kind: "deleted", side: "LEFT", startLine: 2 }],
+      hasInlineCommentableLines: true,
+      hasOnlyMetadataChanges: false,
+      modifiedBlocks: [
+        {
+          addedLines: ["const value = Number(one);", "const result = value + 1;"],
+          deletedLines: ["const value = one;", "const result = value;"],
+          newRange: { endLine: 3, startLine: 2 },
+          oldRange: { endLine: 3, startLine: 2 },
+        },
+      ],
+    });
+    expect(changeSet.files[1]).toMatchObject({
+      hasInlineCommentableLines: false,
+      hasOnlyMetadataChanges: true,
+      oldPath: "src/old-name.ts",
+      path: "src/new-name.ts",
+      status: "renamed",
+    });
   });
 });
