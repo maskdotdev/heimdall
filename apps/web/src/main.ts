@@ -1038,6 +1038,40 @@ type ViewKind =
 /** Top-level console mode. */
 type ConsoleMode = "product" | "admin";
 
+/** Query-backed dashboard state parsed from the current browser URL. */
+type DashboardRouteState = {
+  /** Requested top-level console mode. */
+  readonly mode?: ConsoleMode | undefined;
+  /** Requested admin dashboard view. */
+  readonly view?: ViewKind | undefined;
+  /** Requested admin inspector tab. */
+  readonly inspectorKind?: InspectorKind | undefined;
+  /** Requested admin inspector resource ID. */
+  readonly inspectorResourceId?: string | undefined;
+  /** Requested product organization ID. */
+  readonly productOrgId?: string | undefined;
+  /** Requested product repository ID. */
+  readonly productRepoId?: string | undefined;
+  /** Requested product review run ID. */
+  readonly productReviewRunId?: string | undefined;
+  /** Requested product finding ID. */
+  readonly productFindingId?: string | undefined;
+  /** Requested admin settings repository ID. */
+  readonly settingsRepoId?: string | undefined;
+  /** Requested repository search text for the admin overview. */
+  readonly repositorySearch?: string | undefined;
+  /** Requested review repository filter for the admin overview. */
+  readonly reviewRepoId?: string | undefined;
+  /** Requested review status filter for the admin overview. */
+  readonly reviewStatus?: string | undefined;
+  /** Requested review search text for the admin overview. */
+  readonly reviewSearch?: string | undefined;
+  /** Requested evaluation suite ID. */
+  readonly evaluationSuiteId?: string | undefined;
+  /** Requested evaluation run ID. */
+  readonly evaluationRunId?: string | undefined;
+};
+
 /** API envelope returned by the admin API for successful requests. */
 type ApiEnvelope<T> = {
   /** Response data payload. */
@@ -2775,6 +2809,8 @@ type AppState = {
   authLoading?: string | undefined;
   /** Global authentication error. */
   authError?: string | undefined;
+  /** Last parsed URL state used for reload-safe dashboard selections. */
+  route: DashboardRouteState;
   /** Per-inspector state. */
   inspectors: Record<InspectorKind, InspectorViewState>;
   /** Product onboarding state. */
@@ -2835,6 +2871,24 @@ const SECURITY_EVENT_SOURCE_OPTIONS = [
 ];
 /** Selectable security event statuses shown in the operator dashboard. */
 const SECURITY_EVENT_STATUS_OPTIONS = ["", "new", "triaged", "dismissed", "incident_created"];
+/** Query parameter names owned by the dashboard router shim. */
+const DASHBOARD_ROUTE_PARAM_KEYS = [
+  "mode",
+  "view",
+  "inspector",
+  "resourceId",
+  "orgId",
+  "productRepoId",
+  "reviewRunId",
+  "findingId",
+  "settingsRepoId",
+  "repositorySearch",
+  "reviewRepoId",
+  "reviewStatus",
+  "reviewSearch",
+  "suiteId",
+  "evalRunId",
+] as const;
 /** Sandbox runner options shown in repository settings. */
 const SANDBOX_RUNNER_OPTIONS = ["docker", "gvisor", "microvm"] as const;
 /** Forked pull request runner options shown in repository settings. */
@@ -2940,25 +2994,28 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
   },
 };
 
+const initialRouteState = readDashboardRouteState();
+
 const state: AppState = {
-  activeMode: "product",
-  activeView: "overview",
-  activeKind: "webhook",
+  activeMode: initialRouteState.mode ?? "product",
+  activeView: initialRouteState.view ?? "overview",
+  activeKind: initialRouteState.inspectorKind ?? "webhook",
   apiBaseUrl: sessionStorage.getItem(API_BASE_URL_STORAGE_KEY) ?? apiBaseUrl,
   gatewayBaseUrl: sessionStorage.getItem(GATEWAY_BASE_URL_STORAGE_KEY) ?? gatewayBaseUrl,
+  route: initialRouteState,
   inspectors: {
-    webhook: { id: "", confirmationTokenInput: "" },
-    job: { id: "", confirmationTokenInput: "" },
-    review: { id: "", confirmationTokenInput: "" },
-    publisher: { id: "", confirmationTokenInput: "" },
-    memory: { id: "", confirmationTokenInput: "" },
+    webhook: initialInspectorState("webhook", initialRouteState),
+    job: initialInspectorState("job", initialRouteState),
+    review: initialInspectorState("review", initialRouteState),
+    publisher: initialInspectorState("publisher", initialRouteState),
+    memory: initialInspectorState("memory", initialRouteState),
   },
   product: {},
   overview: {
-    repositorySearch: "",
-    reviewRepoId: "",
-    reviewStatus: "",
-    reviewSearch: "",
+    repositorySearch: initialRouteState.repositorySearch ?? "",
+    reviewRepoId: initialRouteState.reviewRepoId ?? "",
+    reviewStatus: initialRouteState.reviewStatus ?? "",
+    reviewSearch: initialRouteState.reviewSearch ?? "",
     repositories: [],
     reviews: [],
     auditLogs: [],
@@ -2966,7 +3023,11 @@ const state: AppState = {
     repositoriesLoaded: false,
     reviewsLoaded: false,
   },
-  settings: { repoId: "", ruleForm: defaultRuleForm(), rules: [] },
+  settings: {
+    repoId: initialRouteState.settingsRepoId ?? "",
+    ruleForm: defaultRuleForm(),
+    rules: [],
+  },
   audit: {
     orgId: "",
     action: "",
@@ -3006,18 +3067,18 @@ const state: AppState = {
   },
   evaluation: {
     runs: [],
-    selectedSuiteId: "",
+    selectedSuiteId: initialRouteState.evaluationSuiteId ?? "",
     suites: [],
   },
 };
 
+readProductAuthReturn();
 app.addEventListener("click", (event) => {
   void handleClick(event);
 });
 app.addEventListener("input", handleInput);
 
 render();
-readProductAuthReturn();
 void loadProductSession();
 void loadProductOnboarding();
 void completePendingGatewayLogin();
@@ -3033,6 +3094,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   const view = element.dataset.view as ViewKind | undefined;
   if (view && isViewKind(view)) {
     state.activeView = view;
+    replaceDashboardRouteFromState();
     render();
     if (view === "overview" && state.session && state.overview.repositories.length === 0) {
       await loadOverview();
@@ -3055,6 +3117,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   const tab = element.dataset.tab as InspectorKind | undefined;
   if (tab && isInspectorKind(tab)) {
     state.activeKind = tab;
+    replaceDashboardRouteFromState();
     render();
     return;
   }
@@ -3067,6 +3130,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   event.preventDefault();
   if (action === "show-product") {
     state.activeMode = "product";
+    replaceDashboardRouteFromState();
     render();
     if (!state.product.data && !state.product.loading) {
       await loadProductOnboarding();
@@ -3076,6 +3140,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "show-admin") {
     state.activeMode = "admin";
+    replaceDashboardRouteFromState();
     render();
     return;
   }
@@ -3296,6 +3361,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
     state.overview.reviewRepoId = "";
     state.overview.reviewStatus = "";
     state.overview.reviewSearch = "";
+    replaceDashboardRouteFromState();
     await loadReviewHistory();
     return;
   }
@@ -3308,6 +3374,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   if (action === "filter-reviews-repo") {
     state.activeView = "overview";
     state.overview.reviewRepoId = requiredDatasetValue(element, "repoId");
+    replaceDashboardRouteFromState();
     await loadReviewHistory();
     return;
   }
@@ -3501,6 +3568,7 @@ function handleInput(event: Event): void {
     const inspector = currentInspectorState();
     inspector.id = target.value;
     inspector.error = undefined;
+    replaceDashboardRouteFromState();
     return;
   }
 
@@ -3511,12 +3579,14 @@ function handleInput(event: Event): void {
 
   if (field?.startsWith("overview.")) {
     updateOverviewField(field.slice("overview.".length), target.value);
+    replaceDashboardRouteFromState();
     return;
   }
 
   if (field === "settings-repo-id") {
     state.settings.repoId = target.value;
     state.settings.error = undefined;
+    replaceDashboardRouteFromState();
     return;
   }
 
@@ -3600,6 +3670,7 @@ async function completePendingGatewayLogin(): Promise<void> {
   }
 
   state.activeMode = "admin";
+  replaceDashboardRouteFromState();
   await connectAdminSession();
 }
 
@@ -3613,7 +3684,9 @@ function readProductAuthReturn(): void {
 
   state.activeMode = "product";
   state.product.authError = authErrorMessage(authError);
+  state.route = { ...state.route, mode: "product" };
   url.searchParams.delete("authError");
+  url.searchParams.set("mode", "product");
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
@@ -3647,7 +3720,7 @@ async function connectAdminSession(): Promise<void> {
     const session = await requestAdminData<AdminSession>("/admin/session");
     state.session = session;
     sessionStorage.removeItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY);
-    await loadOverview();
+    await loadAdminRouteData();
   } catch (error) {
     state.session = undefined;
     state.authError = errorMessage(error);
@@ -3667,7 +3740,7 @@ async function refreshAdminSession(): Promise<void> {
     persistLoginConfig();
     const session = await requestAdminData<AdminSession>("/admin/session");
     state.session = session;
-    await loadOverview();
+    await loadAdminRouteData();
   } catch (error) {
     state.session = undefined;
     state.authError = errorMessage(error);
@@ -3719,7 +3792,8 @@ async function loadProductSession(): Promise<void> {
   render();
   try {
     state.product.session = await requestProductData<ProductMeResponse>("/api/v1/me");
-    await loadProductResources();
+    await loadProductResources(state.route.productOrgId);
+    await loadProductRouteSelections();
   } catch (error) {
     state.product.session = undefined;
     state.product.resources = undefined;
@@ -3781,6 +3855,7 @@ async function loadProductResources(orgId?: string): Promise<void> {
         reviews: [],
         loaded: true,
       };
+      replaceDashboardRouteFromState();
       return;
     }
 
@@ -3804,6 +3879,7 @@ async function loadProductResources(orgId?: string): Promise<void> {
       usage,
       loaded: true,
     };
+    replaceDashboardRouteFromState();
   } catch (error) {
     state.product.resources = {
       ...defaultProductResources(state.product.resources),
@@ -3848,6 +3924,7 @@ async function loadProductRepositorySettings(repoId: string): Promise<void> {
     rules: [],
     loading: "Loading repository settings",
   };
+  replaceDashboardRouteFromState();
   render();
 
   try {
@@ -4114,6 +4191,7 @@ async function loadProductReviewDetail(reviewRunId: string): Promise<void> {
       previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionScope : "repo",
     loading: "Loading review detail",
   };
+  replaceDashboardRouteFromState();
   render();
 
   try {
@@ -4145,6 +4223,7 @@ async function loadProductReviewDetail(reviewRunId: string): Promise<void> {
       suppressionScope:
         previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionScope : "repo",
     };
+    replaceDashboardRouteFromState();
   } catch (error) {
     state.product.reviewDetail = {
       reviewRunId,
@@ -4327,6 +4406,7 @@ async function loadProductFindingDetail(findingId: string): Promise<void> {
     detail.findings = detail.findings.map((finding) =>
       finding.findingId === data.finding.findingId ? data.finding : finding,
     );
+    replaceDashboardRouteFromState();
   } catch (error) {
     detail.error = errorMessage(error);
   } finally {
@@ -4904,6 +4984,7 @@ async function loadRepositories(): Promise<void> {
     }>(`/admin/repos?${params.toString()}`);
     state.overview.repositories = data.repositories;
     state.overview.repositoriesLoaded = true;
+    replaceDashboardRouteFromState();
   } catch (error) {
     state.overview.error = errorMessage(error);
   } finally {
@@ -4927,6 +5008,7 @@ async function loadReviewHistory(): Promise<void> {
     );
     state.overview.reviews = data.reviews;
     state.overview.reviewsLoaded = true;
+    replaceDashboardRouteFromState();
   } catch (error) {
     state.overview.error = errorMessage(error);
   } finally {
@@ -4969,6 +5051,7 @@ async function loadEvaluationRuns(evalSuiteId: string): Promise<void> {
   state.evaluation.error = undefined;
   state.evaluation.selectedSuiteId = evalSuiteId;
   state.evaluation.selectedRun = undefined;
+  replaceDashboardRouteFromState();
   try {
     const data = await requestAdminData<{
       readonly runs: readonly EvaluationRunSummary[];
@@ -4990,6 +5073,7 @@ async function loadEvaluationRun(evalRunId: string): Promise<void> {
     state.evaluation.selectedRun = await requestAdminData<EvaluationRunDetails>(
       `/admin/evaluation/runs/${encodeURIComponent(evalRunId)}`,
     );
+    replaceDashboardRouteFromState();
   } catch (error) {
     state.evaluation.error = errorMessage(error);
   } finally {
@@ -5002,6 +5086,7 @@ async function loadEvaluationRun(evalRunId: string): Promise<void> {
 async function openRepositorySettings(repoId: string): Promise<void> {
   state.activeView = "settings";
   state.settings.repoId = repoId;
+  replaceDashboardRouteFromState();
   await loadSettings();
 }
 
@@ -5010,6 +5095,7 @@ async function openInspector(kind: InspectorKind, resourceId: string): Promise<v
   state.activeView = "inspectors";
   state.activeKind = kind;
   state.inspectors[kind].id = resourceId;
+  replaceDashboardRouteFromState();
   await loadDetails(kind);
 }
 
@@ -5026,6 +5112,7 @@ async function openAuditSearch(input: {
   state.audit.resourceType = input.resourceType ?? "";
   state.audit.resourceId = input.resourceId ?? "";
   state.audit.search = input.search ?? "";
+  replaceDashboardRouteFromState();
   await loadAuditHistory();
 }
 
@@ -5546,6 +5633,240 @@ function productGitHubLoginStartUrl(): string {
 /** Returns the current dashboard path used after product login. */
 function productReturnPath(): string {
   return `${window.location.pathname}${window.location.search}${window.location.hash}` || "/";
+}
+
+/** Builds initial inspector state from route query parameters. */
+function initialInspectorState(
+  kind: InspectorKind,
+  route: DashboardRouteState,
+): InspectorViewState {
+  return {
+    confirmationTokenInput: "",
+    id: route.inspectorKind === kind ? (route.inspectorResourceId ?? "") : "",
+  };
+}
+
+/** Reads shareable dashboard selections from the current browser URL. */
+function readDashboardRouteState(): DashboardRouteState {
+  const params = new URL(window.location.href).searchParams;
+  const mode = queryConsoleMode(params.get("mode"));
+  const view = queryViewKind(params.get("view"));
+  const inspectorKind = queryInspectorKind(params.get("inspector"));
+
+  return {
+    evaluationRunId: boundedQueryParam(params, "evalRunId"),
+    evaluationSuiteId: boundedQueryParam(params, "suiteId"),
+    inspectorKind,
+    inspectorResourceId: boundedQueryParam(params, "resourceId"),
+    mode,
+    productFindingId: boundedQueryParam(params, "findingId"),
+    productOrgId: boundedQueryParam(params, "orgId"),
+    productRepoId: boundedQueryParam(params, "productRepoId"),
+    productReviewRunId: boundedQueryParam(params, "reviewRunId"),
+    repositorySearch: boundedQueryParam(params, "repositorySearch"),
+    reviewRepoId: boundedQueryParam(params, "reviewRepoId"),
+    reviewSearch: boundedQueryParam(params, "reviewSearch"),
+    reviewStatus: boundedQueryParam(params, "reviewStatus"),
+    settingsRepoId: boundedQueryParam(params, "settingsRepoId"),
+    view,
+  };
+}
+
+/** Replaces owned dashboard URL query parameters from the current in-memory state. */
+function replaceDashboardRouteFromState(): void {
+  const route = dashboardRouteStateFromState();
+  state.route = route;
+  const url = new URL(window.location.href);
+  for (const key of DASHBOARD_ROUTE_PARAM_KEYS) {
+    url.searchParams.delete(key);
+  }
+
+  setDashboardRouteParam(url.searchParams, "mode", route.mode);
+  setDashboardRouteParam(url.searchParams, "view", route.view);
+  setDashboardRouteParam(url.searchParams, "inspector", route.inspectorKind);
+  setDashboardRouteParam(url.searchParams, "resourceId", route.inspectorResourceId);
+  setDashboardRouteParam(url.searchParams, "orgId", route.productOrgId);
+  setDashboardRouteParam(url.searchParams, "productRepoId", route.productRepoId);
+  setDashboardRouteParam(url.searchParams, "reviewRunId", route.productReviewRunId);
+  setDashboardRouteParam(url.searchParams, "findingId", route.productFindingId);
+  setDashboardRouteParam(url.searchParams, "settingsRepoId", route.settingsRepoId);
+  setDashboardRouteParam(url.searchParams, "repositorySearch", route.repositorySearch);
+  setDashboardRouteParam(url.searchParams, "reviewRepoId", route.reviewRepoId);
+  setDashboardRouteParam(url.searchParams, "reviewStatus", route.reviewStatus);
+  setDashboardRouteParam(url.searchParams, "reviewSearch", route.reviewSearch);
+  setDashboardRouteParam(url.searchParams, "suiteId", route.evaluationSuiteId);
+  setDashboardRouteParam(url.searchParams, "evalRunId", route.evaluationRunId);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+/** Builds route state from current dashboard selections. */
+function dashboardRouteStateFromState(): DashboardRouteState {
+  if (state.activeMode === "product") {
+    return {
+      mode: "product",
+      productFindingId: optionalRouteValue(state.product.reviewDetail?.selectedFinding?.findingId),
+      productOrgId: optionalRouteValue(state.product.resources?.selectedOrgId),
+      productRepoId: optionalRouteValue(state.product.repositorySettings?.repoId),
+      productReviewRunId: optionalRouteValue(state.product.reviewDetail?.reviewRunId),
+    };
+  }
+
+  if (state.activeView === "inspectors") {
+    return {
+      inspectorKind: state.activeKind,
+      inspectorResourceId: optionalRouteValue(currentInspectorState().id),
+      mode: "admin",
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "settings") {
+    return {
+      mode: "admin",
+      settingsRepoId: optionalRouteValue(state.settings.repoId),
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "evaluation") {
+    return {
+      evaluationRunId: optionalRouteValue(state.evaluation.selectedRun?.run.evalRunId),
+      evaluationSuiteId: optionalRouteValue(state.evaluation.selectedSuiteId),
+      mode: "admin",
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "overview") {
+    return {
+      mode: "admin",
+      repositorySearch: optionalRouteValue(state.overview.repositorySearch),
+      reviewRepoId: optionalRouteValue(state.overview.reviewRepoId),
+      reviewSearch: optionalRouteValue(state.overview.reviewSearch),
+      reviewStatus: optionalRouteValue(state.overview.reviewStatus),
+      view: state.activeView,
+    };
+  }
+
+  return {
+    mode: "admin",
+    view: state.activeView,
+  };
+}
+
+/** Loads the admin data implied by URL-restored selections. */
+async function loadAdminRouteData(): Promise<void> {
+  if (!state.session) {
+    return;
+  }
+
+  if (state.activeView === "settings" && state.settings.repoId.trim().length > 0) {
+    await loadSettings();
+    return;
+  }
+
+  if (state.activeView === "inspectors" && currentInspectorState().id.trim().length > 0) {
+    await loadDetails(state.activeKind);
+    return;
+  }
+
+  if (state.activeView === "evaluation") {
+    const requestedRunId = state.route.evaluationRunId;
+    await loadEvaluationSuites();
+    if (requestedRunId) {
+      await loadEvaluationRun(requestedRunId);
+    }
+    return;
+  }
+
+  if (state.activeView === "audit") {
+    await loadAuditHistory();
+    return;
+  }
+
+  if (state.activeView === "usage") {
+    await loadUsageSummary();
+    return;
+  }
+
+  if (state.activeView === "plan") {
+    await loadEntitlementSummary();
+    return;
+  }
+
+  if (state.activeView === "billing") {
+    await loadBillingSummary();
+    return;
+  }
+
+  if (state.activeView === "security") {
+    await loadSecurityEvents();
+    return;
+  }
+
+  await loadOverview();
+  const shouldLoadRepositorySearch = state.overview.repositorySearch.trim().length > 0;
+  const shouldLoadReviewSearch =
+    state.overview.reviewRepoId.trim().length > 0 ||
+    state.overview.reviewSearch.trim().length > 0 ||
+    state.overview.reviewStatus.trim().length > 0;
+  await Promise.all([
+    shouldLoadRepositorySearch ? loadRepositories() : Promise.resolve(),
+    shouldLoadReviewSearch ? loadReviewHistory() : Promise.resolve(),
+  ]);
+}
+
+/** Loads product subpanels requested through URL-restored selections. */
+async function loadProductRouteSelections(): Promise<void> {
+  const route = state.route;
+  if (route.productRepoId) {
+    await loadProductRepositorySettings(route.productRepoId);
+  }
+  if (route.productReviewRunId) {
+    await loadProductReviewDetail(route.productReviewRunId);
+  }
+  if (route.productFindingId) {
+    await loadProductFindingDetail(route.productFindingId);
+  }
+}
+
+/** Writes one optional dashboard route query parameter. */
+function setDashboardRouteParam(
+  params: URLSearchParams,
+  key: (typeof DASHBOARD_ROUTE_PARAM_KEYS)[number],
+  value: string | undefined,
+): void {
+  const routeValue = optionalRouteValue(value);
+  if (routeValue) {
+    params.set(key, routeValue);
+  }
+}
+
+/** Reads a bounded non-empty query parameter. */
+function boundedQueryParam(params: URLSearchParams, key: string): string | undefined {
+  const value = optionalRouteValue(params.get(key) ?? undefined);
+  return value ? value.slice(0, 300) : undefined;
+}
+
+/** Returns a normalized non-empty route value. */
+function optionalRouteValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Narrows a query parameter to a console mode. */
+function queryConsoleMode(value: string | null): ConsoleMode | undefined {
+  return value && isConsoleMode(value) ? value : undefined;
+}
+
+/** Narrows a query parameter to an admin view kind. */
+function queryViewKind(value: string | null): ViewKind | undefined {
+  return value && isViewKind(value) ? value : undefined;
+}
+
+/** Narrows a query parameter to an inspector kind. */
+function queryInspectorKind(value: string | null): InspectorKind | undefined {
+  return value && isInspectorKind(value) ? value : undefined;
 }
 
 /** Returns the signed assertion endpoint URL for the configured admin gateway. */
@@ -12117,6 +12438,11 @@ function isViewKind(value: string): value is ViewKind {
     value === "security" ||
     value === "audit"
   );
+}
+
+/** Narrows a string to a top-level console mode. */
+function isConsoleMode(value: string): value is ConsoleMode {
+  return value === "product" || value === "admin";
 }
 
 /** Narrows unknown values to object records. */
