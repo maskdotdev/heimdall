@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCommentableLineIndex,
   buildFileAnchorIndex,
+  buildSnapshotDerivedArtifacts,
   computeSnapshotHash,
   extractChangeSet,
   hashCanonicalJson,
@@ -345,6 +346,38 @@ describe("snapshot hashing", () => {
 
     expect(computeSnapshotHash(first)).toBe(computeSnapshotHash(second));
     expect(computeSnapshotHash(changedHead)).not.toBe(computeSnapshotHash(second));
+  });
+});
+
+describe("buildSnapshotDerivedArtifacts", () => {
+  it("builds reusable change-set and line-anchor artifacts from a pinned snapshot", () => {
+    const artifacts = buildSnapshotDerivedArtifacts({
+      createdAt: "2026-05-07T00:00:00.000Z",
+      snapshot: validPullRequestSnapshotFixture,
+    });
+
+    expect(parseWithSchema("ChangeSet", ChangeSetSchema, artifacts.changeSet)).toEqual(
+      artifacts.changeSet,
+    );
+    expect(artifacts.changeSet).toMatchObject({
+      changedPathSet: ["src/math.ts"],
+      repoId: validPullRequestSnapshotFixture.repoId,
+      pullRequestNumber: validPullRequestSnapshotFixture.pullRequestNumber,
+    });
+    expect(artifacts.lineAnchorIndex).toMatchObject({
+      createdAt: "2026-05-07T00:00:00.000Z",
+      diffHash: validPullRequestSnapshotFixture.diffHash,
+      repoId: validPullRequestSnapshotFixture.repoId,
+      schemaVersion: "line_anchor_index.v1",
+      snapshotId: validPullRequestSnapshotFixture.snapshotId,
+    });
+    expect(artifacts.lineAnchorIndex.files).toHaveLength(1);
+    expect(artifacts.lineAnchorIndex.lines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 2, path: "src/math.ts", side: "LEFT" }),
+        expect.objectContaining({ line: 2, path: "src/math.ts", side: "RIGHT" }),
+      ]),
+    );
   });
 });
 

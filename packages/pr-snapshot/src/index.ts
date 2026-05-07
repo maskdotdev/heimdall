@@ -125,6 +125,44 @@ export type ExtractChangeSetInput = {
   readonly mergeBaseSha?: string;
 };
 
+/** Review artifact payload containing provider-neutral line and file anchor indexes. */
+export type LineAnchorIndexArtifact = {
+  /** Artifact schema version. */
+  readonly schemaVersion: "line_anchor_index.v1";
+  /** Pull request snapshot that produced this index. */
+  readonly snapshotId: PullRequestSnapshot["snapshotId"];
+  /** Repository that owns the pull request. */
+  readonly repoId: PullRequestSnapshot["repoId"];
+  /** Provider pull request number. */
+  readonly pullRequestNumber: PullRequestSnapshot["pullRequestNumber"];
+  /** Reviewed head commit SHA. */
+  readonly headSha: PullRequestSnapshot["headSha"];
+  /** Hash of the raw provider diff used for anchoring. */
+  readonly diffHash: PullRequestSnapshot["diffHash"];
+  /** File-level fallback anchor metadata. */
+  readonly files: readonly FileAnchorInfo[];
+  /** Line-level anchors that are safe to pass to review-comment conversion. */
+  readonly lines: readonly CommentableLine[];
+  /** Timestamp when the artifact payload was created. */
+  readonly createdAt: string;
+};
+
+/** Snapshot-derived artifacts persisted before retrieval and review work. */
+export type SnapshotDerivedArtifacts = {
+  /** Deterministic changed ranges and path sets derived from the parsed snapshot diff. */
+  readonly changeSet: ChangeSet;
+  /** Provider-neutral line and file anchor indexes derived from the parsed snapshot diff. */
+  readonly lineAnchorIndex: LineAnchorIndexArtifact;
+};
+
+/** Input for building snapshot-derived review artifacts. */
+export type BuildSnapshotDerivedArtifactsInput = {
+  /** Pull request snapshot that owns changed-file and hunk data. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Timestamp to stamp onto derived artifact payloads. */
+  readonly createdAt: string;
+};
+
 type MutableChangedFile = {
   path: string;
   oldPath?: string;
@@ -380,6 +418,36 @@ export function extractChangeSet(input: ExtractChangeSetInput): ChangeSet {
     totalAddedLines: sumChangedLines(input.files, "addition"),
     totalContextLines: sumChangedLines(input.files, "context"),
     totalDeletedLines: sumChangedLines(input.files, "deletion"),
+  };
+}
+
+/** Builds reusable review artifacts from the pinned pull request snapshot diff model. */
+export function buildSnapshotDerivedArtifacts(
+  input: BuildSnapshotDerivedArtifactsInput,
+): SnapshotDerivedArtifacts {
+  const { createdAt, snapshot } = input;
+
+  return {
+    changeSet: extractChangeSet({
+      baseSha: snapshot.baseSha,
+      createdAt,
+      files: snapshot.changedFiles,
+      headSha: snapshot.headSha,
+      ...(snapshot.mergeBaseSha !== undefined ? { mergeBaseSha: snapshot.mergeBaseSha } : {}),
+      pullRequestNumber: snapshot.pullRequestNumber,
+      repoId: snapshot.repoId,
+    }),
+    lineAnchorIndex: {
+      createdAt,
+      diffHash: snapshot.diffHash,
+      files: buildFileAnchorIndex(snapshot.changedFiles),
+      headSha: snapshot.headSha,
+      lines: buildCommentableLineIndex(snapshot.changedFiles),
+      pullRequestNumber: snapshot.pullRequestNumber,
+      repoId: snapshot.repoId,
+      schemaVersion: "line_anchor_index.v1",
+      snapshotId: snapshot.snapshotId,
+    },
   };
 }
 
