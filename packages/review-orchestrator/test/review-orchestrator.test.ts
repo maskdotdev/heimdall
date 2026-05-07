@@ -4,7 +4,9 @@ import {
   assertSnapshotMatchesJob,
   checkReviewRunCurrent,
   ReviewInputSnapshotMismatchError,
+  type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
+  reviewMemoryFactFromRow,
   reviewRunStatusForStage,
 } from "../src";
 
@@ -126,11 +128,62 @@ describe("reviewRunStatusForStage", () => {
   });
 });
 
+describe("reviewMemoryFactFromRow", () => {
+  it("maps durable memory metadata into validation suppression facts", () => {
+    const fact = reviewMemoryFactFromRow(memoryFactRowFixture());
+
+    expect(fact).toMatchObject({
+      id: "mem_test",
+      kind: "suppression",
+      appliesTo: {
+        categories: ["test_coverage"],
+        pathGlobs: ["src/generated/**"],
+        titlePatterns: ["snapshot test"],
+      },
+      scope: {
+        level: "path",
+        pathGlobs: ["src/generated/**"],
+        repoId: "repo_test",
+      },
+      sourceKind: "repeated_signal",
+      status: "active",
+    });
+  });
+});
+
 /** Creates the minimal provider surface needed for current-head checks. */
 function providerReturningSnapshot(snapshot: PullRequestSnapshot): {
   readonly fetchPullRequestSnapshot: () => Promise<PullRequestSnapshot>;
 } {
   return {
     fetchPullRequestSnapshot: async () => snapshot,
+  };
+}
+
+/** Creates a durable memory fact row with suppression metadata. */
+function memoryFactRowFixture(overrides: Partial<ReviewMemoryFactRow> = {}): ReviewMemoryFactRow {
+  const now = new Date("2026-05-07T12:00:00.000Z");
+  return {
+    memoryFactId: "mem_test",
+    orgId: "org_test",
+    repoId: "repo_test",
+    factType: "suppression",
+    body: "Do not comment on generated snapshot tests.",
+    status: "active",
+    confidence: 0.93,
+    expiresAt: null,
+    metadata: {
+      appliesTo: {
+        categories: ["test_coverage"],
+        pathGlobs: ["src/generated/**"],
+        titlePatterns: ["snapshot test"],
+      },
+      pathGlobs: ["src/generated/**"],
+      source: "feedback",
+      subject: "Generated snapshot tests",
+    },
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
   };
 }

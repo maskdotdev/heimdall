@@ -19,6 +19,7 @@ import {
   codeIndexVersions,
   type HeimdallDatabase,
   llmCalls,
+  memoryFacts,
   PullRequestRepository,
   providerInstallations,
   RepoRuleRepository,
@@ -28,6 +29,7 @@ import {
 } from "@repo/db";
 import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
+import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
@@ -49,13 +51,51 @@ import {
   UsageLedger,
   ZERO_COST_LLM_RATE_CARD,
 } from "@repo/usage";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or } from "drizzle-orm";
 
 /** Default bounded wait for the index job planned alongside a review job. */
 const DEFAULT_INDEX_WAIT_TIMEOUT_MS = 10_000;
 
 /** Default polling cadence while waiting for a fresh index version. */
 const DEFAULT_INDEX_POLL_INTERVAL_MS = 250;
+
+/** Maximum active memory facts to consider during one review validation. */
+const REVIEW_MEMORY_FACT_LIMIT = 50;
+
+const MEMORY_FACT_KINDS = new Set<MemoryFactKind>([
+  "suppression",
+  "repo_fact",
+  "team_preference",
+  "style_preference",
+  "architecture_convention",
+  "security_convention",
+  "testing_convention",
+  "severity_calibration",
+  "domain_glossary",
+]);
+
+const MEMORY_FACT_STATUSES = new Set<ReviewMemoryFactStatus>([
+  "active",
+  "disabled",
+  "expired",
+  "superseded",
+  "needs_review",
+]);
+
+const FINDING_CATEGORIES = new Set([
+  "correctness",
+  "security",
+  "performance",
+  "test_coverage",
+  "maintainability",
+  "architecture",
+  "dependency",
+  "documentation",
+  "style",
+  "other",
+]);
+
+const FINDING_SEVERITIES = new Set(["info", "low", "medium", "high", "critical"]);
 
 /** Payload required to process one pull request review job. */
 export type ReviewPullRequestInput = {
@@ -116,6 +156,12 @@ type ReviewSnapshotFetchResult = {
   /** UTF-8 byte size of the raw diff text, when available. */
   readonly rawDiffBytes?: number;
 };
+
+/** Durable memory fact row selected for review validation. */
+export type ReviewMemoryFactRow = typeof memoryFacts.$inferSelect;
+
+/** Status values supported by the memory package durable fact type. */
+type ReviewMemoryFactStatus = MemoryFact["status"];
 
 /** Input used to check whether a review run still targets the current PR head. */
 export type ReviewRunCurrentCheckInput = GitHubPullRequestRef & {
@@ -552,11 +598,24 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "validation";
+    const reviewMemoryFacts = await loadReviewMemoryFacts(dependencies.db, {
+      now: now(),
+      orgId: repositoryRecord.orgId,
+      repoId: snapshot.repoId,
+    });
+    const validationConfig = {
+      memorySuppression: {
+        memoryFacts: reviewMemoryFacts,
+        orgId: repositoryRecord.orgId,
+        repoId: snapshot.repoId,
+      },
+      policy: policyResult.snapshot.effectivePolicy,
+    };
     const validationResult = validateCandidateFindings({
       snapshot,
       findings: candidateFindings,
       timestamp: now().toISOString(),
-      config: { policy: policyResult.snapshot.effectivePolicy },
+      config: validationConfig,
     });
     const validatedFindings = validationResult.validated;
     for (const finding of validatedFindings) {
@@ -620,6 +679,7 @@ export async function runPullRequestReview(
         publishedFindingCount,
         rejectedFindingCount,
         validatedFindingCount: validatedFindings.length,
+        memoryFactCount: reviewMemoryFacts.length,
         validationStats: validationResult.stats,
       },
     });
@@ -884,6 +944,213 @@ async function findReadyIndexVersionId(
 /** Resolves after the requested number of milliseconds. */
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+/** Loads active repository and organization memory facts for validation suppression. */
+async function loadReviewMemoryFacts(
+  db: HeimdallDatabase,
+  input: {
+    /** Organization that owns the repository. */
+    readonly orgId: string;
+    /** Repository being reviewed. */
+    readonly repoId: string;
+    /** Timestamp used for expiration filtering. */
+    readonly now: Date;
+  },
+): Promise<readonly MemoryFact[]> {
+  const rows = await db
+    .select()
+    .from(memoryFacts)
+    .where(
+      and(
+        eq(memoryFacts.orgId, input.orgId),
+        eq(memoryFacts.status, "active"),
+        or(eq(memoryFacts.repoId, input.repoId), isNull(memoryFacts.repoId)),
+        or(isNull(memoryFacts.expiresAt), gt(memoryFacts.expiresAt, input.now)),
+      ),
+    )
+    .orderBy(desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId))
+    .limit(REVIEW_MEMORY_FACT_LIMIT);
+
+  return rows.flatMap((row) => {
+    const fact = reviewMemoryFactFromRow(row);
+    return fact ? [fact] : [];
+  });
+}
+
+/** Converts a durable DB memory row into the memory package validation shape. */
+export function reviewMemoryFactFromRow(row: ReviewMemoryFactRow): MemoryFact | undefined {
+  const metadata = recordFromUnknown(row.metadata);
+  const kind = memoryFactKindFromString(row.factType);
+  const status = memoryFactStatusFromString(row.status);
+  const createdByLogin = stringField(metadata, "createdByLogin");
+  if (!kind || !status) {
+    return undefined;
+  }
+
+  return {
+    id: row.memoryFactId,
+    orgId: row.orgId,
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    kind,
+    content: row.body,
+    normalizedContent: normalizeMemoryText(row.body),
+    scope: memoryScopeFromRow(row, metadata),
+    appliesTo: memoryAppliesToFromMetadata(metadata),
+    sourceKind: memorySourceKindFromMetadata(metadata),
+    trustLevel: stringField(metadata, "trustLevel") ?? "explicit_maintainer",
+    confidence: row.confidence,
+    status,
+    priority: numberField(metadata, "priority") ?? (kind === "suppression" ? 700 : 300),
+    ...(row.expiresAt ? { expiresAt: row.expiresAt.toISOString() } : {}),
+    ...(createdByLogin ? { createdByLogin } : {}),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+/** Builds an inferred memory scope from row scope plus optional metadata dimensions. */
+function memoryScopeFromRow(
+  row: ReviewMemoryFactRow,
+  metadata: Record<string, unknown>,
+): MemoryFact["scope"] {
+  const pathGlobs = stringArrayField(metadata, "pathGlobs");
+  const languages = stringArrayField(metadata, "languages");
+  const symbolNames = stringArrayField(metadata, "symbolNames");
+  const findingFingerprints = stringArrayField(metadata, "findingFingerprints");
+
+  return {
+    level: memoryScopeLevel(row, {
+      findingFingerprints,
+      pathGlobs,
+      symbolNames,
+    }),
+    orgId: row.orgId,
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    ...(pathGlobs.length > 0 ? { pathGlobs } : {}),
+    ...(languages.length > 0 ? { languages } : {}),
+    ...(symbolNames.length > 0 ? { symbolNames } : {}),
+    ...(findingFingerprints.length > 0 ? { findingFingerprints } : {}),
+  };
+}
+
+/** Chooses the most specific memory scope level represented by the row metadata. */
+function memoryScopeLevel(
+  row: ReviewMemoryFactRow,
+  metadata: {
+    /** Path globs carried by row metadata. */
+    readonly pathGlobs: readonly string[];
+    /** Symbol names carried by row metadata. */
+    readonly symbolNames: readonly string[];
+    /** Finding fingerprints carried by row metadata. */
+    readonly findingFingerprints: readonly string[];
+  },
+): MemoryFact["scope"]["level"] {
+  if (metadata.findingFingerprints.length > 0) return "finding_fingerprint";
+  if (metadata.symbolNames.length > 0) return "symbol";
+  if (metadata.pathGlobs.length > 0) return "path";
+  return row.repoId ? "repo" : "org";
+}
+
+/** Builds memory suppression dimensions from metadata. */
+function memoryAppliesToFromMetadata(metadata: Record<string, unknown>): MemoryAppliesTo {
+  const appliesTo = recordField(metadata, "appliesTo") ?? metadata;
+  const categories = stringArrayField(appliesTo, "categories").filter(isFindingCategory);
+  const severities = stringArrayField(appliesTo, "severities").filter(isFindingSeverity);
+  const pathGlobs = stringArrayField(appliesTo, "pathGlobs");
+  const languages = stringArrayField(appliesTo, "languages");
+  const findingFingerprints = stringArrayField(appliesTo, "findingFingerprints");
+  const titlePatterns = stringArrayField(appliesTo, "titlePatterns");
+  const symbolNames = stringArrayField(appliesTo, "symbolNames");
+
+  return {
+    ...(categories.length > 0 ? { categories } : {}),
+    ...(severities.length > 0 ? { severities } : {}),
+    ...(pathGlobs.length > 0 ? { pathGlobs } : {}),
+    ...(languages.length > 0 ? { languages } : {}),
+    ...(findingFingerprints.length > 0 ? { findingFingerprints } : {}),
+    ...(titlePatterns.length > 0 ? { titlePatterns } : {}),
+    ...(symbolNames.length > 0 ? { symbolNames } : {}),
+  };
+}
+
+/** Reads a memory fact kind supported by the memory package. */
+function memoryFactKindFromString(value: string): MemoryFactKind | undefined {
+  return MEMORY_FACT_KINDS.has(value as MemoryFactKind) ? (value as MemoryFactKind) : "repo_fact";
+}
+
+/** Reads a memory fact status supported by the memory package. */
+function memoryFactStatusFromString(value: string): ReviewMemoryFactStatus | undefined {
+  return MEMORY_FACT_STATUSES.has(value as ReviewMemoryFactStatus)
+    ? (value as ReviewMemoryFactStatus)
+    : undefined;
+}
+
+/** Maps admin/API memory source metadata into memory package source kinds. */
+function memorySourceKindFromMetadata(metadata: Record<string, unknown>): MemoryFact["sourceKind"] {
+  const source = stringField(metadata, "source");
+  if (source === "feedback" || source === "comment_thread") return "repeated_signal";
+  if (source === "system") return "system";
+  return "dashboard";
+}
+
+/** Returns a JSON object record or an empty record for non-object values. */
+function recordFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** Reads an object field from a JSON record. */
+function recordField(
+  record: Record<string, unknown>,
+  field: string,
+): Record<string, unknown> | undefined {
+  const value = record[field];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Reads a string field from a JSON record. */
+function stringField(record: Record<string, unknown>, field: string): string | undefined {
+  const value = record[field];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** Reads a finite number field from a JSON record. */
+function numberField(record: Record<string, unknown>, field: string): number | undefined {
+  const value = record[field];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Reads a string array field from a JSON record. */
+function stringArrayField(record: Record<string, unknown>, field: string): string[] {
+  const value = record[field];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+/** Normalizes memory text for deterministic matching helpers. */
+function normalizeMemoryText(value: string): string {
+  return value.trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
+/** Returns whether a metadata category is supported by finding contracts. */
+function isFindingCategory(
+  value: string,
+): value is NonNullable<MemoryAppliesTo["categories"]>[number] {
+  return FINDING_CATEGORIES.has(value);
+}
+
+/** Returns whether a metadata severity is supported by finding contracts. */
+function isFindingSeverity(
+  value: string,
+): value is NonNullable<MemoryAppliesTo["severities"]>[number] {
+  return FINDING_SEVERITIES.has(value);
 }
 
 /** Fetches the strongest snapshot payload the provider can supply for deterministic review. */
