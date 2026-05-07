@@ -561,6 +561,8 @@ export type DockerContainerSandboxRunnerOptions = DockerSandboxCommandBuilderOpt
   readonly timeoutSignal?: NodeJS.Signals | undefined;
   /** Grace period before escalating timeout termination to SIGKILL. */
   readonly timeoutKillGraceMs?: number | undefined;
+  /** Optional telemetry used for Docker phase spans. */
+  readonly telemetry?: SandboxTelemetryOptions | undefined;
 };
 
 /** Sandbox run result boundary schema. */
@@ -1533,33 +1535,67 @@ async function runDockerContainerSandbox(
   let materializedRun: DockerMaterializedRun | undefined;
 
   try {
-    materializedRun = await materializeDockerRun(parsedRequest, options);
-    const policyDecisions = dockerSandboxCommandPolicyDecisions(materializedRun.request);
-    const deniedDecision = policyDecisions.find((decision) => decision.status === "denied");
-    if (deniedDecision) {
-      return dockerNonExecutionResult(parsedRequest, runner, policyDecisions, {
+    const preparedRun = await runSandboxTelemetryPhase(
+      options.telemetry,
+      OBSERVABILITY_SPAN_NAMES.sandboxPrepare,
+      dockerPhaseSpanStartAttributes(parsedRequest, runner),
+      async () => {
+        const materialized = await materializeDockerRun(parsedRequest, options);
+        materializedRun = materialized;
+        const policyDecisions = dockerSandboxCommandPolicyDecisions(materialized.request);
+        const deniedDecision = policyDecisions.find((decision) => decision.status === "denied");
+        if (deniedDecision) {
+          return { deniedDecision, materializedRun: materialized, policyDecisions };
+        }
+
+        const command = withDockerProcessEnvironment(
+          buildDockerSandboxCommand(materialized.request, options),
+          options,
+        );
+
+        return {
+          command,
+          materializedRun: materialized,
+          policyDecisions,
+        };
+      },
+      dockerPrepareSpanEndAttributes,
+    );
+    if (preparedRun.deniedDecision) {
+      const deniedDecision = preparedRun.deniedDecision;
+      return dockerNonExecutionResult(parsedRequest, runner, preparedRun.policyDecisions, {
         code: deniedDecision.code,
         message: deniedDecision.message,
         retryable: false,
       });
     }
 
-    const command = withDockerProcessEnvironment(
-      buildDockerSandboxCommand(materializedRun.request, options),
-      options,
-    );
     const executor =
       options.executor ??
       ((input: DockerSandboxProcessExecutorInput) => executeDockerSandboxProcess(input, options));
-    const processResult = await executor({
-      command,
-      request: materializedRun.request,
-      timeoutMs: materializedRun.request.limits.timeoutMs,
-    });
-    const artifactCollection = await collectDockerSandboxArtifacts(materializedRun.request, {
-      artifactDirectory: materializedRun.artifactDirectory,
-      outputDirectory: materializedRun.outputDirectory,
-    });
+    const processResult = await runSandboxTelemetryPhase(
+      options.telemetry,
+      OBSERVABILITY_SPAN_NAMES.sandboxExecute,
+      dockerExecuteSpanStartAttributes(preparedRun.materializedRun.request, runner),
+      () =>
+        executor({
+          command: preparedRun.command,
+          request: preparedRun.materializedRun.request,
+          timeoutMs: preparedRun.materializedRun.request.limits.timeoutMs,
+        }),
+      dockerExecuteSpanEndAttributes,
+    );
+    const artifactCollection = await runSandboxTelemetryPhase(
+      options.telemetry,
+      OBSERVABILITY_SPAN_NAMES.sandboxCollectArtifacts,
+      dockerCollectArtifactsSpanStartAttributes(preparedRun.materializedRun.request, runner),
+      () =>
+        collectDockerSandboxArtifacts(preparedRun.materializedRun.request, {
+          artifactDirectory: preparedRun.materializedRun.artifactDirectory,
+          outputDirectory: preparedRun.materializedRun.outputDirectory,
+        }),
+      dockerCollectArtifactsSpanEndAttributes,
+    );
     const durationMs = processResult.durationMs ?? Math.max(0, Date.now() - startedTimeMs);
 
     return {
@@ -1567,15 +1603,23 @@ async function runDockerContainerSandbox(
       durationMs,
       exitCode: processResult.exitCode,
       finishedAt: finishedAtFromDuration(parsedRequest.createdAt, durationMs),
-      policyDecisions,
+      policyDecisions: preparedRun.policyDecisions,
       requestId: parsedRequest.requestId,
       runId: stableSandboxId("srun", parsedRequest.requestId),
       runner,
       schemaVersion: "sandbox_run_result.v1",
       startedAt: parsedRequest.createdAt,
-      status: dockerStatusFromProcessResult(materializedRun.request, processResult),
-      stderr: dockerProcessCapturedOutput(materializedRun.request, processResult, "stderr"),
-      stdout: dockerProcessCapturedOutput(materializedRun.request, processResult, "stdout"),
+      status: dockerStatusFromProcessResult(preparedRun.materializedRun.request, processResult),
+      stderr: dockerProcessCapturedOutput(
+        preparedRun.materializedRun.request,
+        processResult,
+        "stderr",
+      ),
+      stdout: dockerProcessCapturedOutput(
+        preparedRun.materializedRun.request,
+        processResult,
+        "stdout",
+      ),
       warnings: [...artifactCollection.warnings],
       ...(processResult.error ? { error: processResult.error } : {}),
       ...(processResult.signal ? { signal: processResult.signal } : {}),
@@ -1625,8 +1669,14 @@ async function runDockerContainerSandbox(
       warnings: [],
     };
   } finally {
-    if (materializedRun) {
-      await removeTemporaryDirectory(materializedRun.temporaryDirectory);
+    const runToCleanup = materializedRun;
+    if (runToCleanup) {
+      await runSandboxTelemetryPhase(
+        options.telemetry,
+        OBSERVABILITY_SPAN_NAMES.sandboxCleanup,
+        dockerCleanupSpanStartAttributes(runToCleanup.request, runner),
+        () => removeTemporaryDirectory(runToCleanup.temporaryDirectory),
+      );
     }
   }
 }
@@ -1642,6 +1692,172 @@ type DockerMaterializedRun = {
   /** Durable local directory that retains collected artifacts. */
   readonly artifactDirectory: string;
 };
+
+/** Prepared Docker run that can either execute or return a policy denial. */
+type DockerPreparedRun =
+  | {
+      /** Docker command that passed policy checks. */
+      readonly command: DockerSandboxCommand;
+      /** No denied decision when execution may proceed. */
+      readonly deniedDecision?: undefined;
+      /** Materialized host directories for this run. */
+      readonly materializedRun: DockerMaterializedRun;
+      /** Product-safe policy decisions from command preparation. */
+      readonly policyDecisions: readonly SandboxPolicyDecision[];
+    }
+  | {
+      /** No command is built when policy denies execution. */
+      readonly command?: undefined;
+      /** First denied policy decision. */
+      readonly deniedDecision: SandboxPolicyDecision;
+      /** Materialized host directories for this run. */
+      readonly materializedRun: DockerMaterializedRun;
+      /** Product-safe policy decisions from command preparation. */
+      readonly policyDecisions: readonly SandboxPolicyDecision[];
+    };
+
+/** Builds phase-specific span end attributes from an operation result. */
+type SandboxTelemetryPhaseEndAttributes<T> = (
+  result: T,
+) => Readonly<Record<string, TelemetryAttributeValue | undefined>>;
+
+/** Runs one Docker sandbox phase with an optional product-safe span. */
+async function runSandboxTelemetryPhase<T>(
+  telemetry: SandboxTelemetryOptions | undefined,
+  name: string,
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+  operation: () => Promise<T>,
+  endAttributes?: SandboxTelemetryPhaseEndAttributes<T>,
+): Promise<T> {
+  const span = telemetry?.traces?.startSpan(name, {
+    attributes,
+    kind: "internal",
+    traceContext: telemetry.traceContext,
+  });
+
+  try {
+    const result = await operation();
+    const attributes = endAttributes?.(result);
+    span?.end({
+      ...(attributes ? { attributes } : {}),
+      status: "ok",
+    });
+
+    return result;
+  } catch (error) {
+    span?.end({
+      attributes: { "sandbox.status": "failed" },
+      error,
+      status: "error",
+    });
+    throw error;
+  }
+}
+
+/** Creates common product-safe start attributes for Docker phase spans. */
+function dockerPhaseSpanStartAttributes(
+  request: SandboxRunRequest,
+  runner: SandboxRunnerInfo,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "sandbox.artifact_glob_count": request.artifacts.collectFiles.length,
+    "sandbox.category": request.category,
+    "sandbox.mount_count": request.mounts.length,
+    "sandbox.network_mode": request.network.mode,
+    "sandbox.runner_kind": runner.kind,
+    "sandbox.trust_level": request.trustLevel,
+  };
+}
+
+/** Creates product-safe prepare phase completion attributes. */
+function dockerPrepareSpanEndAttributes(
+  preparedRun: DockerPreparedRun,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "sandbox.command_built": preparedRun.command !== undefined,
+    "sandbox.policy_decision_count": preparedRun.policyDecisions.length,
+    "sandbox.policy_denied_count": preparedRun.policyDecisions.filter(
+      (decision) => decision.status === "denied",
+    ).length,
+    "sandbox.status": preparedRun.deniedDecision ? "policy_denied" : "prepared",
+  };
+}
+
+/** Creates product-safe execute phase start attributes. */
+function dockerExecuteSpanStartAttributes(
+  request: SandboxRunRequest,
+  runner: SandboxRunnerInfo,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    ...dockerPhaseSpanStartAttributes(request, runner),
+    "sandbox.expected_exit_code_count": request.command.expectedExitCodes.length,
+    "sandbox.timeout_ms": request.limits.timeoutMs,
+  };
+}
+
+/** Creates product-safe execute phase completion attributes. */
+function dockerExecuteSpanEndAttributes(
+  result: DockerSandboxProcessResult,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "sandbox.duration_ms": result.durationMs,
+    "sandbox.exit_code": result.exitCode ?? undefined,
+    "sandbox.signal": result.signal ?? undefined,
+    "sandbox.status": dockerExecutePhaseStatus(result),
+    "sandbox.stderr_bytes": byteLength(result.stderr ?? ""),
+    "sandbox.stdout_bytes": byteLength(result.stdout ?? ""),
+    "sandbox.timed_out": result.timedOut ?? false,
+  };
+}
+
+/** Creates product-safe artifact collection phase start attributes. */
+function dockerCollectArtifactsSpanStartAttributes(
+  request: SandboxRunRequest,
+  runner: SandboxRunnerInfo,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    ...dockerPhaseSpanStartAttributes(request, runner),
+    "sandbox.max_artifact_bytes": request.artifacts.maxTotalBytes,
+    "sandbox.max_artifact_files": request.artifacts.maxFiles,
+  };
+}
+
+/** Creates product-safe artifact collection phase completion attributes. */
+function dockerCollectArtifactsSpanEndAttributes(
+  collection: DockerArtifactCollection,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "sandbox.artifact_bytes": dockerArtifactCollectionBytes(collection),
+    "sandbox.artifact_count": collection.artifacts.length,
+    "sandbox.status": "collected",
+    "sandbox.warning_count": collection.warnings.length,
+  };
+}
+
+/** Creates product-safe cleanup phase start attributes. */
+function dockerCleanupSpanStartAttributes(
+  request: SandboxRunRequest,
+  runner: SandboxRunnerInfo,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "sandbox.category": request.category,
+    "sandbox.runner_kind": runner.kind,
+    "sandbox.trust_level": request.trustLevel,
+  };
+}
+
+/** Returns a low-cardinality execute phase status. */
+function dockerExecutePhaseStatus(result: DockerSandboxProcessResult): string {
+  if (result.error) return "runner_error";
+  if (result.timedOut) return "timed_out";
+
+  return "completed";
+}
+
+/** Returns the aggregate bytes copied during artifact collection. */
+function dockerArtifactCollectionBytes(collection: DockerArtifactCollection): number {
+  return collection.artifacts.reduce((total, artifact) => total + artifact.sizeBytes, 0);
+}
 
 /** Creates host directories and rewrites the output mount for one Docker run. */
 async function materializeDockerRun(

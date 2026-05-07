@@ -470,6 +470,7 @@ describe("DockerContainerSandboxRunner", () => {
     const temporaryRoot = join(root, "tmp");
     let observedInput: DockerSandboxProcessExecutorInput | undefined;
     let outputSource: string | undefined;
+    const spans: RecordedSpan[] = [];
 
     try {
       const runner = createDockerContainerSandboxRunner({
@@ -491,6 +492,9 @@ describe("DockerContainerSandboxRunner", () => {
             stderr: "debug",
             stdout: "done",
           };
+        },
+        telemetry: {
+          traces: createRecordingTraces(spans),
         },
         temporaryRoot,
       });
@@ -526,9 +530,22 @@ describe("DockerContainerSandboxRunner", () => {
       );
       expect(observedInput?.command.env.PATH).toBe("/usr/bin");
       expect(observedInput?.command.args).toContain(`type=bind,src=${outputSource},dst=/out`);
+      expect(spans.map((span) => span.name)).toEqual(
+        expect.arrayContaining([
+          OBSERVABILITY_SPAN_NAMES.sandboxCleanup,
+          OBSERVABILITY_SPAN_NAMES.sandboxCollectArtifacts,
+          OBSERVABILITY_SPAN_NAMES.sandboxExecute,
+          OBSERVABILITY_SPAN_NAMES.sandboxPrepare,
+        ]),
+      );
       if (!outputSource) {
         throw new Error("Expected Docker runner executor to observe an output source.");
       }
+      const serializedTelemetry = JSON.stringify(spans);
+      expect(serializedTelemetry).not.toContain(outputSource);
+      expect(serializedTelemetry).not.toContain("debug");
+      expect(serializedTelemetry).not.toContain("done");
+      expect(serializedTelemetry).not.toContain("file://");
       await expect(stat(dirname(outputSource))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(root, { force: true, recursive: true });

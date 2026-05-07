@@ -109,6 +109,7 @@ import {
   type SandboxRunner,
   type SandboxRunRequest,
   type SandboxRunResult,
+  type SandboxTelemetryOptions,
   withSandboxTelemetry,
 } from "@repo/sandbox";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
@@ -703,15 +704,16 @@ export function createWorkerStaticAnalysisRunnerFromEnvironment(
   env: WorkerStaticAnalysisRunnerEnvironment,
   options: WorkerStaticAnalysisRunnerOptions = {},
 ): ToolRunner | undefined {
-  const sandboxRunner = createWorkerSandboxRunnerFromEnvironment(env);
+  const sandboxTelemetry = {
+    ...(options.metrics ? { metrics: options.metrics } : {}),
+    ...(options.traces ? { traces: options.traces } : {}),
+  };
+  const sandboxRunner = createWorkerSandboxRunnerFromEnvironment(env, sandboxTelemetry);
   if (!sandboxRunner) {
     return undefined;
   }
 
-  const instrumentedRunner = withSandboxTelemetry(sandboxRunner, {
-    ...(options.metrics ? { metrics: options.metrics } : {}),
-    ...(options.traces ? { traces: options.traces } : {}),
-  });
+  const instrumentedRunner = withSandboxTelemetry(sandboxRunner, sandboxTelemetry);
 
   return createSandboxToolRunner({
     runner: options.db
@@ -723,6 +725,7 @@ export function createWorkerStaticAnalysisRunnerFromEnvironment(
 /** Creates the optional sandbox runner selected by worker environment. */
 function createWorkerSandboxRunnerFromEnvironment(
   env: WorkerStaticAnalysisRunnerEnvironment,
+  telemetry: SandboxTelemetryOptions = {},
 ): SandboxRunner | undefined {
   const runnerName = (env.STATIC_ANALYSIS_RUNNER ?? env.SANDBOX_RUNNER ?? "off").trim();
   if (
@@ -743,11 +746,11 @@ function createWorkerSandboxRunnerFromEnvironment(
   }
 
   if (runnerName === "docker") {
-    return createDockerContainerSandboxRunner(createWorkerDockerRunnerOptions(env));
+    return createDockerContainerSandboxRunner(createWorkerDockerRunnerOptions(env, telemetry));
   }
 
   if (runnerName === "gvisor") {
-    return createGVisorSandboxRunner(createWorkerDockerRunnerOptions(env));
+    return createGVisorSandboxRunner(createWorkerDockerRunnerOptions(env, telemetry));
   }
 
   throw new Error(`Unsupported SANDBOX_RUNNER: ${runnerName}`);
@@ -756,6 +759,7 @@ function createWorkerSandboxRunnerFromEnvironment(
 /** Creates Docker sandbox runner options from non-secret worker environment values. */
 function createWorkerDockerRunnerOptions(
   env: WorkerStaticAnalysisRunnerEnvironment,
+  telemetry: SandboxTelemetryOptions = {},
 ): DockerContainerSandboxRunnerOptions {
   return {
     ...(nonEmptyEnv(env.SANDBOX_ARTIFACT_ROOT)
@@ -771,6 +775,7 @@ function createWorkerDockerRunnerOptions(
       ? { temporaryRoot: nonEmptyEnv(env.SANDBOX_TEMP_ROOT) }
       : {}),
     dockerProcessEnv: dockerProcessEnvironmentFromWorkerEnv(env),
+    ...(telemetry.metrics || telemetry.traces || telemetry.traceContext ? { telemetry } : {}),
   };
 }
 
