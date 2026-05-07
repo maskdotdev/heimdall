@@ -12,6 +12,12 @@ import {
   GitHubUnavailableError,
   GitHubValidationError,
 } from "./errors";
+import {
+  buildGitHubReviewCommentMarker,
+  buildGitHubSummaryCommentMarker,
+  hasGitHubCommentMarker,
+  parseGitHubCommentMarkers,
+} from "./markers";
 import { readGitHubRateLimitSnapshot } from "./rate-limit";
 import type {
   CheckRunAnnotation,
@@ -67,9 +73,6 @@ const base64Url = (input: string | Buffer): string =>
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replaceAll("=", "");
-
-const sha256 = (value: string | Uint8Array): string =>
-  `sha256:${createHash("sha256").update(value).digest("hex")}`;
 
 const stableId = (prefix: string, parts: readonly (number | string | undefined)[]): string =>
   `${prefix}_${createHash("sha256")
@@ -434,7 +437,9 @@ export class GitHubAppProvider implements GitProvider {
     }));
     const comments = requestedComments.filter(
       (comment) =>
-        !existingComments.some((existingComment) => existingComment.body.includes(comment.marker)),
+        !existingComments.some((existingComment) =>
+          hasGitHubCommentMarker(existingComment.body, comment.marker),
+        ),
     );
 
     if (comments.length === 0) {
@@ -446,7 +451,7 @@ export class GitHubAppProvider implements GitProvider {
         .map(
           (comment) =>
             existingComments.find((existingComment) =>
-              existingComment.body.includes(comment.marker),
+              hasGitHubCommentMarker(existingComment.body, comment.marker),
             )?.providerCommentId,
         )
         .filter((commentId): commentId is string => Boolean(commentId));
@@ -496,8 +501,9 @@ export class GitHubAppProvider implements GitProvider {
     const existingCommentIds = requestedComments
       .map(
         (comment) =>
-          refreshedComments.find((existingComment) => existingComment.body.includes(comment.marker))
-            ?.providerCommentId,
+          refreshedComments.find((existingComment) =>
+            hasGitHubCommentMarker(existingComment.body, comment.marker),
+          )?.providerCommentId,
       )
       .filter((commentId): commentId is string => Boolean(commentId));
 
@@ -595,10 +601,15 @@ export class GitHubAppProvider implements GitProvider {
     const legacyMarker = this.createDedupeMarker(input.body, input.reviewRunId);
     const body = this.withSummaryDedupeMarkers(input);
     const existingComment = (await this.fetchExistingBotComments(input)).find(
-      (comment) => comment.body.includes(stableMarker) || comment.body.includes(legacyMarker),
+      (comment) =>
+        hasGitHubCommentMarker(comment.body, stableMarker) ||
+        hasGitHubCommentMarker(comment.body, legacyMarker),
     );
     if (existingComment) {
-      if (existingComment.body === body || existingComment.body.includes(legacyMarker)) {
+      if (
+        existingComment.body === body ||
+        hasGitHubCommentMarker(existingComment.body, legacyMarker)
+      ) {
         return {
           providerCommentId: existingComment.providerCommentId,
           ...withOptional("htmlUrl", existingComment.htmlUrl),
@@ -928,15 +939,15 @@ export class GitHubAppProvider implements GitProvider {
   }
 
   private createDedupeMarker(body: string, reviewRunId: string, findingId?: string): string {
-    const fingerprint = sha256(`${reviewRunId}:${findingId ?? "summary"}:${body}`);
-    return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
+    return buildGitHubReviewCommentMarker({
+      body,
+      ...(findingId ? { findingId } : {}),
+      reviewRunId,
+    });
   }
 
   private createSummaryDedupeMarker(input: GitHubPullRequestRef): string {
-    const fingerprint = sha256(
-      `summary:${input.providerRepoId ?? `${input.owner}/${input.repo}`}:${input.pullRequestNumber}`,
-    );
-    return `<!-- heimdall:summary:${input.pullRequestNumber}:${fingerprint} -->`;
+    return buildGitHubSummaryCommentMarker(input);
   }
 
   private mapExistingCommentIdsByFindingId(
@@ -947,7 +958,7 @@ export class GitHubAppProvider implements GitProvider {
 
     for (const comment of comments) {
       const existingComment = existingComments.find((candidate) =>
-        candidate.body.includes(comment.marker),
+        hasGitHubCommentMarker(candidate.body, comment.marker),
       );
       if (comment.findingId && existingComment) {
         commentIdsByFindingId[comment.findingId] = existingComment.providerCommentId;
@@ -966,7 +977,9 @@ export class GitHubAppProvider implements GitProvider {
     );
 
     return comments
-      .filter((comment) => optionalString(comment, "body")?.includes("<!-- heimdall:"))
+      .filter(
+        (comment) => parseGitHubCommentMarkers(optionalString(comment, "body") ?? "").length > 0,
+      )
       .map((comment) => ({
         providerCommentId: asString(comment, "id"),
         body: asString(comment, "body"),

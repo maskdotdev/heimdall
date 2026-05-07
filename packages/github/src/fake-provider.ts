@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ChangedFile, PullRequestSnapshot, Repository } from "@repo/contracts";
 import { hashRawDiff } from "@repo/pr-snapshot";
+import {
+  buildGitHubReviewCommentMarker,
+  buildGitHubSummaryCommentMarker,
+  hasGitHubCommentMarker,
+} from "./markers";
 import type {
   CloneAuth,
   CreateOrUpdateCheckRunInput,
@@ -190,16 +195,24 @@ export class FakeGitProvider implements GitProvider {
   public async publishSummaryComment(
     input: PublishSummaryCommentInput,
   ): Promise<PublishedSummaryComment> {
-    const stableMarker = createSummaryDedupeMarker(input);
-    const legacyMarker = createDedupeMarker(input.body, input.reviewRunId);
+    const stableMarker = buildGitHubSummaryCommentMarker(input);
+    const legacyMarker = buildGitHubReviewCommentMarker({
+      body: input.body,
+      reviewRunId: input.reviewRunId,
+    });
     const body = withSummaryDedupeMarkers(input);
     const existingCommentIndex = this.botComments.findIndex(
-      (comment) => comment.body.includes(stableMarker) || comment.body.includes(legacyMarker),
+      (comment) =>
+        hasGitHubCommentMarker(comment.body, stableMarker) ||
+        hasGitHubCommentMarker(comment.body, legacyMarker),
     );
     const existingComment =
       existingCommentIndex >= 0 ? this.botComments[existingCommentIndex] : undefined;
     if (existingComment) {
-      if (existingComment.body !== body && !existingComment.body.includes(legacyMarker)) {
+      if (
+        existingComment.body !== body &&
+        !hasGitHubCommentMarker(existingComment.body, legacyMarker)
+      ) {
         this.publishedSummaryComments.push(input);
         this.botComments[existingCommentIndex] = {
           ...existingComment,
@@ -268,26 +281,10 @@ const stableId = (prefix: string, parts: readonly unknown[]): string =>
     .digest("hex")
     .slice(0, 24)}`;
 
-const createDedupeMarker = (body: string, reviewRunId: string): string => {
-  const fingerprint = `sha256:${createHash("sha256")
-    .update(`${reviewRunId}:summary:${body}`)
-    .digest("hex")}`;
-  return `<!-- heimdall:${reviewRunId}:summary:${fingerprint} -->`;
-};
-
-const createSummaryDedupeMarker = (input: GitHubPullRequestRef): string => {
-  const fingerprint = `sha256:${createHash("sha256")
-    .update(
-      `summary:${input.providerRepoId ?? `${input.owner}/${input.repo}`}:${input.pullRequestNumber}`,
-    )
-    .digest("hex")}`;
-  return `<!-- heimdall:summary:${input.pullRequestNumber}:${fingerprint} -->`;
-};
-
 const withSummaryDedupeMarkers = (input: PublishSummaryCommentInput): string =>
   [
     input.body,
     "",
-    createSummaryDedupeMarker(input),
-    createDedupeMarker(input.body, input.reviewRunId),
+    buildGitHubSummaryCommentMarker(input),
+    buildGitHubReviewCommentMarker({ body: input.body, reviewRunId: input.reviewRunId }),
   ].join("\n");
