@@ -57,6 +57,56 @@ export type GitHubReviewCommentAnchor = {
   readonly startSide?: DiffAnchorSide;
 };
 
+/** Reason a finding is resolved to a file-level review comment instead of a line. */
+export type FileAnchorReason =
+  | "binary_file"
+  | "renamed_without_hunks"
+  | "metadata_only"
+  | "line_not_in_diff"
+  | "fallback";
+
+/** Provider-neutral file-level target for findings that cannot safely use a line anchor. */
+export type FileAnchor = {
+  /** Repository path used by the provider for the review comment. */
+  readonly path: string;
+  /** GitHub-compatible subject type for file-level review comments. */
+  readonly subjectType: "file";
+  /** Why the finding was downgraded to a file-level target. */
+  readonly reason: FileAnchorReason;
+  /** Previous repository path when the target file was renamed. */
+  readonly oldPath?: string;
+  /** Changed-file status that produced the file anchor. */
+  readonly status: FileChangeStatus;
+};
+
+/** Per-file anchor metadata, including whether line or file comments are available. */
+export type FileAnchorInfo = {
+  /** Repository path used by the provider for the review comment. */
+  readonly path: string;
+  /** Previous repository path when the target file was renamed. */
+  readonly oldPath?: string;
+  /** Changed-file status from the parsed diff. */
+  readonly status: FileChangeStatus;
+  /** Whether the parsed file has any diff hunks. */
+  readonly hasHunks: boolean;
+  /** Whether the file has any line-level anchors. */
+  readonly hasCommentableLines: boolean;
+  /** Whether the provider reports this file as binary. */
+  readonly isBinary: boolean;
+  /** Whether the provider can receive a file-level review comment for this file. */
+  readonly supportsFileComment: boolean;
+  /** Default fallback reason for file-level comments on this file. */
+  readonly fallbackReason: FileAnchorReason;
+};
+
+/** GitHub pull request review file-comment anchor. */
+export type GitHubFileReviewCommentAnchor = {
+  /** Repository path passed to GitHub's review comment API. */
+  readonly path: string;
+  /** GitHub subject type for file-level review comments. */
+  readonly subjectType: "file";
+};
+
 /** Metadata and parsed files used to extract a deterministic pull request change set. */
 export type ExtractChangeSetInput = {
   /** Parsed changed files from a provider raw diff. */
@@ -182,11 +232,49 @@ export function buildCommentableLineIndex(
   );
 }
 
+/** Returns file-level anchor metadata for every parsed changed file. */
+export function buildFileAnchorIndex(files: readonly ChangedFile[]): readonly FileAnchorInfo[] {
+  return files.map((file) => {
+    const hasCommentableLines = buildCommentableLineIndex([file]).length > 0;
+
+    return {
+      fallbackReason: defaultFileAnchorReason(file),
+      hasCommentableLines,
+      hasHunks: file.hunks.length > 0,
+      isBinary: file.isBinary,
+      ...(file.oldPath ? { oldPath: file.oldPath } : {}),
+      path: file.path,
+      status: file.status,
+      supportsFileComment: true,
+    };
+  });
+}
+
 /** Returns whether a provider-neutral line anchor appears in the parsed diff. */
 export function isLineCommentable(files: readonly ChangedFile[], anchor: LineAnchor): boolean {
   return buildCommentableLineIndex(files).some(
     (line) => line.path === anchor.path && line.line === anchor.line && line.side === anchor.side,
   );
+}
+
+/** Resolves a provider-neutral file-level anchor for a changed file path. */
+export function resolveFileAnchor(
+  files: readonly ChangedFile[],
+  path: string,
+  reason?: FileAnchorReason,
+): FileAnchor | undefined {
+  const info = buildFileAnchorIndex(files).find((file) => file.path === path);
+  if (!info?.supportsFileComment) {
+    return undefined;
+  }
+
+  return {
+    ...(info.oldPath ? { oldPath: info.oldPath } : {}),
+    path: info.path,
+    reason: reason ?? info.fallbackReason,
+    status: info.status,
+    subjectType: "file",
+  };
 }
 
 /** Converts a verified provider-neutral anchor into a GitHub review-comment anchor. */
@@ -236,6 +324,14 @@ export function toGitHubReviewCommentAnchor(
     side: anchor.side,
     startLine: anchor.startLine,
     startSide,
+  };
+}
+
+/** Converts a provider-neutral file anchor into a GitHub review file-comment anchor. */
+export function toGitHubFileReviewCommentAnchor(anchor: FileAnchor): GitHubFileReviewCommentAnchor {
+  return {
+    path: anchor.path,
+    subjectType: anchor.subjectType,
   };
 }
 
@@ -418,6 +514,21 @@ function commentableLineForDiffLine(
   }
 
   return [];
+}
+
+/** Returns the default file-level fallback reason for one changed file. */
+function defaultFileAnchorReason(file: ChangedFile): FileAnchorReason {
+  if (file.isBinary) {
+    return "binary_file";
+  }
+  if (file.status === "renamed" && file.hunks.length === 0) {
+    return "renamed_without_hunks";
+  }
+  if (file.hunks.length === 0 && file.additions === 0 && file.deletions === 0) {
+    return "metadata_only";
+  }
+
+  return "fallback";
 }
 
 /** Extracts range and block metadata for one parsed changed file. */

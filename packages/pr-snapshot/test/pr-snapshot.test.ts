@@ -3,12 +3,15 @@ import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-r
 import { describe, expect, it } from "vitest";
 import {
   buildCommentableLineIndex,
+  buildFileAnchorIndex,
   computeSnapshotHash,
   extractChangeSet,
   hashCanonicalJson,
   hashRawDiff,
   isLineCommentable,
   parseUnifiedDiff,
+  resolveFileAnchor,
+  toGitHubFileReviewCommentAnchor,
   toGitHubReviewCommentAnchor,
 } from "../src";
 
@@ -183,6 +186,63 @@ describe("line anchors", () => {
         startLine: 1,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("file anchors", () => {
+  it("indexes file-level fallback targets for changed files without line anchors", () => {
+    const files = parseUnifiedDiff(`diff --git a/assets/logo.png b/assets/logo.png
+index 1111111..2222222 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+diff --git a/src/old-name.ts b/src/new-name.ts
+similarity index 100%
+rename from src/old-name.ts
+rename to src/new-name.ts
+diff --git a/scripts/run.sh b/scripts/run.sh
+old mode 100644
+new mode 100755
+`);
+
+    expect(buildFileAnchorIndex(files)).toEqual([
+      expect.objectContaining({
+        fallbackReason: "binary_file",
+        hasCommentableLines: false,
+        hasHunks: false,
+        isBinary: true,
+        path: "assets/logo.png",
+        supportsFileComment: true,
+      }),
+      expect.objectContaining({
+        fallbackReason: "renamed_without_hunks",
+        oldPath: "src/old-name.ts",
+        path: "src/new-name.ts",
+      }),
+      expect.objectContaining({
+        fallbackReason: "metadata_only",
+        path: "scripts/run.sh",
+      }),
+    ]);
+  });
+
+  it("converts resolved file anchors into GitHub review file-comment anchors", () => {
+    const files = parseUnifiedDiff(`diff --git a/assets/logo.png b/assets/logo.png
+index 1111111..2222222 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+`);
+
+    const anchor = resolveFileAnchor(files, "assets/logo.png", "line_not_in_diff");
+
+    expect(anchor).toEqual({
+      path: "assets/logo.png",
+      reason: "line_not_in_diff",
+      status: "modified",
+      subjectType: "file",
+    });
+    expect(anchor ? toGitHubFileReviewCommentAnchor(anchor) : undefined).toEqual({
+      path: "assets/logo.png",
+      subjectType: "file",
+    });
+    expect(resolveFileAnchor(files, "src/missing.ts")).toBeUndefined();
   });
 });
 
