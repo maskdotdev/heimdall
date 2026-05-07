@@ -205,6 +205,10 @@ describe("structured telemetry metrics", () => {
       queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
       queueJobsStartedTotal: "code_review_agent.queue.jobs_started_total",
       queueRetriesTotal: "code_review_agent.queue.retries_total",
+      webhookDeliveriesTotal: "code_review_agent.webhook.deliveries_total",
+      webhookDeliveryDurationMs: "code_review_agent.webhook.delivery_duration_ms",
+      webhookDuplicateDeliveriesTotal: "code_review_agent.webhook.duplicate_deliveries_total",
+      webhookRejectionsTotal: "code_review_agent.webhook.rejections_total",
     });
   });
 
@@ -310,6 +314,7 @@ describe("structured telemetry spans", () => {
       durableJobProcess: "code_review_agent.durable_job.process",
       pullRequestReview: "code_review_agent.review.pull_request",
       reviewPipelineStage: "code_review_agent.review.pipeline_stage",
+      webhookDelivery: "code_review_agent.webhook.delivery",
     });
   });
 

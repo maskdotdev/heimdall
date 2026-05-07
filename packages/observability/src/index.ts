@@ -591,6 +591,10 @@ export const OBSERVABILITY_METRIC_NAMES = {
   queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
   queueJobsStartedTotal: "code_review_agent.queue.jobs_started_total",
   queueRetriesTotal: "code_review_agent.queue.retries_total",
+  webhookDeliveriesTotal: "code_review_agent.webhook.deliveries_total",
+  webhookDeliveryDurationMs: "code_review_agent.webhook.delivery_duration_ms",
+  webhookDuplicateDeliveriesTotal: "code_review_agent.webhook.duplicate_deliveries_total",
+  webhookRejectionsTotal: "code_review_agent.webhook.rejections_total",
   workerServiceStartsTotal: "code_review_agent.worker.service_starts_total",
   workerServiceStopsTotal: "code_review_agent.worker.service_stops_total",
 } as const;
@@ -601,6 +605,7 @@ export const OBSERVABILITY_SPAN_NAMES = {
   durableJobProcess: "code_review_agent.durable_job.process",
   pullRequestReview: "code_review_agent.review.pull_request",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
+  webhookDelivery: "code_review_agent.webhook.delivery",
 } as const;
 
 const OPEN_TELEMETRY_EXPORT_TIMEOUT_MS = 5_000;

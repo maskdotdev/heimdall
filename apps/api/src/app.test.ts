@@ -21,6 +21,7 @@ import {
 } from "@repo/observability";
 import { buildReviewPolicySnapshot } from "@repo/rules";
 import { signAdminIdentityAssertion } from "@repo/security";
+import { WebhookAuthenticationError } from "@repo/webhook-ingestion";
 import { describe, expect, it } from "vitest";
 import {
   type AdminControlPlaneService,
@@ -172,6 +173,131 @@ describe("api app", () => {
     await expect(response.json()).resolves.toMatchObject({
       status: "accepted",
       deliveryId: "delivery-1",
+    });
+  });
+
+  it("records GitHub webhook delivery metrics and spans", async () => {
+    const config = loadObservabilityConfig({
+      OBSERVABILITY_ENABLED: "true",
+      OBSERVABILITY_EXPORTER: "console",
+      OBSERVABILITY_SERVICE_NAME: "code-review-api",
+    });
+    const metricPoints: TelemetryMetricPoint[] = [];
+    const spanSink = createMemoryTelemetrySpanSink();
+    const app = createApiApp({
+      githubWebhookHandler: {
+        handle: async () => ({
+          deliveryId: "delivery-telemetry",
+          jobs: [],
+          status: "accepted",
+          webhookEventId: "webhook_telemetry",
+        }),
+      } as never,
+      metrics: createTelemetryMetricRecorder(config, {
+        write: (point) => {
+          metricPoints.push(point);
+        },
+      }),
+      traces: createTelemetrySpanRecorder(config, spanSink),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/webhooks/github", {
+        body: JSON.stringify({ action: "opened" }),
+        headers: {
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "x-github-event": "pull_request",
+          "x-request-id": "req_webhook_telemetry",
+        },
+        method: "POST",
+      }),
+    );
+
+    const deliveryCount = metricPoints.find(
+      (point) => point.name === OBSERVABILITY_METRIC_NAMES.webhookDeliveriesTotal,
+    );
+    const deliveryDuration = metricPoints.find(
+      (point) => point.name === OBSERVABILITY_METRIC_NAMES.webhookDeliveryDurationMs,
+    );
+    const webhookSpan = spanSink
+      .spans()
+      .find((span) => span.name === OBSERVABILITY_SPAN_NAMES.webhookDelivery);
+
+    expect(response.status).toBe(202);
+    expect(deliveryCount).toMatchObject({
+      kind: "counter",
+      labels: {
+        action: "opened",
+        event_name: "pull_request",
+        provider: "github",
+        status: "accepted",
+      },
+      value: 1,
+    });
+    expect(deliveryDuration).toMatchObject({
+      kind: "histogram",
+      labels: deliveryCount?.labels,
+      unit: "ms",
+    });
+    expect(deliveryDuration?.value).toBeGreaterThanOrEqual(0);
+    expect(webhookSpan).toMatchObject({
+      attributes: expect.objectContaining({
+        action: "opened",
+        event_name: "pull_request",
+        provider: "github",
+        status: "accepted",
+      }),
+      kind: "server",
+      status: "ok",
+      traceContext: {
+        requestId: "req_webhook_telemetry",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
+    });
+  });
+
+  it("records GitHub webhook rejection metrics", async () => {
+    const config = loadObservabilityConfig({
+      OBSERVABILITY_ENABLED: "true",
+      OBSERVABILITY_EXPORTER: "console",
+      OBSERVABILITY_SERVICE_NAME: "code-review-api",
+    });
+    const metricPoints: TelemetryMetricPoint[] = [];
+    const app = createApiApp({
+      githubWebhookHandler: {
+        handle: async () => {
+          throw new WebhookAuthenticationError("GitHub webhook signature verification failed.");
+        },
+      } as never,
+      metrics: createTelemetryMetricRecorder(config, {
+        write: (point) => {
+          metricPoints.push(point);
+        },
+      }),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/webhooks/github", {
+        body: JSON.stringify({ action: "opened" }),
+        headers: {
+          "x-github-event": "pull_request",
+        },
+        method: "POST",
+      }),
+    );
+
+    const rejectionCount = metricPoints.find(
+      (point) => point.name === OBSERVABILITY_METRIC_NAMES.webhookRejectionsTotal,
+    );
+
+    expect(response.status).toBe(401);
+    expect(rejectionCount).toMatchObject({
+      kind: "counter",
+      labels: {
+        provider: "github",
+        reason: "invalid_signature",
+      },
+      value: 1,
     });
   });
 

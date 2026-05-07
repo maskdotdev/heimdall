@@ -805,6 +805,35 @@ type ApiRequestTelemetryEndInput = {
   readonly statusCode: number;
 };
 
+/** Provider webhook delivery status label used for telemetry. */
+type WebhookTelemetryStatus = "accepted" | "duplicate" | "failed" | "ignored" | "rejected";
+
+/** Per-delivery webhook telemetry state kept inside the route handler. */
+type WebhookTelemetryState = {
+  /** Delivery action label parsed from the payload when present. */
+  readonly action: string;
+  /** Provider event name label parsed from request headers. */
+  readonly eventName: string;
+  /** Provider identifier label. */
+  readonly provider: string;
+  /** Request start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Span handle for the provider webhook delivery. */
+  readonly span: TelemetrySpanHandle;
+};
+
+/** Input used to close one provider webhook telemetry record. */
+type WebhookTelemetryEndInput = {
+  /** Optional error that ended the delivery. */
+  readonly error?: unknown;
+  /** Optional product-safe rejection or failure reason. */
+  readonly reason?: string;
+  /** HTTP response status code assigned to the delivery. */
+  readonly statusCode: number;
+  /** Provider delivery status. */
+  readonly webhookStatus: WebhookTelemetryStatus;
+};
+
 /** Authenticated admin request context produced by the session guard. */
 type AdminRequestContext = {
   /** Provider-backed admin actor. */
@@ -6359,6 +6388,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
     })
     .post("/webhooks/github", async ({ request, set }) => {
       const rawBody = new Uint8Array(await request.arrayBuffer());
+      const telemetry = startWebhookDeliveryTelemetry(traces, request, "github", rawBody);
       try {
         const result = await githubWebhookHandler.handle({
           headers: request.headers,
@@ -6366,18 +6396,40 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         });
 
         set.status = 202;
+        finishWebhookDeliveryTelemetry(metrics, telemetry, {
+          statusCode: 202,
+          webhookStatus: result.status,
+        });
         return result;
       } catch (error) {
         if (error instanceof WebhookAuthenticationError) {
           set.status = 401;
+          finishWebhookDeliveryTelemetry(metrics, telemetry, {
+            error,
+            reason: "invalid_signature",
+            statusCode: 401,
+            webhookStatus: "rejected",
+          });
           return { error: { code: "webhook.invalid_signature", message: error.message } };
         }
 
         if (error instanceof WebhookPayloadError) {
           set.status = 400;
+          finishWebhookDeliveryTelemetry(metrics, telemetry, {
+            error,
+            reason: "invalid_payload",
+            statusCode: 400,
+            webhookStatus: "rejected",
+          });
           return { error: { code: "webhook.invalid_payload", message: error.message } };
         }
 
+        finishWebhookDeliveryTelemetry(metrics, telemetry, {
+          error,
+          reason: "unhandled_error",
+          statusCode: 500,
+          webhookStatus: "failed",
+        });
         throw error;
       }
     });
@@ -14647,6 +14699,119 @@ function normalizedStatusCode(statusCode: number, fallback: number): number {
 /** Returns the coarse HTTP status family label for metrics. */
 function statusFamilyFromCode(statusCode: number): string {
   return `${Math.trunc(statusCode / 100)}xx`;
+}
+
+/** Starts provider webhook delivery telemetry for route-local instrumentation. */
+function startWebhookDeliveryTelemetry(
+  traces: TelemetrySpanRecorder,
+  request: Request,
+  provider: string,
+  rawBody: Uint8Array,
+): WebhookTelemetryState {
+  const action = webhookActionFromRawBody(rawBody);
+  const eventName = webhookEventNameFromRequest(request);
+  const span = traces.startSpan(OBSERVABILITY_SPAN_NAMES.webhookDelivery, {
+    attributes: {
+      "webhook.action": action,
+      "webhook.event_name": eventName,
+      "webhook.provider": provider,
+    },
+    kind: "server",
+    traceContext: traceContextFromRequest(request, requestIdFromRequest(request)),
+  });
+
+  return {
+    action,
+    eventName,
+    provider,
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Ends webhook delivery telemetry and emits low-cardinality delivery metrics. */
+function finishWebhookDeliveryTelemetry(
+  metrics: TelemetryMetricRecorder,
+  telemetry: WebhookTelemetryState,
+  input: WebhookTelemetryEndInput,
+): void {
+  const durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
+  const labels = webhookDeliveryMetricLabels(telemetry, input.webhookStatus);
+  metrics.count(OBSERVABILITY_METRIC_NAMES.webhookDeliveriesTotal, { labels });
+  metrics.histogram(OBSERVABILITY_METRIC_NAMES.webhookDeliveryDurationMs, durationMs, {
+    labels,
+    unit: "ms",
+  });
+
+  if (input.webhookStatus === "duplicate") {
+    metrics.count(OBSERVABILITY_METRIC_NAMES.webhookDuplicateDeliveriesTotal, {
+      labels: {
+        event_name: telemetry.eventName,
+        provider: telemetry.provider,
+      },
+    });
+  }
+  if (input.webhookStatus === "rejected") {
+    metrics.count(OBSERVABILITY_METRIC_NAMES.webhookRejectionsTotal, {
+      labels: {
+        provider: telemetry.provider,
+        reason: normalizeWebhookLabel(input.reason ?? "unknown"),
+      },
+    });
+  }
+
+  telemetry.span.end({
+    attributes: {
+      ...labels,
+      "http.response.status_code": normalizedStatusCode(input.statusCode, 500),
+      ...(input.reason ? { reason: normalizeWebhookLabel(input.reason) } : {}),
+    },
+    ...(input.error === undefined ? {} : { error: input.error }),
+    status: input.error === undefined && input.webhookStatus !== "failed" ? "ok" : "error",
+  });
+}
+
+/** Returns metric labels shared by webhook delivery counters and histograms. */
+function webhookDeliveryMetricLabels(
+  telemetry: WebhookTelemetryState,
+  status: WebhookTelemetryStatus,
+): Readonly<Record<string, string>> {
+  return {
+    action: telemetry.action,
+    event_name: telemetry.eventName,
+    provider: telemetry.provider,
+    status,
+  };
+}
+
+/** Returns the provider event name from a webhook request. */
+function webhookEventNameFromRequest(request: Request): string {
+  return normalizeWebhookLabel(request.headers.get("x-github-event") ?? "unknown");
+}
+
+/** Returns a provider action label from a JSON webhook payload when present. */
+function webhookActionFromRawBody(rawBody: Uint8Array): string {
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(rawBody)) as unknown;
+    if (payload && typeof payload === "object" && "action" in payload) {
+      const action = (payload as { readonly action?: unknown }).action;
+      return normalizeWebhookLabel(typeof action === "string" ? action : "unknown");
+    }
+  } catch {
+    return "unknown";
+  }
+
+  return "unknown";
+}
+
+/** Normalizes provider-controlled webhook labels before metric export. */
+function normalizeWebhookLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .slice(0, 80);
+  return normalized.length > 0 ? normalized : "unknown";
 }
 
 /** Returns a numeric status code from an Elysia set object. */
