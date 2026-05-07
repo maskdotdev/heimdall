@@ -118,6 +118,7 @@ export const FindingRejectionReasonSchema = Type.Union([
   Type.Literal("duplicate_exact"),
   Type.Literal("duplicate_location"),
   Type.Literal("duplicate_semantic"),
+  Type.Literal("duplicate_root_cause"),
   Type.Literal("duplicate_previous_comment"),
   Type.Literal("suppressed_by_repo_rule"),
   Type.Literal("suppressed_by_memory"),

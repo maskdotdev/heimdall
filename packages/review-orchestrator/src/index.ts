@@ -1690,6 +1690,8 @@ function duplicateGroupReason(groupKind: string): string {
       return "duplicate_exact";
     case "location":
       return "duplicate_location";
+    case "root_cause":
+      return "duplicate_root_cause";
     case "semantic":
       return "duplicate_semantic";
     default:

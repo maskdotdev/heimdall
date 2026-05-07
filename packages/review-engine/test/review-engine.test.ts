@@ -276,6 +276,68 @@ describe("validateAndRankCandidateFindings", () => {
     );
   });
 
+  it("keeps the highest-value finding when compatible categories share one root cause", () => {
+    const securityFinding = candidateFindingFixture({
+      body: "The changed session token path no longer validates the request before granting permissions.",
+      category: "security",
+      confidence: 0.9,
+      findingId: "fnd_ROOT_SECURITY",
+      fingerprint: "fp_root_security",
+      location: { ...validCandidateFindingFixture.location, line: 40 },
+      severity: "high",
+      title: "Validate session token permissions",
+    });
+    const correctnessFinding = candidateFindingFixture({
+      body: "The changed request path can continue with an invalid session token and grant permissions.",
+      category: "correctness",
+      confidence: 0.86,
+      findingId: "fnd_ROOT_CORRECTNESS",
+      fingerprint: "fp_root_correctness",
+      location: { ...validCandidateFindingFixture.location, line: 2 },
+      severity: "medium",
+      title: "Reject invalid session token requests",
+    });
+    const unrelatedFinding = candidateFindingFixture({
+      body: "The changed logging path formats retry counts inconsistently for the debug summary.",
+      category: "maintainability",
+      confidence: 0.75,
+      findingId: "fnd_ROOT_UNRELATED",
+      fingerprint: "fp_root_unrelated",
+      location: { ...validCandidateFindingFixture.location, line: 80 },
+      severity: "low",
+      title: "Normalize retry count logging",
+    });
+
+    const result = validateCandidateFindings({
+      snapshot: snapshotWithAddedLines([2, 40, 80]),
+      findings: [correctnessFinding, unrelatedFinding, securityFinding],
+      timestamp: validCandidateFindingFixture.createdAt,
+    });
+
+    expect(result.accepted.map((finding) => finding.candidateFindingId)).toEqual([
+      "fnd_ROOT_SECURITY",
+      "fnd_ROOT_UNRELATED",
+    ]);
+    expect(result.accepted.map((finding) => finding.rank)).toEqual([1, 2]);
+    expect(result.rejected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          candidateFindingId: "fnd_ROOT_CORRECTNESS",
+          validation: expect.objectContaining({ reasons: ["duplicate_root_cause"] }),
+        }),
+      ]),
+    );
+    expect(result.duplicateGroups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          canonicalCandidateFindingId: "fnd_ROOT_SECURITY",
+          duplicateCandidateFindingIds: ["fnd_ROOT_CORRECTNESS"],
+          groupKind: "root_cause",
+        }),
+      ]),
+    );
+  });
+
   it("rejects findings that duplicate previously published comments", () => {
     const result = validateCandidateFindings({
       snapshot: validPullRequestSnapshotFixture,

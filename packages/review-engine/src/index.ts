@@ -241,7 +241,7 @@ type NormalizedFindingValidationConfig = {
 /** Duplicate group emitted by deterministic validation. */
 export type FindingDuplicateGroup = {
   /** Dedupe strategy that created the group. */
-  readonly groupKind: "exact" | "location" | "semantic";
+  readonly groupKind: "exact" | "location" | "semantic" | "root_cause";
   /** Canonical candidate retained for ranking. */
   readonly canonicalCandidateFindingId: string;
   /** Duplicate candidates rejected in favor of the canonical candidate. */
@@ -365,12 +365,14 @@ export function validateCandidateFindings(
     }
   }
 
-  const rankedAccepted = rankFindings(accepted);
+  const rootCauseDedupe = dedupeRootCauseFindings(rankFindings(accepted));
+  const rankedAccepted = rankFindings(rootCauseDedupe.accepted);
   const validated = [
     ...rankedAccepted.slice(0, config.maxPublishableFindings),
     ...rankedAccepted
       .slice(config.maxPublishableFindings)
       .map((finding) => rejectForBudget(finding)),
+    ...rootCauseDedupe.rejected,
     ...rejected,
   ];
   const finalAccepted = validated.filter((finding) => finding.decision === "publish");
@@ -423,6 +425,7 @@ function buildDuplicateGroups(
   const canonicalByFingerprint = new Map<string, string>();
   const canonicalByLocation = new Map<string, string>();
   const canonicalSemanticSignatures: SemanticFindingSignature[] = [];
+  const canonicalRootCauseSignatures: RootCauseFindingSignature[] = [];
 
   for (const finding of findings) {
     const isExactDuplicate = canonicalByFingerprint.has(finding.fingerprint);
@@ -448,6 +451,14 @@ function buildDuplicateGroups(
         groups,
       });
     }
+  }
+
+  for (const finding of rankCandidateFindingsForDedupe(findings)) {
+    collectRootCauseDuplicateGroup({
+      canonicalSignatures: canonicalRootCauseSignatures,
+      finding,
+      groups,
+    });
   }
 
   return [...groups.values()]
@@ -506,6 +517,51 @@ function collectSemanticDuplicateGroup(input: {
     groupKey,
     groupKind: "semantic",
   });
+}
+
+function collectRootCauseDuplicateGroup(input: {
+  readonly canonicalSignatures: RootCauseFindingSignature[];
+  readonly finding: CandidateFinding;
+  readonly groups: Map<string, FindingDuplicateGroup>;
+}): void {
+  const signature = buildRootCauseSignature(input.finding);
+  const canonicalSignature = input.canonicalSignatures.find((candidate) =>
+    rootCauseSignaturesMatch(signature, candidate),
+  );
+  if (!canonicalSignature) {
+    input.canonicalSignatures.push(signature);
+    return;
+  }
+
+  const groupKey = `root_cause:${rootCauseGroupKey(canonicalSignature)}`;
+  const existingGroup = input.groups.get(groupKey);
+  input.groups.set(groupKey, {
+    canonicalCandidateFindingId: canonicalSignature.candidateFindingId,
+    duplicateCandidateFindingIds: [
+      ...(existingGroup?.duplicateCandidateFindingIds ?? []),
+      input.finding.findingId,
+    ],
+    groupKey,
+    groupKind: "root_cause",
+  });
+}
+
+function rankCandidateFindingsForDedupe(
+  findings: readonly CandidateFinding[],
+): readonly CandidateFinding[] {
+  return [...findings].sort(
+    (left, right) =>
+      scoreCandidateFinding(right) - scoreCandidateFinding(left) ||
+      left.findingId.localeCompare(right.findingId),
+  );
+}
+
+function scoreCandidateFinding(finding: CandidateFinding): number {
+  return (
+    severityRank(finding.severity) * 100 +
+    finding.confidence * 50 +
+    categoryPriority(finding.category)
+  );
 }
 
 function buildValidationStats(
@@ -734,6 +790,12 @@ type SemanticFindingSignature = {
   readonly tokens: ReadonlySet<string>;
 };
 
+/** Conservative signature used to collapse multiple symptoms of one root cause. */
+type RootCauseFindingSignature = SemanticFindingSignature & {
+  /** Line used to keep root-cause grouping local to nearby changes. */
+  readonly line: number;
+};
+
 /** Rejection reasons plus explainable suppression context for one candidate. */
 type FindingRejectionAnalysis = {
   /** Canonical rejection reasons produced during validation. */
@@ -928,6 +990,44 @@ function rankFindings(findings: readonly ValidatedFinding[]): readonly Validated
     .map((finding, index) => ({ ...finding, rank: index + 1 }));
 }
 
+/** Collapses accepted findings that are likely symptoms of one root cause. */
+function dedupeRootCauseFindings(findings: readonly ValidatedFinding[]): {
+  readonly accepted: readonly ValidatedFinding[];
+  readonly rejected: readonly ValidatedFinding[];
+} {
+  const accepted: ValidatedFinding[] = [];
+  const rejected: ValidatedFinding[] = [];
+  const rootCauseSignatures: RootCauseFindingSignature[] = [];
+
+  for (const finding of findings) {
+    const signature = buildRootCauseSignature(finding);
+    if (
+      rootCauseSignatures.some((canonicalSignature) =>
+        rootCauseSignaturesMatch(signature, canonicalSignature),
+      )
+    ) {
+      rejected.push(rejectForRootCause(finding));
+    } else {
+      rootCauseSignatures.push(signature);
+      accepted.push(finding);
+    }
+  }
+
+  return { accepted, rejected };
+}
+
+function rejectForRootCause(finding: ValidatedFinding): ValidatedFinding {
+  const { rank: _rank, ...unrankedFinding } = finding;
+  return {
+    ...unrankedFinding,
+    decision: "reject",
+    validation: {
+      ...finding.validation,
+      reasons: ["duplicate_root_cause"],
+    },
+  };
+}
+
 function rejectForBudget(finding: ValidatedFinding): ValidatedFinding {
   return {
     findingId: finding.findingId,
@@ -1037,6 +1137,21 @@ function buildSemanticSignature(finding: CandidateFinding): SemanticFindingSigna
   };
 }
 
+/** Builds a root-cause signature from the fields shared by candidate and validated findings. */
+function buildRootCauseSignature(
+  finding: Pick<CandidateFinding | ValidatedFinding, "category" | "title" | "body" | "location"> &
+    Partial<Pick<CandidateFinding, "findingId">> &
+    Partial<Pick<ValidatedFinding, "candidateFindingId">>,
+): RootCauseFindingSignature {
+  return {
+    candidateFindingId: finding.candidateFindingId ?? finding.findingId ?? "unknown_candidate",
+    category: finding.category,
+    line: finding.location.line,
+    path: finding.location.path,
+    tokens: semanticTokens(`${finding.title}\n${finding.body}`),
+  };
+}
+
 /** Returns whether two semantic signatures are close enough to collapse. */
 function semanticSignaturesMatch(
   left: SemanticFindingSignature,
@@ -1051,12 +1166,58 @@ function semanticSignaturesMatch(
   return union > 0 && overlap / union >= SEMANTIC_DUPLICATE_SIMILARITY;
 }
 
+/** Returns whether two findings likely describe symptoms of one root cause. */
+function rootCauseSignaturesMatch(
+  left: RootCauseFindingSignature,
+  right: RootCauseFindingSignature,
+): boolean {
+  if (left.path !== right.path || !rootCauseCategoriesCompatible(left.category, right.category)) {
+    return false;
+  }
+  if (Math.abs(left.line - right.line) > ROOT_CAUSE_MAX_LINE_DISTANCE) {
+    return false;
+  }
+
+  const overlap = intersectionSize(left.tokens, right.tokens);
+  if (overlap < ROOT_CAUSE_MIN_OVERLAP) {
+    return false;
+  }
+
+  const union = left.tokens.size + right.tokens.size - overlap;
+  return union > 0 && overlap / union >= ROOT_CAUSE_SIMILARITY;
+}
+
+/** Returns whether categories may describe the same root cause. */
+function rootCauseCategoriesCompatible(
+  left: CandidateFinding["category"],
+  right: CandidateFinding["category"],
+): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  const pair = new Set([left, right]);
+  return (
+    (pair.has("correctness") && pair.has("security")) ||
+    (pair.has("correctness") && pair.has("test_coverage")) ||
+    (pair.has("performance") && pair.has("architecture"))
+  );
+}
+
 /** Creates a stable group key for semantically equivalent findings. */
 function semanticGroupKey(signature: SemanticFindingSignature): string {
   return [
     signature.path,
     signature.category,
     [...signature.tokens].sort().slice(0, SEMANTIC_DUPLICATE_GROUP_KEY_TOKEN_LIMIT).join("-"),
+  ].join(":");
+}
+
+/** Creates a stable group key for root-cause-equivalent findings. */
+function rootCauseGroupKey(signature: RootCauseFindingSignature): string {
+  return [
+    signature.path,
+    [...signature.tokens].sort().slice(0, ROOT_CAUSE_GROUP_KEY_TOKEN_LIMIT).join("-"),
   ].join(":");
 }
 
@@ -1282,6 +1443,7 @@ const DUPLICATE_REASONS = new Set<FindingRejectionReason>([
   "duplicate_exact",
   "duplicate_location",
   "duplicate_previous_comment",
+  "duplicate_root_cause",
   "duplicate_semantic",
 ]);
 
@@ -1292,6 +1454,14 @@ const SEMANTIC_DUPLICATE_GROUP_KEY_TOKEN_LIMIT = 12;
 const SEMANTIC_DUPLICATE_MIN_OVERLAP = 5;
 
 const SEMANTIC_DUPLICATE_SIMILARITY = 0.5;
+
+const ROOT_CAUSE_GROUP_KEY_TOKEN_LIMIT = 10;
+
+const ROOT_CAUSE_MAX_LINE_DISTANCE = 120;
+
+const ROOT_CAUSE_MIN_OVERLAP = 4;
+
+const ROOT_CAUSE_SIMILARITY = 0.35;
 
 const SEMANTIC_TOKEN_MIN_LENGTH = 4;
 
