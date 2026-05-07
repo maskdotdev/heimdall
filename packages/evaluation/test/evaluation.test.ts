@@ -5,10 +5,13 @@ import { describe, expect, it } from "vitest";
 import {
   buildEvalHistoryWrite,
   compareEvalReports,
+  createEvalHumanLabelFile,
   importEvalCaseIntoSuite,
   loadRegisteredEvalSuite,
   parseEvalCase,
   parseEvalCaseImportSource,
+  parseEvalHumanFindingLabel,
+  parseEvalHumanLabelFile,
   renderEvalComparisonMarkdown,
   renderEvalReportHtml,
   renderEvalReportJUnit,
@@ -125,6 +128,57 @@ describe("evaluation harness", () => {
         suite,
       }).replaced,
     ).toBe(true);
+  });
+
+  it("validates portable human label files for import and export", async () => {
+    const suite = await loadRegisteredEvalSuite("smoke-full-pipeline-v1");
+    const label = {
+      adjudicationStatus: "pending",
+      createdAt: "2026-05-06T00:00:00.000Z",
+      evalCaseId: "case_ts_missing_await_001",
+      evalHumanLabelId: "eval_label_case_ts_missing_await_001_finding_1_reviewer_1",
+      findingFingerprint: "finding_1",
+      label: {
+        anchorAppropriate: true,
+        categoryAppropriate: true,
+        correctness: "correct",
+        evidenceAccurate: true,
+        fixUseful: true,
+        notes: "The finding points at the missing await and is actionable.",
+        severityAppropriate: true,
+        shouldPublish: true,
+        usefulness: 5,
+      },
+      labelerUserId: "user_reviewer_1",
+      updatedAt: "2026-05-06T00:00:00.000Z",
+    } as const;
+    const labelFile = createEvalHumanLabelFile({
+      exportedAt: "2026-05-06T00:00:01.000Z",
+      labels: [label],
+      suiteId: suite.suiteId,
+    });
+
+    expect(parseEvalHumanFindingLabel(label.label).usefulness).toBe(5);
+    expect(parseEvalHumanLabelFile(labelFile)).toMatchObject({
+      schemaVersion: "eval_human_labels.v1",
+      suiteId: "smoke-full-pipeline-v1",
+    });
+    expect(labelFile.labels[0]?.label.shouldPublish).toBe(true);
+    expect(JSON.stringify(labelFile)).not.toContain("The new branch can read session.expiresAt");
+    expect(() =>
+      parseEvalHumanLabelFile({
+        ...labelFile,
+        labels: [
+          {
+            ...label,
+            label: {
+              ...label.label,
+              usefulness: 6,
+            },
+          },
+        ],
+      }),
+    ).toThrow(/EvalHumanLabelFile/u);
   });
 
   it("reports lost true positives during baseline comparison", async () => {

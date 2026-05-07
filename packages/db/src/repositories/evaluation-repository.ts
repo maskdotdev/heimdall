@@ -1,9 +1,10 @@
-import { and, asc, desc, eq, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   evalBaselines,
   evalCaseResults,
   evalCases,
+  evalHumanLabels,
   evalRuns,
   evalSuites,
   evalVariants,
@@ -35,6 +36,9 @@ export type EvalCaseResultRow = typeof evalCaseResults.$inferSelect;
 /** Eval baseline row selected from the database. */
 export type EvalBaselineRow = typeof evalBaselines.$inferSelect;
 
+/** Human label row selected from the database. */
+export type EvalHumanLabelRow = typeof evalHumanLabels.$inferSelect;
+
 /** Complete history write for one evaluation report. */
 export type EvalHistoryWrite = {
   /** Suite metadata to upsert before case and run rows. */
@@ -63,6 +67,20 @@ export type ListEvalRunsForSuiteInput = {
 
 /** Options for listing evaluation suites. */
 export type ListEvalSuitesInput = {
+  /** Maximum rows to return. */
+  readonly limit?: number;
+};
+
+/** Options for listing persisted human labels. */
+export type ListEvalHumanLabelsInput = {
+  /** Optional adjudication status filter. */
+  readonly adjudicationStatus?: string;
+  /** Optional single case ID filter. */
+  readonly evalCaseId?: string;
+  /** Optional case ID allowlist filter. */
+  readonly evalCaseIds?: readonly string[];
+  /** Optional labeler user ID filter. */
+  readonly labelerUserId?: string;
   /** Maximum rows to return. */
   readonly limit?: number;
 };
@@ -250,6 +268,61 @@ export class EvaluationRepository {
       .returning();
 
     return requireReturnedRow(row);
+  }
+
+  /** Inserts or updates human labels by label ID. */
+  public async upsertEvalHumanLabels(
+    inputs: readonly (typeof evalHumanLabels.$inferInsert)[],
+  ): Promise<readonly EvalHumanLabelRow[]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+
+    return await this.db
+      .insert(evalHumanLabels)
+      .values([...inputs])
+      .onConflictDoUpdate({
+        target: evalHumanLabels.evalHumanLabelId,
+        set: {
+          adjudicationStatus: sqlExcluded(evalHumanLabels.adjudicationStatus.name),
+          evalCaseId: sqlExcluded(evalHumanLabels.evalCaseId.name),
+          findingFingerprint: sqlExcluded(evalHumanLabels.findingFingerprint.name),
+          label: sqlExcluded(evalHumanLabels.label.name),
+          labelerUserId: sqlExcluded(evalHumanLabels.labelerUserId.name),
+          updatedAt: sqlExcluded(evalHumanLabels.updatedAt.name),
+        },
+      })
+      .returning();
+  }
+
+  /** Lists persisted human labels in stable newest-first order. */
+  public async listEvalHumanLabels(
+    input: ListEvalHumanLabelsInput = {},
+  ): Promise<readonly EvalHumanLabelRow[]> {
+    if (input.evalCaseIds?.length === 0) {
+      return [];
+    }
+
+    const conditions: SQL[] = [];
+    if (input.evalCaseId) {
+      conditions.push(eq(evalHumanLabels.evalCaseId, input.evalCaseId));
+    }
+    if (input.evalCaseIds && input.evalCaseIds.length > 0) {
+      conditions.push(inArray(evalHumanLabels.evalCaseId, [...input.evalCaseIds]));
+    }
+    if (input.adjudicationStatus) {
+      conditions.push(eq(evalHumanLabels.adjudicationStatus, input.adjudicationStatus));
+    }
+    if (input.labelerUserId) {
+      conditions.push(eq(evalHumanLabels.labelerUserId, input.labelerUserId));
+    }
+
+    return await this.db
+      .select()
+      .from(evalHumanLabels)
+      .where(conditions.length > 0 ? and(...conditions) : sql`true`)
+      .orderBy(desc(evalHumanLabels.updatedAt), desc(evalHumanLabels.createdAt))
+      .limit(input.limit ?? 1000);
   }
 
   /** Gets one eval run by ID. */

@@ -12,6 +12,9 @@ export const EVAL_SUITE_SCHEMA_VERSION = "eval_suite.v1" as const;
 /** Schema version emitted by evaluation reports. */
 export const EVAL_REPORT_SCHEMA_VERSION = "eval_report.v1" as const;
 
+/** Schema version emitted by portable human-label export files. */
+export const EVAL_HUMAN_LABEL_FILE_SCHEMA_VERSION = "eval_human_labels.v1" as const;
+
 /** Published finding categories understood by the MVP grader. */
 export const EvalFindingCategorySchema = Type.Union([
   Type.Literal("correctness"),
@@ -139,6 +142,92 @@ export const EvalCaseSchema = Type.Object({
 
 /** Type for one curated fixture PR case. */
 export type EvalCase = Static<typeof EvalCaseSchema>;
+
+/** Human label correctness decision for one generated finding. */
+export const EvalHumanCorrectnessSchema = Type.Union([
+  Type.Literal("correct"),
+  Type.Literal("partially_correct"),
+  Type.Literal("incorrect"),
+]);
+
+/** Type for a human label correctness decision. */
+export type EvalHumanCorrectness = Static<typeof EvalHumanCorrectnessSchema>;
+
+/** Human label usefulness score for one generated finding. */
+export const EvalHumanUsefulnessSchema = Type.Union([
+  Type.Literal(1),
+  Type.Literal(2),
+  Type.Literal(3),
+  Type.Literal(4),
+  Type.Literal(5),
+]);
+
+/** Type for a human label usefulness score. */
+export type EvalHumanUsefulness = Static<typeof EvalHumanUsefulnessSchema>;
+
+/** Human label payload used to calibrate automated finding graders. */
+export const EvalHumanFindingLabelSchema = Type.Object(
+  {
+    anchorAppropriate: Type.Boolean(),
+    categoryAppropriate: Type.Boolean(),
+    correctness: EvalHumanCorrectnessSchema,
+    evidenceAccurate: Type.Boolean(),
+    fixUseful: Type.Boolean(),
+    notes: Type.Optional(Type.String()),
+    severityAppropriate: Type.Boolean(),
+    shouldPublish: Type.Boolean(),
+    usefulness: EvalHumanUsefulnessSchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Type for a human label payload used to calibrate automated finding graders. */
+export type EvalHumanFindingLabel = Static<typeof EvalHumanFindingLabelSchema>;
+
+/** Adjudication state for a human label row. */
+export const EvalHumanLabelAdjudicationStatusSchema = Type.Union([
+  Type.Literal("pending"),
+  Type.Literal("adjudicated"),
+  Type.Literal("disputed"),
+  Type.Literal("rejected"),
+]);
+
+/** Type for the adjudication state of a human label row. */
+export type EvalHumanLabelAdjudicationStatus = Static<
+  typeof EvalHumanLabelAdjudicationStatusSchema
+>;
+
+/** Portable human label record for import, export, and DB persistence. */
+export const EvalHumanLabelRecordSchema = Type.Object(
+  {
+    adjudicationStatus: EvalHumanLabelAdjudicationStatusSchema,
+    createdAt: Type.Optional(Type.String({ minLength: 1 })),
+    evalCaseId: Type.String({ minLength: 1 }),
+    evalHumanLabelId: Type.String({ minLength: 1 }),
+    findingFingerprint: Type.Optional(Type.String({ minLength: 1 })),
+    label: EvalHumanFindingLabelSchema,
+    labelerUserId: Type.Optional(Type.String({ minLength: 1 })),
+    updatedAt: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Type for a portable human label record. */
+export type EvalHumanLabelRecord = Static<typeof EvalHumanLabelRecordSchema>;
+
+/** Portable human label file used by CLI import and export commands. */
+export const EvalHumanLabelFileSchema = Type.Object(
+  {
+    exportedAt: Type.String({ minLength: 1 }),
+    labels: Type.Array(EvalHumanLabelRecordSchema),
+    schemaVersion: Type.Literal(EVAL_HUMAN_LABEL_FILE_SCHEMA_VERSION),
+    suiteId: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Type for a portable human label file. */
+export type EvalHumanLabelFile = Static<typeof EvalHumanLabelFileSchema>;
 
 /** Versioned evaluation suite fixture. */
 export const EvalSuiteSchema = Type.Object({
@@ -332,6 +421,16 @@ export type ImportEvalCaseIntoSuiteResult = {
   readonly caseCount: number;
 };
 
+/** Input for building a portable human-label file. */
+export type CreateEvalHumanLabelFileInput = {
+  /** Timestamp recorded in the exported label file. */
+  readonly exportedAt?: string;
+  /** Human labels to include in the file. */
+  readonly labels: readonly EvalHumanLabelRecord[];
+  /** Optional suite ID associated with the labels. */
+  readonly suiteId?: string;
+};
+
 /** Baseline comparison output for candidate and baseline reports. */
 export type EvalReportComparison = {
   /** Baseline report ID. */
@@ -465,6 +564,31 @@ export function parseEvalCaseImportSource(value: unknown): EvalCase {
   }
 
   return parseEvalCase(value);
+}
+
+/** Validates unknown data as a human finding label payload. */
+export function parseEvalHumanFindingLabel(value: unknown): EvalHumanFindingLabel {
+  return parseWithSchema("EvalHumanFindingLabel", EvalHumanFindingLabelSchema, value);
+}
+
+/** Validates unknown data as a portable human label record. */
+export function parseEvalHumanLabelRecord(value: unknown): EvalHumanLabelRecord {
+  return parseWithSchema("EvalHumanLabelRecord", EvalHumanLabelRecordSchema, value);
+}
+
+/** Validates unknown data as a portable human label file. */
+export function parseEvalHumanLabelFile(value: unknown): EvalHumanLabelFile {
+  return parseWithSchema("EvalHumanLabelFile", EvalHumanLabelFileSchema, value);
+}
+
+/** Builds a schema-valid portable human-label file. */
+export function createEvalHumanLabelFile(input: CreateEvalHumanLabelFileInput): EvalHumanLabelFile {
+  return parseEvalHumanLabelFile({
+    exportedAt: input.exportedAt ?? new Date().toISOString(),
+    labels: input.labels.map(parseEvalHumanLabelRecord),
+    schemaVersion: EVAL_HUMAN_LABEL_FILE_SCHEMA_VERSION,
+    ...(input.suiteId ? { suiteId: input.suiteId } : {}),
+  });
 }
 
 /** Adds a reviewed eval case to a suite fixture without mutating the input suite. */

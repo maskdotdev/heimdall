@@ -3,16 +3,22 @@
 import { existsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
+import type { EvalHumanLabelRow } from "@repo/db";
 import {
   assertEvalGate,
   buildEvalHistoryWrite,
+  createEvalHumanLabelFile,
+  type EvalHumanLabelRecord,
   type EvalReportArtifacts,
   type EvalSuite,
   type EvalVariant,
+  ensureParentDirectory,
   importEvalCaseIntoSuite,
   loadEvalSuiteFromFile,
   loadRegisteredEvalSuite,
   parseEvalCaseImportSource,
+  parseEvalHumanFindingLabel,
+  parseEvalHumanLabelFile,
   renderEvalReportMarkdown,
   runEvaluation,
   writeEvalReportArtifacts,
@@ -62,6 +68,32 @@ type EvalImportCaseCliOptions = {
   readonly replaceExisting: boolean;
 };
 
+/** Parsed CLI options for importing human labels into eval history storage. */
+type EvalImportLabelsCliOptions = {
+  /** Database URL for label persistence. */
+  readonly databaseUrl: string;
+  /** JSON file containing an eval human-label export. */
+  readonly labelsFile: string;
+};
+
+/** Parsed CLI options for exporting human labels from eval history storage. */
+type EvalExportLabelsCliOptions = {
+  /** Optional adjudication status filter. */
+  readonly adjudicationStatus?: string;
+  /** Database URL for label reads. */
+  readonly databaseUrl: string;
+  /** Optional single eval case ID filter. */
+  readonly evalCaseId?: string;
+  /** Optional labeler user ID filter. */
+  readonly labelerUserId?: string;
+  /** Maximum labels to export. */
+  readonly limit: number;
+  /** Output JSON file. */
+  readonly outputFile: string;
+  /** Optional suite fixture used to export labels for its case IDs. */
+  readonly suiteFile?: string;
+};
+
 /** Entrypoint for the evaluation CLI. */
 async function main(args: readonly string[]): Promise<void> {
   const [command, ...rest] = args;
@@ -73,9 +105,17 @@ async function main(args: readonly string[]): Promise<void> {
     await importCaseCommand(rest);
     return;
   }
+  if (command === "import-labels") {
+    await importLabelsCommand(rest);
+    return;
+  }
+  if (command === "export-labels") {
+    await exportLabelsCommand(rest);
+    return;
+  }
 
   throw new Error(
-    `Unknown evaluation command "${command ?? ""}". Expected "run" or "import-case".`,
+    `Unknown evaluation command "${command ?? ""}". Expected "run", "import-case", "import-labels", or "export-labels".`,
   );
 }
 
@@ -131,6 +171,58 @@ async function importCaseCommand(args: readonly string[]): Promise<void> {
   process.stdout.write(
     `${result.replaced ? "Replaced" : "Imported"} eval case ${evalCase.caseId} in ${outputPath} (${result.caseCount} cases).\n`,
   );
+}
+
+/** Imports a portable human-label file into eval history storage. */
+async function importLabelsCommand(args: readonly string[]): Promise<void> {
+  const options = parseImportLabelsOptions(args);
+  const labelsPath = resolveWorkspacePath(options.labelsFile);
+  const labelFile = parseEvalHumanLabelFile(JSON.parse(await readFile(labelsPath, "utf8")));
+  const { createDatabaseClient, EvaluationRepository } = await import("@repo/db");
+  const client = createDatabaseClient({ maxConnections: 1, url: options.databaseUrl });
+
+  try {
+    const repository = new EvaluationRepository(client.db);
+    const rows = await repository.upsertEvalHumanLabels(
+      labelFile.labels.map(evalHumanLabelRecordToDbInsert),
+    );
+    process.stdout.write(`Imported ${rows.length} human labels from ${labelsPath}.\n`);
+  } finally {
+    await client.close();
+  }
+}
+
+/** Exports persisted human labels into a portable JSON file. */
+async function exportLabelsCommand(args: readonly string[]): Promise<void> {
+  const options = parseExportLabelsOptions(args);
+  const outputPath = resolveWorkspacePath(options.outputFile);
+  const suite = options.suiteFile
+    ? await loadEvalSuiteFromFile(resolveWorkspacePath(options.suiteFile))
+    : undefined;
+  const evalCaseIds = suite?.cases.map((evalCase) => evalCase.caseId);
+  const { createDatabaseClient, EvaluationRepository } = await import("@repo/db");
+  const client = createDatabaseClient({ maxConnections: 1, url: options.databaseUrl });
+
+  try {
+    const repository = new EvaluationRepository(client.db);
+    const labels = await repository.listEvalHumanLabels({
+      ...(options.adjudicationStatus ? { adjudicationStatus: options.adjudicationStatus } : {}),
+      ...(options.evalCaseId ? { evalCaseId: options.evalCaseId } : {}),
+      ...(evalCaseIds ? { evalCaseIds } : {}),
+      ...(options.labelerUserId ? { labelerUserId: options.labelerUserId } : {}),
+      limit: options.limit,
+    });
+    const labelFile = createEvalHumanLabelFile({
+      labels: labels.map(evalHumanLabelRowToRecord),
+      ...(suite ? { suiteId: suite.suiteId } : {}),
+    });
+
+    await ensureParentDirectory(outputPath);
+    await writeFile(outputPath, `${JSON.stringify(labelFile, null, 2)}\n`, "utf8");
+    process.stdout.write(`Exported ${labelFile.labels.length} human labels to ${outputPath}.\n`);
+  } finally {
+    await client.close();
+  }
 }
 
 /** Input for persisting one eval run from the CLI. */
@@ -339,6 +431,161 @@ function parseImportCaseOptions(args: readonly string[]): EvalImportCaseCliOptio
     replaceExisting,
     suiteFile,
   };
+}
+
+/** Parses `eval import-labels` command options. */
+function parseImportLabelsOptions(args: readonly string[]): EvalImportLabelsCliOptions {
+  let databaseUrl: string | undefined;
+  let labelsFile: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--database-url":
+        databaseUrl = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--labels-file":
+        labelsFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      default:
+        throw new Error(`Unknown evaluation import-labels option "${arg}".`);
+    }
+  }
+
+  if (!databaseUrl) {
+    throw new Error("Missing required --database-url for eval import-labels.");
+  }
+  if (!labelsFile) {
+    throw new Error("Missing required --labels-file for eval import-labels.");
+  }
+
+  return {
+    databaseUrl,
+    labelsFile,
+  };
+}
+
+/** Parses `eval export-labels` command options. */
+function parseExportLabelsOptions(args: readonly string[]): EvalExportLabelsCliOptions {
+  let adjudicationStatus: string | undefined;
+  let databaseUrl: string | undefined;
+  let evalCaseId: string | undefined;
+  let labelerUserId: string | undefined;
+  let limit = 1000;
+  let outputFile: string | undefined;
+  let suiteFile: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--database-url":
+        databaseUrl = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--output-file":
+        outputFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--suite-file":
+        suiteFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--case-id":
+        evalCaseId = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--status":
+        adjudicationStatus = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--labeler-user-id":
+        labelerUserId = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--limit":
+        limit = parsePositiveInteger(readOptionValue(args, index, arg), arg);
+        index += 1;
+        break;
+      default:
+        throw new Error(`Unknown evaluation export-labels option "${arg}".`);
+    }
+  }
+
+  if (!databaseUrl) {
+    throw new Error("Missing required --database-url for eval export-labels.");
+  }
+  if (!outputFile) {
+    throw new Error("Missing required --output-file for eval export-labels.");
+  }
+
+  return {
+    ...(adjudicationStatus ? { adjudicationStatus } : {}),
+    databaseUrl,
+    ...(evalCaseId ? { evalCaseId } : {}),
+    ...(labelerUserId ? { labelerUserId } : {}),
+    limit,
+    outputFile,
+    ...(suiteFile ? { suiteFile } : {}),
+  };
+}
+
+/** Converts a portable human-label record into an eval DB insert row. */
+function evalHumanLabelRecordToDbInsert(record: EvalHumanLabelRecord): {
+  readonly adjudicationStatus: string;
+  readonly createdAt?: Date;
+  readonly evalCaseId: string;
+  readonly evalHumanLabelId: string;
+  readonly findingFingerprint?: string;
+  readonly label: EvalHumanLabelRecord["label"];
+  readonly labelerUserId?: string;
+  readonly updatedAt?: Date;
+} {
+  return {
+    adjudicationStatus: record.adjudicationStatus,
+    ...(record.createdAt ? { createdAt: parseCliDate(record.createdAt, "createdAt") } : {}),
+    evalCaseId: record.evalCaseId,
+    evalHumanLabelId: record.evalHumanLabelId,
+    ...(record.findingFingerprint ? { findingFingerprint: record.findingFingerprint } : {}),
+    label: record.label,
+    ...(record.labelerUserId ? { labelerUserId: record.labelerUserId } : {}),
+    ...(record.updatedAt ? { updatedAt: parseCliDate(record.updatedAt, "updatedAt") } : {}),
+  };
+}
+
+/** Converts a DB human-label row into a portable export record. */
+function evalHumanLabelRowToRecord(row: EvalHumanLabelRow): EvalHumanLabelRecord {
+  return {
+    adjudicationStatus: row.adjudicationStatus as EvalHumanLabelRecord["adjudicationStatus"],
+    createdAt: row.createdAt.toISOString(),
+    evalCaseId: row.evalCaseId,
+    evalHumanLabelId: row.evalHumanLabelId,
+    ...(row.findingFingerprint ? { findingFingerprint: row.findingFingerprint } : {}),
+    label: parseEvalHumanFindingLabel(row.label),
+    ...(row.labelerUserId ? { labelerUserId: row.labelerUserId } : {}),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+/** Parses a positive integer CLI value. */
+function parsePositiveInteger(value: string, optionName: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0 || String(parsed) !== value) {
+    throw new Error(`${optionName} must be a positive integer.`);
+  }
+
+  return parsed;
+}
+
+/** Parses a timestamp from a CLI label file. */
+function parseCliDate(value: string, fieldName: string): Date {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${fieldName} must be a valid timestamp.`);
+  }
+
+  return date;
 }
 
 /** Reads an option value from the following CLI argument. */
