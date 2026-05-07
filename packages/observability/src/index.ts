@@ -99,6 +99,47 @@ export const AdminControlPlaneTelemetryEventSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Coarse error classes safe to export in telemetry backends. */
+export const TelemetryErrorClassSchema = Type.Union([
+  Type.Literal("auth_error"),
+  Type.Literal("db_error"),
+  Type.Literal("provider_error"),
+  Type.Literal("rate_limit_error"),
+  Type.Literal("timeout_error"),
+  Type.Literal("validation_error"),
+  Type.Literal("unknown_error"),
+]);
+
+/** Product-safe serialized error payload. */
+export const SerializedTelemetryErrorSchema = Type.Object(
+  {
+    class: TelemetryErrorClassSchema,
+    code: Type.Optional(Type.String({ minLength: 1 })),
+    message: Type.String({ minLength: 1 }),
+    name: Type.Optional(Type.String({ minLength: 1 })),
+    retryable: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** Structured JSON log entry emitted by the observability logger. */
+export const StructuredTelemetryLogEntrySchema = Type.Object(
+  {
+    attributes: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    error: Type.Optional(SerializedTelemetryErrorSchema),
+    level: ObservabilityLogLevelSchema,
+    message: Type.String({ minLength: 1 }),
+    resource: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    target: Type.String({ minLength: 1 }),
+    timestamp: Type.String({ minLength: 1 }),
+  },
+  { additionalProperties: false },
+);
+
 /** Scalar attribute value allowed in structured telemetry events. */
 export type TelemetryAttributeValue = Static<typeof TelemetryAttributeValueSchema>;
 
@@ -134,6 +175,15 @@ export type AdminControlPlaneTelemetryEventName = Static<
 /** Structured admin control-plane telemetry event. */
 export type AdminControlPlaneTelemetryEvent = Static<typeof AdminControlPlaneTelemetryEventSchema>;
 
+/** Coarse error class safe to export in telemetry backends. */
+export type TelemetryErrorClass = Static<typeof TelemetryErrorClassSchema>;
+
+/** Product-safe serialized error payload. */
+export type SerializedTelemetryError = Static<typeof SerializedTelemetryErrorSchema>;
+
+/** Structured JSON log entry emitted by the observability logger. */
+export type StructuredTelemetryLogEntry = Static<typeof StructuredTelemetryLogEntrySchema>;
+
 /** Admin control-plane telemetry event accepted before timestamp normalization. */
 export type AdminControlPlaneTelemetryEventInput = Omit<
   AdminControlPlaneTelemetryEvent,
@@ -159,10 +209,44 @@ export type MemoryObservabilitySink = ObservabilitySink & {
 
 /** Console logger surface used by the console sink. */
 export type ObservabilityConsoleLogger = {
+  /** Emits a debug structured telemetry line. */
+  readonly debug?: (message?: unknown, ...optionalParams: readonly unknown[]) => void;
+  /** Emits an error structured telemetry line. */
+  readonly error?: (message?: unknown, ...optionalParams: readonly unknown[]) => void;
   /** Emits an informational structured telemetry line. */
   readonly info: (message?: unknown, ...optionalParams: readonly unknown[]) => void;
   /** Emits a warning structured telemetry line. */
   readonly warn: (message?: unknown, ...optionalParams: readonly unknown[]) => void;
+};
+
+/** Structured telemetry log options accepted by logger methods. */
+export type StructuredTelemetryLogOptions = {
+  /** Additional safe telemetry attributes. */
+  readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>>;
+  /** Optional error to classify and serialize. */
+  readonly error?: unknown;
+  /** Optional target/component label. */
+  readonly target?: string;
+  /** Optional deterministic timestamp for tests. */
+  readonly timestamp?: string;
+};
+
+/** Sink that receives structured telemetry log entries. */
+export type StructuredTelemetryLogSink = {
+  /** Writes one normalized structured log entry. */
+  readonly write: (entry: StructuredTelemetryLogEntry) => void;
+};
+
+/** Logger facade used by application services. */
+export type StructuredTelemetryLogger = {
+  /** Emits a debug log entry. */
+  readonly debug: (message: string, options?: StructuredTelemetryLogOptions) => void;
+  /** Emits an error log entry. */
+  readonly error: (message: string, options?: StructuredTelemetryLogOptions) => void;
+  /** Emits an informational log entry. */
+  readonly info: (message: string, options?: StructuredTelemetryLogOptions) => void;
+  /** Emits a warning log entry. */
+  readonly warn: (message: string, options?: StructuredTelemetryLogOptions) => void;
 };
 
 /** Summary of admin control-plane telemetry used by release audits. */
@@ -353,6 +437,238 @@ export function createObservabilityResourceAttributes(
   return attributes;
 }
 
+/** Sanitizes telemetry attributes by dropping unsafe keys and redacting string values. */
+export function sanitizeTelemetryAttributes(
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+  redaction: ObservabilityRedactionConfig = DEFAULT_OBSERVABILITY_CONFIG.redaction,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  const sanitized: Record<string, TelemetryAttributeValue> = {};
+
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value === undefined || shouldDropTelemetryAttribute(key, redaction)) {
+      continue;
+    }
+
+    if (typeof value === "string") {
+      sanitized[key] = redactTelemetryText(value, redaction);
+      continue;
+    }
+
+    sanitized[key] = value;
+  }
+
+  return sanitized;
+}
+
+/** Redacts secret-looking values from telemetry text. */
+export function redactTelemetryText(
+  value: string,
+  redaction: ObservabilityRedactionConfig = DEFAULT_OBSERVABILITY_CONFIG.redaction,
+): string {
+  const maxLength = redaction.strict ? 1000 : 2000;
+
+  return value
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gu, "Bearer [redacted]")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/gu, "[redacted-token]")
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/gu, "[redacted-token]")
+    .replace(
+      /\b(token|secret|password|api[_-]?key|authorization|cookie)=([^\s,;]+)/giu,
+      "$1=[redacted]",
+    )
+    .slice(0, maxLength);
+}
+
+/** Classifies an unknown error into a safe telemetry error class. */
+export function classifyTelemetryError(error: unknown): TelemetryErrorClass {
+  const record = recordFromUnknown(error);
+  const searchable = [
+    error instanceof Error ? error.name : undefined,
+    error instanceof Error ? error.message : undefined,
+    stringFromRecord(record, "code"),
+    stringFromRecord(record, "type"),
+    stringFromRecord(record, "name"),
+    stringFromRecord(record, "status"),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (searchable.includes("rate") && searchable.includes("limit")) {
+    return "rate_limit_error";
+  }
+  if (
+    searchable.includes("timeout") ||
+    searchable.includes("timed out") ||
+    searchable.includes("abort")
+  ) {
+    return "timeout_error";
+  }
+  if (
+    searchable.includes("postgres") ||
+    searchable.includes("drizzle") ||
+    searchable.includes("database") ||
+    searchable.includes("sql")
+  ) {
+    return "db_error";
+  }
+  if (
+    searchable.includes("github") ||
+    searchable.includes("openai") ||
+    searchable.includes("stripe") ||
+    searchable.includes("provider") ||
+    searchable.includes("llm")
+  ) {
+    return "provider_error";
+  }
+  if (
+    searchable.includes("validation") ||
+    searchable.includes("schema") ||
+    searchable.includes("parse")
+  ) {
+    return "validation_error";
+  }
+  if (
+    searchable.includes("auth") ||
+    searchable.includes("unauthorized") ||
+    searchable.includes("forbidden") ||
+    searchable.includes("csrf")
+  ) {
+    return "auth_error";
+  }
+
+  return "unknown_error";
+}
+
+/** Serializes an unknown error without leaking raw secrets by default. */
+export function serializeTelemetryError(
+  error: unknown,
+  redaction: ObservabilityRedactionConfig = DEFAULT_OBSERVABILITY_CONFIG.redaction,
+): SerializedTelemetryError {
+  const record = recordFromUnknown(error);
+  const errorClass = classifyTelemetryError(error);
+  const rawMessage =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const serialized = withoutUndefinedValues({
+    class: errorClass,
+    code: stringFromRecord(record, "code") ?? stringFromRecord(record, "type"),
+    message: redaction.logRawErrors
+      ? redactTelemetryText(rawMessage || safeTelemetryErrorMessage(errorClass), redaction)
+      : safeTelemetryErrorMessage(errorClass),
+    name: error instanceof Error ? error.name : stringFromRecord(record, "name"),
+    retryable: booleanFromRecord(record, "retryable"),
+  });
+
+  if (!Value.Check(SerializedTelemetryErrorSchema, serialized)) {
+    throw new Error("Serialized telemetry error does not match the schema.");
+  }
+
+  return serialized as SerializedTelemetryError;
+}
+
+/** Builds a structured telemetry log entry. */
+export function createStructuredTelemetryLogEntry(
+  config: ObservabilityConfig,
+  input: StructuredTelemetryLogOptions & {
+    /** Severity level for the log entry. */
+    readonly level: ObservabilityLogLevel;
+    /** Human-readable log message. */
+    readonly message: string;
+  },
+  env: EnvironmentRecord = getProcessEnvironment(),
+): StructuredTelemetryLogEntry {
+  const entry = withoutUndefinedValues({
+    attributes: input.attributes
+      ? sanitizeTelemetryAttributes(input.attributes, config.redaction)
+      : undefined,
+    error:
+      input.error === undefined
+        ? undefined
+        : serializeTelemetryError(input.error, config.redaction),
+    level: input.level,
+    message: redactTelemetryText(input.message, config.redaction),
+    resource: createObservabilityResourceAttributes(config, env),
+    target: input.target ?? config.serviceName,
+    timestamp: input.timestamp ?? new Date().toISOString(),
+  });
+
+  if (!Value.Check(StructuredTelemetryLogEntrySchema, entry)) {
+    throw new Error("Structured telemetry log entry does not match the schema.");
+  }
+
+  return entry as StructuredTelemetryLogEntry;
+}
+
+/** Renders a structured telemetry log entry as one JSON line. */
+export function renderStructuredTelemetryLogLine(entry: StructuredTelemetryLogEntry): string {
+  if (!Value.Check(StructuredTelemetryLogEntrySchema, entry)) {
+    throw new Error("Structured telemetry log entry does not match the schema.");
+  }
+
+  return JSON.stringify(entry);
+}
+
+/** Creates a console-backed sink for structured telemetry log entries. */
+export function createConsoleStructuredTelemetryLogSink(
+  logger: ObservabilityConsoleLogger = console,
+): StructuredTelemetryLogSink {
+  return {
+    write: (entry) => {
+      const line = renderStructuredTelemetryLogLine(entry);
+      if (entry.level === "error") {
+        (logger.error ?? logger.warn)(line);
+        return;
+      }
+      if (entry.level === "warn") {
+        logger.warn(line);
+        return;
+      }
+      if (entry.level === "debug") {
+        (logger.debug ?? logger.info)(line);
+        return;
+      }
+
+      logger.info(line);
+    },
+  };
+}
+
+/** Creates a structured telemetry logger facade. */
+export function createStructuredTelemetryLogger(
+  config: ObservabilityConfig,
+  sink: StructuredTelemetryLogSink = createConsoleStructuredTelemetryLogSink(),
+  env: EnvironmentRecord = getProcessEnvironment(),
+): StructuredTelemetryLogger {
+  const log = (
+    level: ObservabilityLogLevel,
+    message: string,
+    options?: StructuredTelemetryLogOptions,
+  ) => {
+    if (!config.enabled || config.exporter === "none") {
+      return;
+    }
+
+    sink.write(
+      createStructuredTelemetryLogEntry(
+        config,
+        {
+          ...options,
+          level,
+          message,
+        },
+        env,
+      ),
+    );
+  };
+
+  return {
+    debug: (message, options) => log("debug", message, options),
+    error: (message, options) => log("error", message, options),
+    info: (message, options) => log("info", message, options),
+    warn: (message, options) => log("warn", message, options),
+  };
+}
+
 /** Creates a sink that intentionally drops events. */
 export function createNoopObservabilitySink(): ObservabilitySink {
   return {
@@ -492,6 +808,82 @@ function emptyEventCounts(): Record<AdminControlPlaneTelemetryEventName, number>
     "admin.session.revoked": 0,
     "admin.settings.updated": 0,
   };
+}
+
+/** Returns whether an attribute key should be dropped for privacy. */
+function shouldDropTelemetryAttribute(
+  key: string,
+  redaction: ObservabilityRedactionConfig,
+): boolean {
+  if (!/^[A-Za-z0-9_.-]{1,120}$/u.test(key)) {
+    return true;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  if (!redaction.includeDebugAttributes && normalizedKey.startsWith("debug.")) {
+    return true;
+  }
+  if (!redaction.capturePrompts && normalizedKey.includes("prompt")) {
+    return true;
+  }
+  if (
+    !redaction.captureCodeSnippets &&
+    (normalizedKey.includes("code_snippet") ||
+      normalizedKey.includes("snippet") ||
+      normalizedKey.includes("raw_diff") ||
+      normalizedKey.includes("patch") ||
+      normalizedKey.includes("source_body"))
+  ) {
+    return true;
+  }
+
+  return (
+    normalizedKey.includes("token") ||
+    normalizedKey.includes("secret") ||
+    normalizedKey.includes("password") ||
+    normalizedKey.includes("authorization") ||
+    normalizedKey.includes("cookie") ||
+    normalizedKey.includes("email")
+  );
+}
+
+/** Returns a product-safe fallback message for an error class. */
+function safeTelemetryErrorMessage(errorClass: TelemetryErrorClass): string {
+  switch (errorClass) {
+    case "auth_error":
+      return "Authentication or authorization failed.";
+    case "db_error":
+      return "Database operation failed.";
+    case "provider_error":
+      return "External provider operation failed.";
+    case "rate_limit_error":
+      return "External provider rate limit was reached.";
+    case "timeout_error":
+      return "Operation timed out.";
+    case "validation_error":
+      return "Input validation failed.";
+    case "unknown_error":
+      return "Unexpected error.";
+  }
+}
+
+/** Converts unknown input to a record for product-safe field reads. */
+function recordFromUnknown(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** Reads one string value from a record. */
+function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Reads one boolean value from a record. */
+function booleanFromRecord(record: Record<string, unknown>, key: string): boolean | undefined {
+  const value = record[key];
+  return typeof value === "boolean" ? value : undefined;
 }
 
 /** Returns the log level for one telemetry event. */

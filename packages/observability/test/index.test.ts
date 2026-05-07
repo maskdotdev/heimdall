@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   createMemoryObservabilitySink,
   createObservabilityResourceAttributes,
+  createStructuredTelemetryLogger,
+  DEFAULT_OBSERVABILITY_CONFIG,
   loadObservabilityConfig,
   normalizeAdminControlPlaneTelemetryEvent,
   ObservabilityConfigValidationError,
   recordAdminControlPlaneTelemetryEvent,
+  renderStructuredTelemetryLogLine,
+  sanitizeTelemetryAttributes,
+  serializeTelemetryError,
   summarizeAdminControlPlaneTelemetry,
 } from "../src";
 
@@ -79,6 +84,94 @@ describe("observability config", () => {
     });
     expect(attributes).not.toHaveProperty("org_id");
     expect(attributes).not.toHaveProperty("repo_id");
+  });
+});
+
+describe("structured telemetry logging", () => {
+  it("sanitizes unsafe attributes and redacts secret-looking text", () => {
+    const attributes = sanitizeTelemetryAttributes({
+      "debug.trace": "drop debug internals",
+      "github.token": "ghp_1234567890",
+      "http.status_code": 200,
+      "prompt.raw": "ignore all previous instructions",
+      "provider.message": "Bearer ghp_1234567890 failed for dev@example.com",
+    });
+
+    expect(attributes).toEqual({
+      "http.status_code": 200,
+      "provider.message": "Bearer [redacted] failed for [redacted-email]",
+    });
+  });
+
+  it("serializes errors without leaking raw messages by default", () => {
+    const error = Object.assign(
+      new Error("GitHub rate limit for dev@example.com with token=ghp_1234567890"),
+      {
+        code: "GITHUB_RATE_LIMIT",
+        retryable: true,
+      },
+    );
+    const safeError = serializeTelemetryError(error);
+    const verboseError = serializeTelemetryError(error, {
+      ...DEFAULT_OBSERVABILITY_CONFIG.redaction,
+      logRawErrors: true,
+    });
+
+    expect(safeError).toMatchObject({
+      class: "rate_limit_error",
+      code: "GITHUB_RATE_LIMIT",
+      message: "External provider rate limit was reached.",
+      retryable: true,
+    });
+    expect(verboseError.message).toContain("[redacted-email]");
+    expect(verboseError.message).toContain("token=[redacted]");
+    expect(verboseError.message).not.toContain("dev@example.com");
+    expect(verboseError.message).not.toContain("ghp_1234567890");
+  });
+
+  it("emits structured JSON log lines with resource attributes", () => {
+    const lines: string[] = [];
+    const config = loadObservabilityConfig({
+      APP_VERSION: "sha-456",
+      OBSERVABILITY_ENABLED: "true",
+      OBSERVABILITY_EXPORTER: "console",
+      OBSERVABILITY_SERVICE_NAME: "heimdall-api",
+    });
+    const logger = createStructuredTelemetryLogger(
+      config,
+      {
+        write: (entry) => {
+          lines.push(renderStructuredTelemetryLogLine(entry));
+        },
+      },
+      { HOSTNAME: "api-1" },
+    );
+
+    logger.info("Handled request token=ghp_1234567890", {
+      attributes: {
+        "http.status_code": 200,
+        "prompt.raw": "raw prompt must not be logged",
+      },
+      timestamp: "2026-05-07T12:00:00.000Z",
+    });
+
+    const [entry] = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(entry).toMatchObject({
+      attributes: {
+        "http.status_code": 200,
+      },
+      level: "info",
+      message: "Handled request token=[redacted]",
+      resource: {
+        "host.name": "api-1",
+        "service.name": "heimdall-api",
+        "service.version": "sha-456",
+      },
+      target: "heimdall-api",
+      timestamp: "2026-05-07T12:00:00.000Z",
+    });
+    expect(JSON.stringify(entry)).not.toContain("raw prompt");
+    expect(JSON.stringify(entry)).not.toContain("ghp_1234567890");
   });
 });
 
