@@ -14,6 +14,7 @@
     { "path": "../embedding/tsconfig.build.json" },
     { "path": "../evaluation/tsconfig.build.json" },
     { "path": "../github/tsconfig.build.json" },
+    { "path": "../llm-gateway/tsconfig.build.json" },
     { "path": "../queue/tsconfig.build.json" },
     { "path": "../publisher/tsconfig.build.json" },
     { "path": "../retrieval/tsconfig.build.json" },

@@ -389,6 +389,9 @@ importers:
       '@repo/github':
         specifier: workspace:*
         version: link:../github
+      '@repo/llm-gateway':
+        specifier: workspace:*
+        version: link:../llm-gateway
       '@repo/publisher':
         specifier: workspace:*
         version: link:../publisher
