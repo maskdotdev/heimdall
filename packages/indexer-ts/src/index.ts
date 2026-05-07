@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, parse, resolve, sep } from "node:path";
 import {
   type ChunkRecord,
   type CodeLanguage,
@@ -99,6 +100,7 @@ export async function indexTypeScriptRepository(input: {
   readonly workspacePath: string;
   readonly previousIndexVersionId?: string;
 }): Promise<IndexArtifact> {
+  await validateWorkspacePath(input.workspacePath);
   const paths = await findSourceFiles(input.workspacePath);
   const records: IndexRecord[] = [];
   const languages = new Set<CodeLanguage>();
@@ -149,6 +151,31 @@ export async function indexTypeScriptRepository(input: {
     },
     records,
   };
+}
+
+/** Validates a workspace root before recursively reading repository files. */
+async function validateWorkspacePath(workspacePath: string): Promise<void> {
+  const trimmedPath = workspacePath.trim();
+  if (trimmedPath.length === 0) {
+    throw new Error("Workspace path is required.");
+  }
+
+  const absolutePath = resolve(trimmedPath);
+  const info = await lstat(absolutePath);
+  if (info.isSymbolicLink()) {
+    throw new Error("Workspace path must not be a symbolic link.");
+  }
+  if (!info.isDirectory()) {
+    throw new Error("Workspace path must be a directory.");
+  }
+
+  const resolvedPath = await realpath(absolutePath);
+  if (isFilesystemRoot(resolvedPath)) {
+    throw new Error("Workspace path must not be a filesystem root.");
+  }
+  if (resolvedPath === resolve(homedir())) {
+    throw new Error("Workspace path must not be the user home directory.");
+  }
 }
 
 async function findSourceFiles(root: string, directory = ""): Promise<string[]> {
@@ -502,6 +529,13 @@ function shouldSkipSourceFile(path: string, content: string): boolean {
 /** Returns whether a path points at the Git metadata directory. */
 function isGitDirectory(path: string): boolean {
   return path === ".git" || path.startsWith(".git/");
+}
+
+/** Returns whether a path resolves to a filesystem root. */
+function isFilesystemRoot(path: string): boolean {
+  const resolvedPath = resolve(path);
+
+  return resolvedPath === parse(resolvedPath).root;
 }
 
 /** Returns whether a normalized path contains any matching segment. */

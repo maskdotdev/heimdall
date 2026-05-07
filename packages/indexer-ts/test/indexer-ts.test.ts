@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, parse } from "node:path";
 import { validateIndexArtifact } from "@repo/indexer-driver";
 import { describe, expect, it } from "vitest";
 import { indexTypeScriptRepository } from "../src/index";
@@ -116,5 +116,29 @@ describe("indexTypeScriptRepository", () => {
       false,
     );
     expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("rejects unsafe workspace roots before discovery", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    const filePath = join(workspacePath, "not-a-directory.ts");
+    await writeFile(filePath, "export const value = true;\n");
+    const input = {
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    };
+
+    await expect(indexTypeScriptRepository({ ...input, workspacePath: "" })).rejects.toThrow(
+      "Workspace path is required.",
+    );
+    await expect(indexTypeScriptRepository({ ...input, workspacePath: filePath })).rejects.toThrow(
+      "Workspace path must be a directory.",
+    );
+    await expect(
+      indexTypeScriptRepository({ ...input, workspacePath: parse(workspacePath).root }),
+    ).rejects.toThrow("Workspace path must not be a filesystem root.");
+    await expect(indexTypeScriptRepository({ ...input, workspacePath: homedir() })).rejects.toThrow(
+      "Workspace path must not be the user home directory.",
+    );
   });
 });
