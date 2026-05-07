@@ -24,6 +24,15 @@ import {
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import type { EffectivePublishingPolicy } from "@repo/rules";
 import { and, eq } from "drizzle-orm";
 
@@ -111,12 +120,18 @@ export type ReviewPublisherDependencies = {
   readonly db: HeimdallDatabase;
   /** Git provider used to create or update external publishing objects. */
   readonly gitProvider: GitProvider;
+  /** Optional metric recorder for product-safe aggregate publisher telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional clock for deterministic tests. */
   readonly now?: () => Date;
   /** Optional shared throttle for provider-visible publish writes. */
   readonly publishThrottle?: PublishThrottle;
   /** Optional publish throttle limit overrides used while planning. */
   readonly publishThrottleLimits?: Partial<PublishThrottleLimits>;
+  /** Optional trace context propagated from the durable publish job. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe publisher spans. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Result returned by one publisher handoff. */
@@ -213,6 +228,20 @@ export type SerializedPublisherError = {
   readonly rateLimit?: GitHubRateLimitSnapshot;
   /** Extra diagnostic details for logs and debug views. */
   readonly details?: Record<string, unknown>;
+};
+
+type PublisherTelemetryStatus = "completed" | "failed" | "skipped";
+
+type PublisherTelemetryState = {
+  /** Low-cardinality labels shared by publisher run and duration metrics. */
+  readonly labels: Readonly<{
+    readonly provider: "github";
+    readonly publish_mode: "live";
+  }>;
+  /** Monotonic start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Product-safe span for the publish handoff. */
+  readonly span: TelemetrySpanHandle | undefined;
 };
 
 /** Creates a policy-derived publish plan from a review run and validated findings. */
@@ -332,8 +361,141 @@ export function createInMemoryPublishThrottle(
   };
 }
 
+/** Starts product-safe publisher telemetry and returns shared metric labels. */
+function startPublisherTelemetry(
+  payload: PublishReviewJobPayload,
+  dependencies: ReviewPublisherDependencies,
+): PublisherTelemetryState {
+  const labels = { provider: "github", publish_mode: "live" } as const;
+  const span = dependencies.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.publisherPublishReview, {
+    attributes: {
+      "app.pull_request_number": payload.pullRequestNumber,
+      "app.repo_id": payload.repoId,
+      "app.review_run_id": payload.reviewRunId,
+      "publisher.provider": labels.provider,
+      "publisher.publish_mode": labels.publish_mode,
+    },
+    kind: "client",
+    ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
+  });
+
+  return {
+    labels,
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Ends a publisher span and emits aggregate publisher metrics. */
+function finishPublisherTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: PublisherTelemetryState,
+  input: {
+    /** Error raised while publishing, when the handoff failed. */
+    readonly error?: unknown;
+    /** Publish result returned by the handoff, when it completed or skipped. */
+    readonly result?: PublishReviewResult;
+    /** Final publisher handoff status. */
+    readonly status: PublisherTelemetryStatus;
+  },
+): void {
+  const durationMs = Date.now() - telemetry.startedAtMs;
+  const labels = {
+    ...telemetry.labels,
+    ...(input.error === undefined ? {} : { error_class: classifyTelemetryError(input.error) }),
+    status: input.status,
+  };
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.publisherRunsTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.publisherDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+
+  if (input.result) {
+    recordPublisherCommentMetrics(metrics, telemetry.labels, input.result);
+  }
+  if (isGitHubRateLimitedPublisherError(input.error)) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.publisherGithubRateLimitedTotal, {
+      labels: { operation: "publish_review" },
+    });
+  }
+
+  telemetry.span?.end({
+    ...(input.error === undefined ? {} : { error: input.error }),
+    attributes: {
+      "publisher.duration_ms": Math.max(0, durationMs),
+      ...(input.result
+        ? {
+            "publisher.annotation_count": input.result.annotationCount,
+            "publisher.inline_comment_count": input.result.inlineCommentCount,
+            "publisher.stale_head": input.result.staleHead,
+            "publisher.summary_comment_count": input.result.providerSummaryCommentId ? 1 : 0,
+          }
+        : {}),
+      ...(input.error === undefined
+        ? {}
+        : { "publisher.error_class": classifyTelemetryError(input.error) }),
+      "publisher.status": input.status,
+    },
+    status: input.status === "failed" ? "error" : "ok",
+  });
+}
+
+/** Records publisher comment count metrics with low-cardinality labels. */
+function recordPublisherCommentMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  labels: PublisherTelemetryState["labels"],
+  result: PublishReviewResult,
+): void {
+  if (result.inlineCommentCount > 0) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.publisherCommentsCreatedTotal, {
+      labels: { ...labels, comment_type: "inline" },
+      value: result.inlineCommentCount,
+    });
+  }
+  if (result.providerSummaryCommentId) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.publisherCommentsCreatedTotal, {
+      labels: { ...labels, comment_type: "summary" },
+    });
+  }
+  if (result.staleHead) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.publisherCommentsSkippedTotal, {
+      labels: { ...labels, reason: "stale_head" },
+    });
+  }
+}
+
+/** Returns whether the publisher failed because GitHub requested rate limiting. */
+function isGitHubRateLimitedPublisherError(error: unknown): boolean {
+  return (
+    error instanceof GitHubProviderError &&
+    (error.code === "github_rate_limit" || error.code === "github_secondary_rate_limit")
+  );
+}
+
 /** Creates or updates live PR output and persists durable publish state. */
 export async function publishReviewRun(
+  payload: PublishReviewJobPayload,
+  dependencies: ReviewPublisherDependencies,
+): Promise<PublishReviewResult> {
+  const telemetry = startPublisherTelemetry(payload, dependencies);
+
+  try {
+    const result = await publishReviewRunInternal(payload, dependencies);
+    finishPublisherTelemetry(dependencies.metrics, telemetry, {
+      result,
+      status: result.staleHead ? "skipped" : "completed",
+    });
+    return result;
+  } catch (error) {
+    finishPublisherTelemetry(dependencies.metrics, telemetry, { error, status: "failed" });
+    throw error;
+  }
+}
+
+/** Creates or updates live PR output and persists durable publish state. */
+async function publishReviewRunInternal(
   payload: PublishReviewJobPayload,
   dependencies: ReviewPublisherDependencies,
 ): Promise<PublishReviewResult> {

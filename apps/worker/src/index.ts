@@ -509,7 +509,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       await publishReviewRun(payload, {
         db: options.db,
         gitProvider: options.gitProvider,
+        ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(options.publishThrottle ? { publishThrottle: options.publishThrottle } : {}),
+        ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+        ...(options.traces ? { traces: options.traces } : {}),
       });
     },
     [JOB_TYPES.UpdateMemory]: async (envelope) => {

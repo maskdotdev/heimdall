@@ -795,6 +795,9 @@ importers:
       '@repo/github':
         specifier: workspace:*
         version: link:../github
+      '@repo/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules
