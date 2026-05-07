@@ -816,8 +816,19 @@ function isSameSideRangeCommentable(
   files: readonly ChangedFile[],
   anchor: Required<Pick<ReviewCommentRangeAnchor, "line" | "path" | "side" | "startLine">>,
 ): boolean {
+  const anchorsByLine = new Map(
+    buildCommentableLineIndex(files)
+      .filter((line) => line.path === anchor.path && line.side === anchor.side)
+      .map((line) => [line.line, line]),
+  );
+  const startAnchor = anchorsByLine.get(anchor.startLine);
+  if (!startAnchor) {
+    return false;
+  }
+
   for (let line = anchor.startLine; line <= anchor.line; line += 1) {
-    if (!isLineCommentable(files, { line, path: anchor.path, side: anchor.side })) {
+    const currentAnchor = anchorsByLine.get(line);
+    if (!currentAnchor || currentAnchor.hunkId !== startAnchor.hunkId) {
       return false;
     }
   }

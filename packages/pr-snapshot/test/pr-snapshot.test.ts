@@ -308,6 +308,54 @@ describe("line anchors", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("converts left-side multiline ranges for contiguous deleted lines", () => {
+    const files = parseUnifiedDiff(`diff --git a/src/math.ts b/src/math.ts
+--- a/src/math.ts
++++ b/src/math.ts
+@@ -1,3 +1 @@
+-export const one = 1;
+-export const two = 2;
+ export const done = true;
+`);
+
+    expect(
+      toGitHubReviewCommentAnchor(files, {
+        line: 2,
+        path: "src/math.ts",
+        side: "LEFT",
+        startLine: 1,
+      }),
+    ).toEqual({
+      line: 2,
+      path: "src/math.ts",
+      side: "LEFT",
+      startLine: 1,
+      startSide: "LEFT",
+    });
+  });
+
+  it("rejects multiline ranges that cross diff hunks", () => {
+    const files = parseUnifiedDiff(`diff --git a/src/math.ts b/src/math.ts
+--- a/src/math.ts
++++ b/src/math.ts
+@@ -1 +1 @@
+-export const one = 1;
++export const one = Number(1);
+@@ -2 +2 @@
+-export const two = 2;
++export const two = Number(2);
+`);
+
+    expect(
+      toGitHubReviewCommentAnchor(files, {
+        line: 2,
+        path: "src/math.ts",
+        side: "RIGHT",
+        startLine: 1,
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("file anchors", () => {
