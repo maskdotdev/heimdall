@@ -202,6 +202,30 @@ export const TelemetryMetricPointSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Alert severity used for actionable observability definitions. */
+export const ObservabilityAlertSeveritySchema = Type.Union([
+  Type.Literal("page"),
+  Type.Literal("ticket"),
+  Type.Literal("info"),
+]);
+
+/** Vendor-neutral alert definition used by deployment and runbook tooling. */
+export const ObservabilityAlertDefinitionSchema = Type.Object(
+  {
+    condition: Type.String({ minLength: 1 }),
+    dashboardPath: Type.String({ minLength: 1 }),
+    id: Type.String({ minLength: 1 }),
+    labels: Type.Array(Type.String({ minLength: 1 })),
+    name: Type.String({ minLength: 1 }),
+    owner: Type.String({ minLength: 1 }),
+    runbookPath: Type.String({ minLength: 1 }),
+    severity: ObservabilityAlertSeveritySchema,
+    signal: Type.String({ minLength: 1 }),
+    window: Type.String({ minLength: 1 }),
+  },
+  { additionalProperties: false },
+);
+
 /** Telemetry span kind compatible with common OpenTelemetry span roles. */
 export const TelemetrySpanKindSchema = Type.Union([
   Type.Literal("internal"),
@@ -318,6 +342,12 @@ export type TelemetryMetricKind = Static<typeof TelemetryMetricKindSchema>;
 
 /** Structured metric point emitted by the observability metric recorder. */
 export type TelemetryMetricPoint = Static<typeof TelemetryMetricPointSchema>;
+
+/** Alert severity used for actionable observability definitions. */
+export type ObservabilityAlertSeverity = Static<typeof ObservabilityAlertSeveritySchema>;
+
+/** Vendor-neutral alert definition used by deployment and runbook tooling. */
+export type ObservabilityAlertDefinition = Static<typeof ObservabilityAlertDefinitionSchema>;
 
 /** Telemetry span kind compatible with common OpenTelemetry span roles. */
 export type TelemetrySpanKind = Static<typeof TelemetrySpanKindSchema>;
@@ -657,6 +687,137 @@ export const OBSERVABILITY_METRIC_NAMES = {
   workerServiceStartsTotal: "code_review_agent.worker.service_starts_total",
   workerServiceStopsTotal: "code_review_agent.worker.service_stops_total",
 } as const;
+
+/** Canonical MVP alert definitions expected by deployment and runbook checks. */
+export const OBSERVABILITY_ALERT_DEFINITIONS = [
+  {
+    condition: "API readiness fails continuously for more than 5 minutes.",
+    dashboardPath: "/admin/overview",
+    id: "api_down",
+    labels: ["service", "environment"],
+    name: "API readiness failing",
+    owner: "platform",
+    runbookPath: "docs/runbooks/observability-alerts.md#api-down",
+    severity: "page",
+    signal: "api.readiness",
+    window: "5m",
+  },
+  {
+    condition: "Webhook rejection or processing failure rate exceeds the configured threshold.",
+    dashboardPath: "/admin/debug/webhooks",
+    id: "webhook_ingestion_failures",
+    labels: ["service", "environment", "provider"],
+    name: "Webhook ingestion failures",
+    owner: "integrations",
+    runbookPath: "docs/runbooks/observability-alerts.md#webhook-ingestion-failures",
+    severity: "page",
+    signal: OBSERVABILITY_METRIC_NAMES.webhookRejectionsTotal,
+    window: "10m",
+  },
+  {
+    condition: "Review queue wait p95 is greater than 10 minutes.",
+    dashboardPath: "/admin/debug/jobs",
+    id: "review_queue_backlog",
+    labels: ["service", "environment", "queue_name"],
+    name: "Review queue backlog",
+    owner: "platform",
+    runbookPath: "docs/runbooks/observability-alerts.md#review-queue-backlog",
+    severity: "ticket",
+    signal: "queue.pr_review.wait_p95",
+    window: "15m",
+  },
+  {
+    condition: "Failed review runs exceed 10% of started review runs.",
+    dashboardPath: "/admin/overview",
+    id: "review_failure_rate",
+    labels: ["service", "environment", "stage"],
+    name: "Review failure rate",
+    owner: "review-pipeline",
+    runbookPath: "docs/runbooks/observability-alerts.md#review-failure-rate",
+    severity: "page",
+    signal: "review.run.failure_rate",
+    window: "15m",
+  },
+  {
+    condition: "Failed publisher runs exceed 5% of publisher runs.",
+    dashboardPath: "/admin/debug/publisher",
+    id: "publishing_failure_rate",
+    labels: ["service", "environment", "provider"],
+    name: "Publishing failure rate",
+    owner: "integrations",
+    runbookPath: "docs/runbooks/observability-alerts.md#publishing-failure-rate",
+    severity: "page",
+    signal: OBSERVABILITY_METRIC_NAMES.publisherRunsTotal,
+    window: "15m",
+  },
+  {
+    condition: "LLM provider error and rate-limit failures exceed 20%.",
+    dashboardPath: "/admin/overview",
+    id: "llm_provider_outage",
+    labels: ["service", "environment", "provider", "model_profile"],
+    name: "LLM provider outage",
+    owner: "ai-platform",
+    runbookPath: "docs/runbooks/observability-alerts.md#llm-provider-outage",
+    severity: "page",
+    signal: OBSERVABILITY_METRIC_NAMES.llmCallsTotal,
+    window: "10m",
+  },
+  {
+    condition: "Cost per review or total hourly review cost exceeds the configured budget.",
+    dashboardPath: "/admin/usage",
+    id: "cost_anomaly",
+    labels: ["service", "environment"],
+    name: "Cost anomaly",
+    owner: "platform",
+    runbookPath: "docs/runbooks/observability-alerts.md#cost-anomaly",
+    severity: "ticket",
+    signal: "review.cost.hourly_usd",
+    window: "60m",
+  },
+  {
+    condition: "Embedding queue age p95 exceeds the configured backlog threshold.",
+    dashboardPath: "/admin/debug/jobs",
+    id: "embedding_backlog",
+    labels: ["service", "environment", "queue_name"],
+    name: "Embedding backlog",
+    owner: "indexing",
+    runbookPath: "docs/runbooks/observability-alerts.md#embedding-backlog",
+    severity: "ticket",
+    signal: "queue.embedding.wait_p95",
+    window: "15m",
+  },
+  {
+    condition: "Index runs fail above the configured driver or language threshold.",
+    dashboardPath: "/admin/overview",
+    id: "indexing_failures",
+    labels: ["service", "environment", "driver", "language"],
+    name: "Indexing failures",
+    owner: "indexing",
+    runbookPath: "docs/runbooks/observability-alerts.md#indexing-failures",
+    severity: "ticket",
+    signal: OBSERVABILITY_METRIC_NAMES.indexerDriverRunsTotal,
+    window: "15m",
+  },
+  {
+    condition: "Sandbox violations spike above baseline for the violation type.",
+    dashboardPath: "/admin/overview",
+    id: "sandbox_violation_spike",
+    labels: ["service", "environment", "violation_type"],
+    name: "Sandbox violation spike",
+    owner: "security",
+    runbookPath: "docs/runbooks/observability-alerts.md#sandbox-violation-spike",
+    severity: "ticket",
+    signal: OBSERVABILITY_METRIC_NAMES.sandboxViolationsTotal,
+    window: "15m",
+  },
+] satisfies readonly ObservabilityAlertDefinition[];
+
+/** Returns one canonical alert definition by ID when it exists. */
+export function getObservabilityAlertDefinition(
+  id: string,
+): ObservabilityAlertDefinition | undefined {
+  return OBSERVABILITY_ALERT_DEFINITIONS.find((definition) => definition.id === id);
+}
 
 /** Stable span names emitted directly by service and queue boundaries. */
 export const OBSERVABILITY_SPAN_NAMES = {

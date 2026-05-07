@@ -10,9 +10,11 @@ import {
   createTelemetryTraceContextFromHeaders,
   createTelemetryTraceHeaders,
   DEFAULT_OBSERVABILITY_CONFIG,
+  getObservabilityAlertDefinition,
   loadObservabilityConfig,
   normalizeAdminControlPlaneTelemetryEvent,
   normalizeTelemetryTraceContext,
+  OBSERVABILITY_ALERT_DEFINITIONS,
   OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
   ObservabilityConfigValidationError,
@@ -104,6 +106,37 @@ describe("observability config", () => {
     });
     expect(attributes).not.toHaveProperty("org_id");
     expect(attributes).not.toHaveProperty("repo_id");
+  });
+});
+
+describe("observability alert definitions", () => {
+  it("defines the core MVP alert set with runbook and dashboard metadata", () => {
+    const ids = OBSERVABILITY_ALERT_DEFINITIONS.map((definition) => definition.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual([
+      "api_down",
+      "webhook_ingestion_failures",
+      "review_queue_backlog",
+      "review_failure_rate",
+      "publishing_failure_rate",
+      "llm_provider_outage",
+      "cost_anomaly",
+      "embedding_backlog",
+      "indexing_failures",
+      "sandbox_violation_spike",
+    ]);
+    expect(getObservabilityAlertDefinition("api_down")).toMatchObject({
+      dashboardPath: "/admin/overview",
+      labels: expect.arrayContaining(["service", "environment"]),
+      runbookPath: expect.stringContaining("observability-alerts.md#api-down"),
+      severity: "page",
+    });
+    expect(
+      OBSERVABILITY_ALERT_DEFINITIONS.every(
+        (definition) => definition.dashboardPath && definition.runbookPath && definition.owner,
+      ),
+    ).toBe(true);
   });
 });
 
