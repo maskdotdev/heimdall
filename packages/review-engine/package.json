@@ -22,6 +22,7 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
+    "@repo/memory": "workspace:*",
     "@repo/rules": "workspace:*"
   },
   "devDependencies": {

@@ -838,6 +838,9 @@ importers:
       '@repo/llm-gateway':
         specifier: workspace:*
         version: link:../llm-gateway
+      '@repo/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules

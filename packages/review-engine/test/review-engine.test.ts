@@ -6,6 +6,7 @@ import {
 } from "@repo/contracts/fixtures/pull-request.fixture";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
+import type { MemoryFact } from "@repo/memory";
 import { createPolicyFixture } from "@repo/rules";
 import { describe, expect, it } from "vitest";
 import {
@@ -273,4 +274,71 @@ describe("validateAndRankCandidateFindings", () => {
       ]),
     );
   });
+
+  it("rejects findings suppressed by configured memory facts", () => {
+    const memoryFact = memoryFactFixture({
+      appliesTo: { findingFingerprints: [validCandidateFindingFixture.fingerprint] },
+      id: "mem_suppress_exact",
+      kind: "suppression",
+      repoId: validPullRequestSnapshotFixture.repoId,
+      scope: {
+        level: "repo",
+        orgId: "org_1",
+        repoId: validPullRequestSnapshotFixture.repoId,
+      },
+    });
+
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [validCandidateFindingFixture],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: {
+        memorySuppression: {
+          orgId: "org_1",
+          repoId: validPullRequestSnapshotFixture.repoId,
+          memoryFacts: [memoryFact],
+        },
+      },
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected[0]?.validation.reasons).toContain("suppressed_by_memory");
+    expect(result.rejected[0]?.metadata).toMatchObject({
+      memorySuppression: {
+        matchKind: "exact_fingerprint",
+        memoryFactId: "mem_suppress_exact",
+      },
+    });
+    expect(result.trace.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          candidateFindingId: validCandidateFindingFixture.findingId,
+          reasons: ["suppressed_by_memory"],
+          stage: "suppression",
+          status: "rejected",
+        }),
+      ]),
+    );
+  });
 });
+
+function memoryFactFixture(overrides: Partial<MemoryFact> = {}): MemoryFact {
+  return {
+    id: "mem_1",
+    orgId: "org_1",
+    repoId: validPullRequestSnapshotFixture.repoId,
+    kind: "suppression",
+    content: "Suppress matching findings for this repository.",
+    normalizedContent: "suppress matching findings for this repository.",
+    scope: { level: "repo", orgId: "org_1", repoId: validPullRequestSnapshotFixture.repoId },
+    appliesTo: {},
+    sourceKind: "command",
+    trustLevel: "explicit_maintainer",
+    confidence: 0.95,
+    status: "active",
+    priority: 700,
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-05T00:00:00.000Z",
+    ...overrides,
+  };
+}

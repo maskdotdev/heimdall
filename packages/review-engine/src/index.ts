@@ -11,6 +11,7 @@ import type {
   ValidatedFinding,
 } from "@repo/contracts/review/finding";
 import type { LLMGateway } from "@repo/llm-gateway";
+import { evaluateSuppression, type MemoryFact, type SuppressionDecision } from "@repo/memory";
 import { type EffectiveReviewPolicy, evaluateFindingPolicy } from "@repo/rules";
 
 /** Context provided to every deterministic or model-backed review pass. */
@@ -192,8 +193,20 @@ export type FindingValidationConfig = {
   readonly maxPublishableFindings?: number;
   /** Repo rule text used for basic suppression decisions. */
   readonly repoRules?: readonly string[];
+  /** Active and inactive memory facts available for validation suppression. */
+  readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
   readonly policy?: EffectiveReviewPolicy;
+};
+
+/** Memory facts and repository scope used for finding suppression. */
+export type FindingMemorySuppressionConfig = {
+  /** Organization ID used when evaluating org-scoped memory. */
+  readonly orgId: string;
+  /** Repository ID used when evaluating repo-scoped memory. */
+  readonly repoId: string;
+  /** Memory facts available to the current review run. */
+  readonly memoryFacts: readonly MemoryFact[];
 };
 
 /** Normalized validation config with defaults and optional compiled policy. */
@@ -208,6 +221,8 @@ type NormalizedFindingValidationConfig = {
   readonly maxPublishableFindings: number;
   /** Repo rule text used for basic suppression decisions. */
   readonly repoRules: readonly string[];
+  /** Active and inactive memory facts available for validation suppression. */
+  readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
   readonly policy?: EffectiveReviewPolicy;
 };
@@ -225,7 +240,13 @@ export type FindingDuplicateGroup = {
 };
 
 /** Product-safe validation event stage. */
-export type FindingValidationEventStage = "anchor" | "evidence" | "policy" | "dedupe" | "ranking";
+export type FindingValidationEventStage =
+  | "anchor"
+  | "evidence"
+  | "policy"
+  | "suppression"
+  | "dedupe"
+  | "ranking";
 
 /** Product-safe event explaining one validation stage for one candidate. */
 export type FindingValidationEvent = {
@@ -312,7 +333,7 @@ export function validateCandidateFindings(
   const rejected: ValidatedFinding[] = [];
 
   for (const finding of input.findings) {
-    const reasons = rejectionReasons(
+    const analysis = rejectionAnalysis(
       finding,
       state,
       config,
@@ -320,8 +341,8 @@ export function validateCandidateFindings(
       seenLocations,
       seenSemanticSignatures,
     );
-    const decision = reasons.length === 0 ? "publish" : "reject";
-    const validated = toValidatedFinding(finding, input.timestamp, decision, reasons);
+    const decision = analysis.reasons.length === 0 ? "publish" : "reject";
+    const validated = toValidatedFinding(finding, input.timestamp, decision, analysis);
 
     if (decision === "publish") {
       seenFingerprints.add(finding.fingerprint);
@@ -378,6 +399,7 @@ function normalizeFindingValidationConfig(
     maxPublishableFindings:
       config?.policy?.findings.maxCommentsPerReview ?? config?.maxPublishableFindings ?? 10,
     repoRules: config?.repoRules ?? [],
+    ...(config?.memorySuppression ? { memorySuppression: config.memorySuppression } : {}),
     ...(config?.policy ? { policy: config.policy } : {}),
   };
 }
@@ -700,6 +722,14 @@ type SemanticFindingSignature = {
   readonly tokens: ReadonlySet<string>;
 };
 
+/** Rejection reasons plus explainable suppression context for one candidate. */
+type FindingRejectionAnalysis = {
+  /** Canonical rejection reasons produced during validation. */
+  readonly reasons: readonly FindingRejectionReason[];
+  /** Product-safe memory suppression decision when memory rejected the candidate. */
+  readonly memorySuppression?: SuppressionDecision;
+};
+
 function buildAnchorState(snapshot: PullRequestSnapshot): AnchorState {
   return {
     files: new Map(snapshot.changedFiles.map((file) => [file.path, file])),
@@ -718,14 +748,14 @@ function buildAnchorState(snapshot: PullRequestSnapshot): AnchorState {
   };
 }
 
-function rejectionReasons(
+function rejectionAnalysis(
   finding: CandidateFinding,
   state: AnchorState,
   config: NormalizedFindingValidationConfig,
   seenFingerprints: ReadonlySet<string>,
   seenLocations: ReadonlySet<string>,
   seenSemanticSignatures: readonly SemanticFindingSignature[],
-): readonly FindingRejectionReason[] {
+): FindingRejectionAnalysis {
   const reasons: FindingRejectionReason[] = [];
   const file = state.files.get(finding.location.path);
   const addedLines = state.addedLinesByPath.get(finding.location.path);
@@ -759,6 +789,10 @@ function rejectionReasons(
   if (isSuppressedByRepoRule(finding, config.repoRules)) {
     pushReason(reasons, "suppressed_by_repo_rule");
   }
+  const memorySuppression = memorySuppressionDecision(finding, config);
+  if (memorySuppression?.suppressed) {
+    pushReason(reasons, "suppressed_by_memory");
+  }
   if (config.policy) {
     const policyDecision = evaluateFindingPolicy({ policy: config.policy, finding });
     const policyReason = policyReasonToRejectionReason(policyDecision.reasonCode);
@@ -767,7 +801,27 @@ function rejectionReasons(
     }
   }
 
-  return reasons;
+  return {
+    ...(memorySuppression?.suppressed ? { memorySuppression } : {}),
+    reasons,
+  };
+}
+
+/** Evaluates configured memory facts for one candidate finding. */
+function memorySuppressionDecision(
+  finding: CandidateFinding,
+  config: NormalizedFindingValidationConfig,
+): SuppressionDecision | undefined {
+  if (!config.memorySuppression || config.memorySuppression.memoryFacts.length === 0) {
+    return undefined;
+  }
+
+  return evaluateSuppression({
+    candidateFinding: finding,
+    memoryFacts: config.memorySuppression.memoryFacts,
+    orgId: config.memorySuppression.orgId,
+    repoId: config.memorySuppression.repoId,
+  });
 }
 
 /** Adds a rejection reason once while preserving decision order. */
@@ -807,7 +861,7 @@ function toValidatedFinding(
   finding: CandidateFinding,
   timestamp: string,
   decision: "publish" | "reject",
-  reasons: readonly FindingRejectionReason[],
+  analysis: FindingRejectionAnalysis,
 ): ValidatedFinding {
   return {
     findingId: stableId("fnd", [finding.findingId, "validation.v2"]),
@@ -824,11 +878,29 @@ function toValidatedFinding(
     validation: {
       validatedAt: timestamp,
       validatorVersion: "finding-validation.v2",
-      reasons: [...reasons],
+      reasons: [...analysis.reasons],
     },
     fingerprint: finding.fingerprint,
-    metadata: { candidateSourceName: finding.sourceName },
+    metadata: validationMetadata(finding, analysis),
   };
+}
+
+/** Builds product-safe validation metadata for persisted findings. */
+function validationMetadata(
+  finding: CandidateFinding,
+  analysis: FindingRejectionAnalysis,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = { candidateSourceName: finding.sourceName };
+  if (analysis.memorySuppression?.suppressed) {
+    metadata.memorySuppression = {
+      confidence: analysis.memorySuppression.confidence,
+      matchKind: analysis.memorySuppression.matchKind,
+      memoryFactId: analysis.memorySuppression.memoryFactId,
+      reason: analysis.memorySuppression.reason,
+    };
+  }
+
+  return metadata;
 }
 
 function rankFindings(findings: readonly ValidatedFinding[]): readonly ValidatedFinding[] {
@@ -1084,6 +1156,7 @@ const VALIDATION_EVENT_STAGES = [
   "anchor",
   "evidence",
   "policy",
+  "suppression",
   "dedupe",
   "ranking",
 ] as const satisfies readonly FindingValidationEventStage[];
@@ -1122,9 +1195,12 @@ const POLICY_REASONS = new Set<FindingRejectionReason>([
   "low_confidence",
   "publisher_unsupported",
   "style_only",
+  "unsupported_schema_version",
+]);
+
+const SUPPRESSION_REASONS = new Set<FindingRejectionReason>([
   "suppressed_by_memory",
   "suppressed_by_repo_rule",
-  "unsupported_schema_version",
 ]);
 
 const DUPLICATE_REASONS = new Set<FindingRejectionReason>([
@@ -1171,6 +1247,7 @@ const VALIDATION_REASONS_BY_STAGE: Record<
   evidence: EVIDENCE_REASONS,
   policy: POLICY_REASONS,
   ranking: RANKING_REASONS,
+  suppression: SUPPRESSION_REASONS,
 };
 
 function firstAddedLine(file: ChangedFile): number | undefined {
