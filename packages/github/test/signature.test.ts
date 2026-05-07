@@ -3,6 +3,7 @@ import {
   computeGitHubWebhookSignature,
   readGitHubWebhookHeaders,
   verifyGitHubWebhookSignature,
+  verifyGitHubWebhookSignatureWithSecrets,
 } from "../src";
 
 describe("GitHub webhook signatures", () => {
@@ -25,6 +26,51 @@ describe("GitHub webhook signatures", () => {
         signature256: signature,
       }),
     ).toBe(false);
+  });
+
+  it("matches GitHub's documented sha256 test vector", () => {
+    const rawBody = new TextEncoder().encode("Hello, World!");
+
+    expect(computeGitHubWebhookSignature("It's a Secret to Everybody", rawBody)).toBe(
+      "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17",
+    );
+  });
+
+  it("returns the matched secret version during rotation", () => {
+    const rawBody = new TextEncoder().encode('{"zen":"rotate safely"}');
+    const currentSignature = computeGitHubWebhookSignature("current-secret", rawBody);
+    const previousSignature = computeGitHubWebhookSignature("previous-secret", rawBody);
+
+    expect(
+      verifyGitHubWebhookSignatureWithSecrets({
+        rawBody,
+        secrets: [
+          { secret: "current-secret", version: "current" },
+          { secret: "previous-secret", version: "previous" },
+        ],
+        signature256: currentSignature,
+      }),
+    ).toEqual({ matchedSecretVersion: "current", ok: true });
+    expect(
+      verifyGitHubWebhookSignatureWithSecrets({
+        rawBody,
+        secrets: [
+          { secret: "current-secret", version: "current" },
+          { secret: "previous-secret", version: "previous" },
+        ],
+        signature256: previousSignature,
+      }),
+    ).toEqual({ matchedSecretVersion: "previous", ok: true });
+    expect(
+      verifyGitHubWebhookSignatureWithSecrets({
+        rawBody,
+        secrets: [
+          { secret: "current-secret", version: "current" },
+          { secret: "previous-secret", version: "previous" },
+        ],
+        signature256: "sha256=too-short",
+      }),
+    ).toEqual({ ok: false, reason: "invalid_signature" });
   });
 
   it("extracts required webhook headers", () => {

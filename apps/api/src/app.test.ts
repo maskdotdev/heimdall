@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHmac } from "node:crypto";
 import {
   AdminDebugNotFoundError,
   type AdminDebugService,
@@ -24,6 +25,7 @@ import { buildReviewPolicySnapshot } from "@repo/rules";
 import {
   createMemorySecurityEventSink,
   createSecurityEvent,
+  type SecretsManager,
   signAdminIdentityAssertion,
 } from "@repo/security";
 import { WebhookAuthenticationError } from "@repo/webhook-ingestion";
@@ -35,6 +37,7 @@ import {
   type ProductDashboardService,
   type ProductGitHubOAuthService,
   type ProductSessionService,
+  resolveApiGitHubWebhookSecrets,
 } from "./app";
 
 type AdminRuleSummaryFixture = Awaited<
@@ -212,6 +215,63 @@ describe("api app", () => {
         updatedAt: new Date("2026-05-07T12:00:00.000Z"),
       }),
     ]);
+  });
+
+  it("resolves GitHub webhook secrets through SecretRef configuration", async () => {
+    await expect(
+      resolveApiGitHubWebhookSecrets({
+        CURRENT_WEBHOOK_SECRET: "current-webhook-secret",
+        GITHUB_PREVIOUS_WEBHOOK_SECRET: "previous-webhook-secret",
+        GITHUB_WEBHOOK_SECRET_REF: "env:CURRENT_WEBHOOK_SECRET",
+      }),
+    ).resolves.toEqual({
+      current: "current-webhook-secret",
+      previous: "previous-webhook-secret",
+    });
+    await expect(
+      resolveApiGitHubWebhookSecrets({
+        GITHUB_WEBHOOK_SECRET_REF: "aws:prod/github-app/webhook-secret",
+      }),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+  });
+
+  it("resolves GitHub webhook route secrets before signature verification", async () => {
+    const resolvedRefs: string[] = [];
+    const secretsManager: SecretsManager = {
+      resolveSecret: async (ref, context) => {
+        resolvedRefs.push(`${ref.provider}:${ref.name}:${context?.purpose}:${context?.service}`);
+        return {
+          ref,
+          resolvedAt: "2026-05-07T12:00:00.000Z",
+          value: "route-webhook-secret",
+        };
+      },
+    };
+    const app = createApiApp({
+      databaseClient: { db: {} as HeimdallDatabase } as never,
+      secretEnvironment: {
+        GITHUB_WEBHOOK_SECRET_REF: "env:ROUTE_WEBHOOK_SECRET",
+      },
+      secretsManager,
+    });
+    const rawBody = new TextEncoder().encode("{}");
+
+    const response = await app.handle(
+      new Request("http://localhost/webhooks/github", {
+        method: "POST",
+        body: rawBody,
+        headers: {
+          "x-github-delivery": "delivery-secret-ref",
+          "x-github-event": "pull_request",
+          "x-hub-signature-256": githubWebhookSignature("wrong-secret", rawBody),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(resolvedRefs).toEqual(["env:ROUTE_WEBHOOK_SECRET:github_webhook_secret:api"]);
   });
 
   it("wires the GitHub webhook route to the handler", async () => {
@@ -5648,6 +5708,11 @@ function noopWebhookHandler() {
       jobs: [],
     }),
   } as never;
+}
+
+/** Computes a GitHub-style HMAC SHA-256 webhook signature for route tests. */
+function githubWebhookSignature(secret: string, rawBody: Uint8Array): string {
+  return `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 
 /** Creates a signed IdP login request. */

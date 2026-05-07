@@ -160,11 +160,13 @@ import {
   actorHasPermission,
   adminCapabilities,
   createAdminSessionManager,
+  createLocalEnvSecretsManager,
   isCsrfSafeMethod,
   isProductRole,
   type ProductActor,
   type ProductMembership,
   type ProductPermission,
+  parseSecretRef,
   productActorHasOrgPermission,
   productActorHasRepoPermission,
   productCapabilities,
@@ -173,6 +175,8 @@ import {
   SECURITY_EVENT_SEVERITIES,
   SECURITY_EVENT_SOURCES,
   SECURITY_EVENT_STATUSES,
+  type SecretRef,
+  type SecretsManager,
   type SecurityEvent,
   type SecurityEventSeverity,
   type SecurityEventSink,
@@ -191,7 +195,9 @@ import {
 } from "@repo/usage";
 import {
   GitHubWebhookHandler,
+  type HandleGitHubWebhookInput,
   WebhookAuthenticationError,
+  type WebhookIngestionResult,
   WebhookPayloadError,
 } from "@repo/webhook-ingestion";
 import {
@@ -2723,10 +2729,27 @@ export type ApiHealthResponse = {
 /** Readiness check hook used by tests and custom API composition. */
 export type ApiReadinessCheck = () => Promise<readonly ApiHealthCheck[]>;
 
+/** Environment map used by API runtime secret resolution. */
+export type ApiSecretEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Secrets used to verify GitHub webhook signatures. */
+export type ApiGitHubWebhookSecrets = {
+  /** Current active GitHub webhook secret. */
+  readonly current: string;
+  /** Optional previous secret accepted during a rotation window. */
+  readonly previous?: string | undefined;
+};
+
+/** Minimal GitHub webhook handler contract used by the API route. */
+export type GitHubWebhookRequestHandler = {
+  /** Handles one raw GitHub webhook delivery. */
+  readonly handle: (input: HandleGitHubWebhookInput) => Promise<WebhookIngestionResult>;
+};
+
 /** Dependencies used to create the API app. */
 export type CreateApiAppOptions = {
   /** GitHub webhook handler for tests or custom composition. */
-  readonly githubWebhookHandler?: GitHubWebhookHandler;
+  readonly githubWebhookHandler?: GitHubWebhookRequestHandler;
   /** Admin debug service for tests or custom composition. */
   readonly adminDebugService?: AdminDebugService;
   /** Admin control-plane service for tests or custom composition. */
@@ -2751,6 +2774,10 @@ export type CreateApiAppOptions = {
   readonly productGitHubOAuth?: ProductGitHubOAuthOptions;
   /** Shared database client for production composition or tests. */
   readonly databaseClient?: DatabaseClient;
+  /** Environment map used by runtime secret resolvers. */
+  readonly secretEnvironment?: ApiSecretEnvironment;
+  /** Secret manager used by runtime secret resolvers. */
+  readonly secretsManager?: SecretsManager;
   /** Admin control-plane observability sink for structured telemetry. */
   readonly adminObservabilitySink?: ObservabilitySink;
   /** Admin control-plane security-event sink for high-risk access denials. */
@@ -2819,6 +2846,90 @@ function securityEventInsertFromEvent(event: SecurityEvent): typeof securityEven
   };
 }
 
+/** Dependencies for a GitHub webhook handler that resolves secrets at request time. */
+type SecretResolvingGitHubWebhookHandlerDependencies = {
+  /** Database used by the underlying ingestion handler. */
+  readonly db: HeimdallDatabase;
+  /** Environment map that contains secret refs or local fallback values. */
+  readonly env: ApiSecretEnvironment;
+  /** Optional metric recorder used by webhook ingestion. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Secret manager used to resolve configured secret refs. */
+  readonly secretsManager: SecretsManager;
+  /** Optional span recorder used by webhook ingestion. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
+};
+
+/** GitHub webhook handler that resolves configured secrets through the security boundary. */
+class SecretResolvingGitHubWebhookHandler implements GitHubWebhookRequestHandler {
+  /** Creates a secret-resolving GitHub webhook handler. */
+  public constructor(
+    private readonly dependencies: SecretResolvingGitHubWebhookHandlerDependencies,
+  ) {}
+
+  /** Resolves webhook secrets, then delegates to the durable GitHub ingestion handler. */
+  public async handle(input: HandleGitHubWebhookInput): Promise<WebhookIngestionResult> {
+    const secrets = await resolveApiGitHubWebhookSecrets(
+      this.dependencies.env,
+      this.dependencies.secretsManager,
+    );
+    if (!secrets) {
+      throw new WebhookAuthenticationError("GitHub webhook secret is not configured.");
+    }
+
+    return new GitHubWebhookHandler({
+      db: this.dependencies.db,
+      metrics: this.dependencies.metrics,
+      previousWebhookSecret: secrets.previous,
+      traces: this.dependencies.traces,
+      webhookSecret: secrets.current,
+    }).handle(input);
+  }
+}
+
+/** Resolves GitHub webhook secrets through SecretRef/SecretsManager configuration. */
+export async function resolveApiGitHubWebhookSecrets(
+  env: ApiSecretEnvironment,
+  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+): Promise<ApiGitHubWebhookSecrets | undefined> {
+  const currentRef = secretRefFromEnvironment({
+    directValue: env.GITHUB_WEBHOOK_SECRET,
+    envName: "GITHUB_WEBHOOK_SECRET",
+    refValue: env.GITHUB_WEBHOOK_SECRET_REF,
+  });
+  if (!currentRef) {
+    return undefined;
+  }
+
+  const previousRef = secretRefFromEnvironment({
+    directValue: env.GITHUB_PREVIOUS_WEBHOOK_SECRET,
+    envName: "GITHUB_PREVIOUS_WEBHOOK_SECRET",
+    refValue: env.GITHUB_PREVIOUS_WEBHOOK_SECRET_REF ?? env.GITHUB_WEBHOOK_PREVIOUS_SECRET_REF,
+  });
+  const [current, previous] = await Promise.all([
+    secretsManager.resolveSecret(currentRef, {
+      purpose: "github_webhook_secret",
+      service: "api",
+    }),
+    previousRef
+      ? secretsManager.resolveSecret(previousRef, {
+          purpose: "github_webhook_secret",
+          service: "api",
+        })
+      : undefined,
+  ]);
+  const currentValue = emptyToUndefined(current.value);
+  if (!currentValue) {
+    return undefined;
+  }
+  const previousValue = previous ? emptyToUndefined(previous.value) : undefined;
+
+  return {
+    current: currentValue,
+    ...(previousValue ? { previous: previousValue } : {}),
+  };
+}
+
 /** Creates the Heimdall API app. */
 export function createApiApp(options: CreateApiAppOptions = {}) {
   let databaseClient: DatabaseClient | undefined = options.databaseClient;
@@ -2880,14 +2991,24 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
   };
   const metrics = options.metrics ?? createNoopTelemetryMetricRecorder();
   const traces = options.traces ?? createNoopTelemetrySpanRecorder();
-  const githubWebhookHandler =
-    options.githubWebhookHandler ??
-    new GitHubWebhookHandler({
+  const secretEnvironment = options.secretEnvironment ?? process.env;
+  const secretsManager =
+    options.secretsManager ?? createLocalEnvSecretsManager({ env: secretEnvironment });
+  let environmentGithubWebhookHandler: GitHubWebhookRequestHandler | undefined;
+  const getGithubWebhookHandler = () => {
+    if (options.githubWebhookHandler) {
+      return options.githubWebhookHandler;
+    }
+    environmentGithubWebhookHandler ??= new SecretResolvingGitHubWebhookHandler({
       db: getDatabaseClient().db,
+      env: secretEnvironment,
       metrics,
+      secretsManager,
       traces,
-      webhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? "",
     });
+
+    return environmentGithubWebhookHandler;
+  };
   const readinessCheck = options.readinessCheck ?? (() => checkApiReadiness(getDatabaseClient));
   const apiRequestTelemetry = new WeakMap<Request, ApiRequestTelemetryState>();
 
@@ -6621,7 +6742,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       const rawBody = new Uint8Array(await request.arrayBuffer());
       const telemetry = startWebhookDeliveryTelemetry(traces, request, "github", rawBody);
       try {
-        const result = await githubWebhookHandler.handle({
+        const result = await getGithubWebhookHandler().handle({
           headers: request.headers,
           rawBody,
         });
@@ -7567,7 +7688,7 @@ function productGitHubAppSetup(): ProductGitHubAppSetup {
   const installUrl =
     explicitInstallUrl ?? (appSlug ? `https://github.com/apps/${appSlug}/installations/new` : "");
   const webhookUrl = productWebhookUrl();
-  const webhookConfigured = Boolean(emptyToUndefined(process.env.GITHUB_WEBHOOK_SECRET));
+  const webhookConfigured = githubWebhookSecretConfigured(process.env);
 
   return {
     configured: Boolean(appId && webhookConfigured && installUrl),
@@ -16194,6 +16315,30 @@ function isHttpUrl(value: string): boolean {
 /** Converts blank environment values to undefined. */
 function emptyToUndefined(value: string | undefined): string | undefined {
   return value && value.trim().length > 0 ? value : undefined;
+}
+
+/** Returns whether a GitHub webhook secret or secret ref is configured. */
+function githubWebhookSecretConfigured(env: ApiSecretEnvironment): boolean {
+  return Boolean(
+    emptyToUndefined(env.GITHUB_WEBHOOK_SECRET_REF) ?? emptyToUndefined(env.GITHUB_WEBHOOK_SECRET),
+  );
+}
+
+/** Builds a secret ref from an explicit ref or a local env fallback value. */
+function secretRefFromEnvironment(input: {
+  /** Direct local environment value used as a fallback. */
+  readonly directValue: string | undefined;
+  /** Local environment variable name to wrap in an env SecretRef. */
+  readonly envName: string;
+  /** Explicit SecretRef string. */
+  readonly refValue: string | undefined;
+}): SecretRef | undefined {
+  const explicitRef = emptyToUndefined(input.refValue);
+  if (explicitRef) {
+    return parseSecretRef(explicitRef);
+  }
+
+  return emptyToUndefined(input.directValue) ? parseSecretRef(`env:${input.envName}`) : undefined;
 }
 
 /** Parses a JSON or comma-separated string list. */

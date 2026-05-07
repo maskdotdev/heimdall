@@ -17,7 +17,7 @@ import {
 import {
   type GitHubWebhookHeaders,
   readGitHubWebhookHeaders,
-  verifyGitHubWebhookSignature,
+  verifyGitHubWebhookSignatureWithSecrets,
 } from "@repo/github";
 import {
   createTelemetryTraceContextFromHeaders,
@@ -53,6 +53,8 @@ export type GitHubWebhookHandlerDependencies = {
   readonly traces?: TelemetrySpanRecorder | undefined;
   /** GitHub webhook secret. */
   readonly webhookSecret: string;
+  /** Previous GitHub webhook secret accepted during a rotation window. */
+  readonly previousWebhookSecret?: string | undefined;
 };
 
 /** Request input for GitHub webhook ingestion. */
@@ -65,6 +67,7 @@ export type HandleGitHubWebhookInput = {
 
 type NormalizedEvent = {
   readonly headers: GitHubWebhookHeaders;
+  readonly matchedSecretVersion: string;
   readonly payloadHash: string;
   readonly payload: Record<string, unknown>;
   readonly traceContext: TelemetryTraceContext;
@@ -91,19 +94,28 @@ export class GitHubWebhookHandler {
   /** Ingests a GitHub webhook delivery. */
   public async handle(input: HandleGitHubWebhookInput): Promise<WebhookIngestionResult> {
     const headers = readGitHubWebhookHeaders(input.headers);
+    const verification = verifyGitHubWebhookSignatureWithSecrets({
+      rawBody: input.rawBody,
+      secrets: [
+        { secret: this.dependencies.webhookSecret, version: "current" },
+        ...(this.dependencies.previousWebhookSecret
+          ? [{ secret: this.dependencies.previousWebhookSecret, version: "previous" }]
+          : []),
+      ],
+      signature256: headers.signature256,
+    });
 
-    if (
-      !verifyGitHubWebhookSignature({
-        secret: this.dependencies.webhookSecret,
-        rawBody: input.rawBody,
-        signature256: headers.signature256,
-      })
-    ) {
+    if (!verification.ok) {
       throw new WebhookAuthenticationError("GitHub webhook signature verification failed.");
     }
 
     const inboundTraceContext = createTelemetryTraceContextFromHeaders(input.headers);
-    const normalized = this.normalize(headers, input.rawBody, inboundTraceContext);
+    const normalized = this.normalize(
+      headers,
+      input.rawBody,
+      inboundTraceContext,
+      verification.matchedSecretVersion,
+    );
     const result = await this.persist(normalized);
 
     return result;
@@ -113,12 +125,14 @@ export class GitHubWebhookHandler {
     headers: GitHubWebhookHeaders,
     rawBody: Uint8Array,
     traceContext: TelemetryTraceContext,
+    matchedSecretVersion: string,
   ): NormalizedEvent {
     const payload = parseGitHubWebhookPayload(rawBody);
 
     if (!supportedEvents.has(headers.eventName)) {
       return {
         headers,
+        matchedSecretVersion,
         payloadHash: sha256(rawBody),
         payload,
         traceContext,
@@ -134,6 +148,7 @@ export class GitHubWebhookHandler {
 
     return {
       headers,
+      matchedSecretVersion,
       payloadHash: sha256(rawBody),
       payload,
       traceContext,
@@ -195,6 +210,7 @@ export class GitHubWebhookHandler {
           status,
           payloadHash: normalized.payloadHash,
           payload: normalized.payload,
+          metadata: { githubWebhookSecretVersion: normalized.matchedSecretVersion },
         })
         .onConflictDoNothing()
         .returning();

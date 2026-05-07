@@ -10,6 +10,29 @@ export type GitHubWebhookHeaders = {
   readonly signature256: string;
 };
 
+/** One webhook secret candidate used during signature verification. */
+export type GitHubWebhookSecretCandidate = {
+  /** Secret value. Do not log this field. */
+  readonly secret: string;
+  /** Product-safe version label, such as current or previous. */
+  readonly version: string;
+};
+
+/** Result returned by multi-secret webhook signature verification. */
+export type GitHubWebhookSignatureVerificationResult =
+  | {
+      /** Whether the signature matched one candidate secret. */
+      readonly ok: true;
+      /** Product-safe version label for the matched secret. */
+      readonly matchedSecretVersion: string;
+    }
+  | {
+      /** Whether the signature matched one candidate secret. */
+      readonly ok: false;
+      /** Product-safe rejection reason. */
+      readonly reason: "invalid_signature";
+    };
+
 /** Error raised when required GitHub webhook headers are absent. */
 export class GitHubWebhookHeaderError extends Error {
   /** Creates a GitHub webhook header error. */
@@ -54,11 +77,38 @@ export function verifyGitHubWebhookSignature(options: {
   readonly rawBody: Uint8Array;
   readonly signature256: string;
 }): boolean {
-  const expected = Buffer.from(
-    computeGitHubWebhookSignature(options.secret, options.rawBody),
-    "utf8",
-  );
+  return verifyGitHubWebhookSignatureWithSecrets({
+    rawBody: options.rawBody,
+    secrets: [{ secret: options.secret, version: "current" }],
+    signature256: options.signature256,
+  }).ok;
+}
+
+/** Verifies a GitHub webhook signature against current and rotation-window secrets. */
+export function verifyGitHubWebhookSignatureWithSecrets(options: {
+  readonly rawBody: Uint8Array;
+  readonly secrets: readonly GitHubWebhookSecretCandidate[];
+  readonly signature256: string;
+}): GitHubWebhookSignatureVerificationResult {
   const actual = Buffer.from(options.signature256, "utf8");
 
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  for (const candidate of options.secrets) {
+    if (candidate.secret.length === 0) {
+      continue;
+    }
+
+    const expected = Buffer.from(
+      computeGitHubWebhookSignature(candidate.secret, options.rawBody),
+      "utf8",
+    );
+
+    if (actual.length === expected.length && timingSafeEqual(actual, expected)) {
+      return {
+        matchedSecretVersion: candidate.version,
+        ok: true,
+      };
+    }
+  }
+
+  return { ok: false, reason: "invalid_signature" };
 }

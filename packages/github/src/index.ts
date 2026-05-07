@@ -16,6 +16,9 @@ export {
   computeGitHubWebhookSignature,
   GitHubWebhookHeaderError,
   type GitHubWebhookHeaders,
+  type GitHubWebhookSecretCandidate,
+  type GitHubWebhookSignatureVerificationResult,
   readGitHubWebhookHeaders,
   verifyGitHubWebhookSignature,
+  verifyGitHubWebhookSignatureWithSecrets,
 } from "./webhook-signature";
