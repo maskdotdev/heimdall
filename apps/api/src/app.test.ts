@@ -387,7 +387,9 @@ describe("api app", () => {
       OBSERVABILITY_SERVICE_NAME: "code-review-api",
     });
     const metricPoints: TelemetryMetricPoint[] = [];
+    const securityEvents = createMemorySecurityEventSink();
     const app = createApiApp({
+      adminSecurityEventSink: securityEvents,
       githubWebhookHandler: {
         handle: async () => {
           throw new WebhookAuthenticationError("GitHub webhook signature verification failed.");
@@ -404,7 +406,9 @@ describe("api app", () => {
       new Request("http://localhost/webhooks/github", {
         body: JSON.stringify({ action: "opened" }),
         headers: {
+          "x-github-delivery": "delivery-rejected",
           "x-github-event": "pull_request",
+          "x-request-id": "req_webhook_rejected",
         },
         method: "POST",
       }),
@@ -423,6 +427,24 @@ describe("api app", () => {
       },
       value: 1,
     });
+    expect(securityEvents.events()).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          action: "opened",
+          deliveryId: "delivery-rejected",
+          eventName: "pull_request",
+          reason: "invalid_signature",
+          requestId: "req_webhook_rejected",
+          route: "/webhooks/github",
+          statusCode: 401,
+        }),
+        resourceId: "delivery-rejected",
+        resourceType: "webhook_delivery",
+        severity: "high",
+        source: "api",
+        type: "invalid_webhook_signature_spike",
+      }),
+    ]);
   });
 
   it("exposes liveness without touching external dependencies", async () => {

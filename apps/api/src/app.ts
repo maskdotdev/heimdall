@@ -835,6 +835,8 @@ type WebhookTelemetryState = {
   readonly eventName: string;
   /** Provider identifier label. */
   readonly provider: string;
+  /** Request ID used for trace and security-event correlation. */
+  readonly requestId: string;
   /** Request start time used for duration metrics. */
   readonly startedAtMs: number;
   /** Span handle for the provider webhook delivery. */
@@ -6756,6 +6758,11 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       } catch (error) {
         if (error instanceof WebhookAuthenticationError) {
           set.status = 401;
+          tryRecordInvalidGitHubWebhookSignatureSecurityEvent(
+            securityEventSink,
+            request,
+            telemetry,
+          );
           finishWebhookDeliveryTelemetry(metrics, telemetry, {
             error,
             reason: "invalid_signature",
@@ -15504,6 +15511,7 @@ function startWebhookDeliveryTelemetry(
 ): WebhookTelemetryState {
   const action = webhookActionFromRawBody(rawBody);
   const eventName = webhookEventNameFromRequest(request);
+  const requestId = requestIdFromRequest(request);
   const span = traces.startSpan(OBSERVABILITY_SPAN_NAMES.webhookDelivery, {
     attributes: {
       "webhook.action": action,
@@ -15511,16 +15519,48 @@ function startWebhookDeliveryTelemetry(
       "webhook.provider": provider,
     },
     kind: "server",
-    traceContext: traceContextFromRequest(request, requestIdFromRequest(request)),
+    traceContext: traceContextFromRequest(request, requestId),
   });
 
   return {
     action,
     eventName,
     provider,
+    requestId,
     span,
     startedAtMs: Date.now(),
   };
+}
+
+/** Records a product-safe security event for rejected GitHub webhook signatures. */
+function tryRecordInvalidGitHubWebhookSignatureSecurityEvent(
+  securityEventSink: SecurityEventSink,
+  request: Request,
+  telemetry: WebhookTelemetryState,
+): void {
+  try {
+    const deliveryId = webhookHeaderMetadataValue(request.headers, "x-github-delivery");
+    recordSecurityEvent(securityEventSink, {
+      metadata: {
+        action: telemetry.action,
+        eventName: telemetry.eventName,
+        method: request.method,
+        provider: telemetry.provider,
+        reason: "invalid_signature",
+        requestId: telemetry.requestId,
+        route: routeFromRequest(request),
+        statusCode: 401,
+        ...(deliveryId ? { deliveryId } : {}),
+      },
+      resourceId: deliveryId,
+      resourceType: "webhook_delivery",
+      severity: "high",
+      source: "api",
+      type: "invalid_webhook_signature_spike",
+    });
+  } catch {
+    // Security event sinks must never change the webhook response outcome.
+  }
 }
 
 /** Ends webhook delivery telemetry and emits low-cardinality delivery metrics. */
@@ -15581,6 +15621,12 @@ function webhookDeliveryMetricLabels(
 /** Returns the provider event name from a webhook request. */
 function webhookEventNameFromRequest(request: Request): string {
   return normalizeWebhookLabel(request.headers.get("x-github-event") ?? "unknown");
+}
+
+/** Returns a bounded product-safe webhook header value for metadata. */
+function webhookHeaderMetadataValue(headers: Headers, name: string): string | undefined {
+  const value = emptyToUndefined(headers.get(name) ?? undefined);
+  return value ? value.slice(0, 120) : undefined;
 }
 
 /** Returns a provider action label from a JSON webhook payload when present. */
