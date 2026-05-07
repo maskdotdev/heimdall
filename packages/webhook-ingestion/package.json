@@ -25,6 +25,7 @@
     "@repo/db": "workspace:*",
     "@repo/github": "workspace:*",
     "@repo/memory": "workspace:*",
+    "@repo/observability": "workspace:*",
     "@repo/queue": "workspace:*",
     "@repo/rules": "workspace:*"
   },

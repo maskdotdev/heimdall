@@ -21,6 +21,10 @@ const syncInstallationEnvelope = {
   createdAt: "2026-01-01T00:00:00.000Z",
   attempt: 0,
   maxAttempts: 3,
+  traceContext: {
+    requestId: "req_queue_test",
+    traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+  },
   payload: {
     installationId: "inst_test",
     provider: "github",
@@ -164,6 +168,10 @@ describeRedis("BullMQ producer integration", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       attempt: 0,
       maxAttempts: 3,
+      traceContext: {
+        requestId: "req_queue_test",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
       payload: {
         installationId: "inst_test",
         provider: "github",

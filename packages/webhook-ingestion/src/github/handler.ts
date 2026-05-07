@@ -19,6 +19,11 @@ import {
   readGitHubWebhookHeaders,
   verifyGitHubWebhookSignature,
 } from "@repo/github";
+import {
+  createTelemetryTraceContextFromHeaders,
+  normalizeTelemetryTraceContext,
+  type TelemetryTraceContext,
+} from "@repo/observability";
 import { eq, inArray } from "drizzle-orm";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
@@ -56,6 +61,7 @@ type NormalizedEvent = {
   readonly headers: GitHubWebhookHeaders;
   readonly payloadHash: string;
   readonly payload: Record<string, unknown>;
+  readonly traceContext: TelemetryTraceContext;
   readonly installation?: NormalizedGitHubInstallation | undefined;
   readonly repositories: readonly NormalizedGitHubRepository[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
@@ -90,13 +96,18 @@ export class GitHubWebhookHandler {
       throw new WebhookAuthenticationError("GitHub webhook signature verification failed.");
     }
 
-    const normalized = this.normalize(headers, input.rawBody);
+    const inboundTraceContext = createTelemetryTraceContextFromHeaders(input.headers);
+    const normalized = this.normalize(headers, input.rawBody, inboundTraceContext);
     const result = await this.persist(normalized);
 
     return result;
   }
 
-  private normalize(headers: GitHubWebhookHeaders, rawBody: Uint8Array): NormalizedEvent {
+  private normalize(
+    headers: GitHubWebhookHeaders,
+    rawBody: Uint8Array,
+    traceContext: TelemetryTraceContext,
+  ): NormalizedEvent {
     const payload = parseGitHubWebhookPayload(rawBody);
 
     if (!supportedEvents.has(headers.eventName)) {
@@ -104,6 +115,7 @@ export class GitHubWebhookHandler {
         headers,
         payloadHash: sha256(rawBody),
         payload,
+        traceContext,
         repositories: [],
       };
     }
@@ -118,6 +130,7 @@ export class GitHubWebhookHandler {
       headers,
       payloadHash: sha256(rawBody),
       payload,
+      traceContext,
       installation,
       repositories,
       pullRequest,
@@ -189,6 +202,11 @@ export class GitHubWebhookHandler {
         };
       }
 
+      const traceContext = normalizeTelemetryTraceContext({
+        ...normalized.traceContext,
+        parentEventId: webhookEventId,
+        requestId: normalized.headers.deliveryId,
+      });
       const jobs = planGitHubWebhookJobs({
         deliveryId: normalized.headers.deliveryId,
         eventName: normalized.headers.eventName,
@@ -198,6 +216,7 @@ export class GitHubWebhookHandler {
         repositorySettings: await loadPersistedRepositorySettings(tx, normalized.repositories),
         pullRequest: normalized.pullRequest,
         feedback: normalized.feedback,
+        traceContext,
       });
 
       for (const job of jobs) {

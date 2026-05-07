@@ -1,4 +1,5 @@
 import { JOB_TYPES, type JobPayload, type RepositorySettings } from "@repo/contracts";
+import type { TelemetryTraceContext } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
 import { buildReviewPolicySnapshot, shouldReviewPr } from "@repo/rules";
 import { newId } from "../ids";
@@ -19,6 +20,7 @@ type PlanOptions = {
   readonly repositorySettings?: readonly RepositorySettings[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
   readonly feedback?: NormalizedGitHubFeedback | undefined;
+  readonly traceContext?: TelemetryTraceContext | undefined;
 };
 
 const createdAt = (): string => new Date().toISOString();
@@ -27,6 +29,7 @@ const envelope = <TPayload extends JobPayload>(
   jobType: string,
   idempotencyKey: string,
   payload: TPayload,
+  traceContext?: TelemetryTraceContext | undefined,
 ) => ({
   jobId: newId("job"),
   jobType,
@@ -35,6 +38,7 @@ const envelope = <TPayload extends JobPayload>(
   createdAt: createdAt(),
   attempt: 0,
   maxAttempts: 3,
+  ...(traceContext ? { traceContext } : {}),
   payload,
 });
 
@@ -59,6 +63,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           provider: "github",
           reason: "installed",
         },
+        options.traceContext,
       ),
     });
   }
@@ -79,6 +84,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           provider: "github",
           reason: "repository_added",
         },
+        options.traceContext,
       ),
     });
   }
@@ -128,6 +134,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           priority: "high",
           reason: "pr_review",
         },
+        options.traceContext,
       ),
     });
     jobs.push({
@@ -144,6 +151,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           headSha: snapshot.headSha,
           trigger: "webhook",
         },
+        options.traceContext,
       ),
     });
   }
@@ -183,6 +191,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
             : {}),
           ...(options.feedback.command ? { feedbackCommand: options.feedback.command } : {}),
         },
+        options.traceContext,
       ),
     });
   }

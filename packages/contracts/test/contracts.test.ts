@@ -381,6 +381,12 @@ describe("contract validation", () => {
       createdAt: "2026-04-28T12:00:00.000Z",
       attempt: 0,
       maxAttempts: 3,
+      traceContext: {
+        parentEventId: "webhook_01HXAMPLE",
+        requestId: "req_01HXAMPLE",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        tracestate: "vendor=value",
+      },
       payload: validReviewPullRequestJobPayloadFixture,
     };
 

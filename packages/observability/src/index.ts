@@ -168,10 +168,16 @@ export const TelemetryMetricPointSchema = Type.Object(
 /** Trace context propagated between requests, durable jobs, and workers. */
 export const TelemetryTraceContextSchema = Type.Object(
   {
-    parentEventId: Type.Optional(Type.String({ minLength: 1 })),
-    requestId: Type.Optional(Type.String({ minLength: 1 })),
-    traceparent: Type.Optional(Type.String({ minLength: 55 })),
-    tracestate: Type.Optional(Type.String({ minLength: 1 })),
+    parentEventId: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+    requestId: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+    traceparent: Type.Optional(
+      Type.String({
+        maxLength: 55,
+        minLength: 55,
+        pattern: "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      }),
+    ),
+    tracestate: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
   },
   { additionalProperties: false },
 );
@@ -1234,7 +1240,19 @@ function readTelemetryHeader(
     return headers.get(name) ?? undefined;
   }
 
-  return headers[name] ?? headers[name.toLowerCase()];
+  const directValue = headers[name] ?? headers[name.toLowerCase()];
+  if (directValue !== undefined) {
+    return directValue;
+  }
+
+  const normalizedName = name.toLowerCase();
+  for (const [headerName, headerValue] of Object.entries(headers)) {
+    if (headerName.toLowerCase() === normalizedName) {
+      return headerValue;
+    }
+  }
+
+  return undefined;
 }
 
 /** Normalizes bounded trace context text fields. */

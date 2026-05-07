@@ -1058,6 +1058,9 @@ importers:
       '@repo/memory':
         specifier: workspace:*
         version: link:../memory
+      '@repo/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@repo/queue':
         specifier: workspace:*
         version: link:../queue

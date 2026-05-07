@@ -1959,7 +1959,11 @@ describe("api app", () => {
           cookie: login.cookie,
           "idempotency-key": "idem_sync",
           origin: adminOrigin,
+          traceparent: "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01",
+          tracestate: "vendor=value",
           "x-csrf-token": login.csrfToken,
+          "x-heimdall-parent-event-id": "webhook_1",
+          "x-request-id": "req_admin_sync",
         },
       }),
     );
@@ -1977,8 +1981,14 @@ describe("api app", () => {
     expect(syncRequests[0]).toMatchObject({
       actor: expect.objectContaining({ actorUserId: "oidc:usr_admin" }),
       idempotencyKey: "idem_sync",
-      requestId: expect.stringMatching(/^req_/u),
+      requestId: "req_admin_sync",
       sessionId: expect.stringMatching(/^sess_/u),
+      traceContext: {
+        parentEventId: "webhook_1",
+        requestId: "req_admin_sync",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        tracestate: "vendor=value",
+      },
     });
   });
 

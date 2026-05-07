@@ -119,7 +119,10 @@ import {
   type AdminControlPlaneTelemetryEventInput,
   type AdminControlPlaneTelemetryEventName,
   createNoopObservabilitySink,
+  createTelemetryTraceContextFromHeaders,
+  normalizeTelemetryTraceContext,
   type ObservabilitySink,
+  type TelemetryTraceContext,
   tryRecordAdminControlPlaneTelemetryEvent,
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
@@ -777,6 +780,8 @@ type AdminRequestContext = {
   readonly actor: AdminActor;
   /** Verified admin session. */
   readonly session: AdminSession;
+  /** Product-safe trace context propagated into durable work. */
+  readonly traceContext: TelemetryTraceContext;
   /** Request ID propagated into audit logs. */
   readonly requestId: string;
   /** Request-scoped support-session ID for privileged raw artifact handling. */
@@ -787,6 +792,8 @@ type AdminRequestContext = {
 type ProductRequestContext = {
   /** Verified product session. */
   readonly session: ProductSessionContext;
+  /** Product-safe trace context propagated into durable work. */
+  readonly traceContext: TelemetryTraceContext;
   /** Request ID propagated into response headers. */
   readonly requestId: string;
 };
@@ -806,6 +813,8 @@ type ApiV1RequestContext =
       readonly productActor: ProductActor;
       /** Verified product session. */
       readonly session: ProductSessionContext;
+      /** Product-safe trace context propagated into durable work. */
+      readonly traceContext: TelemetryTraceContext;
       /** Request ID propagated into audit logs and response headers. */
       readonly requestId: string;
     };
@@ -2033,6 +2042,14 @@ type ScopedAdminBillingReconciliationQuery = AdminBillingReconciliationQuery & {
   readonly orgId: string;
 };
 
+/** Request used to enqueue a durable billing reconciliation job. */
+type AdminBillingReconciliationEnqueueRequest = ScopedAdminBillingReconciliationQuery & {
+  /** Product-safe trace context propagated into durable work. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
+  /** Request ID that authorized the enqueue when available. */
+  readonly requestId?: string | undefined;
+};
+
 /** Billing reconciliation issue severity. */
 type AdminBillingReconciliationSeverity = "warning" | "critical";
 
@@ -2145,6 +2162,8 @@ type AdminAuditEventInput = {
   readonly actor: AdminActor;
   /** Session ID that authorized the event when available. */
   readonly sessionId?: string | undefined;
+  /** Product-safe trace context propagated into durable work. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
   /** Request ID that authorized the event. */
   readonly requestId: string;
   /** Audit action. */
@@ -2420,7 +2439,7 @@ export type AdminControlPlaneService = {
   ) => Promise<AdminBillingReconciliationSummary>;
   /** Enqueues a durable billing reconciliation repair job. */
   readonly enqueueBillingReconciliation: (
-    query: ScopedAdminBillingReconciliationQuery,
+    query: AdminBillingReconciliationEnqueueRequest,
   ) => Promise<AdminBillingReconciliationRunSummary>;
   /** Creates a provider checkout session for an organization billing account. */
   readonly createBillingCheckoutSession: (
@@ -3057,6 +3076,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
             ),
             requestId: guardResult.requestId,
             sessionId: guardResult.session.sessionId,
+            traceContext: guardResult.traceContext,
           },
         );
         set.status = 202;
@@ -3746,6 +3766,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           ),
           requestId: guardResult.requestId,
           sessionId: guardResult.session.sessionId,
+          traceContext: guardResult.traceContext,
         });
         set.status = 202;
 
@@ -3832,6 +3853,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           ),
           requestId: guardResult.requestId,
           sessionId: guardResult.session.sessionId,
+          traceContext: guardResult.traceContext,
         });
         set.status = 202;
 
@@ -3889,6 +3911,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           ...(body.reason ? { reason: body.reason } : {}),
           requestId: guardResult.requestId,
           sessionId: guardResult.session.sessionId,
+          traceContext: guardResult.traceContext,
         });
         set.status = 202;
 
@@ -4231,6 +4254,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           ),
           requestId: guardResult.requestId,
           sessionId: guardResult.session.sessionId,
+          traceContext: guardResult.traceContext,
         });
         set.status = 202;
 
@@ -4332,6 +4356,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           ),
           requestId: guardResult.requestId,
           sessionId: guardResult.session.sessionId,
+          traceContext: guardResult.traceContext,
         });
 
         return { data: outcome };
@@ -6101,6 +6126,8 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       const run = await getAdminControlPlaneService().enqueueBillingReconciliation({
         ...query,
         orgId: requireValue(query.orgId),
+        requestId: guardResult.requestId,
+        traceContext: guardResult.traceContext,
       });
       await getAdminControlPlaneService().recordAuditEvent({
         action: "billing.reconciliation.enqueued",
@@ -7664,6 +7691,7 @@ async function enqueueInstallationSync(
       maxAttempts: 3,
       payload,
       schemaVersion: "sync_installation_job.v1",
+      ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
     const [inserted] = await transactionDb
@@ -7770,6 +7798,7 @@ async function enqueueRepositorySync(
       maxAttempts: 3,
       payload,
       schemaVersion: "sync_installation_job.v1",
+      ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
     const [inserted] = await transactionDb
@@ -7869,6 +7898,7 @@ async function enqueueRepositoryReindex(
       maxAttempts: 3,
       payload,
       schemaVersion: "index_repo_commit_job.v1",
+      ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
     const [inserted] = await transactionDb
@@ -7965,6 +7995,7 @@ async function enqueueReviewRerun(
       maxAttempts: 3,
       payload,
       schemaVersion: "job_envelope.v1",
+      ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
     const [inserted] = await transactionDb
@@ -9438,6 +9469,7 @@ async function enqueueFindingOutcomeMemoryUpdate(
     maxAttempts: 3,
     payload,
     schemaVersion: "job_envelope.v1",
+    ...(request.traceContext ? { traceContext: request.traceContext } : {}),
   };
 
   const [inserted] = await db
@@ -11336,7 +11368,7 @@ async function listUsageAnomalyIssues(
 /** Enqueues a durable billing reconciliation repair job. */
 async function enqueueBillingReconciliation(
   db: HeimdallDatabase,
-  query: ScopedAdminBillingReconciliationQuery,
+  query: AdminBillingReconciliationEnqueueRequest,
 ): Promise<AdminBillingReconciliationRunSummary> {
   const payload = billingReconciliationJobPayload(query);
   const jobKey = [
@@ -11354,6 +11386,7 @@ async function enqueueBillingReconciliation(
     maxAttempts: 3,
     payload,
     schemaVersion: "billing_reconcile_job.v1",
+    ...(query.traceContext ? { traceContext: query.traceContext } : {}),
   };
   const [inserted] = await db
     .insert(backgroundJobs)
@@ -11363,6 +11396,7 @@ async function enqueueBillingReconciliation(
       jobType: JOB_TYPES.BillingReconcile,
       maxAttempts: 3,
       metadata: {
+        ...(query.requestId ? { requestId: query.requestId } : {}),
         source: "admin_billing_reconciliation",
       },
       orgId: query.orgId,
@@ -13134,6 +13168,7 @@ function guardAdminSession(
     actor: session.actor,
     requestId,
     session,
+    traceContext: traceContextFromRequest(request, requestId),
     ...(supportSessionId ? { supportSessionId } : {}),
   };
 }
@@ -13191,6 +13226,7 @@ async function guardProductSession(
   return {
     requestId,
     session,
+    traceContext: traceContextFromRequest(request, requestId),
   };
 }
 
@@ -13216,6 +13252,7 @@ async function guardApiV1Session(
         productActor: productGuard.session.actor,
         requestId: productGuard.requestId,
         session: productGuard.session,
+        traceContext: productGuard.traceContext,
       };
     }
     if (!hasAdminCookie) {
@@ -13681,10 +13718,13 @@ function setAdminResponseHeaders(
     set.headers["access-control-allow-headers"] = [
       "content-type",
       "idempotency-key",
+      "traceparent",
+      "tracestate",
       "x-csrf-token",
       "x-heimdall-idp-assertion",
       "x-heimdall-idp-signature",
       "x-heimdall-idp-timestamp",
+      "x-heimdall-parent-event-id",
       "x-heimdall-support-session-id",
       "x-request-id",
     ].join(",");
@@ -13713,8 +13753,15 @@ function setProductResponseHeaders(request: Request, set: AdminResponseSet): voi
 
   if (origin && allowedOrigins.includes(origin)) {
     set.headers["access-control-allow-credentials"] = "true";
-    set.headers["access-control-allow-headers"] = "content-type,x-request-id";
-    set.headers["access-control-allow-methods"] = "GET,POST,OPTIONS";
+    set.headers["access-control-allow-headers"] = [
+      "content-type",
+      "idempotency-key",
+      "traceparent",
+      "tracestate",
+      "x-heimdall-parent-event-id",
+      "x-request-id",
+    ].join(",");
+    set.headers["access-control-allow-methods"] = "GET,POST,PATCH,OPTIONS";
     set.headers["access-control-allow-origin"] = origin;
     set.headers.vary = "Origin";
   }
@@ -14450,6 +14497,14 @@ function routeFromRequest(request: Request): string {
 /** Returns a request ID from a header or generates one. */
 function requestIdFromRequest(request: Request): string {
   return request.headers.get("x-request-id") ?? `req_${randomUUID()}`;
+}
+
+/** Returns normalized trace context for a request and the selected request ID. */
+function traceContextFromRequest(request: Request, requestId: string): TelemetryTraceContext {
+  return normalizeTelemetryTraceContext({
+    ...createTelemetryTraceContextFromHeaders(request.headers),
+    requestId,
+  });
 }
 
 /** Returns a stable client key for admin route rate limiting. */

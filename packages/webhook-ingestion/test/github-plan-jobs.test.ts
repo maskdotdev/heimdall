@@ -23,10 +23,20 @@ describe("GitHub webhook job planning", () => {
       action: "created",
       installation: normalizeGitHubInstallation(installationPayload),
       repositories: normalizeGitHubRepositories(installationPayload),
+      traceContext: {
+        parentEventId: "webhook_1",
+        requestId: "delivery-1",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
     });
 
     expect(job?.queueName).toBe(QUEUE_NAMES.repoSync);
     expect(job?.envelope.jobType).toBe(JOB_TYPES.SyncInstallation);
+    expect(job?.envelope.traceContext).toEqual({
+      parentEventId: "webhook_1",
+      requestId: "delivery-1",
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    });
   });
 
   it("plans index and review jobs for pull request openings", () => {

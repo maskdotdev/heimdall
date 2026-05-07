@@ -329,6 +329,22 @@ describe("telemetry trace context", () => {
       "x-request-id": "req_1",
     });
   });
+
+  it("extracts trace context from case-insensitive header records", () => {
+    const context = createTelemetryTraceContextFromHeaders({
+      Traceparent: "00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01",
+      Tracestate: "vendor=value",
+      "X-Heimdall-Parent-Event-Id": "webhook_1",
+      "X-Request-Id": "req_1",
+    });
+
+    expect(context).toEqual({
+      parentEventId: "webhook_1",
+      requestId: "req_1",
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "vendor=value",
+    });
+  });
 });
 
 describe("observability runtime bootstrap", () => {
