@@ -71,6 +71,7 @@ import {
   type MemoryCandidate,
   type MemoryScope,
   MemoryScopeSchema,
+  type MemoryTelemetryOptions,
 } from "@repo/memory";
 import {
   createObservabilityRuntime,
@@ -540,7 +541,11 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     [JOB_TYPES.UpdateMemory]: async (envelope) => {
       const payload = asUpdateMemoryPayload(envelope.payload);
       await updateMemoryFromFindingOutcome(options.db, payload);
-      await recordOutcomeFromProviderFeedback(options.db, payload, envelope.createdAt);
+      await recordOutcomeFromProviderFeedback(options.db, payload, envelope.createdAt, {
+        ...(options.metrics ? { metrics: options.metrics } : {}),
+        ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+        ...(options.traces ? { traces: options.traces } : {}),
+      });
     },
     [JOB_TYPES.BillingReconcile]: async (envelope) => {
       const payload = asBillingReconcilePayload(envelope.payload);
@@ -1473,6 +1478,7 @@ async function recordOutcomeFromProviderFeedback(
   db: HeimdallDatabase,
   payload: UpdateMemoryJobPayload,
   receivedAt: string,
+  telemetry: MemoryTelemetryOptions = {},
 ): Promise<void> {
   if (
     (payload.reason !== "comment_reply" && payload.reason !== "provider_reaction") ||
@@ -1517,7 +1523,7 @@ async function recordOutcomeFromProviderFeedback(
       .onConflictDoNothing();
   }
 
-  await createMemoryCandidatesFromProviderCommand(db, payload, published, receivedAt);
+  await createMemoryCandidatesFromProviderCommand(db, payload, published, receivedAt, telemetry);
 }
 
 /** Finds a published finding row from provider feedback metadata. */
@@ -1679,6 +1685,7 @@ async function createMemoryCandidatesFromProviderCommand(
     readonly repoId: string;
   },
   receivedAt: string,
+  telemetry: MemoryTelemetryOptions = {},
 ): Promise<void> {
   const command = feedbackCommandFromPayload(payload);
   if (!command) {
@@ -1698,8 +1705,11 @@ async function createMemoryCandidatesFromProviderCommand(
     createdAt: receivedAt,
     createdByLogin: payload.actorLogin,
     findingFingerprint: published.finding.fingerprint,
+    ...(telemetry.metrics ? { metrics: telemetry.metrics } : {}),
     orgId: published.orgId,
     repoId: published.repoId,
+    ...(telemetry.traceContext ? { traceContext: telemetry.traceContext } : {}),
+    ...(telemetry.traces ? { traces: telemetry.traces } : {}),
   });
 
   for (const candidate of candidates) {

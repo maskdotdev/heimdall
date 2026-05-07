@@ -6,6 +6,16 @@ import {
   FindingCategorySchema,
   FindingSeveritySchema,
 } from "@repo/contracts";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { type Static, Type } from "@sinclair/typebox";
 
 /** Feedback event kinds accepted by the memory package. */
@@ -402,6 +412,16 @@ export type ReviewerMarker = {
   readonly bodyHash?: string | undefined;
 };
 
+/** Optional telemetry dependencies used by feedback and memory operations. */
+export type MemoryTelemetryOptions = {
+  /** Optional metric recorder for aggregate feedback and memory counters. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Optional trace context propagated from the parent job or review. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe feedback and memory spans. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
+};
+
 /** Candidate finding subset required by suppression evaluation. */
 export type SuppressionCandidateFinding = Pick<
   CandidateFinding,
@@ -409,7 +429,7 @@ export type SuppressionCandidateFinding = Pick<
 >;
 
 /** Suppression engine input. */
-export type SuppressionInput = {
+export type SuppressionInput = MemoryTelemetryOptions & {
   /** Organization ID for memory scoping. */
   readonly orgId: string;
   /** Repository ID for memory scoping. */
@@ -469,7 +489,7 @@ export type MemoryRetrievalChangedFile = {
 };
 
 /** Relevant memory retrieval input for review context construction. */
-export type RetrieveRelevantMemoryInput = {
+export type RetrieveRelevantMemoryInput = MemoryTelemetryOptions & {
   /** Organization ID for memory scoping. */
   readonly orgId: string;
   /** Repository ID for memory scoping. */
@@ -685,15 +705,26 @@ export function actorCanRunCommand(actor: FeedbackActor, command: FeedbackComman
 }
 
 /** Classifies a feedback event into deterministic feedback signals. */
-export function classifyFeedbackEvent(input: {
-  /** Feedback event to classify. */
-  readonly event: FeedbackEvent;
-  /** Redacted body text associated with the event, if any. */
-  readonly redactedText?: string | undefined;
-  /** Parsed command from the body text, if already available. */
-  readonly command?: FeedbackCommand | undefined;
-}): readonly FeedbackSignal[] {
+export function classifyFeedbackEvent(
+  input: MemoryTelemetryOptions & {
+    /** Feedback event to classify. */
+    readonly event: FeedbackEvent;
+    /** Redacted body text associated with the event, if any. */
+    readonly redactedText?: string | undefined;
+    /** Parsed command from the body text, if already available. */
+    readonly command?: FeedbackCommand | undefined;
+  },
+): readonly FeedbackSignal[] {
   const event = input.event;
+  const processSpan = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryProcessFeedback, {
+    ...feedbackEventTelemetryAttributes(event),
+    "feedback.has_command": input.command !== undefined,
+    "feedback.has_published_finding": event.publishedFindingId !== undefined,
+  });
+  const classifySpan = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryClassifySignal, {
+    ...feedbackEventTelemetryAttributes(event),
+    "feedback.has_command": input.command !== undefined,
+  });
   const signal = (
     signalKind: FeedbackSignalKind,
     polarity: FeedbackSignal["polarity"],
@@ -712,44 +743,104 @@ export function classifyFeedbackEvent(input: {
     createdAt: event.receivedAt,
   });
 
-  if (input.command) {
-    return [signalForCommand(input.command, signal)];
-  }
+  input.metrics?.count(OBSERVABILITY_METRIC_NAMES.feedbackEventsTotal, {
+    labels: {
+      event_type: event.eventKind,
+      provider: sanitizeMemoryTelemetryLabel(event.provider),
+      source: event.source,
+    },
+  });
 
-  if (event.eventKind === "review_thread_resolved") {
-    return [signal("thread_resolved", "positive", 0.35, 0.65, "Review thread was resolved.")];
-  }
+  const finish = (signals: readonly FeedbackSignal[]): readonly FeedbackSignal[] => {
+    recordFeedbackSignalMetrics(input.metrics, signals);
+    classifySpan?.end({
+      attributes: {
+        "feedback.signal_count": signals.length,
+        "memory.status": "succeeded",
+      },
+    });
+    processSpan?.end({
+      attributes: {
+        "feedback.signal_count": signals.length,
+        "memory.status": "succeeded",
+      },
+    });
 
-  if (event.eventKind === "review_thread_unresolved") {
-    return [signal("thread_unresolved", "mixed", 0.25, 0.6, "Review thread was reopened.")];
-  }
+    return signals;
+  };
 
-  if (event.eventKind === "pull_request_merged") {
-    return [
-      signal("pr_merged", "neutral", 0.1, 0.35, "Pull request merged without explicit feedback."),
-    ];
-  }
+  try {
+    if (input.command) {
+      return finish([signalForCommand(input.command, signal)]);
+    }
 
-  const body = normalizeText(input.redactedText ?? "");
-  if (body.includes("fixed") || body.includes("thanks")) {
-    return [signal("user_acknowledged", "positive", 0.55, 0.7, "User acknowledged the finding.")];
-  }
-  if (body.includes("wrong") || body.includes("nope")) {
-    return [signal("user_disagreed", "negative", 0.6, 0.7, "User disagreed with the finding.")];
-  }
+    if (event.eventKind === "review_thread_resolved") {
+      return finish([
+        signal("thread_resolved", "positive", 0.35, 0.65, "Review thread was resolved."),
+      ]);
+    }
 
-  return [];
+    if (event.eventKind === "review_thread_unresolved") {
+      return finish([
+        signal("thread_unresolved", "mixed", 0.25, 0.6, "Review thread was reopened."),
+      ]);
+    }
+
+    if (event.eventKind === "pull_request_merged") {
+      return finish([
+        signal("pr_merged", "neutral", 0.1, 0.35, "Pull request merged without explicit feedback."),
+      ]);
+    }
+
+    const body = normalizeText(input.redactedText ?? "");
+    if (body.includes("fixed") || body.includes("thanks")) {
+      return finish([
+        signal("user_acknowledged", "positive", 0.55, 0.7, "User acknowledged the finding."),
+      ]);
+    }
+    if (body.includes("wrong") || body.includes("nope")) {
+      return finish([
+        signal("user_disagreed", "negative", 0.6, 0.7, "User disagreed with the finding."),
+      ]);
+    }
+
+    return finish([]);
+  } catch (error) {
+    const errorClass = classifyTelemetryError(error);
+    classifySpan?.end({
+      attributes: {
+        "memory.error_class": errorClass,
+        "memory.status": "failed",
+      },
+      error,
+    });
+    processSpan?.end({
+      attributes: {
+        "memory.error_class": errorClass,
+        "memory.status": "failed",
+      },
+      error,
+    });
+    throw error;
+  }
 }
 
 /** Applies signals to a finding outcome with deterministic MVP transition rules. */
-export function applySignalsToOutcome(input: {
-  /** Existing outcome before new signals. */
-  readonly outcome: MemoryFindingOutcome;
-  /** Signals to apply in chronological order. */
-  readonly signals: readonly FeedbackSignal[];
-  /** Update timestamp. */
-  readonly updatedAt: string;
-}): MemoryFindingOutcome {
+export function applySignalsToOutcome(
+  input: MemoryTelemetryOptions & {
+    /** Existing outcome before new signals. */
+    readonly outcome: MemoryFindingOutcome;
+    /** Signals to apply in chronological order. */
+    readonly signals: readonly FeedbackSignal[];
+    /** Update timestamp. */
+    readonly updatedAt: string;
+  },
+): MemoryFindingOutcome {
+  const span = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryUpdateOutcome, {
+    "app.review_run_id": input.outcome.reviewRunId,
+    "feedback.signal_count": input.signals.length,
+    "memory.current_outcome": input.outcome.outcome,
+  });
   const aggregate = input.signals.reduce(
     (current, signal) => ({
       positiveScore: current.positiveScore + (signal.polarity === "positive" ? signal.strength : 0),
@@ -774,71 +865,80 @@ export function applySignalsToOutcome(input: {
   const addressed = input.signals.find(
     (signal) => signal.signalKind === "finding_no_longer_applies",
   );
+  const finish = (outcome: MemoryFindingOutcome): MemoryFindingOutcome => {
+    span?.end({
+      attributes: {
+        "memory.next_outcome": outcome.outcome,
+        "memory.status": "succeeded",
+        "memory.updated": outcome.outcome !== input.outcome.outcome,
+      },
+    });
+
+    return outcome;
+  };
 
   if (explicitFalsePositive) {
-    return updateOutcome(
-      input.outcome,
-      "rejected_false_positive",
-      0.98,
-      aggregate,
-      input.updatedAt,
+    return finish(
+      updateOutcome(input.outcome, "rejected_false_positive", 0.98, aggregate, input.updatedAt),
     );
   }
   if (explicitNotActionable) {
-    return updateOutcome(
-      input.outcome,
-      "rejected_not_actionable",
-      0.92,
-      aggregate,
-      input.updatedAt,
+    return finish(
+      updateOutcome(input.outcome, "rejected_not_actionable", 0.92, aggregate, input.updatedAt),
     );
   }
   if (suppressCommand) {
-    return updateOutcome(input.outcome, "suppressed", 0.94, aggregate, input.updatedAt);
+    return finish(updateOutcome(input.outcome, "suppressed", 0.94, aggregate, input.updatedAt));
   }
   if (addressed) {
-    return updateOutcome(input.outcome, "addressed", 0.9, aggregate, input.updatedAt);
+    return finish(updateOutcome(input.outcome, "addressed", 0.9, aggregate, input.updatedAt));
   }
   if (aggregate.positiveScore >= 1.2 && aggregate.negativeScore < 0.5) {
-    return updateOutcome(input.outcome, "likely_useful", 0.75, aggregate, input.updatedAt);
+    return finish(updateOutcome(input.outcome, "likely_useful", 0.75, aggregate, input.updatedAt));
   }
   if (aggregate.negativeScore >= 1 && aggregate.positiveScore < 0.4) {
-    return updateOutcome(
-      input.outcome,
-      "rejected_not_actionable",
-      0.75,
-      aggregate,
-      input.updatedAt,
+    return finish(
+      updateOutcome(input.outcome, "rejected_not_actionable", 0.75, aggregate, input.updatedAt),
     );
   }
   if (aggregate.positiveScore > input.outcome.positiveScore) {
-    return updateOutcome(input.outcome, "acknowledged", 0.55, aggregate, input.updatedAt);
+    return finish(updateOutcome(input.outcome, "acknowledged", 0.55, aggregate, input.updatedAt));
   }
 
-  return updateOutcome(
-    input.outcome,
-    input.outcome.outcome,
-    input.outcome.confidence,
-    aggregate,
-    input.updatedAt,
+  return finish(
+    updateOutcome(
+      input.outcome,
+      input.outcome.outcome,
+      input.outcome.confidence,
+      aggregate,
+      input.updatedAt,
+    ),
   );
 }
 
 /** Creates memory candidates from a trusted parsed command. */
-export function createMemoryCandidatesFromCommand(input: {
-  /** Parsed command. */
-  readonly command: FeedbackCommand;
-  /** Organization ID. */
-  readonly orgId: string;
-  /** Repository ID. */
-  readonly repoId?: string | undefined;
-  /** Published finding fingerprint related to exact suppression commands. */
-  readonly findingFingerprint?: string | undefined;
-  /** Login that issued the command. */
-  readonly createdByLogin?: string | undefined;
-  /** Creation timestamp. */
-  readonly createdAt: string;
-}): readonly MemoryCandidate[] {
+export function createMemoryCandidatesFromCommand(
+  input: MemoryTelemetryOptions & {
+    /** Parsed command. */
+    readonly command: FeedbackCommand;
+    /** Organization ID. */
+    readonly orgId: string;
+    /** Repository ID. */
+    readonly repoId?: string | undefined;
+    /** Published finding fingerprint related to exact suppression commands. */
+    readonly findingFingerprint?: string | undefined;
+    /** Login that issued the command. */
+    readonly createdByLogin?: string | undefined;
+    /** Creation timestamp. */
+    readonly createdAt: string;
+  },
+): readonly MemoryCandidate[] {
+  const span = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryCreateCandidate, {
+    "app.org_id": input.orgId,
+    ...(input.repoId ? { "app.repo_id": input.repoId } : {}),
+    "memory.command_kind": input.command.commandKind,
+    "memory.source": "command",
+  });
   const common = {
     orgId: input.orgId,
     ...(input.repoId ? { repoId: input.repoId } : {}),
@@ -850,9 +950,20 @@ export function createMemoryCandidatesFromCommand(input: {
     ...(input.createdByLogin ? { createdByLogin: input.createdByLogin } : {}),
     createdAt: input.createdAt,
   };
+  const finish = (candidates: readonly MemoryCandidate[]): readonly MemoryCandidate[] => {
+    recordMemoryCandidateMetrics(input.metrics, candidates);
+    span?.end({
+      attributes: {
+        "memory.candidate_count": candidates.length,
+        "memory.status": "succeeded",
+      },
+    });
+
+    return candidates;
+  };
 
   if (input.command.commandKind === "remember_fact" && input.command.content) {
-    return [
+    return finish([
       {
         ...common,
         id: stableId("memcand", [
@@ -865,11 +976,11 @@ export function createMemoryCandidatesFromCommand(input: {
         proposedContent: input.command.content,
         proposedAppliesTo: input.command.appliesTo ?? {},
       },
-    ];
+    ]);
   }
 
   if (input.command.commandKind === "suppress_exact" && input.findingFingerprint) {
-    return [
+    return finish([
       {
         ...common,
         id: stableId("memcand", [input.orgId, input.findingFingerprint, input.createdAt]),
@@ -882,14 +993,14 @@ export function createMemoryCandidatesFromCommand(input: {
         },
         proposedAppliesTo: { findingFingerprints: [input.findingFingerprint] },
       },
-    ];
+    ]);
   }
 
   if (
     input.command.commandKind === "suppress_similar" ||
     input.command.commandKind === "disable_category_in_scope"
   ) {
-    return [
+    return finish([
       {
         ...common,
         id: stableId("memcand", [
@@ -905,25 +1016,34 @@ export function createMemoryCandidatesFromCommand(input: {
         proposedContent: input.command.content ?? "Suppress similar findings.",
         proposedAppliesTo: input.command.appliesTo ?? {},
       },
-    ];
+    ]);
   }
 
-  return [];
+  return finish([]);
 }
 
 /** Converts an approved or auto-activated candidate into an active memory fact. */
-export function activateMemoryCandidate(input: {
-  /** Candidate to activate. */
-  readonly candidate: MemoryCandidate;
-  /** New memory fact ID. */
-  readonly memoryFactId: string;
-  /** Activation timestamp. */
-  readonly activatedAt: string;
-  /** Optional expiration timestamp. */
-  readonly expiresAt?: string | undefined;
-}): MemoryFact {
+export function activateMemoryCandidate(
+  input: MemoryTelemetryOptions & {
+    /** Candidate to activate. */
+    readonly candidate: MemoryCandidate;
+    /** New memory fact ID. */
+    readonly memoryFactId: string;
+    /** Activation timestamp. */
+    readonly activatedAt: string;
+    /** Optional expiration timestamp. */
+    readonly expiresAt?: string | undefined;
+  },
+): MemoryFact {
   const kind = memoryKindForCandidate(input.candidate.candidateKind);
-  return {
+  const span = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryActivateFact, {
+    "app.org_id": input.candidate.orgId,
+    ...(input.candidate.repoId ? { "app.repo_id": input.candidate.repoId } : {}),
+    "memory.candidate_kind": input.candidate.candidateKind,
+    "memory.fact_kind": kind,
+    "memory.scope": input.candidate.proposedScope.level,
+  });
+  const fact: MemoryFact = {
     id: input.memoryFactId,
     orgId: input.candidate.orgId,
     ...(input.candidate.repoId ? { repoId: input.candidate.repoId } : {}),
@@ -942,23 +1062,59 @@ export function activateMemoryCandidate(input: {
     createdAt: input.activatedAt,
     updatedAt: input.activatedAt,
   };
+  recordMemoryFactMetrics(input.metrics, [fact]);
+  span?.end({
+    attributes: {
+      "memory.fact_kind": fact.kind,
+      "memory.scope": fact.scope.level,
+      "memory.status": "succeeded",
+    },
+  });
+
+  return fact;
 }
 
 /** Evaluates active memory facts for an explainable suppression decision. */
 export function evaluateSuppression(input: SuppressionInput): SuppressionDecision {
+  recordMemoryCorrelationSpan(input);
+  const span = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryMatchSuppression, {
+    "app.org_id": input.orgId,
+    "app.repo_id": input.repoId,
+    "memory.candidate_category": input.candidateFinding.category,
+    "memory.candidate_severity": input.candidateFinding.severity,
+    "memory.fact_count": input.memoryFacts.length,
+  });
   const activeFacts = input.memoryFacts
     .filter((fact) => fact.status === "active" && fact.kind === "suppression")
     .filter((fact) => memoryFactInScope(fact, input.orgId, input.repoId))
     .sort(compareMemoryPriority);
 
+  const finish = (decision: SuppressionDecision): SuppressionDecision => {
+    const matchedFact = decision.memoryFactId
+      ? activeFacts.find((fact) => fact.id === decision.memoryFactId)
+      : undefined;
+    recordSuppressionMatchMetric(input.metrics, decision, matchedFact);
+    span?.end({
+      attributes: {
+        ...(decision.matchKind ? { "memory.match_type": decision.matchKind } : {}),
+        ...(matchedFact ? { "memory.scope": matchedFact.scope.level } : {}),
+        "memory.active_fact_count": activeFacts.length,
+        "memory.status": "succeeded",
+        "memory.suppressed": decision.suppressed,
+      },
+    });
+
+    return decision;
+  };
+
   for (const fact of activeFacts) {
     const decision = evaluateMemoryFactSuppression(fact, input.candidateFinding);
     if (decision.suppressed) {
-      return decision;
+      return finish(decision);
     }
   }
 
-  return { suppressed: false, confidence: 0 };
+  return finish({ suppressed: false, confidence: 0 });
 }
 
 /** Retrieves active memory facts with relevance scoring, trace data, and prompt budgets. */
@@ -1072,6 +1228,163 @@ export function createPendingOutcome(input: {
     negativeScore: 0,
     updatedAt: input.createdAt,
   };
+}
+
+/** Starts a product-safe memory span when tracing is configured. */
+function startMemorySpan(
+  telemetry: MemoryTelemetryOptions,
+  name: string,
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+): TelemetrySpanHandle | undefined {
+  return telemetry.traces?.startSpan(name, {
+    attributes,
+    kind: "internal",
+    traceContext: telemetry.traceContext,
+  });
+}
+
+/** Builds product-safe feedback event span attributes. */
+function feedbackEventTelemetryAttributes(
+  event: FeedbackEvent,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "app.org_id": event.orgId,
+    "app.repo_id": event.repoId,
+    ...(event.reviewRunId ? { "app.review_run_id": event.reviewRunId } : {}),
+    "feedback.event_type": event.eventKind,
+    "feedback.provider": sanitizeMemoryTelemetryLabel(event.provider),
+    "feedback.source": event.source,
+  };
+}
+
+/** Records feedback signals grouped by bounded signal metadata. */
+function recordFeedbackSignalMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  signals: readonly FeedbackSignal[],
+): void {
+  const signalCounts = new Map<string, { readonly signal: FeedbackSignal; count: number }>();
+  for (const signal of signals) {
+    const key = `${signal.signalKind}:${signal.polarity}`;
+    const existing = signalCounts.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+
+    signalCounts.set(key, { signal, count: 1 });
+  }
+
+  for (const { count, signal } of signalCounts.values()) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.feedbackSignalsTotal, {
+      labels: {
+        polarity: signal.polarity,
+        signal_type: signal.signalKind,
+      },
+      value: count,
+    });
+  }
+}
+
+/** Records memory candidate counters grouped by status and source. */
+function recordMemoryCandidateMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  candidates: readonly MemoryCandidate[],
+): void {
+  const candidateCounts = new Map<string, { readonly candidate: MemoryCandidate; count: number }>();
+  for (const candidate of candidates) {
+    const key = `${candidate.status}:${candidate.sourceKind}:${candidate.candidateKind}`;
+    const existing = candidateCounts.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+
+    candidateCounts.set(key, { candidate, count: 1 });
+  }
+
+  for (const { candidate, count } of candidateCounts.values()) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.memoryCandidatesTotal, {
+      labels: {
+        candidate_kind: candidate.candidateKind,
+        source: candidate.sourceKind,
+        status: candidate.status,
+      },
+      value: count,
+    });
+  }
+}
+
+/** Records memory fact counters grouped by status and scope. */
+function recordMemoryFactMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  facts: readonly MemoryFact[],
+): void {
+  const factCounts = new Map<string, { readonly fact: MemoryFact; count: number }>();
+  for (const fact of facts) {
+    const key = `${fact.status}:${fact.scope.level}:${fact.kind}`;
+    const existing = factCounts.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+
+    factCounts.set(key, { fact, count: 1 });
+  }
+
+  for (const { fact, count } of factCounts.values()) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.memoryFactsTotal, {
+      labels: {
+        kind: fact.kind,
+        scope: fact.scope.level,
+        status: fact.status,
+      },
+      value: count,
+    });
+  }
+}
+
+/** Records memory suppression matches without candidate text or paths. */
+function recordSuppressionMatchMetric(
+  metrics: TelemetryMetricRecorder | undefined,
+  decision: SuppressionDecision,
+  matchedFact: MemoryFact | undefined,
+): void {
+  if (!decision.suppressed) {
+    return;
+  }
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.memorySuppressionMatchesTotal, {
+    labels: {
+      match_type: decision.matchKind ?? "unknown",
+      scope: matchedFact?.scope.level ?? "unknown",
+    },
+  });
+}
+
+/** Records a short span for provider finding correlation during suppression matching. */
+function recordMemoryCorrelationSpan(input: SuppressionInput): void {
+  const span = startMemorySpan(input, OBSERVABILITY_SPAN_NAMES.memoryCorrelateFinding, {
+    "app.org_id": input.orgId,
+    "app.repo_id": input.repoId,
+    "memory.candidate_category": input.candidateFinding.category,
+    "memory.candidate_severity": input.candidateFinding.severity,
+    "memory.changed_symbol_count": input.changedSymbolNames?.length ?? 0,
+  });
+
+  span?.end({
+    attributes: { "memory.status": "completed" },
+  });
+}
+
+/** Converts free-form provider names into bounded telemetry label values. */
+function sanitizeMemoryTelemetryLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .slice(0, 80);
+
+  return normalized.length > 0 ? normalized : "unknown";
 }
 
 /** Parses marker fields from a hidden HTML comment marker. */

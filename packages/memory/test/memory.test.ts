@@ -1,3 +1,10 @@
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import {
   activateMemoryCandidate,
@@ -117,6 +124,113 @@ describe("memory package", () => {
     expect(signals[0]?.signalKind).toBe("explicit_false_positive");
     expect(outcome.outcome).toBe("rejected_false_positive");
     expect(outcome.negativeScore).toBe(1);
+  });
+
+  it("records feedback and memory telemetry without comment text or paths", () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const command = parseFeedbackCommand("@bot never mention src/private/generated.ts", {
+      orgId: "org_1",
+      repoId: "repo_1",
+    });
+    if (!command) {
+      throw new Error("Expected a parsed feedback command.");
+    }
+
+    const signals = classifyFeedbackEvent({
+      command,
+      event: feedbackEvent,
+      metrics: createRecordingMetrics(metrics),
+      redactedText: "thanks for fixing src/private/generated.ts",
+      traces: createRecordingTraces(spans),
+    });
+    const candidates = createMemoryCandidatesFromCommand({
+      command,
+      createdAt: "2026-05-06T00:00:00.000Z",
+      metrics: createRecordingMetrics(metrics),
+      orgId: "org_1",
+      repoId: "repo_1",
+      traces: createRecordingTraces(spans),
+    });
+    const [candidate] = candidates;
+    if (!candidate) {
+      throw new Error("Expected a memory candidate.");
+    }
+    const memoryFact = activateMemoryCandidate({
+      activatedAt: "2026-05-06T00:02:00.000Z",
+      candidate,
+      memoryFactId: "mem_private",
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
+    const decision = evaluateSuppression({
+      candidateFinding: {
+        ...finding,
+        location: { ...finding.location, path: "src/private/generated.ts" },
+        title: "src/private/generated.ts should be ignored",
+      },
+      memoryFacts: [memoryFact],
+      metrics: createRecordingMetrics(metrics),
+      orgId: "org_1",
+      repoId: "repo_1",
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(signals).toEqual([expect.objectContaining({ signalKind: "explicit_suppress_command" })]);
+    expect(decision.suppressed).toBe(true);
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "counter",
+          labels: { event_type: "issue_comment_created", provider: "github", source: "webhook" },
+          name: OBSERVABILITY_METRIC_NAMES.feedbackEventsTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: { polarity: "suppression", signal_type: "explicit_suppress_command" },
+          name: OBSERVABILITY_METRIC_NAMES.feedbackSignalsTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: {
+            candidate_kind: "suppress_similar_finding",
+            source: "command",
+            status: "pending",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.memoryCandidatesTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: { kind: "suppression", scope: "repo", status: "active" },
+          name: OBSERVABILITY_METRIC_NAMES.memoryFactsTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: { match_type: "title_pattern", scope: "repo" },
+          name: OBSERVABILITY_METRIC_NAMES.memorySuppressionMatchesTotal,
+          value: 1,
+        },
+      ]),
+    );
+    expect(spans.map((span) => span.name)).toEqual(
+      expect.arrayContaining([
+        OBSERVABILITY_SPAN_NAMES.memoryProcessFeedback,
+        OBSERVABILITY_SPAN_NAMES.memoryClassifySignal,
+        OBSERVABILITY_SPAN_NAMES.memoryCreateCandidate,
+        OBSERVABILITY_SPAN_NAMES.memoryActivateFact,
+        OBSERVABILITY_SPAN_NAMES.memoryCorrelateFinding,
+        OBSERVABILITY_SPAN_NAMES.memoryMatchSuppression,
+      ]),
+    );
+
+    const serializedTelemetry = JSON.stringify({ metrics, spans });
+    expect(serializedTelemetry).not.toContain("src/private/generated.ts");
+    expect(serializedTelemetry).not.toContain("thanks for fixing");
+    expect(serializedTelemetry).not.toContain("never mention");
   });
 
   it("activates approved suppression memory and explains suppression decisions", () => {
@@ -248,6 +362,78 @@ describe("memory package", () => {
     expect(result.trace.some((entry) => entry.memoryFactId === "mem_disabled")).toBe(false);
   });
 });
+
+/** Metric record captured by telemetry assertions. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels attached to the record. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Span record captured by telemetry assertions. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric records in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}
 
 function memoryFactFixture(overrides: Partial<MemoryFact> = {}): MemoryFact {
   return {
