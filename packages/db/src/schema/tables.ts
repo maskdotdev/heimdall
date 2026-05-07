@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   boolean,
   customType,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -35,6 +36,110 @@ export const orgs = pgTable(
     ...timestamps,
   },
   (table) => [uniqueIndex("orgs_slug_unique").on(table.slug)],
+);
+
+/** Human users who authenticate to the product dashboard. */
+export const users = pgTable(
+  "users",
+  {
+    userId: text("user_id").primaryKey(),
+    primaryEmail: text("primary_email"),
+    displayName: text("display_name"),
+    avatarUrl: text("avatar_url"),
+    metadata: jsonb("metadata"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("users_primary_email_unique")
+      .on(table.primaryEmail)
+      .where(sql`${table.primaryEmail} is not null`),
+  ],
+);
+
+/** External identity provider accounts linked to product users. */
+export const userProviderAccounts = pgTable(
+  "user_provider_accounts",
+  {
+    userProviderAccountId: text("user_provider_account_id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.userId),
+    provider: text("provider").notNull(),
+    providerUserId: text("provider_user_id").notNull(),
+    providerLogin: text("provider_login"),
+    email: text("email"),
+    metadata: jsonb("metadata"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("user_provider_accounts_provider_user_unique").on(
+      table.provider,
+      table.providerUserId,
+    ),
+    index("user_provider_accounts_user_idx").on(table.userId),
+  ],
+);
+
+/** Organization memberships and product roles for authenticated users. */
+export const orgMemberships = pgTable(
+  "org_memberships",
+  {
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.userId),
+    role: text("role").notNull(),
+    metadata: jsonb("metadata"),
+    ...timestamps,
+  },
+  (table) => [
+    primaryKey({ columns: [table.orgId, table.userId] }),
+    index("org_memberships_user_idx").on(table.userId),
+    index("org_memberships_org_role_idx").on(table.orgId, table.role),
+  ],
+);
+
+/** Opaque DB-backed sessions for product dashboard/API authentication. */
+export const userSessions = pgTable(
+  "user_sessions",
+  {
+    sessionId: text("session_id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.userId),
+    sessionHash: text("session_hash").notNull(),
+    selectedOrgId: text("selected_org_id").references(() => orgs.orgId),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("user_sessions_hash_unique").on(table.sessionHash),
+    index("user_sessions_user_id_idx").on(table.userId),
+    index("user_sessions_expires_at_idx").on(table.expiresAt),
+    index("user_sessions_active_idx")
+      .on(table.userId, table.expiresAt)
+      .where(sql`${table.revokedAt} is null`),
+  ],
+);
+
+/** One-time GitHub OAuth state records used to defend login callbacks. */
+export const oauthStates = pgTable(
+  "oauth_states",
+  {
+    oauthStateId: text("oauth_state_id").primaryKey(),
+    stateHash: text("state_hash").notNull(),
+    redirectTo: text("redirect_to"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("oauth_states_state_hash_unique").on(table.stateHash)],
 );
 
 /** Provider installations such as GitHub App installations. */
@@ -719,6 +824,365 @@ export const usageEvents = pgTable("usage_events", {
   metadata: jsonb("metadata"),
 });
 
+/** Billing plan catalog rows. */
+export const billingPlans = pgTable(
+  "billing_plans",
+  {
+    billingPlanId: text("billing_plan_id").primaryKey(),
+    planKey: text("plan_key").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    audience: text("audience").notNull(),
+    public: boolean("public").notNull().default(false),
+    active: boolean("active").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => [uniqueIndex("billing_plans_plan_key_unique").on(table.planKey)],
+);
+
+/** Versioned billing plan configuration used for stable plan snapshots. */
+export const billingPlanVersions = pgTable(
+  "billing_plan_versions",
+  {
+    billingPlanVersionId: text("billing_plan_version_id").primaryKey(),
+    billingPlanId: text("billing_plan_id")
+      .notNull()
+      .references(() => billingPlans.billingPlanId),
+    version: text("version").notNull(),
+    active: boolean("active").notNull().default(true),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true }),
+    provider: text("provider"),
+    providerProductId: text("provider_product_id"),
+    providerBasePriceId: text("provider_base_price_id"),
+    currency: text("currency").notNull().default("usd"),
+    baseAmountMicros: integer("base_amount_micros"),
+    billingInterval: text("billing_interval"),
+    included: jsonb("included").notNull().default(sql`'{}'::jsonb`),
+    limits: jsonb("limits").notNull().default(sql`'{}'::jsonb`),
+    features: jsonb("features").notNull().default(sql`'{}'::jsonb`),
+    overage: jsonb("overage").notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("billing_plan_versions_plan_version_unique").on(table.billingPlanId, table.version),
+  ],
+);
+
+/** Organization billing account mirror used for local entitlement decisions. */
+export const billingAccounts = pgTable(
+  "billing_accounts",
+  {
+    billingAccountId: text("billing_account_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    billingMode: text("billing_mode").notNull(),
+    status: text("status").notNull(),
+    provider: text("provider").notNull().default("stripe"),
+    providerCustomerId: text("provider_customer_id"),
+    billingEmail: text("billing_email"),
+    billingName: text("billing_name"),
+    billingCountry: text("billing_country"),
+    currentPlanKey: text("current_plan_key"),
+    currentPlanVersionId: text("current_plan_version_id"),
+    trialEndsAt: timestamp("trial_ends_at", { withTimezone: true }),
+    gracePeriodEndsAt: timestamp("grace_period_ends_at", { withTimezone: true }),
+    paymentStatus: text("payment_status").notNull().default("not_required"),
+    ...timestamps,
+  },
+  (table) => [uniqueIndex("billing_accounts_org_unique").on(table.orgId)],
+);
+
+/** Internal subscription mirror owned by one billing account. */
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    subscriptionId: text("subscription_id").primaryKey(),
+    billingAccountId: text("billing_account_id")
+      .notNull()
+      .references(() => billingAccounts.billingAccountId),
+    provider: text("provider").notNull(),
+    providerSubscriptionId: text("provider_subscription_id"),
+    status: text("status").notNull(),
+    billingPlanVersionId: text("billing_plan_version_id").references(
+      () => billingPlanVersions.billingPlanVersionId,
+    ),
+    currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    trialStart: timestamp("trial_start", { withTimezone: true }),
+    trialEnd: timestamp("trial_end", { withTimezone: true }),
+    quantity: integer("quantity"),
+    rawProviderStatus: jsonb("raw_provider_status").notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (table) => [
+    index("subscriptions_billing_account_idx").on(table.billingAccountId),
+    uniqueIndex("subscriptions_provider_subscription_unique").on(
+      table.provider,
+      table.providerSubscriptionId,
+    ),
+  ],
+);
+
+/** Internal subscription item mirror. */
+export const subscriptionItems = pgTable(
+  "subscription_items",
+  {
+    subscriptionItemId: text("subscription_item_id").primaryKey(),
+    subscriptionId: text("subscription_id")
+      .notNull()
+      .references(() => subscriptions.subscriptionId),
+    providerItemId: text("provider_item_id"),
+    providerPriceId: text("provider_price_id"),
+    itemType: text("item_type").notNull(),
+    quantity: integer("quantity"),
+    meterKey: text("meter_key"),
+    active: boolean("active").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => [
+    index("subscription_items_subscription_idx").on(table.subscriptionId),
+    uniqueIndex("subscription_items_provider_item_unique").on(table.providerItemId),
+  ],
+);
+
+/** Manual or promotional credits applied outside provider invoices. */
+export const creditGrants = pgTable(
+  "credit_grants",
+  {
+    creditGrantId: text("credit_grant_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    creditType: text("credit_type").notNull(),
+    quantity: integer("quantity").notNull(),
+    remainingQuantity: integer("remaining_quantity").notNull(),
+    reason: text("reason").notNull(),
+    source: text("source").notNull(),
+    sourceId: text("source_id"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdByUserId: text("created_by_user_id"),
+    ...timestamps,
+  },
+  (table) => [index("credit_grants_org_idx").on(table.orgId)],
+);
+
+/** Provider invoice mirror for customer support and billing dashboards. */
+export const invoices = pgTable(
+  "invoices",
+  {
+    invoiceId: text("invoice_id").primaryKey(),
+    billingAccountId: text("billing_account_id")
+      .notNull()
+      .references(() => billingAccounts.billingAccountId),
+    provider: text("provider").notNull(),
+    providerInvoiceId: text("provider_invoice_id").notNull(),
+    status: text("status").notNull(),
+    currency: text("currency").notNull(),
+    amountDueMicros: integer("amount_due_micros").notNull().default(0),
+    amountPaidMicros: integer("amount_paid_micros").notNull().default(0),
+    amountRemainingMicros: integer("amount_remaining_micros").notNull().default(0),
+    periodStart: timestamp("period_start", { withTimezone: true }),
+    periodEnd: timestamp("period_end", { withTimezone: true }),
+    hostedInvoiceUrl: text("hosted_invoice_url"),
+    invoicePdfUrl: text("invoice_pdf_url"),
+    rawProviderInvoice: jsonb("raw_provider_invoice").notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (table) => [
+    index("invoices_billing_account_idx").on(table.billingAccountId),
+    uniqueIndex("invoices_provider_invoice_unique").on(table.provider, table.providerInvoiceId),
+  ],
+);
+
+/** Audit log for outbound billing provider API requests. */
+export const billingProviderRequests = pgTable(
+  "billing_provider_requests",
+  {
+    billingProviderRequestId: text("billing_provider_request_id").primaryKey(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    billingAccountId: text("billing_account_id").references(() => billingAccounts.billingAccountId),
+    provider: text("provider").notNull(),
+    operation: text("operation").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    providerRequestId: text("provider_request_id"),
+    status: text("status").notNull(),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    requestMetadata: jsonb("request_metadata").notNull().default(sql`'{}'::jsonb`),
+    responseMetadata: jsonb("response_metadata").notNull().default(sql`'{}'::jsonb`),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("billing_provider_requests_account_idx").on(table.billingAccountId),
+    index("billing_provider_requests_org_idx").on(table.orgId),
+    uniqueIndex("billing_provider_requests_idempotency_unique").on(
+      table.provider,
+      table.idempotencyKey,
+    ),
+  ],
+);
+
+/** Idempotent log for inbound billing provider webhook events. */
+export const billingWebhookEvents = pgTable(
+  "billing_webhook_events",
+  {
+    billingWebhookEventId: text("billing_webhook_event_id").primaryKey(),
+    provider: text("provider").notNull(),
+    providerEventId: text("provider_event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    billingAccountId: text("billing_account_id").references(() => billingAccounts.billingAccountId),
+    providerCustomerId: text("provider_customer_id"),
+    providerSubscriptionId: text("provider_subscription_id"),
+    status: text("status").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    payload: jsonb("payload").notNull().default(sql`'{}'::jsonb`),
+    error: jsonb("error"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("billing_webhook_events_account_idx").on(table.billingAccountId),
+    index("billing_webhook_events_org_idx").on(table.orgId),
+    uniqueIndex("billing_webhook_events_provider_event_unique").on(
+      table.provider,
+      table.providerEventId,
+    ),
+  ],
+);
+
+/** Planned and sent usage-based billing meter events. */
+export const billingMeterEvents = pgTable(
+  "billing_meter_events",
+  {
+    billingMeterEventId: text("billing_meter_event_id").primaryKey(),
+    billingAccountId: text("billing_account_id")
+      .notNull()
+      .references(() => billingAccounts.billingAccountId),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    provider: text("provider").notNull(),
+    providerCustomerId: text("provider_customer_id").notNull(),
+    meterKey: text("meter_key").notNull(),
+    providerEventName: text("provider_event_name").notNull(),
+    periodKey: text("period_key").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    quantity: integer("quantity").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: text("status").notNull(),
+    providerMeterEventId: text("provider_meter_event_id"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    sourceUsageEventIds: jsonb("source_usage_event_ids").notNull().default(sql`'[]'::jsonb`),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("billing_meter_events_account_status_idx").on(table.billingAccountId, table.status),
+    index("billing_meter_events_org_period_idx").on(table.orgId, table.periodKey),
+    uniqueIndex("billing_meter_events_idempotency_unique").on(table.provider, table.idempotencyKey),
+  ],
+);
+
+/** Active and historical feature entitlements for organizations. */
+export const entitlements = pgTable(
+  "entitlements",
+  {
+    entitlementId: text("entitlement_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    featureKey: text("feature_key").notNull(),
+    enabled: boolean("enabled").notNull(),
+    source: text("source").notNull(),
+    sourceId: text("source_id"),
+    value: jsonb("value").notNull().default(sql`'{}'::jsonb`),
+    effectiveFrom: timestamp("effective_from", { withTimezone: true }).notNull(),
+    effectiveTo: timestamp("effective_to", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("entitlements_org_feature_source_effective_unique").on(
+      table.orgId,
+      table.featureKey,
+      table.source,
+      table.effectiveFrom,
+    ),
+    index("entitlements_active_idx").on(
+      table.orgId,
+      table.featureKey,
+      table.effectiveFrom,
+      table.effectiveTo,
+    ),
+  ],
+);
+
+/** Fast quota counter state for one organization and billing period. */
+export const quotaCounters = pgTable(
+  "quota_counters",
+  {
+    quotaCounterId: text("quota_counter_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    quotaKey: text("quota_key").notNull(),
+    periodKey: text("period_key").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    usedQuantity: integer("used_quantity").notNull().default(0),
+    reservedQuantity: integer("reserved_quantity").notNull().default(0),
+    limitQuantity: integer("limit_quantity"),
+    source: text("source").notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("quota_counters_org_quota_period_unique").on(
+      table.orgId,
+      table.quotaKey,
+      table.periodKey,
+    ),
+  ],
+);
+
+/** Durable quota reservations for idempotent expensive work starts. */
+export const quotaReservations = pgTable(
+  "quota_reservations",
+  {
+    quotaReservationId: text("quota_reservation_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    quotaCounterId: text("quota_counter_id")
+      .notNull()
+      .references(() => quotaCounters.quotaCounterId),
+    sourceType: text("source_type").notNull(),
+    sourceId: text("source_id").notNull(),
+    quantity: integer("quantity").notNull(),
+    status: text("status").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("quota_reservations_source_counter_unique").on(
+      table.sourceType,
+      table.sourceId,
+      table.quotaCounterId,
+    ),
+  ],
+);
+
 /** Repository rules are useful for MVP debugging even if advanced rules ship later. */
 export const repoRules = pgTable("repo_rules", {
   repoRuleId: text("repo_rule_id").primaryKey(),
@@ -749,6 +1213,164 @@ export const memoryFacts = pgTable("memory_facts", {
   metadata: jsonb("metadata"),
   ...timestamps,
 });
+
+/** Durable record of privileged internal admin actions. */
+export const adminActions = pgTable(
+  "admin_actions",
+  {
+    adminActionId: text("admin_action_id").primaryKey(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    actorType: text("actor_type").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    reviewRunId: text("review_run_id").references(() => reviewRuns.reviewRunId),
+    supportSessionId: text("support_session_id"),
+    reason: text("reason").notNull(),
+    request: jsonb("request").notNull(),
+    result: jsonb("result"),
+    error: jsonb("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("admin_actions_org_idx").on(table.orgId, table.createdAt),
+    index("admin_actions_actor_idx").on(table.actorUserId, table.createdAt),
+    index("admin_actions_review_run_idx").on(table.reviewRunId, table.createdAt),
+  ],
+);
+
+/** Durable replay run rows that link operator dispatches to replay artifacts and jobs. */
+export const replayRuns = pgTable(
+  "replay_runs",
+  {
+    replayRunId: text("replay_run_id").primaryKey(),
+    adminActionId: text("admin_action_id")
+      .notNull()
+      .references(() => adminActions.adminActionId),
+    sourceReviewRunId: text("source_review_run_id").references(() => reviewRuns.reviewRunId),
+    orgId: text("org_id").references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    mode: text("mode").notNull(),
+    stages: jsonb("stages").notNull().default(sql`'[]'::jsonb`),
+    configOverrides: jsonb("config_overrides").notNull().default(sql`'{}'::jsonb`),
+    status: text("status").notNull(),
+    createdByActorType: text("created_by_actor_type").notNull(),
+    createdByActorUserId: text("created_by_actor_user_id").notNull(),
+    supportSessionId: text("support_session_id"),
+    reason: text("reason").notNull(),
+    result: jsonb("result"),
+    error: jsonb("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("replay_runs_source_idx").on(table.sourceReviewRunId, table.createdAt),
+    index("replay_runs_org_idx").on(table.orgId, table.createdAt),
+    index("replay_runs_admin_action_idx").on(table.adminActionId),
+  ],
+);
+
+/** Durable per-stage replay rows for later replay runner and comparison artifacts. */
+export const replayStageRuns = pgTable(
+  "replay_stage_runs",
+  {
+    replayStageRunId: text("replay_stage_run_id").primaryKey(),
+    replayRunId: text("replay_run_id")
+      .notNull()
+      .references(() => replayRuns.replayRunId),
+    stage: text("stage").notNull(),
+    status: text("status").notNull(),
+    inputArtifactRef: jsonb("input_artifact_ref"),
+    outputArtifactRef: jsonb("output_artifact_ref"),
+    metrics: jsonb("metrics").notNull().default(sql`'{}'::jsonb`),
+    error: jsonb("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [index("replay_stage_runs_replay_idx").on(table.replayRunId, table.stage)],
+);
+
+/** Internal operator notes attached to admin-inspected resources. */
+export const adminNotes = pgTable(
+  "admin_notes",
+  {
+    adminNoteId: text("admin_note_id").primaryKey(),
+    actorType: text("actor_type").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    reviewRunId: text("review_run_id").references(() => reviewRuns.reviewRunId),
+    findingId: text("finding_id"),
+    visibility: text("visibility").notNull(),
+    body: text("body").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("admin_notes_review_run_idx").on(table.reviewRunId, table.createdAt),
+    index("admin_notes_org_idx").on(table.orgId, table.createdAt),
+  ],
+);
+
+/** Durable debug bundle export rows for operator history and expiration tracking. */
+export const debugExports = pgTable(
+  "debug_exports",
+  {
+    debugExportId: text("debug_export_id").primaryKey(),
+    adminActionId: text("admin_action_id")
+      .notNull()
+      .references(() => adminActions.adminActionId),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    reviewRunId: text("review_run_id").references(() => reviewRuns.reviewRunId),
+    exportKind: text("export_kind").notNull(),
+    artifactUri: text("artifact_uri"),
+    artifactHash: text("artifact_hash"),
+    redactionLevel: text("redaction_level").notNull(),
+    status: text("status").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdByActorType: text("created_by_actor_type").notNull(),
+    createdByActorUserId: text("created_by_actor_user_id").notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    error: jsonb("error"),
+    ...timestamps,
+  },
+  (table) => [
+    index("debug_exports_org_idx").on(table.orgId, table.createdAt),
+    index("debug_exports_review_run_idx").on(table.reviewRunId, table.createdAt),
+  ],
+);
+
+/** Auditable event for sensitive artifact access attempts and downloads. */
+export const artifactAccessEvents = pgTable(
+  "artifact_access_events",
+  {
+    artifactAccessEventId: text("artifact_access_event_id").primaryKey(),
+    actorType: text("actor_type").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    reviewRunId: text("review_run_id").references(() => reviewRuns.reviewRunId),
+    artifactRef: jsonb("artifact_ref").notNull(),
+    accessLevel: text("access_level").notNull(),
+    supportSessionId: text("support_session_id"),
+    reason: text("reason").notNull(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("artifact_access_events_org_idx").on(table.orgId, table.createdAt),
+    index("artifact_access_events_review_idx").on(table.reviewRunId, table.createdAt),
+  ],
+);
 
 /** Security/compliance audit trail for sensitive operations. */
 export const auditLogs = pgTable("audit_logs", {

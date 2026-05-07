@@ -65,4 +65,15 @@ export class PullRequestRepository {
 
     return row ? toPullRequestSnapshot(row) : undefined;
   }
+
+  /** Gets one immutable pull request snapshot by its durable snapshot ID. */
+  public async getSnapshot(snapshotId: string): Promise<PullRequestSnapshot | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(pullRequestSnapshots)
+      .where(eq(pullRequestSnapshots.snapshotId, snapshotId))
+      .limit(1);
+
+    return row ? toPullRequestSnapshot(row) : undefined;
+  }
 }

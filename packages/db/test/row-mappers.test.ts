@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { toRepoRule } from "../src/repositories/repo-rule-repository";
 import { toRepository } from "../src/repositories/row-mappers";
 
 describe("database row mappers", () => {
@@ -24,5 +25,34 @@ describe("database row mappers", () => {
         metadata: {},
       }),
     ).toThrow(/Input failed schema validation: Repository/u);
+  });
+
+  it("maps durable repo rule rows into typed policy rules", () => {
+    const rule = toRepoRule({
+      repoRuleId: "rule_generated",
+      orgId: "org_test",
+      repoId: "repo_test",
+      scope: "path",
+      ruleType: "suppress",
+      body: "Do not publish generated-file findings.",
+      isEnabled: true,
+      metadata: {
+        name: "Suppress generated files",
+        effect: "suppress",
+        matcher: { paths: ["src/generated/**"] },
+        instruction: "Do not publish generated-file findings.",
+        priority: 100,
+      },
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+
+    expect(rule).toMatchObject({
+      ruleId: "rule_generated",
+      effect: "suppress",
+      matcher: { paths: ["src/generated/**"] },
+      priority: 100,
+      enabled: true,
+    });
   });
 });

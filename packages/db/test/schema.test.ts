@@ -1,26 +1,53 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  adminActions,
+  adminNotes,
+  artifactAccessEvents,
   backgroundJobs,
+  billingMeterEvents,
+  billingProviderRequests,
+  billingWebhookEvents,
   codeChunkEmbeddings,
   codeIndexVersions,
+  creditGrants,
+  debugExports,
   indexedFiles,
+  invoices,
+  oauthStates,
+  orgMemberships,
   publishedCheckRuns,
   publishedReviews,
   publishedSummaryComments,
   pullRequests,
+  quotaCounters,
+  quotaReservations,
+  replayRuns,
+  replayStageRuns,
   repositories,
   reviewArtifacts,
+  subscriptionItems,
+  subscriptions,
   usageEvents,
+  userProviderAccounts,
+  userSessions,
+  users,
   webhookEvents,
 } from "../src/schema";
 
 const testDirectory = fileURLToPath(new URL(".", import.meta.url));
 const bootstrapPath = resolve(testDirectory, "../bootstrap/0000_extensions.sql");
+const migrationsDirectory = resolve(testDirectory, "../migrations");
 const migrationPath = resolve(testDirectory, "../migrations/0000_foundation.sql");
+const adminToolingMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0007_acoustic_black_widow.sql",
+);
+const adminReplayMigrationPath = resolve(testDirectory, "../migrations/0008_minor_thunderball.sql");
+const productAuthMigrationPath = resolve(testDirectory, "../migrations/0009_high_sphinx.sql");
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -30,6 +57,11 @@ describe("database schema foundation", () => {
 
   it("defines the Phase 2 persistence surfaces", () => {
     expect(webhookEvents.webhookEventId.name).toBe("webhook_event_id");
+    expect(users.userId.name).toBe("user_id");
+    expect(userProviderAccounts.userProviderAccountId.name).toBe("user_provider_account_id");
+    expect(orgMemberships.role.name).toBe("role");
+    expect(userSessions.sessionHash.name).toBe("session_hash");
+    expect(oauthStates.stateHash.name).toBe("state_hash");
     expect(backgroundJobs.backgroundJobId.name).toBe("background_job_id");
     expect(pullRequests.pullRequestId.name).toBe("pull_request_id");
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
@@ -41,6 +73,23 @@ describe("database schema foundation", () => {
     );
     expect(publishedCheckRuns.publishedCheckRunId.name).toBe("published_check_run_id");
     expect(usageEvents.usageEventId.name).toBe("usage_event_id");
+    expect(quotaCounters.quotaCounterId.name).toBe("quota_counter_id");
+    expect(quotaReservations.quotaReservationId.name).toBe("quota_reservation_id");
+    expect(subscriptions.subscriptionId.name).toBe("subscription_id");
+    expect(subscriptionItems.subscriptionItemId.name).toBe("subscription_item_id");
+    expect(creditGrants.creditGrantId.name).toBe("credit_grant_id");
+    expect(invoices.invoiceId.name).toBe("invoice_id");
+    expect(billingProviderRequests.billingProviderRequestId.name).toBe(
+      "billing_provider_request_id",
+    );
+    expect(billingWebhookEvents.billingWebhookEventId.name).toBe("billing_webhook_event_id");
+    expect(billingMeterEvents.billingMeterEventId.name).toBe("billing_meter_event_id");
+    expect(adminActions.adminActionId.name).toBe("admin_action_id");
+    expect(replayRuns.replayRunId.name).toBe("replay_run_id");
+    expect(replayStageRuns.replayStageRunId.name).toBe("replay_stage_run_id");
+    expect(adminNotes.adminNoteId.name).toBe("admin_note_id");
+    expect(debugExports.debugExportId.name).toBe("debug_export_id");
+    expect(artifactAccessEvents.artifactAccessEventId.name).toBe("artifact_access_event_id");
   });
 
   it("defines pgvector storage for code chunk embeddings", () => {
@@ -50,6 +99,9 @@ describe("database schema foundation", () => {
   it("ships the generated foundation migration and extension bootstrap", async () => {
     const bootstrap = await readFile(bootstrapPath, "utf8");
     const migration = await readFile(migrationPath, "utf8");
+    const adminToolingMigration = await readFile(adminToolingMigrationPath, "utf8");
+    const adminReplayMigration = await readFile(adminReplayMigrationPath, "utf8");
+    const productAuthMigration = await readFile(productAuthMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -73,10 +125,21 @@ describe("database schema foundation", () => {
     expect(migration).toContain('CREATE TABLE "usage_events"');
     expect(migration).toContain('CREATE UNIQUE INDEX "code_index_versions_repo_commit_key_unique"');
     expect(migration).toContain('"embedding" vector(1536) NOT NULL');
+    expect(adminToolingMigration).toContain('CREATE TABLE "admin_actions"');
+    expect(adminToolingMigration).toContain('CREATE TABLE "debug_exports"');
+    expect(adminToolingMigration).toContain('CREATE TABLE "artifact_access_events"');
+    expect(adminReplayMigration).toContain('CREATE TABLE "replay_runs"');
+    expect(adminReplayMigration).toContain('CREATE TABLE "replay_stage_runs"');
+    expect(adminReplayMigration).toContain('CREATE TABLE "admin_notes"');
+    expect(productAuthMigration).toContain('CREATE TABLE "users"');
+    expect(productAuthMigration).toContain('CREATE TABLE "user_provider_accounts"');
+    expect(productAuthMigration).toContain('CREATE TABLE "org_memberships"');
+    expect(productAuthMigration).toContain('CREATE TABLE "user_sessions"');
+    expect(productAuthMigration).toContain('CREATE TABLE "oauth_states"');
   });
 });
 
-describe.runIf(integrationDatabaseUrl)("foundation migration integration", () => {
+describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
   const schemaName = `heimdall_test_${process.pid}_${Date.now()}`.replace(/[^A-Za-z0-9_]/g, "_");
   const sql = postgres(integrationDatabaseUrl ?? "", { max: 1 });
 
@@ -85,14 +148,13 @@ describe.runIf(integrationDatabaseUrl)("foundation migration integration", () =>
     await sql.end();
   });
 
-  it("applies from an empty schema and supports core Phase 2 rows", async () => {
+  it("applies every migration from an empty schema and supports core rows", async () => {
     const bootstrap = await readFile(bootstrapPath, "utf8");
-    const migration = await readFile(migrationPath, "utf8");
 
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(bootstrap);
-    await sql.unsafe(migration.replaceAll('"public".', `"${schemaName}".`));
+    await applyMigrations(sql, schemaName);
 
     await sql`
       INSERT INTO orgs (org_id, name, slug)
@@ -219,13 +281,37 @@ describe.runIf(integrationDatabaseUrl)("foundation migration integration", () =>
       SELECT
         (SELECT count(*)::int FROM webhook_events) AS webhook_events,
         (SELECT count(*)::int FROM code_index_versions) AS index_versions,
-        (SELECT count(*)::int FROM code_chunk_embeddings) AS embeddings
+        (SELECT count(*)::int FROM code_chunk_embeddings) AS embeddings,
+        (SELECT to_regclass('admin_actions')::text) AS admin_actions_table,
+        (SELECT to_regclass('replay_runs')::text) AS replay_runs_table,
+        (SELECT to_regclass('users')::text) AS users_table,
+        (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
     `;
 
     expect(result).toEqual({
+      admin_actions_table: "admin_actions",
       webhook_events: 1,
       index_versions: 1,
       embeddings: 1,
+      oauth_states_table: "oauth_states",
+      replay_runs_table: "replay_runs",
+      users_table: "users",
     });
   });
 });
+
+/** Applies all generated SQL migrations in lexical order to a test schema. */
+async function applyMigrations(sql: postgres.Sql, schemaName: string): Promise<void> {
+  const files = (await readdir(migrationsDirectory))
+    .filter((file) => file.endsWith(".sql"))
+    .sort((left, right) => left.localeCompare(right));
+
+  for (const file of files) {
+    await sql.unsafe(
+      (await readFile(resolve(migrationsDirectory, file), "utf8")).replaceAll(
+        '"public".',
+        `"${schemaName}".`,
+      ),
+    );
+  }
+}
