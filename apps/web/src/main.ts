@@ -771,6 +771,40 @@ type AdminMemoryFactDebugSummary = {
   readonly updatedAt: string;
 };
 
+/** Memory candidate row returned by the memory and rules inspector. */
+type AdminMemoryCandidateDebugSummary = {
+  /** Durable memory candidate row ID. */
+  readonly memoryCandidateId: string;
+  /** Organization that owns the candidate. */
+  readonly orgId: string;
+  /** Repository that owns the candidate when repository-scoped. */
+  readonly repoId?: string;
+  /** Source that proposed the candidate. */
+  readonly sourceKind: string;
+  /** Machine-readable candidate kind. */
+  readonly candidateKind: string;
+  /** Proposed memory text. */
+  readonly proposedContent: string;
+  /** Current candidate status. */
+  readonly status: string;
+  /** Candidate confidence score. */
+  readonly confidence: number;
+  /** Trust level assigned to the candidate. */
+  readonly trustLevel: string;
+  /** User login that created the candidate when available. */
+  readonly createdByLogin?: string;
+  /** Sorted proposed scope keys. */
+  readonly proposedScopeKeys: readonly string[];
+  /** Sorted proposed applies-to keys. */
+  readonly proposedAppliesToKeys: readonly string[];
+  /** Metadata keys available on the row. */
+  readonly metadataKeys: readonly string[];
+  /** Candidate creation timestamp. */
+  readonly createdAt: string;
+  /** Candidate update timestamp. */
+  readonly updatedAt: string;
+};
+
 /** Effective rule row returned by the memory and rules inspector. */
 type AdminRepoRuleDebugSummary = {
   /** Rule ID used by typed policy snapshots. */
@@ -825,6 +859,8 @@ type AdminMemoryRulesDebugDetails = {
   readonly repository: AdminMemoryRulesRepositorySummary;
   /** Stored memory facts that can apply to the repository. */
   readonly memoryFacts: readonly AdminMemoryFactDebugSummary[];
+  /** Proposed memory candidates that can apply to the repository. */
+  readonly memoryCandidates: readonly AdminMemoryCandidateDebugSummary[];
   /** Effective repository and organization rules. */
   readonly rules: readonly AdminRepoRuleDebugSummary[];
   /** Candidate moderation support in the current implementation. */
@@ -8245,11 +8281,15 @@ function renderMemoryRulesDetails(details: AdminMemoryRulesDebugDetails): string
   const repository = details.repository;
   const enabledRuleCount = details.rules.filter((rule) => rule.enabled).length;
   const activeFactCount = details.memoryFacts.filter((fact) => fact.status === "active").length;
+  const pendingCandidateCount = details.memoryCandidates.filter(
+    (candidate) => candidate.status === "pending",
+  ).length;
 
   return `
     <section class="summary-grid">
       ${renderMetric("Repository", repository.fullName)}
       ${renderMetric("Active facts", String(activeFactCount))}
+      ${renderMetric("Pending candidates", String(pendingCandidateCount))}
       ${renderMetric("Enabled rules", String(enabledRuleCount))}
       ${renderMetric("Warnings", String(details.warnings.length), details.warnings.length > 0)}
     </section>
@@ -8268,6 +8308,7 @@ function renderMemoryRulesDetails(details: AdminMemoryRulesDebugDetails): string
       ${renderMemoryRuleTools(details)}
     </section>
     ${renderMemoryWarnings(details.warnings)}
+    ${renderMemoryCandidates(details.memoryCandidates)}
     ${renderMemoryFacts(details.memoryFacts)}
     ${renderEffectiveRules(details.rules)}
   `;
@@ -8323,6 +8364,47 @@ function renderMemoryWarnings(warnings: readonly string[]): string {
           )
           .join("")}
       </ul>
+    </section>
+  `;
+}
+
+/** Renders proposed memory candidate rows. */
+function renderMemoryCandidates(candidates: readonly AdminMemoryCandidateDebugSummary[]): string {
+  if (candidates.length === 0) {
+    return renderEmptyState("No memory candidates currently apply to this repository.");
+  }
+
+  return `
+    <section class="panel">
+      <h3>Memory Candidates</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Candidate</th><th>Status</th><th>Trust</th><th>Confidence</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            ${candidates
+              .map(
+                (candidate) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(candidate.candidateKind)}</strong>
+                      <p class="muted-text">${escapeHtml(candidate.proposedContent)}</p>
+                      <p class="muted-text">${escapeHtml(candidate.sourceKind)}${candidate.createdByLogin ? ` by ${escapeHtml(candidate.createdByLogin)}` : ""}</p>
+                      ${candidate.proposedScopeKeys.length > 0 ? `<p class="muted-text">scope: ${escapeHtml(candidate.proposedScopeKeys.join(", "))}</p>` : ""}
+                      ${candidate.proposedAppliesToKeys.length > 0 ? `<p class="muted-text">applies: ${escapeHtml(candidate.proposedAppliesToKeys.join(", "))}</p>` : ""}
+                    </td>
+                    <td><span class="status ${statusClass(candidate.status)}">${escapeHtml(candidate.status)}</span></td>
+                    <td>${escapeHtml(candidate.trustLevel)}</td>
+                    <td>${Math.round(candidate.confidence * 100)}%</td>
+                    <td>${formatTime(candidate.updatedAt)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
     </section>
   `;
 }
@@ -10090,7 +10172,12 @@ function isReviewDetails(details: InspectorDetails): details is AdminReviewDebug
 
 /** Narrows inspector details to memory and rules details. */
 function isMemoryRulesDetails(details: InspectorDetails): details is AdminMemoryRulesDebugDetails {
-  return "memoryFacts" in details && "rules" in details && "repository" in details;
+  return (
+    "memoryFacts" in details &&
+    "memoryCandidates" in details &&
+    "rules" in details &&
+    "repository" in details
+  );
 }
 
 /** Narrows replay plans to webhook replay plans. */

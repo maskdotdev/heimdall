@@ -20,6 +20,7 @@ import {
   debugExports,
   type HeimdallDatabase,
   llmCalls,
+  memoryCandidates,
   memoryFacts,
   PullRequestRepository,
   providerInstallations,
@@ -886,6 +887,56 @@ export type AdminMemoryFactDebugSummary = {
   readonly updatedAt: string;
 };
 
+/** Debug summary for one proposed memory candidate. */
+export type AdminMemoryCandidateDebugSummary = {
+  /** Durable memory candidate row ID. */
+  readonly memoryCandidateId: string;
+  /** Organization that owns the candidate. */
+  readonly orgId: string;
+  /** Repository that owns the candidate when repository-scoped. */
+  readonly repoId?: string;
+  /** Source that proposed the candidate. */
+  readonly sourceKind: string;
+  /** Machine-readable candidate kind. */
+  readonly candidateKind: string;
+  /** Proposed memory text. */
+  readonly proposedContent: string;
+  /** Current candidate lifecycle status. */
+  readonly status: string;
+  /** Confidence score assigned to the candidate. */
+  readonly confidence: number;
+  /** Trust level assigned to the proposing actor or source. */
+  readonly trustLevel: string;
+  /** User login that created the candidate when available. */
+  readonly createdByLogin?: string;
+  /** Source finding linked to the candidate when available. */
+  readonly sourceFindingId?: string;
+  /** Memory fact created from the candidate when approved. */
+  readonly approvedMemoryFactId?: string;
+  /** User that made the moderation decision when available. */
+  readonly decidedByUserId?: string;
+  /** Decision timestamp when available. */
+  readonly decidedAt?: string;
+  /** Expiration timestamp when the candidate is temporary. */
+  readonly expiresAt?: string;
+  /** Sorted proposed scope keys. */
+  readonly proposedScopeKeys: readonly string[];
+  /** Stable hash of the proposed scope payload when present. */
+  readonly proposedScopeHash?: `sha256:${string}`;
+  /** Sorted proposed applies-to keys. */
+  readonly proposedAppliesToKeys: readonly string[];
+  /** Stable hash of the proposed applies-to payload when present. */
+  readonly proposedAppliesToHash?: `sha256:${string}`;
+  /** Sorted metadata keys available on the row. */
+  readonly metadataKeys: readonly string[];
+  /** Hash of the metadata payload when metadata exists. */
+  readonly metadataHash?: `sha256:${string}`;
+  /** Candidate creation timestamp. */
+  readonly createdAt: string;
+  /** Candidate update timestamp. */
+  readonly updatedAt: string;
+};
+
 /** Debug summary for one effective repository or organization rule. */
 export type AdminRepoRuleDebugSummary = {
   /** Rule ID used by typed policy snapshots. */
@@ -940,6 +991,8 @@ export type AdminMemoryRulesDebugDetails = {
   readonly repository: AdminMemoryRulesRepositorySummary;
   /** Stored memory facts that can apply to the repository. */
   readonly memoryFacts: readonly AdminMemoryFactDebugSummary[];
+  /** Proposed memory candidates that can apply to the repository. */
+  readonly memoryCandidates: readonly AdminMemoryCandidateDebugSummary[];
   /** Effective organization and repository rules that can apply to the repository. */
   readonly rules: readonly AdminRepoRuleDebugSummary[];
   /** Candidate moderation capability shown by the inspector. */
@@ -1887,8 +1940,12 @@ export async function getMemoryRulesDebugDetails(
   dependencies: AdminDebugServiceDependencies,
 ): Promise<AdminMemoryRulesDebugDetails> {
   const repository = await getRepositoryRow(repoId, dependencies.db);
-  const [facts, rules] = await Promise.all([
+  const [facts, candidates, rules] = await Promise.all([
     listMemoryFactsForRepository(dependencies.db, {
+      orgId: repository.orgId,
+      repoId,
+    }),
+    listMemoryCandidatesForRepository(dependencies.db, {
       orgId: repository.orgId,
       repoId,
     }),
@@ -1899,6 +1956,7 @@ export async function getMemoryRulesDebugDetails(
   ]);
 
   const memoryFactsSummary = facts.map(toMemoryFactDebugSummary);
+  const memoryCandidatesSummary = candidates.map(toMemoryCandidateDebugSummary);
   const rulesSummary = [...rules]
     .sort(compareRepoRulesForDebug)
     .map((rule) => toRepoRuleDebugSummary(rule, repoId));
@@ -1906,12 +1964,12 @@ export async function getMemoryRulesDebugDetails(
   return {
     repository: toMemoryRulesRepositorySummary(repository),
     memoryFacts: memoryFactsSummary,
+    memoryCandidates: memoryCandidatesSummary,
     rules: rulesSummary,
     candidateActions: {
       canApprove: false,
       canReject: false,
-      reason:
-        "Memory candidate approval and rejection require durable memory-candidate persistence.",
+      reason: "Memory candidate approval and rejection workflows are not wired yet.",
     },
     evaluationTools: [
       {
@@ -1934,7 +1992,7 @@ export async function getMemoryRulesDebugDetails(
         status: "unavailable",
       },
     ],
-    warnings: memoryRulesWarnings(memoryFactsSummary, rulesSummary),
+    warnings: memoryRulesWarnings(memoryFactsSummary, memoryCandidatesSummary, rulesSummary),
   };
 }
 
@@ -2850,6 +2908,7 @@ type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
 type RepositoryRow = typeof repositories.$inferSelect;
 type MemoryFactRow = typeof memoryFacts.$inferSelect;
+type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
 type HeimdallTransaction = Parameters<Parameters<HeimdallDatabase["transaction"]>[0]>[0];
 type HeimdallDbExecutor = HeimdallDatabase | HeimdallTransaction;
 
@@ -2965,6 +3024,32 @@ async function listMemoryFactsForRepository(
       ),
     )
     .orderBy(asc(memoryFacts.status), desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId));
+}
+
+/** Lists memory candidates that can apply to a repository. */
+async function listMemoryCandidatesForRepository(
+  db: HeimdallDatabase,
+  input: {
+    /** Organization that owns the inspected repository. */
+    readonly orgId: string;
+    /** Repository ID being inspected. */
+    readonly repoId: string;
+  },
+): Promise<readonly MemoryCandidateRow[]> {
+  return db
+    .select()
+    .from(memoryCandidates)
+    .where(
+      or(
+        eq(memoryCandidates.repoId, input.repoId),
+        and(eq(memoryCandidates.orgId, input.orgId), isNull(memoryCandidates.repoId)),
+      ),
+    )
+    .orderBy(
+      asc(memoryCandidates.status),
+      desc(memoryCandidates.updatedAt),
+      asc(memoryCandidates.memoryCandidateId),
+    );
 }
 
 async function listJobsByKeys(
@@ -3168,6 +3253,46 @@ function toMemoryFactDebugSummary(row: MemoryFactRow): AdminMemoryFactDebugSumma
   };
 }
 
+/** Converts a memory candidate row to an operator-facing debug summary. */
+function toMemoryCandidateDebugSummary(row: MemoryCandidateRow): AdminMemoryCandidateDebugSummary {
+  const metadata = asRecord(row.metadata);
+  const metadataKeys = sortedRecordKeys(metadata);
+  const proposedScope = asRecord(row.proposedScope);
+  const proposedScopeKeys = sortedRecordKeys(proposedScope);
+  const proposedAppliesTo = asRecord(row.proposedAppliesTo);
+  const proposedAppliesToKeys = sortedRecordKeys(proposedAppliesTo);
+
+  return {
+    memoryCandidateId: row.memoryCandidateId,
+    orgId: row.orgId,
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    sourceKind: row.sourceKind,
+    candidateKind: row.candidateKind,
+    proposedContent: row.proposedContent,
+    status: row.status,
+    confidence: row.confidence,
+    trustLevel: row.trustLevel,
+    ...(row.createdByLogin ? { createdByLogin: row.createdByLogin } : {}),
+    ...(row.sourceFindingId ? { sourceFindingId: row.sourceFindingId } : {}),
+    ...(row.approvedMemoryFactId ? { approvedMemoryFactId: row.approvedMemoryFactId } : {}),
+    ...(row.decidedByUserId ? { decidedByUserId: row.decidedByUserId } : {}),
+    ...(row.decidedAt ? { decidedAt: toIso(row.decidedAt) } : {}),
+    ...(row.expiresAt ? { expiresAt: toIso(row.expiresAt) } : {}),
+    proposedScopeKeys,
+    ...(proposedScopeKeys.length > 0 && proposedScope
+      ? { proposedScopeHash: hashJson(proposedScope) }
+      : {}),
+    proposedAppliesToKeys,
+    ...(proposedAppliesToKeys.length > 0 && proposedAppliesTo
+      ? { proposedAppliesToHash: hashJson(proposedAppliesTo) }
+      : {}),
+    metadataKeys,
+    ...(metadataKeys.length > 0 && metadata ? { metadataHash: hashJson(metadata) } : {}),
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  };
+}
+
 /** Converts a typed repository rule to an operator-facing debug summary. */
 function toRepoRuleDebugSummary(rule: RepoRule, repoId: string): AdminRepoRuleDebugSummary {
   const metadataKeys = sortedRecordKeys(rule.metadata);
@@ -3203,13 +3328,15 @@ function compareRepoRulesForDebug(left: RepoRule, right: RepoRule): number {
 /** Builds warnings for the memory and rules inspector response. */
 function memoryRulesWarnings(
   facts: readonly AdminMemoryFactDebugSummary[],
+  candidates: readonly AdminMemoryCandidateDebugSummary[],
   rules: readonly AdminRepoRuleDebugSummary[],
 ): readonly string[] {
-  const warnings = [
-    "Memory candidate approval and rejection are unavailable until memory candidates are persisted.",
-  ];
+  const warnings = ["Memory candidate approval and rejection workflows are not wired yet."];
   if (facts.length === 0) {
     warnings.push("No memory facts currently apply to this repository.");
+  }
+  if (candidates.length === 0) {
+    warnings.push("No memory candidates currently apply to this repository.");
   }
   if (!rules.some((rule) => rule.enabled)) {
     warnings.push("No enabled repository or organization rules currently apply.");

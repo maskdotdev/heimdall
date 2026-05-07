@@ -2912,6 +2912,12 @@ describe("api app", () => {
             status: "active",
           },
         ],
+        memoryCandidates: [
+          {
+            memoryCandidateId: "mcand_1",
+            status: "pending",
+          },
+        ],
         repository: {
           repoId: "repo_1",
           orgId: "org_1",
@@ -5636,6 +5642,25 @@ function memoryRulesDebugDetailsFixture(
         updatedAt: "2026-05-05T12:30:00.000Z",
       },
     ],
+    memoryCandidates: [
+      {
+        memoryCandidateId: "mcand_1",
+        orgId: "org_1",
+        repoId: "repo_1",
+        sourceKind: "command",
+        candidateKind: "repo_fact",
+        proposedContent: "Prefer stable public APIs in tests.",
+        status: "pending",
+        confidence: 0.8,
+        trustLevel: "explicit_maintainer",
+        createdByLogin: "maintainer",
+        proposedScopeKeys: ["level", "orgId", "repoId"],
+        proposedAppliesToKeys: ["pathGlobs"],
+        metadataKeys: ["source"],
+        createdAt: "2026-05-05T12:00:00.000Z",
+        updatedAt: "2026-05-05T12:30:00.000Z",
+      },
+    ],
     rules: [
       {
         ruleId: "rule_1",
@@ -5656,8 +5681,7 @@ function memoryRulesDebugDetailsFixture(
     candidateActions: {
       canApprove: false,
       canReject: false,
-      reason:
-        "Memory candidate approval and rejection require durable memory-candidate persistence.",
+      reason: "Memory candidate approval and rejection workflows are not wired yet.",
     },
     evaluationTools: [
       {
