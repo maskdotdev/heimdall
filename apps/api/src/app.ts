@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { openapi } from "@elysia/openapi";
 import {
   AdminDebugConfirmationError,
@@ -233,6 +233,8 @@ export type AdminControlPlaneAuthOptions = {
   readonly assertionSecret?: string;
   /** Signed session cookie secret. */
   readonly sessionSecret?: string;
+  /** Optional support-session signing secret. Defaults to the session secret. */
+  readonly supportSessionSecret?: string;
   /** Signed session cookie name. */
   readonly cookieName?: string;
   /** Whether session cookies require HTTPS. */
@@ -319,6 +321,8 @@ type ResolvedAdminControlPlaneAuthOptions = {
   readonly sessionManager?: AdminSessionManager | undefined;
   /** Name of the signed admin session cookie. */
   readonly sessionCookieName: string;
+  /** Secret used to sign short-lived support-session tokens. */
+  readonly supportSessionSecret?: string | undefined;
   /** Strict CORS origins allowed to use admin credentials. */
   readonly allowedOrigins: readonly string[];
   /** Required GitHub organization for github_org identity providers. */
@@ -824,6 +828,87 @@ type ApiRequestTelemetryEndInput = {
   readonly statusCode: number;
 };
 
+/** Supported privileged operations for time-limited support sessions. */
+type SupportSessionScope = "raw_artifact_payload" | "raw_eval_import";
+
+/** Parsed support-session header value. */
+type RequestSupportSession = {
+  /** Stable support-session ID used in audit records. */
+  readonly supportSessionId: string;
+  /** Raw header value used for signed-token verification. */
+  readonly token: string;
+  /** Whether the header uses the current signed-token format or a legacy opaque reference. */
+  readonly format: "signed" | "legacy";
+};
+
+/** Request body accepted by the support-session creation route. */
+type CreateSupportSessionRequestBody = {
+  /** Human-entered reason for privileged access. */
+  readonly reason: string;
+  /** Optional scope list. Defaults to raw artifact and raw eval access. */
+  readonly scopes?: readonly SupportSessionScope[] | undefined;
+  /** Optional organization scope. */
+  readonly orgId?: string | undefined;
+  /** Optional repository scope. */
+  readonly repoId?: string | undefined;
+  /** Optional review-run scope. */
+  readonly reviewRunId?: string | undefined;
+  /** Requested lifetime in minutes. */
+  readonly expiresInMinutes?: number | undefined;
+};
+
+/** Public support-session token response. */
+type SupportSessionTokenSummary = {
+  /** Stable support-session ID used in audit records. */
+  readonly supportSessionId: string;
+  /** Signed support-session token to send in the support-session header. */
+  readonly token: string;
+  /** Scope list embedded in the signed token. */
+  readonly scopes: readonly SupportSessionScope[];
+  /** ISO timestamp when the token expires. */
+  readonly expiresAt: string;
+  /** Audit log row for the session creation event. */
+  readonly auditLogId: string;
+  /** Optional organization scope. */
+  readonly orgId?: string | undefined;
+  /** Optional repository scope. */
+  readonly repoId?: string | undefined;
+  /** Optional review-run scope. */
+  readonly reviewRunId?: string | undefined;
+};
+
+/** Signed support-session token payload. */
+type SupportSessionTokenClaims = {
+  /** Token schema version. */
+  readonly version: typeof SUPPORT_SESSION_TOKEN_VERSION;
+  /** Stable support-session ID used in audit records. */
+  readonly supportSessionId: string;
+  /** Actor user ID that may use this support session. */
+  readonly actorUserId: string;
+  /** Scope list embedded in the signed token. */
+  readonly scopes: readonly SupportSessionScope[];
+  /** ISO timestamp when the token was created. */
+  readonly createdAt: string;
+  /** ISO timestamp when the token expires. */
+  readonly expiresAt: string;
+  /** Optional organization scope. */
+  readonly orgId?: string | undefined;
+  /** Optional repository scope. */
+  readonly repoId?: string | undefined;
+  /** Optional review-run scope. */
+  readonly reviewRunId?: string | undefined;
+};
+
+/** Resource being accessed through a support session. */
+type SupportSessionResourceScope = {
+  /** Organization that owns the target resource. */
+  readonly orgId?: string | undefined;
+  /** Repository that owns the target resource. */
+  readonly repoId?: string | undefined;
+  /** Review run that owns the target resource. */
+  readonly reviewRunId?: string | undefined;
+};
+
 /** Provider webhook delivery status label used for telemetry. */
 type WebhookTelemetryStatus = "accepted" | "duplicate" | "failed" | "ignored" | "rejected";
 
@@ -873,6 +958,8 @@ type AdminRequestContext = {
   readonly securityEventSink?: SecurityEventSink | undefined;
   /** Request-scoped support-session ID for privileged raw artifact handling. */
   readonly supportSessionId?: string;
+  /** Parsed support-session header value when present. */
+  readonly supportSession?: RequestSupportSession | undefined;
 };
 
 /** Authenticated product request context produced by the session guard. */
@@ -2404,6 +2491,14 @@ const DEFAULT_ADMIN_RATE_LIMIT_MAX_ENTRIES = 10_000;
 const SUPPORT_SESSION_HEADER = "x-heimdall-support-session-id";
 /** Opaque support-session IDs accepted from trusted admin surfaces. */
 const SUPPORT_SESSION_ID_PATTERN = /^supp_[A-Za-z0-9_-]{8,128}$/u;
+/** Signed support-session token accepted for privileged access. */
+const SIGNED_SUPPORT_SESSION_TOKEN_PATTERN = /^supp_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43,86}$/u;
+/** Support-session token schema version. */
+const SUPPORT_SESSION_TOKEN_VERSION = 1;
+/** Default support-session lifetime in minutes. */
+const DEFAULT_SUPPORT_SESSION_EXPIRES_MINUTES = 30;
+/** Maximum support-session lifetime in minutes. */
+const MAX_SUPPORT_SESSION_EXPIRES_MINUTES = 120;
 /** Admin action kind emitted for successful action metric telemetry by source event name. */
 const ADMIN_ACTION_KIND_BY_TELEMETRY_NAME: Partial<
   Record<AdminControlPlaneTelemetryEventName, string>
@@ -4449,6 +4544,12 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           const rawAccessResponse = guardRawArtifactPayloadAccess(
             payloadRequest,
             guardResult,
+            adminAuth,
+            {
+              orgId: reviewRun.orgId,
+              repoId: reviewRun.repoId,
+              reviewRunId: reviewRun.reviewRunId,
+            },
             request,
             set,
             observabilitySink,
@@ -4523,6 +4624,12 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           const rawAccessResponse = guardRawArtifactPayloadAccess(
             payloadRequest,
             guardResult,
+            adminAuth,
+            {
+              orgId: reviewRun.orgId,
+              repoId: reviewRun.repoId,
+              reviewRunId: reviewRun.reviewRunId,
+            },
             request,
             set,
             observabilitySink,
@@ -4597,6 +4704,12 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           const rawAccessResponse = guardRawArtifactPayloadAccess(
             payloadRequest,
             guardResult,
+            adminAuth,
+            {
+              orgId: reviewRun.orgId,
+              repoId: reviewRun.repoId,
+              reviewRunId: reviewRun.reviewRunId,
+            },
             request,
             set,
             observabilitySink,
@@ -5178,6 +5291,32 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       setAdminResponseHeaders(request, set, adminAuth, guardResult.requestId, rotated.cookie);
       return { data: publicAdminSession(rotated.session) };
     })
+    .post("/admin/support-sessions", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      try {
+        const supportSession = await createAuditedSupportSession({
+          auth: adminAuth,
+          body: await readCreateSupportSessionRequestBody(request),
+          context: guardResult,
+          service: getAdminControlPlaneService(),
+        });
+        set.status = 201;
+
+        return { data: supportSession };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
     .get("/admin/debug/webhooks/:webhookEventId", async ({ params, request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -5661,6 +5800,11 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         const rawImportGuardResponse = guardRawEvalImportAccess(
           importRequest,
           guardResult,
+          adminAuth,
+          {
+            repoId: details.reviewRun.repoId,
+            reviewRunId: details.reviewRun.reviewRunId,
+          },
           request,
           set,
           observabilitySink,
@@ -13044,6 +13188,10 @@ function resolveAdminControlPlaneAuth(
   const cookieSameSite =
     options?.cookieSameSite ?? parseCookieSameSite(process.env.HEIMDALL_ADMIN_COOKIE_SAME_SITE);
   const sessionSecret = options?.sessionSecret ?? process.env.HEIMDALL_ADMIN_SESSION_SECRET;
+  const supportSessionSecret =
+    options?.supportSessionSecret ??
+    process.env.HEIMDALL_ADMIN_SUPPORT_SESSION_SECRET ??
+    sessionSecret;
   const sessionCookieName = options?.cookieName ?? "heimdall_admin_session";
   const identityProvider =
     options?.identityProvider ??
@@ -13083,6 +13231,7 @@ function resolveAdminControlPlaneAuth(
     cookieSameSite,
     secureCookies,
     sessionSecret,
+    supportSessionSecret,
   });
 
   return {
@@ -13097,6 +13246,7 @@ function resolveAdminControlPlaneAuth(
       options?.internalHeaderValue ?? process.env.HEIMDALL_ADMIN_INTERNAL_HEADER_VALUE,
     routeExposure,
     sessionCookieName,
+    supportSessionSecret,
     sessionManager:
       enabled && sessionSecret
         ? createAdminSessionManager({
@@ -13360,6 +13510,8 @@ function validateResolvedAdminAuth(input: {
   readonly assertionSecret?: string | undefined;
   /** Session signing secret. */
   readonly sessionSecret?: string | undefined;
+  /** Support-session signing secret. */
+  readonly supportSessionSecret?: string | undefined;
   /** Whether cookies are secure. */
   readonly secureCookies: boolean;
   /** SameSite policy used for browser session cookies. */
@@ -13392,6 +13544,9 @@ function validateResolvedAdminAuth(input: {
   }
   if (!input.sessionSecret || input.sessionSecret.length < 32) {
     return "Admin control-plane auth requires a 32+ character HEIMDALL_ADMIN_SESSION_SECRET.";
+  }
+  if (!input.supportSessionSecret || input.supportSessionSecret.length < 32) {
+    return "Admin control-plane auth requires a 32+ character HEIMDALL_ADMIN_SUPPORT_SESSION_SECRET or HEIMDALL_ADMIN_SESSION_SECRET.";
   }
   if (input.nodeEnv === "production" && !input.secureCookies) {
     return "Production admin sessions require secure cookies.";
@@ -13838,8 +13993,8 @@ function guardAdminSession(
     };
   }
 
-  const supportSessionId = supportSessionIdFromRequest(request);
-  if (supportSessionId === null) {
+  const supportSession = supportSessionFromRequest(request);
+  if (supportSession === null) {
     set.status = 400;
     recordAdminAccessDenied(
       observabilitySink,
@@ -13868,7 +14023,9 @@ function guardAdminSession(
     securityEventSink: auth.securityEventSink,
     session,
     traceContext: traceContextFromRequest(request, requestId),
-    ...(supportSessionId ? { supportSessionId } : {}),
+    ...(supportSession
+      ? { supportSession, supportSessionId: supportSession.supportSessionId }
+      : {}),
   };
 }
 
@@ -14103,14 +14260,164 @@ function recordAdminScopeForbiddenSecurityEvent(
   }
 }
 
-/** Reads and validates the optional request-scoped support-session ID. */
-function supportSessionIdFromRequest(request: Request): string | null | undefined {
-  const supportSessionId = request.headers.get(SUPPORT_SESSION_HEADER)?.trim();
-  if (!supportSessionId) {
+/** Reads and validates the optional request-scoped support-session header. */
+function supportSessionFromRequest(request: Request): RequestSupportSession | null | undefined {
+  const token = request.headers.get(SUPPORT_SESSION_HEADER)?.trim();
+  if (!token) {
     return undefined;
   }
 
-  return SUPPORT_SESSION_ID_PATTERN.test(supportSessionId) ? supportSessionId : null;
+  if (SIGNED_SUPPORT_SESSION_TOKEN_PATTERN.test(token)) {
+    const claims = readUnverifiedSupportSessionClaims(token);
+    return claims ? { format: "signed", supportSessionId: claims.supportSessionId, token } : null;
+  }
+
+  return SUPPORT_SESSION_ID_PATTERN.test(token)
+    ? { format: "legacy", supportSessionId: token, token }
+    : null;
+}
+
+/** Creates a signed support-session token from validated claims. */
+function createSupportSessionToken(claims: SupportSessionTokenClaims, secret: string): string {
+  const payload = encodeBase64Url(JSON.stringify(claims));
+  return `supp_${payload}.${supportSessionSignature(payload, secret)}`;
+}
+
+/** Verifies a support-session token and returns validated claims. */
+function verifySupportSessionToken(
+  token: string,
+  secret: string,
+): SupportSessionTokenClaims | undefined {
+  const parsed = splitSupportSessionToken(token);
+  if (!parsed) {
+    return undefined;
+  }
+
+  const expectedSignature = supportSessionSignature(parsed.payload, secret);
+  if (!constantTimeEqual(expectedSignature, parsed.signature)) {
+    return undefined;
+  }
+
+  return supportSessionClaimsFromPayload(parsed.payload);
+}
+
+/** Reads token claims without trusting them, only to expose the product-safe support-session ID. */
+function readUnverifiedSupportSessionClaims(token: string): SupportSessionTokenClaims | undefined {
+  const parsed = splitSupportSessionToken(token);
+  return parsed ? supportSessionClaimsFromPayload(parsed.payload) : undefined;
+}
+
+/** Splits a signed support-session token into payload and signature segments. */
+function splitSupportSessionToken(
+  token: string,
+): { readonly payload: string; readonly signature: string } | undefined {
+  const [prefixedPayload, signature, extra] = token.split(".");
+  if (
+    !prefixedPayload ||
+    !signature ||
+    extra !== undefined ||
+    !prefixedPayload.startsWith("supp_")
+  ) {
+    return undefined;
+  }
+
+  const payload = prefixedPayload.slice("supp_".length);
+  return payload ? { payload, signature } : undefined;
+}
+
+/** Decodes and validates support-session token claims. */
+function supportSessionClaimsFromPayload(payload: string): SupportSessionTokenClaims | undefined {
+  try {
+    const claims = JSON.parse(decodeBase64Url(payload)) as unknown;
+    if (!claims || typeof claims !== "object" || Array.isArray(claims)) {
+      return undefined;
+    }
+
+    const record = claims as Record<string, unknown>;
+    const supportSessionId = stringField(record, "supportSessionId");
+    const actorUserId = stringField(record, "actorUserId");
+    const createdAt = stringField(record, "createdAt");
+    const expiresAt = stringField(record, "expiresAt");
+    if (
+      record.version !== SUPPORT_SESSION_TOKEN_VERSION ||
+      !supportSessionId ||
+      !SUPPORT_SESSION_ID_PATTERN.test(supportSessionId) ||
+      !actorUserId ||
+      !createdAt ||
+      !expiresAt ||
+      Number.isNaN(Date.parse(createdAt)) ||
+      Number.isNaN(Date.parse(expiresAt))
+    ) {
+      return undefined;
+    }
+
+    const scopes = supportSessionScopesFromValue(record.scopes);
+    if (scopes.length === 0) {
+      return undefined;
+    }
+
+    const orgId = stringField(record, "orgId");
+    const repoId = stringField(record, "repoId");
+    const reviewRunId = stringField(record, "reviewRunId");
+    return {
+      actorUserId,
+      createdAt,
+      expiresAt,
+      scopes,
+      supportSessionId,
+      version: SUPPORT_SESSION_TOKEN_VERSION,
+      ...(orgId ? { orgId } : {}),
+      ...(repoId ? { repoId } : {}),
+      ...(reviewRunId ? { reviewRunId } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Returns a valid support-session scope list from an unknown token or request value. */
+function supportSessionScopesFromValue(value: unknown): readonly SupportSessionScope[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.filter(isSupportSessionScope))];
+}
+
+/** Returns whether a value is a supported support-session scope. */
+function isSupportSessionScope(value: unknown): value is SupportSessionScope {
+  return value === "raw_artifact_payload" || value === "raw_eval_import";
+}
+
+/** Returns an HMAC-SHA256 signature for a support-session token payload. */
+function supportSessionSignature(payload: string, secret: string): string {
+  return createHmac("sha256", secret).update(payload).digest("base64url");
+}
+
+/** Returns a product-safe SHA-256 token hash for audit metadata. */
+function supportSessionTokenHash(token: string): string {
+  return `sha256:${createHash("sha256").update(token).digest("hex")}`;
+}
+
+/** Encodes UTF-8 text as base64url. */
+function encodeBase64Url(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url");
+}
+
+/** Decodes UTF-8 text from base64url. */
+function decodeBase64Url(value: string): string {
+  return Buffer.from(value, "base64url").toString("utf8");
+}
+
+/** Compares two strings in constant time. */
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  if (leftBytes.byteLength !== rightBytes.byteLength) {
+    return false;
+  }
+
+  return timingSafeEqual(leftBytes, rightBytes);
 }
 
 /** Builds the audited artifact payload access request from URL query and auth context. */
@@ -14170,6 +14477,8 @@ function artifactPayloadAccessLevelFromUrl(url: URL): AdminReviewArtifactPayload
 function guardRawArtifactPayloadAccess(
   payloadRequest: AdminReviewArtifactPayloadRequest,
   context: ApiV1RequestContext,
+  auth: ResolvedAdminControlPlaneAuthOptions,
+  resource: SupportSessionResourceScope,
   request: Request,
   set: AdminStatusSet,
   observabilitySink: ObservabilitySink,
@@ -14181,7 +14490,8 @@ function guardRawArtifactPayloadAccess(
 
   if (
     context.kind === "admin" &&
-    (context.supportSessionId || canBypassRawArtifactPayloadSupportSession(context.actor))
+    (supportSessionAllowsAccess(context, auth, "raw_artifact_payload", resource) ||
+      canBypassRawArtifactPayloadSupportSession(context.actor))
   ) {
     return undefined;
   }
@@ -14207,6 +14517,55 @@ function guardRawArtifactPayloadAccess(
   };
 }
 
+/** Returns whether a signed support session authorizes one privileged operation. */
+function supportSessionAllowsAccess(
+  context: Extract<ApiV1RequestContext, { readonly kind: "admin" }> | AdminRequestContext,
+  auth: ResolvedAdminControlPlaneAuthOptions,
+  requiredScope: SupportSessionScope,
+  resource: SupportSessionResourceScope,
+): boolean {
+  if (!context.supportSession || context.supportSession.format !== "signed") {
+    return false;
+  }
+
+  const claims = verifySupportSessionToken(
+    context.supportSession.token,
+    requireValue(auth.supportSessionSecret),
+  );
+  if (!claims || claims.actorUserId !== context.actor.actorUserId) {
+    return false;
+  }
+  if (new Date(claims.expiresAt).getTime() <= Date.now()) {
+    return false;
+  }
+  if (!claims.scopes.includes(requiredScope)) {
+    return false;
+  }
+
+  return supportSessionResourceMatches(claims, resource);
+}
+
+/** Returns whether token resource claims allow the requested resource. */
+function supportSessionResourceMatches(
+  claims: SupportSessionTokenClaims,
+  resource: SupportSessionResourceScope,
+): boolean {
+  if (claims.reviewRunId && resource.reviewRunId !== claims.reviewRunId) {
+    return false;
+  }
+  if (claims.repoId && resource.repoId !== claims.repoId) {
+    return false;
+  }
+  if (claims.orgId && resource.orgId && claims.orgId !== resource.orgId) {
+    return false;
+  }
+  if (claims.orgId && !claims.repoId && !claims.reviewRunId) {
+    return resource.orgId === claims.orgId;
+  }
+
+  return true;
+}
+
 /** Returns whether an admin actor can read raw artifact payloads without support-session context. */
 function canBypassRawArtifactPayloadSupportSession(actor: AdminActor): boolean {
   return (
@@ -14219,6 +14578,8 @@ function canBypassRawArtifactPayloadSupportSession(actor: AdminActor): boolean {
 function guardRawEvalImportAccess(
   importRequest: ImportReviewRunToEvalRequest,
   context: AdminRequestContext,
+  auth: ResolvedAdminControlPlaneAuthOptions,
+  resource: SupportSessionResourceScope,
   request: Request,
   set: AdminStatusSet,
   observabilitySink: ObservabilitySink,
@@ -14226,7 +14587,7 @@ function guardRawEvalImportAccess(
 ): AdminErrorResponse | undefined {
   if (
     importRequest.redactionLevel !== "raw_allowed" ||
-    context.supportSessionId ||
+    supportSessionAllowsAccess(context, auth, "raw_eval_import", resource) ||
     canBypassRawEvalImportSupportSession(context.actor)
   ) {
     return undefined;
@@ -14599,6 +14960,244 @@ function replayAuditActor(context: AdminRequestContext): AdminReplayAuditActor {
     ...(context.actor.displayName ? { displayName: context.actor.displayName } : {}),
     ...(context.actor.email ? { email: context.actor.email } : {}),
   };
+}
+
+/** Creates one audited, signed support session for privileged raw-data access. */
+async function createAuditedSupportSession(input: {
+  /** Resolved admin auth configuration used for support-session signing. */
+  readonly auth: ResolvedAdminControlPlaneAuthOptions;
+  /** Request body after validation. */
+  readonly body: CreateSupportSessionRequestBody;
+  /** Authenticated admin request context. */
+  readonly context: AdminRequestContext;
+  /** Control-plane service used for audit and scope lookups. */
+  readonly service: AdminControlPlaneService;
+}): Promise<SupportSessionTokenSummary> {
+  const secret = requireValue(input.auth.supportSessionSecret);
+  const resource = await resolveSupportSessionResourceScope(
+    input.service,
+    input.context.actor,
+    input.body,
+  );
+  const supportSessionId = `supp_${randomBytes(24).toString("base64url")}`;
+  const createdAt = new Date();
+  const expiresInMinutes = input.body.expiresInMinutes ?? DEFAULT_SUPPORT_SESSION_EXPIRES_MINUTES;
+  const expiresAt = new Date(createdAt.getTime() + expiresInMinutes * 60 * 1000).toISOString();
+  const claims: SupportSessionTokenClaims = {
+    actorUserId: input.context.actor.actorUserId,
+    createdAt: createdAt.toISOString(),
+    expiresAt,
+    scopes: input.body.scopes ?? defaultSupportSessionScopes(),
+    supportSessionId,
+    version: SUPPORT_SESSION_TOKEN_VERSION,
+    ...(resource.orgId ? { orgId: resource.orgId } : {}),
+    ...(resource.repoId ? { repoId: resource.repoId } : {}),
+    ...(resource.reviewRunId ? { reviewRunId: resource.reviewRunId } : {}),
+  };
+  const token = createSupportSessionToken(claims, secret);
+  const auditLog = await input.service.recordAuditEvent({
+    action: "admin.support_session.created",
+    actor: input.context.actor,
+    metadata: {
+      createdAt: createdAt.toISOString(),
+      expiresInMinutes,
+      expiresAt,
+      reason: input.body.reason,
+      requestId: input.context.requestId,
+      scopes: claims.scopes,
+      supportSessionId,
+      tokenHash: supportSessionTokenHash(token),
+      ...(resource.reviewRunId ? { reviewRunId: resource.reviewRunId } : {}),
+      ...(resource.repoId ? { repoId: resource.repoId } : {}),
+    },
+    ...(resource.orgId ? { orgId: resource.orgId } : {}),
+    requestId: input.context.requestId,
+    resourceId: supportSessionId,
+    resourceType: "support_session",
+    sessionId: input.context.session.sessionId,
+  });
+
+  return {
+    auditLogId: auditLog.auditLogId,
+    expiresAt,
+    scopes: claims.scopes,
+    supportSessionId,
+    token,
+    ...(resource.orgId ? { orgId: resource.orgId } : {}),
+    ...(resource.repoId ? { repoId: resource.repoId } : {}),
+    ...(resource.reviewRunId ? { reviewRunId: resource.reviewRunId } : {}),
+  };
+}
+
+/** Reads and validates a support-session creation request body. */
+async function readCreateSupportSessionRequestBody(
+  request: Request,
+): Promise<CreateSupportSessionRequestBody> {
+  const body = asRecord(await request.json().catch(() => undefined));
+  if (!body) {
+    throw new AdminRequestValidationError(
+      "admin.support_session_body_invalid",
+      "Support-session creation requires a JSON object body.",
+      400,
+    );
+  }
+
+  const reason = stringField(body, "reason");
+  if (!reason) {
+    throw new AdminRequestValidationError(
+      "admin.reason_required",
+      "Support-session creation requires a non-empty reason.",
+      400,
+    );
+  }
+  if (reason.length > 1000) {
+    throw new AdminRequestValidationError(
+      "admin.reason_too_long",
+      "Support-session reason must be at most 1000 characters.",
+      400,
+    );
+  }
+
+  const expiresInMinutes = supportSessionExpiresInMinutes(body.expiresInMinutes);
+  const scopes =
+    body.scopes === undefined
+      ? defaultSupportSessionScopes()
+      : supportSessionScopesFromValue(body.scopes);
+  if (scopes.length === 0) {
+    throw new AdminRequestValidationError(
+      "admin.support_session_scope_invalid",
+      "Support-session scopes must include at least one supported scope.",
+      400,
+    );
+  }
+
+  const orgId = stringField(body, "orgId");
+  const repoId = stringField(body, "repoId");
+  const reviewRunId = stringField(body, "reviewRunId");
+
+  return {
+    expiresInMinutes,
+    reason,
+    scopes,
+    ...(orgId ? { orgId } : {}),
+    ...(repoId ? { repoId } : {}),
+    ...(reviewRunId ? { reviewRunId } : {}),
+  };
+}
+
+/** Resolves and authorizes the resource scope for one support-session token. */
+async function resolveSupportSessionResourceScope(
+  service: AdminControlPlaneService,
+  actor: AdminActor,
+  body: CreateSupportSessionRequestBody,
+): Promise<SupportSessionResourceScope> {
+  if (body.reviewRunId) {
+    const reviewRun = await service.getReviewRun(body.reviewRunId);
+    ensureConsistentSupportSessionScope(body, {
+      orgId: reviewRun.orgId,
+      repoId: reviewRun.repoId,
+      reviewRunId: reviewRun.reviewRunId,
+    });
+    ensureActorCanCreateSupportSession(actor, {
+      orgId: reviewRun.orgId,
+      repoId: reviewRun.repoId,
+      reviewRunId: reviewRun.reviewRunId,
+    });
+    return {
+      orgId: reviewRun.orgId,
+      repoId: reviewRun.repoId,
+      reviewRunId: reviewRun.reviewRunId,
+    };
+  }
+
+  if (body.repoId) {
+    const settings = await service.getRepositorySettings(body.repoId);
+    ensureConsistentSupportSessionScope(body, {
+      orgId: settings.repository.orgId,
+      repoId: settings.repository.repoId,
+    });
+    ensureActorCanCreateSupportSession(actor, {
+      orgId: settings.repository.orgId,
+      repoId: settings.repository.repoId,
+    });
+    return { orgId: settings.repository.orgId, repoId: settings.repository.repoId };
+  }
+
+  if (body.orgId) {
+    ensureActorCanCreateSupportSession(actor, { orgId: body.orgId });
+    return { orgId: body.orgId };
+  }
+
+  if (!actorHasPermission(actor, "admin.settings.manage")) {
+    throw new AdminRequestValidationError(
+      "admin.support_session_scope_required",
+      "Support-session creation requires an organization, repository, or review-run scope.",
+      400,
+    );
+  }
+
+  return {};
+}
+
+/** Ensures an explicit support-session request scope matches the loaded resource. */
+function ensureConsistentSupportSessionScope(
+  requested: CreateSupportSessionRequestBody,
+  resolved: SupportSessionResourceScope,
+): void {
+  if (
+    (requested.orgId && requested.orgId !== resolved.orgId) ||
+    (requested.repoId && requested.repoId !== resolved.repoId) ||
+    (requested.reviewRunId && requested.reviewRunId !== resolved.reviewRunId)
+  ) {
+    throw new AdminRequestValidationError(
+      "admin.support_session_scope_mismatch",
+      "Support-session resource scope does not match the requested resource.",
+      400,
+    );
+  }
+}
+
+/** Ensures an actor can create a support session for the requested resource. */
+function ensureActorCanCreateSupportSession(
+  actor: AdminActor,
+  resource: SupportSessionResourceScope,
+): void {
+  const permitted = resource.repoId
+    ? actorCanAccessRepo(actor, resource.repoId, resource.orgId)
+    : actorCanAccessOrg(actor, resource.orgId);
+  if (!permitted) {
+    throw new AdminRequestValidationError(
+      "admin.scope_forbidden",
+      "Admin actor is not scoped to this organization or repository.",
+      403,
+    );
+  }
+}
+
+/** Returns the bounded support-session lifetime from an unknown request value. */
+function supportSessionExpiresInMinutes(value: unknown): number {
+  if (value === undefined) {
+    return DEFAULT_SUPPORT_SESSION_EXPIRES_MINUTES;
+  }
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_SUPPORT_SESSION_EXPIRES_MINUTES
+  ) {
+    throw new AdminRequestValidationError(
+      "admin.support_session_ttl_invalid",
+      `Support-session expiresInMinutes must be an integer between 1 and ${MAX_SUPPORT_SESSION_EXPIRES_MINUTES}.`,
+      400,
+    );
+  }
+
+  return value;
+}
+
+/** Returns the default support-session scopes for privileged raw support workflows. */
+function defaultSupportSessionScopes(): readonly SupportSessionScope[] {
+  return ["raw_artifact_payload", "raw_eval_import"];
 }
 
 /** Extracts a replay confirmation token from a JSON request body. */

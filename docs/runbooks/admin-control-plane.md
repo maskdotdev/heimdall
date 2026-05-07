@@ -56,9 +56,10 @@ evidence from every gate:
    against the current API, dashboard, and gateway revisions.
 2. Create a dedicated production GitHub OAuth app for the admin gateway. Configure only the exact
    callback URL `https://<gateway-production-origin>/auth/github/callback`.
-3. Generate four distinct production secrets: `HEIMDALL_ADMIN_SESSION_SECRET`,
+3. Generate distinct production secrets: `HEIMDALL_ADMIN_SESSION_SECRET`,
    `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET`, `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET`, and the
-   GitHub OAuth client secret.
+   GitHub OAuth client secret. Optionally set `HEIMDALL_ADMIN_SUPPORT_SESSION_SECRET` when
+   support-session token rotation should be separate from admin-session rotation.
 4. Deploy the API, dashboard, and gateway to Railway with admin access still disabled on the API:
    `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`.
    In Railway service settings, set each service config path to the committed config-as-code file:
@@ -125,7 +126,7 @@ Use this checklist for production and for every gateway configuration change:
 | Org allowlist | Require active membership in `HEIMDALL_ADMIN_GITHUB_ORG` and keep `HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS` explicit. Leave `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=false` unless the GitHub org is itself the admin access group and the security owner approves it. |
 | Scope grants | Grant only the required `HEIMDALL_ADMIN_GATEWAY_ORG_IDS`, optional `HEIMDALL_ADMIN_GATEWAY_REPO_IDS`, and `admin.*` permissions for the release. Avoid `*` scopes unless the release ticket documents why global access is required. |
 | Session policy | Gateway sessions use signed, `HttpOnly`, `Secure`, `SameSite=Lax` cookies with `HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS<=28800`. OAuth state uses `SameSite=Lax` and `HEIMDALL_ADMIN_GATEWAY_OAUTH_STATE_MAX_AGE_SECONDS<=900`. API admin sessions use signed, `HttpOnly`, `Secure` cookies with CSRF on unsafe methods and API-side admin route rate limits enabled. |
-| Support-session references | Privileged raw eval import requests from support actors must include `x-heimdall-support-session-id` with an opaque `supp_` ID from the support ticket or approval workflow. The API records that ID in debug/eval audit actor metadata. Full support-session approval persistence remains future work. |
+| Support-session tokens | Privileged raw artifact and raw eval import requests from support actors must include `x-heimdall-support-session-id` with a signed `supp_` token created by `POST /admin/support-sessions`. The API audits token creation, records only the stable support-session ID and token hash, and validates actor, scope, resource, and expiration before raw access. Full approval persistence and revocation remain future work. |
 | Operator rationale | Eval import draft mutations must include a non-empty `reason` that links the action to a support ticket, incident, release drill, or eval maintenance task. |
 | OAuth app settings | Use a dedicated production GitHub OAuth app. Configure only the production gateway callback URL, request `read:org`, disable signup in the authorization request, and store the client secret only in the deployment secret store. |
 | Origin checks | Set exact HTTPS dashboard origins in both `HEIMDALL_ADMIN_ALLOWED_ORIGINS` and `HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS`. Do not use wildcard origins. Verify credentialed CORS with the preflight command before and after changes. |
@@ -349,6 +350,7 @@ Set these variables before enabling admin routes:
 | `HEIMDALL_ADMIN_IDENTITY_PROVIDER` | `oidc`, `saml`, or `github_org` |
 | `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET` | A 32+ character secret shared with the identity gateway |
 | `HEIMDALL_ADMIN_SESSION_SECRET` | A distinct 32+ character session signing secret |
+| `HEIMDALL_ADMIN_SUPPORT_SESSION_SECRET` | Optional. A distinct 32+ character support-session token signing secret; defaults to `HEIMDALL_ADMIN_SESSION_SECRET` |
 | `HEIMDALL_ADMIN_ALLOWED_ORIGINS` | Comma-separated dashboard origins |
 | `HEIMDALL_ADMIN_GITHUB_ORG` | Required when `HEIMDALL_ADMIN_IDENTITY_PROVIDER=github_org` |
 | `HEIMDALL_ADMIN_RATE_LIMIT_MAX_REQUESTS` | Optional. Defaults to `120` requests per client window |
@@ -403,6 +405,7 @@ General rotation steps:
 | Secret | Rotation procedure | Expected user impact | Verification |
 | --- | --- | --- | --- |
 | `HEIMDALL_ADMIN_SESSION_SECRET` | Update the API secret and redeploy `@app/api`. Existing API admin sessions become invalid. | Operators must refresh the dashboard session and log in again. | Login succeeds through the gateway, `/admin/auth/session` returns the new session, logout writes an audit row, and old cookies return 401. |
+| `HEIMDALL_ADMIN_SUPPORT_SESSION_SECRET` | Update the API secret and redeploy `@app/api`. Existing signed support-session tokens become invalid. | Operators must create new support-session tokens for active raw-data investigations. Admin sessions remain valid. | `POST /admin/support-sessions` returns a new signed token, old tokens are denied with `admin.support_session_required`, and audit rows include only the new token hash. |
 | `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET` | This secret is shared by the gateway and API and has no dual-secret window. Disable admin routes or schedule a short maintenance window, update the gateway and API to the same new value, redeploy both, then re-enable admin routes. | Assertions minted before the cutover fail after the API deploy. Operators must request a new assertion and API session. | `pnpm preflight:control-plane:staging` passes against the target URLs, assertion timestamps are current, and invalid old assertions fail with `admin_auth.invalid_signature`. |
 | `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET` | Update the gateway secret and redeploy `@app/admin-gateway`. | Operators must repeat GitHub OAuth login because gateway session cookies become invalid. API sessions remain valid until they expire, but operators need a new gateway session for refresh. | `/heimdall/assertion` returns 401 for the old gateway cookie, then succeeds after a new GitHub login. |
 | GitHub OAuth client secret | Generate or rotate the client secret in the GitHub OAuth app, update `HEIMDALL_ADMIN_GATEWAY_GITHUB_CLIENT_SECRET`, and redeploy the gateway. Revoke the old secret after login verification. | New OAuth callbacks fail during a bad deploy. Existing gateway and API sessions continue until expiration. | `/auth/github/start` redirects to GitHub, callback completes, gateway sets a new session cookie, and no `admin_gateway.github_token_exchange_failed` errors appear. |
@@ -425,7 +428,7 @@ create equivalent alerts before moving to a formal infrastructure target.
 | Replay/export audit visibility | Search `audit_logs` for `webhook.requeue_jobs`, `job.requeue`, `review.requeue`, `publish.review`, `debug_bundle.export`, and `eval_import.draft_created` after any matching telemetry event | Replay dispatch, debug bundle export, or eval import draft creation returns without a matching audit row |
 | Replay/eval action durability | Search `admin_actions` for `replay.dispatch` and `eval_import.draft_create`, and search `replay_runs`/`replay_stage_runs` after replay dispatches, then compare row IDs with API responses and audit metadata | Replay dispatch or eval import draft creation returns without a completed admin action row linked from the audit row, or replay dispatch lacks a replay run row |
 | Debug export durability | Search `admin_actions` and `debug_exports` after a debug bundle export and compare the row IDs with the API response and `debug_bundle.export` audit metadata | A debug bundle export returns without a completed admin action row, debug export row, expiration timestamp, or audit metadata link |
-| Raw eval import gating | Review `admin.access.denied` telemetry for `admin.support_session_required` and confirm approved raw eval imports include `supportSessionId` in the `eval_import.draft_created` audit actor metadata | Raw eval imports succeed without an admin actor or support-session reference, or denied raw requests lack telemetry |
+| Raw access gating | Review `admin.access.denied` telemetry for `admin.support_session_required` and confirm approved raw artifact or raw eval access includes `supportSessionId` in audit metadata | Raw artifact or raw eval access succeeds without an elevated admin actor or signed support-session token, or denied raw requests lack telemetry |
 | Memory/rules inspection | Count `admin.memory_rules.inspected` telemetry by repository and compare against support tickets or release drills | Unexpected inspection spikes or inspection outside an approved support/release window |
 | Settings audit visibility | Search `audit_logs` for `repo.settings.updated` after any `admin.settings.updated` event | Settings update returns without a matching audit row |
 | Admin action metrics | Count `admin.action.completed` telemetry by `attributes.actionKind` and compare with specific action telemetry and audit rows | Completed action telemetry disappears for replay, debug export, eval import, settings, rules, billing, or support inspection actions |

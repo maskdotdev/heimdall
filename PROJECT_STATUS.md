@@ -22,7 +22,7 @@ tracked milestone.
 | #2 Database layer | Partial | `packages/db`, `drizzle.config.ts`, `packages/db/migrations/0000_foundation.sql`, `packages/db/migrations/0009_high_sphinx.sql`, `b9b4635` | Drizzle schema, generated migrations, bootstrap extensions, client, and repository helpers exist. Product auth persistence now includes users, provider accounts, organization memberships, opaque user sessions, and one-time OAuth state rows. More repository methods and live DB verification remain. |
 | #3 GitHub App integration | Done | `packages/github`, `docs/runbooks/github-dev-app.md`, `408f7bd` | Provider surface, installation token caching, repo discovery, PR snapshot fetching, clone auth, publishing primitives, inline review dedupe, summary-comment dedupe, check-run create/update, fake provider coverage, typed error mapping, basic rate-limit header observation, and a manual dev-app runbook exist. The latest live PR review smoke provides the current MVP test-repository proof. |
 | #4 Webhook ingestion | Done | `packages/webhook-ingestion`, `apps/api/src/app.ts`, `b9b4635` | Handles GitHub installation, repository, and pull request webhooks with signature verification, persistence, idempotency, and job planning. |
-| #5 API server | Partial | `apps/api`, `apps/api/package.json`, `packages/security`, `packages/artifacts`, `b9b4635` | Health check, GitHub webhook route, bearer-guarded internal admin-debug routes, signed admin control-plane auth, settings/history/rule reads, settings updates, repository-scoped rules CRUD, repository policy preview, repository-scoped memory/rules inspection, scoped usage rollup APIs, provider-free entitlement inspection APIs, billing reconciliation inspection and repair enqueue APIs, billing checkout/portal session APIs, audited redacted review debug bundle export, audited eval import draft creation, OpenAPI documentation in non-production environments, product role/permission helpers, GitHub OAuth start/callback routes, DB-backed product session read/revoke support, `/api/v1/me`, `/api/v1/auth/logout`, and product-session `/api/v1` org list/detail, installation list/detail/sync enqueue, GitHub install URL/callback helper, repository list/detail/settings, repository enable/disable, repository sync/reindex, repository rules CRUD, repository policy preview, scoped review-run list/detail with failure summaries and related durable job summaries, review finding list/detail, finding outcome update, suppress-similar rule creation, review rerun enqueue, review artifact metadata listing plus audited redacted payload reads/downloads through DB-inline, filesystem, or S3/R2-compatible review artifact payload stores, raw object-storage artifact signed download URL creation behind support-session access, repository memory fact CRUD, and product usage summary/event routes exist with product RBAC and admin support-session fallback. Large-payload streaming and final hardening remain. |
+| #5 API server | Partial | `apps/api`, `apps/api/package.json`, `packages/security`, `packages/artifacts`, `b9b4635` | Health check, GitHub webhook route, bearer-guarded internal admin-debug routes, signed admin control-plane auth, settings/history/rule reads, settings updates, repository-scoped rules CRUD, repository policy preview, repository-scoped memory/rules inspection, scoped usage rollup APIs, provider-free entitlement inspection APIs, billing reconciliation inspection and repair enqueue APIs, billing checkout/portal session APIs, audited redacted review debug bundle export, audited eval import draft creation, OpenAPI documentation in non-production environments, product role/permission helpers, GitHub OAuth start/callback routes, DB-backed product session read/revoke support, `/api/v1/me`, `/api/v1/auth/logout`, and product-session `/api/v1` org list/detail, installation list/detail/sync enqueue, GitHub install URL/callback helper, repository list/detail/settings, repository enable/disable, repository sync/reindex, repository rules CRUD, repository policy preview, scoped review-run list/detail with failure summaries and related durable job summaries, review finding list/detail, finding outcome update, suppress-similar rule creation, review rerun enqueue, review artifact metadata listing plus audited redacted payload reads/downloads through DB-inline, filesystem, or S3/R2-compatible review artifact payload stores, raw object-storage artifact signed download URL creation behind audited signed support-session token access, repository memory fact CRUD, and product usage summary/event routes exist with product RBAC and admin support-session fallback. Large-payload streaming and final hardening remain. |
 | #6 Web dashboard | Partial | `apps/web/src/main.ts`, `apps/web/src/styles.css` | Operator dashboard views exist for admin-debug webhook, review, publisher, and memory/rules inspection, guarded replay controls, redacted review debug bundle export, eval import draft creation, repository settings editing, repository-scoped rule CRUD, effective policy preview, usage rollups, plan/entitlement inspection, billing state, reconciliation alerts and repair enqueue controls, audit history, security event history, product session status, GitHub sign-in, refresh, and sign-out controls, and an authenticated product workspace for org selection, synced repositories, repo enable/disable actions, repository settings editing, repository-scoped rule CRUD, policy preview, review detail, failed review summaries, related durable job timeline, finding list/detail inspection, finding outcome controls, suppress-similar controls, review rerun action, artifact metadata views, audited redacted artifact payload previews/downloads, recent reviews, and basic usage cards. Broader route/query hardening remains. |
 | #7 Job queue and orchestration | Partial | `packages/queue`, `apps/worker`, `packages/db/src/schema/tables.ts` | Current async backbone scope exists: pending durable rows, outbox dispatch to BullMQ, worker lifecycle updates, retry/idempotency coverage, and worker handler registration, including indexing, embedding, review, publishing, and billing reconciliation jobs. Broader operational controls remain. |
 | #8 Repo sync and workspace manager | Partial | `packages/repo-sync`, `apps/worker/src/index.ts` | Repo sync can obtain GitHub clone auth, create an exact-commit workspace, verify `HEAD`, hand the workspace to the TypeScript indexer, and clean up temporary workspaces. Broader workspace caching remains. |
@@ -95,9 +95,10 @@ tracked milestone.
   payload-free artifact metadata after `review:debug:read` authorization, and
   `/api/v1/review-runs/:reviewRunId/artifacts/:artifactId/payload` returns redacted stored payloads
   only after scoped authorization and a caller reason. Successful payload reads and downloads write
-  `artifact_access_events`, raw reads/downloads require an admin support session or elevated admin
-  permission, `/api/v1/review-runs/:reviewRunId/artifacts/:artifactId/download-url` creates
-  short-lived raw object-storage URLs only after the same raw access gates, and the product review
+  `artifact_access_events`, raw reads/downloads require an audited signed admin support-session
+  token or elevated admin permission,
+  `/api/v1/review-runs/:reviewRunId/artifacts/:artifactId/download-url` creates short-lived raw
+  object-storage URLs only after the same raw access gates, and the product review
   detail panel can load or download redacted payloads without exposing raw prompt/code artifacts.
 - Latest review artifact storage milestone: `@repo/artifacts` now defines the review artifact
   payload store boundary, stable payload descriptors, DB-inline fallback storage, legacy inline
@@ -342,11 +343,13 @@ tracked milestone.
   reject them with audit logs. PR12 hardening now includes cross-tenant API tests that verify debug
   bundle export, eval import draft creation, and Memory & Rules inspection are denied before
   sensitive actions run, plus configurable API-side
-  admin route rate limits that return `429` with `Retry-After` and telemetry. Support-session
-  references can now be propagated with `x-heimdall-support-session-id` into debug/eval audit actor
-  metadata, and raw eval import drafts require either that support-session reference or elevated
-  admin permissions before draft creation. Eval import draft mutations also require a non-empty
-  operator reason, with denied attempts recorded through admin access-denied telemetry before draft
+  admin route rate limits that return `429` with `Retry-After` and telemetry. Support sessions can
+  now be minted through `/admin/support-sessions` as audited, signed, time-limited tokens scoped to
+  an organization, repository, or review run. The `x-heimdall-support-session-id` header still
+  propagates support-session IDs into debug/eval audit actor metadata, but privileged raw artifact
+  and raw eval access require a valid signed token or elevated admin permissions before the
+  sensitive action runs. Eval import draft mutations also require a non-empty operator reason, with
+  denied attempts recorded through admin access-denied telemetry before draft
   creation. Successful privileged admin actions now also emit generic `admin.action.completed`
   telemetry with an `actionKind` attribute so production monitoring can count action volume across
   replay, debug export, eval import, settings, rules, billing, and support inspection workflows.
@@ -600,7 +603,9 @@ tracked milestone.
   rotation, and records the matched webhook secret version in durable webhook metadata. Repo sync
   now keeps Git remotes credential-free, supplies installation tokens through a temporary
   environment-backed askpass helper for `git fetch`, removes that helper after use, and exposes a
-  product-safe Git remote URL redactor. Review orchestration now persists review artifact
+  product-safe Git remote URL redactor. The API now mints audited signed support-session tokens for
+  privileged raw-data support workflows and validates actor, scope, resource, and expiration before
+  raw artifact or raw eval access. Review orchestration now persists review artifact
   retention metadata and `retention_until`, `@repo/artifacts` can delete inline, filesystem, and
   S3/R2-backed payloads, and the worker handles `review_artifact.cleanup.v1` jobs that remove
   expired payload bytes or inline payload metadata while leaving product-safe tombstone rows. The

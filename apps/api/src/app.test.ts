@@ -147,6 +147,8 @@ const adminOrigin = "http://localhost:3001";
 const SUPPORT_SESSION_HEADER_FIXTURE = "x-heimdall-support-session-id";
 /** Valid support-session ID used by privileged admin route tests. */
 const SUPPORT_SESSION_ID_FIXTURE = "supp_12345678";
+/** Default support-session reason used by privileged admin route tests. */
+const SUPPORT_SESSION_REASON_FIXTURE = "Investigate support ticket.";
 
 describe("api app", () => {
   const auth = {
@@ -1472,6 +1474,46 @@ describe("api app", () => {
     });
   });
 
+  it("blocks legacy support-session IDs from raw artifact payload reads", async () => {
+    let payloadRead = false;
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        getReviewRun: async () => reviewRunSummaryFixture,
+        getReviewArtifactPayload: async () => {
+          payloadRead = true;
+          return reviewArtifactPayloadFixture({ accessLevel: "raw_allowed" });
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+      productSessionAuth: productAuth,
+      productSessionService: createMockProductSessionService(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect"],
+      providerSubject: "usr_support",
+    });
+
+    const response = await app.handle(
+      new Request(
+        "http://localhost/api/v1/review-runs/rrn_1/artifacts/art_1/payload?reason=Raw%20debug&accessLevel=raw_allowed",
+        {
+          headers: {
+            cookie: login.cookie,
+            [SUPPORT_SESSION_HEADER_FIXTURE]: SUPPORT_SESSION_ID_FIXTURE,
+          },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(403);
+    expect(payloadRead).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "admin.support_session_required" },
+    });
+  });
+
   it("allows admin support sessions to read raw artifact payloads", async () => {
     const payloadRequests: Parameters<AdminControlPlaneService["getReviewArtifactPayload"]>[2][] =
       [];
@@ -1496,6 +1538,7 @@ describe("api app", () => {
       permissions: ["admin.inspect"],
       providerSubject: "usr_support",
     });
+    const supportSession = await createSupportSession(app, login);
 
     const response = await app.handle(
       new Request(
@@ -1503,7 +1546,7 @@ describe("api app", () => {
         {
           headers: {
             cookie: login.cookie,
-            [SUPPORT_SESSION_HEADER_FIXTURE]: SUPPORT_SESSION_ID_FIXTURE,
+            [SUPPORT_SESSION_HEADER_FIXTURE]: supportSession.token,
           },
         },
       ),
@@ -1513,7 +1556,7 @@ describe("api app", () => {
     expect(payloadRequests).toEqual([
       expect.objectContaining({
         accessLevel: "raw_allowed",
-        supportSessionId: SUPPORT_SESSION_ID_FIXTURE,
+        supportSessionId: supportSession.supportSessionId,
       }),
     ]);
     await expect(response.json()).resolves.toMatchObject({
@@ -1546,6 +1589,7 @@ describe("api app", () => {
       permissions: ["admin.inspect"],
       providerSubject: "usr_support",
     });
+    const supportSession = await createSupportSession(app, login);
 
     const response = await app.handle(
       new Request(
@@ -1553,7 +1597,7 @@ describe("api app", () => {
         {
           headers: {
             cookie: login.cookie,
-            [SUPPORT_SESSION_HEADER_FIXTURE]: SUPPORT_SESSION_ID_FIXTURE,
+            [SUPPORT_SESSION_HEADER_FIXTURE]: supportSession.token,
           },
         },
       ),
@@ -1565,7 +1609,7 @@ describe("api app", () => {
       expect.objectContaining({
         accessLevel: "raw_allowed",
         reason: "Support download",
-        supportSessionId: SUPPORT_SESSION_ID_FIXTURE,
+        supportSessionId: supportSession.supportSessionId,
       }),
     ]);
     await expect(response.json()).resolves.toMatchObject({
@@ -1978,6 +2022,76 @@ describe("api app", () => {
         },
       },
     });
+  });
+
+  it("creates audited signed support sessions for scoped raw access", async () => {
+    const auditEvents: Parameters<AdminControlPlaneService["recordAuditEvent"]>[0][] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        recordAuditEvent: async (event) => {
+          auditEvents.push(event);
+          return auditLog(event.action);
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect"],
+      providerSubject: "usr_support",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/admin/support-sessions", {
+        body: JSON.stringify({
+          expiresInMinutes: 15,
+          reason: SUPPORT_SESSION_REASON_FIXTURE,
+          reviewRunId: "rrn_1",
+          scopes: ["raw_artifact_payload"],
+        }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const payload = (await response.json()) as {
+      data?: {
+        auditLogId?: unknown;
+        reviewRunId?: unknown;
+        scopes?: unknown;
+        supportSessionId?: unknown;
+        token?: unknown;
+      };
+    };
+    expect(payload.data).toMatchObject({
+      auditLogId: "audit_admin.support_session.created",
+      reviewRunId: "rrn_1",
+      scopes: ["raw_artifact_payload"],
+    });
+    expect(payload.data?.supportSessionId).toEqual(expect.stringMatching(/^supp_[A-Za-z0-9_-]+$/u));
+    expect(payload.data?.token).toEqual(expect.stringMatching(/^supp_[A-Za-z0-9_-]+\./u));
+    const supportEvent = auditEvents.find(
+      (event) => event.action === "admin.support_session.created",
+    );
+    expect(supportEvent).toMatchObject({
+      orgId: "org_1",
+      resourceType: "support_session",
+      metadata: expect.objectContaining({
+        expiresInMinutes: 15,
+        reason: SUPPORT_SESSION_REASON_FIXTURE,
+        reviewRunId: "rrn_1",
+        scopes: ["raw_artifact_payload"],
+        tokenHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      }),
+    });
+    expect(supportEvent?.metadata).not.toHaveProperty("token");
   });
 
   it("keeps admin routes disabled by default", async () => {
@@ -3952,6 +4066,7 @@ describe("api app", () => {
       permissions: ["admin.inspect"],
       providerSubject: "usr_support",
     });
+    const supportSession = await createSupportSession(app, login);
 
     const denied = await app.handle(
       new Request("http://localhost/admin/debug/reviews/rrn_1/import-eval", {
@@ -3981,7 +4096,7 @@ describe("api app", () => {
           cookie: login.cookie,
           "content-type": "application/json",
           origin: adminOrigin,
-          [SUPPORT_SESSION_HEADER_FIXTURE]: SUPPORT_SESSION_ID_FIXTURE,
+          [SUPPORT_SESSION_HEADER_FIXTURE]: supportSession.token,
           "x-csrf-token": login.csrfToken,
         },
       }),
@@ -3996,7 +4111,7 @@ describe("api app", () => {
     expect(actors).toEqual([
       expect.objectContaining({
         actorUserId: "oidc:usr_support",
-        supportSessionId: SUPPORT_SESSION_ID_FIXTURE,
+        supportSessionId: supportSession.supportSessionId,
       }),
     ]);
   });
@@ -5788,6 +5903,14 @@ type TestLoginSession = {
   readonly csrfToken: string;
 };
 
+/** Support-session details returned by the audited API route. */
+type TestSupportSession = {
+  /** Stable support-session ID returned by the API. */
+  readonly supportSessionId: string;
+  /** Signed support-session token sent in the support-session header. */
+  readonly token: string;
+};
+
 /** Creates an authenticated admin session for tests. */
 async function loginSession(
   app: ReturnType<typeof createApiApp>,
@@ -5806,6 +5929,48 @@ async function loginSession(
   }
 
   return { cookie, csrfToken: body.data.csrfToken };
+}
+
+/** Creates a scoped support session through the audited API route. */
+async function createSupportSession(
+  app: ReturnType<typeof createApiApp>,
+  login: TestLoginSession,
+  body: Record<string, unknown> = {
+    reason: SUPPORT_SESSION_REASON_FIXTURE,
+    reviewRunId: "rrn_1",
+  },
+): Promise<TestSupportSession> {
+  const response = await app.handle(
+    new Request("http://localhost/admin/support-sessions", {
+      body: JSON.stringify(body),
+      headers: {
+        cookie: login.cookie,
+        "content-type": "application/json",
+        origin: adminOrigin,
+        "x-csrf-token": login.csrfToken,
+      },
+      method: "POST",
+    }),
+  );
+  expect(response.status).toBe(201);
+
+  const payload = (await response.json()) as {
+    data?: {
+      supportSessionId?: unknown;
+      token?: unknown;
+    };
+  };
+  if (
+    typeof payload.data?.supportSessionId !== "string" ||
+    typeof payload.data.token !== "string"
+  ) {
+    throw new Error("Support-session creation response did not include a token.");
+  }
+
+  return {
+    supportSessionId: payload.data.supportSessionId,
+    token: payload.data.token,
+  };
 }
 
 /** Restores a set of environment variables after a route test mutates process.env. */
