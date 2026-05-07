@@ -54,6 +54,36 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("indexes Node JavaScript modules and skips TypeScript declaration files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await Promise.all([
+      writeFile(
+        join(workspacePath, "common.cjs"),
+        "function createService() { return true; }\nmodule.exports = { createService };\n",
+      ),
+      writeFile(join(workspacePath, "module.mjs"), "export function loadService() { return 1; }\n"),
+      writeFile(join(workspacePath, "types.d.ts"), "export declare const typed: boolean;\n"),
+      writeFile(join(workspacePath, "module-types.d.mts"), "export declare const esm: boolean;\n"),
+      writeFile(join(workspacePath, "common-types.d.cts"), "export declare const cjs: boolean;\n"),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const filePaths = artifact.records.flatMap((record) =>
+      record.type === "file" ? [record.path] : [],
+    );
+    expect(filePaths).toEqual(["common.cjs", "module.mjs"]);
+    expect(
+      artifact.records.every((record) => !("path" in record) || !record.path.includes(".d.")),
+    ).toBe(true);
+    expect(artifact.manifest.languages).toEqual(["javascript"]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("skips generated and vendored sources before emitting records", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await Promise.all([

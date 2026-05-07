@@ -506,7 +506,7 @@ function lineRange(
 }
 
 function isSupportedPath(path: string): boolean {
-  return /\.(ts|tsx|js|jsx|mts|cts)$/.test(path) && !path.endsWith(".d.ts");
+  return /\.(cjs|cts|js|jsx|mjs|mts|ts|tsx)$/.test(path) && !/\.d\.[cm]?ts$/.test(path);
 }
 
 /** Returns whether a source file should be considered for indexing. */
@@ -517,14 +517,14 @@ function isIndexableSourcePath(path: string): boolean {
 function languageForPath(path: string): CodeLanguage {
   if (path.endsWith(".tsx")) return "tsx";
   if (path.endsWith(".jsx")) return "jsx";
-  if (path.endsWith(".js")) return "javascript";
+  if (/\.[cm]?js$/.test(path)) return "javascript";
   return "typescript";
 }
 
 function scriptKind(path: string): ts.ScriptKind {
   if (path.endsWith(".tsx")) return ts.ScriptKind.TSX;
   if (path.endsWith(".jsx")) return ts.ScriptKind.JSX;
-  if (path.endsWith(".js")) return ts.ScriptKind.JS;
+  if (/\.[cm]?js$/.test(path)) return ts.ScriptKind.JS;
   return ts.ScriptKind.TS;
 }
 
