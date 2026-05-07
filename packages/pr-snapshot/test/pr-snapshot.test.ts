@@ -5,6 +5,7 @@ import {
   hashRawDiff,
   isLineCommentable,
   parseUnifiedDiff,
+  toGitHubReviewCommentAnchor,
 } from "../src";
 
 describe("parseUnifiedDiff", () => {
@@ -95,6 +96,89 @@ describe("line anchors", () => {
     );
     expect(isLineCommentable(files, { line: 2, path: "src/math.ts", side: "RIGHT" })).toBe(true);
     expect(isLineCommentable(files, { line: 3, path: "src/math.ts", side: "RIGHT" })).toBe(false);
+  });
+
+  it("converts only verified diff lines into GitHub review comment anchors", () => {
+    const files = parseUnifiedDiff(`diff --git a/src/math.ts b/src/math.ts
+--- a/src/math.ts
++++ b/src/math.ts
+@@ -1,3 +1,4 @@
+ export function add(a: number, b: number) {
+-  return a + b
++  return Number(a) + Number(b);
+ }
++export const value = 1;
+`);
+
+    expect(
+      toGitHubReviewCommentAnchor(files, { line: 2, path: "src/math.ts", side: "RIGHT" }),
+    ).toEqual({
+      line: 2,
+      path: "src/math.ts",
+      side: "RIGHT",
+    });
+    expect(
+      toGitHubReviewCommentAnchor(files, { line: 2, path: "src/math.ts", side: "LEFT" }),
+    ).toEqual({
+      line: 2,
+      path: "src/math.ts",
+      side: "LEFT",
+    });
+    expect(
+      toGitHubReviewCommentAnchor(files, { line: 99, path: "src/math.ts", side: "RIGHT" }),
+    ).toBeUndefined();
+    expect(
+      toGitHubReviewCommentAnchor(files, {
+        line: 2,
+        path: "src/math.ts",
+        side: "RIGHT",
+        startLine: 2,
+        startSide: "LEFT",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("converts same-side multiline ranges only when every line is commentable", () => {
+    const files = parseUnifiedDiff(`diff --git a/src/math.ts b/src/math.ts
+--- a/src/math.ts
++++ b/src/math.ts
+@@ -1,2 +1,3 @@
+ export function add(a: number, b: number) {
++  const sum = Number(a) + Number(b);
+   return a + b;
+`);
+
+    expect(
+      toGitHubReviewCommentAnchor(files, {
+        line: 2,
+        path: "src/math.ts",
+        side: "RIGHT",
+        startLine: 1,
+      }),
+    ).toEqual({
+      line: 2,
+      path: "src/math.ts",
+      side: "RIGHT",
+      startLine: 1,
+      startSide: "RIGHT",
+    });
+    expect(
+      toGitHubReviewCommentAnchor(files, {
+        line: 2,
+        path: "src/math.ts",
+        side: "RIGHT",
+        startLine: 1,
+        startSide: "LEFT",
+      }),
+    ).toBeUndefined();
+    expect(
+      toGitHubReviewCommentAnchor(files, {
+        line: 4,
+        path: "src/math.ts",
+        side: "RIGHT",
+        startLine: 1,
+      }),
+    ).toBeUndefined();
   });
 });
 

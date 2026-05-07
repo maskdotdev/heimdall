@@ -24,6 +24,28 @@ export type CommentableLine = LineAnchor & {
   readonly kind: DiffLine["kind"];
 };
 
+/** Provider-neutral range anchor to convert into a GitHub review-comment target. */
+export type ReviewCommentRangeAnchor = LineAnchor & {
+  /** Optional first line for a same-side multiline comment range. */
+  readonly startLine?: number;
+  /** Optional first-line side for a same-side multiline comment range. */
+  readonly startSide?: DiffAnchorSide;
+};
+
+/** GitHub pull request review comment anchor using the modern line/side fields. */
+export type GitHubReviewCommentAnchor = {
+  /** Repository path passed to GitHub's review comment API. */
+  readonly path: string;
+  /** Last 1-based line in the selected diff side. */
+  readonly line: number;
+  /** Last diff side for the review comment. */
+  readonly side: DiffAnchorSide;
+  /** Optional first 1-based line for multiline comments. */
+  readonly startLine?: number;
+  /** Optional first diff side for multiline comments. */
+  readonly startSide?: DiffAnchorSide;
+};
+
 type MutableChangedFile = {
   path: string;
   oldPath?: string;
@@ -124,6 +146,56 @@ export function isLineCommentable(files: readonly ChangedFile[], anchor: LineAnc
   return buildCommentableLineIndex(files).some(
     (line) => line.path === anchor.path && line.line === anchor.line && line.side === anchor.side,
   );
+}
+
+/** Converts a verified provider-neutral anchor into a GitHub review-comment anchor. */
+export function toGitHubReviewCommentAnchor(
+  files: readonly ChangedFile[],
+  anchor: ReviewCommentRangeAnchor,
+): GitHubReviewCommentAnchor | undefined {
+  if (!isLineCommentable(files, anchor)) {
+    return undefined;
+  }
+
+  if (anchor.startLine === undefined) {
+    return {
+      line: anchor.line,
+      path: anchor.path,
+      side: anchor.side,
+    };
+  }
+
+  const startSide = anchor.startSide ?? anchor.side;
+  if (startSide !== anchor.side || anchor.startLine > anchor.line) {
+    return undefined;
+  }
+
+  if (anchor.startLine === anchor.line) {
+    return {
+      line: anchor.line,
+      path: anchor.path,
+      side: anchor.side,
+    };
+  }
+
+  if (
+    !isSameSideRangeCommentable(files, {
+      line: anchor.line,
+      path: anchor.path,
+      side: anchor.side,
+      startLine: anchor.startLine,
+    })
+  ) {
+    return undefined;
+  }
+
+  return {
+    line: anchor.line,
+    path: anchor.path,
+    side: anchor.side,
+    startLine: anchor.startLine,
+    startSide,
+  };
 }
 
 /** Converts a parsed changed file into a minimal patch text. */
@@ -272,6 +344,20 @@ function commentableLineForDiffLine(
   }
 
   return [];
+}
+
+/** Checks whether every line in a same-side review range can receive a comment. */
+function isSameSideRangeCommentable(
+  files: readonly ChangedFile[],
+  anchor: Required<Pick<ReviewCommentRangeAnchor, "line" | "path" | "side" | "startLine">>,
+): boolean {
+  for (let line = anchor.startLine; line <= anchor.line; line += 1) {
+    if (!isLineCommentable(files, { line, path: anchor.path, side: anchor.side })) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function normalizeDiffPath(path: string): string {
