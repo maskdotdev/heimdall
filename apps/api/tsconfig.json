@@ -10,10 +10,14 @@
   "exclude": ["dist", "node_modules"],
   "references": [
     { "path": "../../packages/admin-tools/tsconfig.build.json" },
+    { "path": "../../packages/artifacts/tsconfig.build.json" },
+    { "path": "../../packages/billing/tsconfig.build.json" },
     { "path": "../../packages/config/tsconfig.build.json" },
     { "path": "../../packages/db/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
+    { "path": "../../packages/rules/tsconfig.build.json" },
     { "path": "../../packages/security/tsconfig.build.json" },
+    { "path": "../../packages/usage/tsconfig.build.json" },
     { "path": "../../packages/webhook-ingestion/tsconfig.build.json" }
   ]
 }

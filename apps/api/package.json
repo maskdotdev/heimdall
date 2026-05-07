@@ -14,14 +14,19 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
+    "@elysia/openapi": "1.4.15",
     "@repo/admin-tools": "workspace:*",
+    "@repo/artifacts": "workspace:*",
+    "@repo/billing": "workspace:*",
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
-    "@repo/queue": "workspace:*",
-    "@repo/security": "workspace:*",
-    "@repo/webhook-ingestion": "workspace:*",
     "@repo/observability": "workspace:*",
+    "@repo/queue": "workspace:*",
+    "@repo/rules": "workspace:*",
+    "@repo/security": "workspace:*",
+    "@repo/usage": "workspace:*",
+    "@repo/webhook-ingestion": "workspace:*",
     "drizzle-orm": "catalog:",
     "elysia": "catalog:"
   },

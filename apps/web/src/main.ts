@@ -10,6 +10,12 @@ type AdminFailureDetail = {
   readonly message: string;
   /** Whether retrying the operation is expected to be safe. */
   readonly retryable?: boolean;
+  /** Related database row ID when available. */
+  readonly rowId?: string;
+  /** ISO timestamp associated with the failure when available. */
+  readonly occurredAt?: string;
+  /** Additional structured failure metadata. */
+  readonly details?: unknown;
 };
 
 /** Durable background job summary shown by inspectors. */
@@ -24,6 +30,30 @@ type AdminBackgroundJobDebugSummary = {
   readonly jobType: string;
   /** Current durable job status. */
   readonly status: string;
+  /** Organization associated with the job when available. */
+  readonly orgId?: string;
+  /** Repository associated with the job when available. */
+  readonly repoId?: string;
+  /** Review run associated with the job when available. */
+  readonly reviewRunId?: string;
+  /** Current durable attempt count. */
+  readonly attempts?: number;
+  /** Maximum durable attempts allowed. */
+  readonly maxAttempts?: number;
+  /** ISO timestamp when the job was scheduled. */
+  readonly scheduledAt?: string;
+  /** ISO timestamp when the job started. */
+  readonly startedAt?: string;
+  /** ISO timestamp when the job completed. */
+  readonly completedAt?: string;
+  /** ISO timestamp when the job was created. */
+  readonly createdAt?: string;
+  /** ISO timestamp when the job was updated. */
+  readonly updatedAt?: string;
+  /** Structured failure summary when the job failed. */
+  readonly failure?: AdminFailureDetail;
+  /** Raw validated or stored job envelope. */
+  readonly payload?: unknown;
 };
 
 /** Replay audit row shown by inspectors. */
@@ -55,6 +85,16 @@ type AdminWebhookDebugDetails = {
   readonly expectedJobKeys: readonly string[];
   /** Related durable jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
+  /** Audited replay decisions. */
+  readonly replayAudits: readonly AdminReplayAuditSummary[];
+  /** Structured failures. */
+  readonly failures: readonly AdminFailureDetail[];
+};
+
+/** Background job debug response consumed by the dashboard. */
+type AdminBackgroundJobDebugDetails = {
+  /** Durable job summary. */
+  readonly job: AdminBackgroundJobDebugSummary;
   /** Audited replay decisions. */
   readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Structured failures. */
@@ -144,16 +184,42 @@ type AdminReviewDependencySummary = {
 type AdminReviewArtifactSummary = {
   /** Artifact row ID. */
   readonly reviewArtifactId: string;
+  /** Review run that owns the artifact when returned by product APIs. */
+  readonly reviewRunId?: string;
+  /** Repository that owns the artifact when returned by product APIs. */
+  readonly repoId?: string;
   /** Artifact kind. */
   readonly kind: string;
   /** Artifact display name. */
   readonly name: string;
   /** Artifact URI. */
   readonly uri: string;
+  /** Artifact content hash when available. */
+  readonly hash?: string;
   /** Artifact byte size. */
   readonly sizeBytes: number;
+  /** Data classification label when available. */
+  readonly classification?: string;
+  /** Retention expiration timestamp when configured. */
+  readonly retentionUntil?: string;
   /** Artifact creation timestamp. */
   readonly createdAt: string;
+  /** Whether artifact metadata indicates an inline stored payload. */
+  readonly hasStoredPayload?: boolean;
+  /** Metadata keys present on the artifact row. */
+  readonly metadataKeys?: readonly string[];
+};
+
+/** Audited artifact payload response shown in product review inspectors. */
+type AdminReviewArtifactPayloadSummary = {
+  /** Payload-free artifact metadata. */
+  readonly artifact: AdminReviewArtifactSummary;
+  /** Artifact access event row written by the API. */
+  readonly artifactAccessEventId: string;
+  /** Payload access level authorized for this response. */
+  readonly accessLevel: "redacted" | "raw_allowed";
+  /** Redacted artifact payload returned by the API. */
+  readonly payload: unknown;
 };
 
 /** Candidate finding summary shown on review inspectors. */
@@ -302,6 +368,26 @@ type WebhookReplayPlan = {
   readonly confirmationToken: string;
 };
 
+/** Background job replay plan response. */
+type BackgroundJobReplayPlan = {
+  /** Replay action. */
+  readonly action: "job.requeue";
+  /** Durable background job being replayed. */
+  readonly backgroundJobId: string;
+  /** Current durable job status. */
+  readonly currentStatus: string;
+  /** Queue that should receive the replay job. */
+  readonly queueName: string;
+  /** Handler type carried by the replay envelope. */
+  readonly jobType: string;
+  /** Replay job that can be inserted. */
+  readonly job: AdminReplayJobPlan;
+  /** Current failures. */
+  readonly failures: readonly AdminFailureDetail[];
+  /** Confirmation token for this plan. */
+  readonly confirmationToken: string;
+};
+
 /** Review replay plan response. */
 type ReviewReplayPlan = {
   /** Replay action. */
@@ -351,10 +437,128 @@ type PublisherReplayPlan = {
   readonly confirmationToken: string;
 };
 
+/** Context bundle summary for a retrieval replay dry-run. */
+type RetrievalReplayBundleSummary = {
+  /** Context bundle ID when present. */
+  readonly contextBundleId?: string;
+  /** Retrieval mode used by the bundle. */
+  readonly retrievalMode?: string;
+  /** Index version ID used by indexed retrieval. */
+  readonly indexVersionId?: string;
+  /** Context item count. */
+  readonly itemCount: number;
+  /** Estimated token count. */
+  readonly estimatedTokens: number;
+  /** Maximum token budget. */
+  readonly maxTokens: number;
+};
+
+/** Context item comparison row for retrieval replay. */
+type RetrievalReplayItemComparison = {
+  /** Stable comparison key. */
+  readonly key: string;
+  /** Comparison status. */
+  readonly status: "unchanged" | "changed" | "added" | "removed";
+  /** Original item kind when present. */
+  readonly originalKind?: string;
+  /** Replayed item kind when present. */
+  readonly replayedKind?: string;
+  /** Original item title when present. */
+  readonly originalTitle?: string;
+  /** Replayed item title when present. */
+  readonly replayedTitle?: string;
+  /** Original item priority when present. */
+  readonly originalPriority?: number;
+  /** Replayed item priority when present. */
+  readonly replayedPriority?: number;
+};
+
+/** Non-mutating retrieval replay dry-run result. */
+type RetrievalReplayDryRun = {
+  /** Dry-run schema version. */
+  readonly schemaVersion: "admin_retrieval_replay_dry_run.v1";
+  /** Review run that was replayed. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot used by retrieval. */
+  readonly pullRequestSnapshotId: string;
+  /** ISO timestamp when the dry-run was generated. */
+  readonly generatedAt: string;
+  /** Whether this dry-run mutated production state. */
+  readonly mutatesProductionState: false;
+  /** Original persisted context bundle summary when available. */
+  readonly original?: RetrievalReplayBundleSummary;
+  /** Replayed context bundle summary. */
+  readonly replayed: RetrievalReplayBundleSummary;
+  /** Item-level comparisons. */
+  readonly comparisons: readonly RetrievalReplayItemComparison[];
+  /** Warnings about dry-run fidelity. */
+  readonly warnings: readonly string[];
+};
+
+/** Decision count block for a validation replay dry-run. */
+type ValidationReplayDecisionCounts = {
+  /** Publish decision count. */
+  readonly publish: number;
+  /** Reject decision count. */
+  readonly reject: number;
+};
+
+/** Finding-level comparison row for validation replay. */
+type ValidationReplayFindingComparison = {
+  /** Stable comparison key. */
+  readonly key: string;
+  /** Candidate finding ID when known. */
+  readonly candidateFindingId?: string;
+  /** Original validated finding ID when present. */
+  readonly originalFindingId?: string;
+  /** Replayed validated finding ID when present. */
+  readonly replayedFindingId?: string;
+  /** Original validation decision when present. */
+  readonly originalDecision?: string;
+  /** Replayed validation decision when present. */
+  readonly replayedDecision?: string;
+  /** Original rejection reasons. */
+  readonly originalReasons: readonly string[];
+  /** Replayed rejection reasons. */
+  readonly replayedReasons: readonly string[];
+  /** Comparison status. */
+  readonly status: "unchanged" | "changed" | "added" | "removed";
+  /** Finding title. */
+  readonly title: string;
+};
+
+/** Non-mutating validation replay dry-run result. */
+type ValidationReplayDryRun = {
+  /** Dry-run schema version. */
+  readonly schemaVersion: "admin_validation_replay_dry_run.v1";
+  /** Review run that was replayed. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot used by validation. */
+  readonly pullRequestSnapshotId: string;
+  /** ISO timestamp when the dry-run was generated. */
+  readonly generatedAt: string;
+  /** Whether this dry-run mutated production state. */
+  readonly mutatesProductionState: false;
+  /** Candidate finding input count. */
+  readonly candidateFindingCount: number;
+  /** Original persisted validation decision counts. */
+  readonly original: ValidationReplayDecisionCounts;
+  /** Replayed validation decision counts. */
+  readonly replayed: ValidationReplayDecisionCounts;
+  /** Finding-level comparisons. */
+  readonly comparisons: readonly ValidationReplayFindingComparison[];
+  /** Warnings about dry-run fidelity. */
+  readonly warnings: readonly string[];
+};
+
 /** Replay execution result returned after dispatch. */
 type AdminReplayExecutionResult = {
   /** Replay action that was confirmed. */
   readonly action: string;
+  /** Durable admin action row ID for this replay dispatch. */
+  readonly adminActionId: string;
+  /** Durable replay run row ID for this replay dispatch. */
+  readonly replayRunId: string;
   /** Audit log row ID when an actor was provided. */
   readonly auditLogId?: string | undefined;
   /** Durable job row IDs inserted for this replay. */
@@ -365,11 +569,204 @@ type AdminReplayExecutionResult = {
   readonly replayJobs: readonly AdminBackgroundJobDebugSummary[];
 };
 
+/** Redacted review-run debug bundle returned by the admin API. */
+type AdminReviewRunDebugBundle = {
+  /** Bundle contract version. */
+  readonly schemaVersion: "admin_debug_bundle.v1";
+  /** Generated debug bundle ID. */
+  readonly bundleId: string;
+  /** Durable debug export row ID for operator history. */
+  readonly debugExportId: string;
+  /** Durable admin action row ID for this export. */
+  readonly adminActionId: string;
+  /** Review run exported into the bundle. */
+  readonly reviewRunId: string;
+  /** Repository that owns the review run. */
+  readonly repoId: string;
+  /** Redaction policy applied to the payload. */
+  readonly redactionLevel: string;
+  /** ISO timestamp when the bundle was generated. */
+  readonly generatedAt: string;
+  /** ISO timestamp when the debug bundle should no longer be used. */
+  readonly expiresAt: string;
+  /** Hash of the redacted payload returned to the operator. */
+  readonly payloadHash: string;
+  /** Audit log row written for the export. */
+  readonly auditLogId: string;
+  /** Redacted review, publisher, and replay metadata. */
+  readonly payload: unknown;
+};
+
+/** Eval import draft returned by the admin API. */
+type AdminReviewRunEvalImportDraft = {
+  /** Draft contract version. */
+  readonly schemaVersion: "admin_eval_import_draft.v1";
+  /** Generated eval import draft ID. */
+  readonly importDraftId: string;
+  /** Durable admin action row ID for this draft creation. */
+  readonly adminActionId: string;
+  /** Review run used as the source. */
+  readonly reviewRunId: string;
+  /** Repository that owns the review run. */
+  readonly repoId: string;
+  /** Target suite ID. */
+  readonly suiteId: string;
+  /** Eval case generated from review state. */
+  readonly evalCase: {
+    /** Generated case ID. */
+    readonly caseId: string;
+    /** Case title. */
+    readonly title: string;
+    /** Changed files in the generated case. */
+    readonly changedFiles: readonly unknown[];
+    /** Expected findings in the generated case. */
+    readonly expectedFindings: readonly unknown[];
+    /** Actual findings in the generated case. */
+    readonly actualFindings: readonly unknown[];
+  };
+  /** Proposed files for a later fixture commit. */
+  readonly files: readonly {
+    /** Proposed path. */
+    readonly path: string;
+    /** Proposed file kind. */
+    readonly kind: string;
+  }[];
+  /** Redaction level used for generated files. */
+  readonly redactionLevel: string;
+  /** Warnings that require human review. */
+  readonly warnings: readonly string[];
+  /** Audit log row written for the draft creation. */
+  readonly auditLogId: string;
+};
+
+/** Repository summary returned by the memory and rules inspector. */
+type AdminMemoryRulesRepositorySummary = {
+  /** Repository ID being inspected. */
+  readonly repoId: string;
+  /** Organization that owns the repository. */
+  readonly orgId: string;
+  /** Source code hosting provider. */
+  readonly provider: string;
+  /** Provider owner and repository name. */
+  readonly fullName: string;
+  /** Default branch when available. */
+  readonly defaultBranch?: string;
+  /** Provider visibility label. */
+  readonly visibility: string;
+  /** Whether reviews are enabled for the repository. */
+  readonly enabled: boolean;
+  /** Whether the provider marks the repository as archived. */
+  readonly isArchived: boolean;
+  /** Whether the provider marks the repository as a fork. */
+  readonly isFork: boolean;
+};
+
+/** Memory fact row returned by the memory and rules inspector. */
+type AdminMemoryFactDebugSummary = {
+  /** Durable memory fact row ID. */
+  readonly memoryFactId: string;
+  /** Organization that owns the fact. */
+  readonly orgId: string;
+  /** Repository that owns the fact when repository-scoped. */
+  readonly repoId?: string;
+  /** Effective fact scope. */
+  readonly scope: "repository" | "organization";
+  /** Machine-readable fact type. */
+  readonly factType: string;
+  /** Stored fact body. */
+  readonly body: string;
+  /** Current fact status. */
+  readonly status: string;
+  /** Confidence score assigned to the fact. */
+  readonly confidence: number;
+  /** Fact expiration timestamp when temporary. */
+  readonly expiresAt?: string;
+  /** Metadata keys available on the row. */
+  readonly metadataKeys: readonly string[];
+  /** Hash of the metadata payload when metadata exists. */
+  readonly metadataHash?: string;
+  /** Fact creation timestamp. */
+  readonly createdAt: string;
+  /** Fact update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Effective rule row returned by the memory and rules inspector. */
+type AdminRepoRuleDebugSummary = {
+  /** Rule ID used by typed policy snapshots. */
+  readonly ruleId: string;
+  /** Organization that owns the rule. */
+  readonly orgId: string;
+  /** Repository that owns the rule when repository-scoped. */
+  readonly repoId?: string;
+  /** Effective rule scope. */
+  readonly scope: "repository" | "organization";
+  /** Human-readable rule name. */
+  readonly name: string;
+  /** Human-readable rule description when available. */
+  readonly description?: string;
+  /** Rule effect consumed by the policy engine. */
+  readonly effect: string;
+  /** Structured matcher consumed by the policy engine. */
+  readonly matcher: AdminRepoRuleSummary["matcher"];
+  /** Rule instruction consumed by policy and review context assembly. */
+  readonly instruction: string;
+  /** Rule priority. */
+  readonly priority: number;
+  /** Whether the rule is enabled. */
+  readonly enabled: boolean;
+  /** User that created the rule when available. */
+  readonly createdByUserId?: string;
+  /** Metadata keys available on the typed rule. */
+  readonly metadataKeys: readonly string[];
+  /** Rule creation timestamp. */
+  readonly createdAt: string;
+  /** Rule update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Tool entry returned by the memory and rules inspector. */
+type AdminMemoryRulesDebugTool = {
+  /** Stable tool identifier. */
+  readonly toolId: string;
+  /** Human-readable tool label. */
+  readonly label: string;
+  /** Whether this tool is available. */
+  readonly status: "available" | "unavailable";
+  /** Admin API route for available tools. */
+  readonly route?: string;
+  /** Explanation for unavailable tools. */
+  readonly reason?: string;
+};
+
+/** Memory and rules inspector response. */
+type AdminMemoryRulesDebugDetails = {
+  /** Repository being inspected. */
+  readonly repository: AdminMemoryRulesRepositorySummary;
+  /** Stored memory facts that can apply to the repository. */
+  readonly memoryFacts: readonly AdminMemoryFactDebugSummary[];
+  /** Effective repository and organization rules. */
+  readonly rules: readonly AdminRepoRuleDebugSummary[];
+  /** Candidate moderation support in the current implementation. */
+  readonly candidateActions: {
+    /** Whether approval is available. */
+    readonly canApprove: boolean;
+    /** Whether rejection is available. */
+    readonly canReject: boolean;
+    /** Why candidate actions are unavailable. */
+    readonly reason: string;
+  };
+  /** Policy and finding evaluation tools. */
+  readonly evaluationTools: readonly AdminMemoryRulesDebugTool[];
+  /** Warnings that need operator attention. */
+  readonly warnings: readonly string[];
+};
+
 /** Inspector kind available in the support console. */
-type InspectorKind = "webhook" | "review" | "publisher";
+type InspectorKind = "webhook" | "job" | "review" | "publisher" | "memory";
 
 /** Primary dashboard view. */
-type ViewKind = "overview" | "inspectors" | "settings" | "audit";
+type ViewKind = "overview" | "inspectors" | "settings" | "usage" | "plan" | "billing" | "audit";
 
 /** Top-level console mode. */
 type ConsoleMode = "product" | "admin";
@@ -521,6 +918,102 @@ type AdminReviewRunSummary = {
   readonly startedAt?: string;
   /** Completion timestamp when available. */
   readonly completedAt?: string;
+  /** Structured failure summary when the review failed. */
+  readonly failure?: AdminFailureDetail;
+  /** Durable jobs tied to this review when detail data is loaded. */
+  readonly relatedJobs?: readonly AdminBackgroundJobDebugSummary[];
+};
+
+/** Provider publication state attached to one review finding. */
+type AdminReviewFindingPublicationSummary = {
+  /** Published finding row ID. */
+  readonly findingId: string;
+  /** Provider that received the finding. */
+  readonly provider: string;
+  /** Publication status. */
+  readonly status: string;
+  /** Provider comment ID when the finding was published inline. */
+  readonly providerCommentId?: string | undefined;
+  /** Provider review ID when the finding was published in a review. */
+  readonly providerReviewId?: string | undefined;
+  /** Provider check-run ID when the finding was published to a check run. */
+  readonly providerCheckRunId?: string | undefined;
+  /** Publication error when present. */
+  readonly error?: string | undefined;
+  /** Publication timestamp when present. */
+  readonly publishedAt?: string | undefined;
+};
+
+/** Latest human or system outcome attached to one finding. */
+type AdminReviewFindingOutcomeSummary = {
+  /** Outcome row ID. */
+  readonly outcomeId: string;
+  /** Outcome value. */
+  readonly outcome: string;
+  /** Outcome source. */
+  readonly source: string;
+  /** Optional human notes. */
+  readonly notes?: string | undefined;
+  /** Outcome timestamp. */
+  readonly createdAt: string;
+};
+
+/** Finding row returned by scoped review finding APIs. */
+type AdminReviewFindingSummary = {
+  /** Canonical validated finding ID. */
+  readonly findingId: string;
+  /** Candidate finding ID emitted before validation. */
+  readonly candidateFindingId: string;
+  /** Published finding ID when available. */
+  readonly publishedFindingId?: string | undefined;
+  /** Review run that produced the finding. */
+  readonly reviewRunId: string;
+  /** Repository that owns the finding. */
+  readonly repoId: string;
+  /** Organization that owns the finding. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Validation decision. */
+  readonly decision: string;
+  /** Finding category. */
+  readonly category: string;
+  /** Finding severity. */
+  readonly severity: string;
+  /** Finding title. */
+  readonly title: string;
+  /** Finding body. */
+  readonly body: string;
+  /** Finding location. */
+  readonly location: unknown;
+  /** Evidence payload captured for the finding. */
+  readonly evidence: unknown;
+  /** Finding confidence. */
+  readonly confidence: number;
+  /** Validation payload captured for the finding. */
+  readonly validation: unknown;
+  /** Rank within the review when available. */
+  readonly rank?: number | undefined;
+  /** Stable duplicate-detection fingerprint. */
+  readonly fingerprint: string;
+  /** Finding metadata. */
+  readonly metadata?: Record<string, unknown> | undefined;
+  /** Publication state when available. */
+  readonly publication?: AdminReviewFindingPublicationSummary | undefined;
+  /** Latest outcome when available. */
+  readonly latestOutcome?: AdminReviewFindingOutcomeSummary | undefined;
+};
+
+/** Response returned after creating a suppress-similar rule. */
+type AdminFindingSuppressionSummary = {
+  /** Finding that seeded the suppression. */
+  readonly finding: AdminReviewFindingSummary;
+  /** Created or reused suppression rule. */
+  readonly rule: AdminRepoRuleSummary;
+  /** Suppression scope that was applied. */
+  readonly scope: "repo" | "org";
+  /** Audit row written by the API. */
+  readonly auditLogId: string;
 };
 
 /** Dashboard overview response. */
@@ -625,6 +1118,106 @@ type ProductOnboardingSummary = {
   readonly webhook: ProductWebhookSummary;
 };
 
+/** Current product user response returned by the API. */
+type ProductMeResponse = {
+  /** Product user attached to the current session. */
+  readonly user: {
+    /** Stable product user ID. */
+    readonly userId: string;
+    /** Primary email address when known. */
+    readonly primaryEmail?: string;
+    /** Display name when known. */
+    readonly displayName?: string;
+    /** Avatar URL when known. */
+    readonly avatarUrl?: string;
+  };
+  /** Selected organization for dashboard convenience. */
+  readonly selectedOrgId?: string;
+  /** Organization memberships available to the user. */
+  readonly memberships: readonly {
+    /** Organization ID. */
+    readonly orgId: string;
+    /** Product role. */
+    readonly role: string;
+    /** Permissions granted by the role. */
+    readonly permissions: readonly string[];
+    /** Dashboard capability flags derived from the role. */
+    readonly capabilities: Record<string, boolean>;
+  }[];
+  /** Provider installations visible through the user's memberships. */
+  readonly installations: readonly {
+    /** Stable installation ID. */
+    readonly installationId: string;
+    /** Organization that owns the installation. */
+    readonly orgId: string;
+    /** Provider name. */
+    readonly provider: string;
+    /** Provider installation ID. */
+    readonly providerInstallationId: string;
+    /** Provider account login. */
+    readonly accountLogin: string;
+    /** Provider account type. */
+    readonly accountType: string;
+  }[];
+  /** Current session summary. */
+  readonly session: {
+    /** Stable product session ID. */
+    readonly sessionId: string;
+    /** Session expiration timestamp. */
+    readonly expiresAt: string;
+  };
+};
+
+/** Product organization row returned by authenticated product APIs. */
+type ProductOrganizationSummary = {
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Organization display name. */
+  readonly name: string;
+  /** Organization slug. */
+  readonly slug: string;
+  /** Number of connected provider installations. */
+  readonly installationCount: number;
+  /** Number of repositories known to the app. */
+  readonly repositoryCount: number;
+};
+
+/** Product usage summary returned by authenticated product APIs. */
+type ProductUsageSummary = {
+  /** Completed review count. */
+  readonly reviewRuns: number;
+  /** Indexed commit count. */
+  readonly indexedCommits: number;
+  /** Embedding token count. */
+  readonly embeddingTokens: number;
+  /** Review input token count. */
+  readonly reviewInputTokens: number;
+  /** Review output token count. */
+  readonly reviewOutputTokens: number;
+  /** Estimated internal cost in USD. */
+  readonly estimatedCostUsd: string;
+};
+
+/** Authenticated product workspace state. */
+type ProductResourcesState = {
+  /** Organizations visible to the product user. */
+  readonly orgs: readonly ProductOrganizationSummary[];
+  /** Currently selected organization ID. */
+  readonly selectedOrgId?: string | undefined;
+  /** Repositories visible in the selected organization. */
+  readonly repositories: readonly AdminRepositorySummary[];
+  /** Recent review runs in the selected organization. */
+  readonly reviews: readonly AdminReviewRunSummary[];
+  /** Basic usage summary for the selected organization. */
+  readonly usage?: ProductUsageSummary | undefined;
+  /** Whether resource data has loaded at least once. */
+  readonly loaded: boolean;
+  /** Loading label. */
+  readonly loading?: string | undefined;
+  /** Error message. */
+  readonly error?: string | undefined;
+};
+
 /** Repository settings returned by settings APIs. */
 type ControlPlaneSettings = {
   /** Review policy. */
@@ -659,12 +1252,45 @@ type ControlPlaneSettingsResponse = {
 
 /** Repository or organization rule row shown by repository settings UX. */
 type AdminRepoRuleSummary = {
+  /** Rule ID used by typed policy snapshots. */
+  readonly ruleId: string;
   /** Rule row ID. */
   readonly repoRuleId: string;
   /** Organization ID that owns the rule. */
   readonly orgId: string;
   /** Repository ID when the rule is repository-scoped. */
   readonly repoId?: string;
+  /** Human-readable rule name. */
+  readonly name: string;
+  /** Optional human-readable rule description. */
+  readonly description?: string;
+  /** Rule effect consumed by the policy engine. */
+  readonly effect: string;
+  /** Structured matcher consumed by the policy engine. */
+  readonly matcher: {
+    /** Path patterns matched by the rule. */
+    readonly paths?: readonly string[];
+    /** Languages matched by the rule. */
+    readonly languages?: readonly string[];
+    /** Finding categories matched by the rule. */
+    readonly categories?: readonly string[];
+    /** Finding severities matched by the rule. */
+    readonly severities?: readonly string[];
+    /** Pull request authors matched by the rule. */
+    readonly authors?: readonly string[];
+    /** Pull request labels matched by the rule. */
+    readonly labels?: readonly string[];
+    /** Finding title regex matched by the rule. */
+    readonly titleRegex?: string;
+  };
+  /** Rule instruction consumed by the policy engine. */
+  readonly instruction: string;
+  /** Rule priority. Lower values run first. */
+  readonly priority: number;
+  /** Whether the rule currently applies. */
+  readonly enabled: boolean;
+  /** User ID that created the rule when available. */
+  readonly createdByUserId?: string;
   /** Rule scope label. */
   readonly scope: string;
   /** Rule type label. */
@@ -677,6 +1303,85 @@ type AdminRepoRuleSummary = {
   readonly createdAt: string;
   /** Rule update timestamp. */
   readonly updatedAt: string;
+};
+
+/** Compiler warning returned by policy preview. */
+type ControlPlanePolicyWarning = {
+  /** Stable warning code. */
+  readonly code: string;
+  /** Human-readable warning message. */
+  readonly message: string;
+  /** Optional structured warning details. */
+  readonly details?: Readonly<Record<string, unknown>>;
+};
+
+/** Policy decision trace returned by policy preview. */
+type ControlPlanePolicyTrace = {
+  /** Decision type. */
+  readonly decisionType: string;
+  /** Decision result. */
+  readonly decision: string;
+  /** Stable reason code. */
+  readonly reasonCode: string;
+  /** Optional structured trace details. */
+  readonly details?: Readonly<Record<string, unknown>>;
+};
+
+/** Effective policy subset rendered by the settings preview. */
+type ControlPlaneEffectivePolicy = {
+  /** Whether automated review is enabled after compilation. */
+  readonly enabled: boolean;
+  /** Review policy mode. */
+  readonly reviewPolicy: string;
+  /** Finding policy. */
+  readonly findings: {
+    /** Effective severity threshold. */
+    readonly severityThreshold: string;
+    /** Effective comment budget. */
+    readonly maxCommentsPerReview: number;
+    /** Effective confidence threshold. */
+    readonly minimumConfidence: number;
+  };
+  /** Publishing policy. */
+  readonly publishing: {
+    /** Whether a check run is published. */
+    readonly publishCheckRun: boolean;
+    /** Whether inline comments are published. */
+    readonly publishInlineComments: boolean;
+    /** Whether a summary comment is published. */
+    readonly publishSummaryComment: boolean;
+    /** Effective comment budget. */
+    readonly maxCommentsPerReview: number;
+  };
+  /** Trigger policy. */
+  readonly trigger: {
+    /** Enabled pull request actions. */
+    readonly enabledActions: readonly string[];
+    /** Ignored pull request authors. */
+    readonly ignoredAuthors: readonly string[];
+    /** Ignored pull request labels. */
+    readonly ignoredLabels: readonly string[];
+    /** Required pull request label. */
+    readonly requireLabel?: string;
+    /** Whether draft pull requests are skipped. */
+    readonly skipDraftPullRequests: boolean;
+  };
+  /** Compiled review instructions. */
+  readonly instructions: readonly string[];
+};
+
+/** Policy preview returned by the admin API. */
+type ControlPlanePolicyPreview = {
+  /** Preview policy snapshot ID. */
+  readonly policySnapshotId: string;
+  /** Stable effective policy hash. */
+  readonly policyHash: string;
+  /** Effective compiled policy. */
+  readonly effectivePolicy: ControlPlaneEffectivePolicy;
+  /** Compiler warnings. */
+  readonly warnings: readonly ControlPlanePolicyWarning[];
+  /** Compiler trace. */
+  readonly trace: ControlPlanePolicyTrace;
 };
 
 /** Mutable settings form state. */
@@ -703,6 +1408,106 @@ type SettingsFormState = {
   skipDraftPullRequests: boolean;
   /** Custom instructions. */
   customInstructions: string;
+};
+
+/** Mutable repository rule form state. */
+type RuleFormState = {
+  /** Rule ID being edited. Empty when creating a rule. */
+  editingRuleId: string;
+  /** Human-readable rule name. */
+  name: string;
+  /** Rule effect. */
+  effect: string;
+  /** Rule priority. Lower values run first. */
+  priority: string;
+  /** Whether the rule is enabled. */
+  enabled: boolean;
+  /** Path matchers, one per line. */
+  matcherPaths: string;
+  /** Category matchers, one per line. */
+  matcherCategories: string;
+  /** Severity matchers, one per line. */
+  matcherSeverities: string;
+  /** Finding title regular expression. */
+  titleRegex: string;
+  /** Rule instruction. */
+  instruction: string;
+};
+
+/** Product-facing repository settings panel state. */
+type ProductRepositorySettingsState = {
+  /** Selected repository ID. */
+  repoId: string;
+  /** Loaded settings payload. */
+  data?: ControlPlaneSettingsResponse | undefined;
+  /** Editable form state. */
+  form?: SettingsFormState | undefined;
+  /** Rules that currently affect the selected repository. */
+  rules: readonly AdminRepoRuleSummary[];
+  /** Editable repository rule form. */
+  ruleForm: RuleFormState;
+  /** Latest effective policy preview for the current form state. */
+  preview?: ControlPlanePolicyPreview | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+  /** Save confirmation message. */
+  saved?: string | undefined;
+};
+
+/** Product-facing review detail and finding inspection state. */
+type ProductReviewDetailState = {
+  /** Selected review run ID. */
+  reviewRunId: string;
+  /** Loaded review run detail. */
+  reviewRun?: AdminReviewRunSummary | undefined;
+  /** Loaded finding rows for the selected review. */
+  findings: readonly AdminReviewFindingSummary[];
+  /** Payload-free artifact metadata rows for the selected review. */
+  artifacts?: readonly AdminReviewArtifactSummary[] | undefined;
+  /** Whether artifact metadata has been requested for this review. */
+  artifactsLoaded?: boolean | undefined;
+  /** Human-readable reason draft for artifact payload access. */
+  artifactAccessReason: string;
+  /** Last redacted artifact payload loaded for the selected review. */
+  artifactPayload?: AdminReviewArtifactPayloadSummary | undefined;
+  /** Selected finding detail. */
+  selectedFinding?: AdminReviewFindingSummary | undefined;
+  /** Outcome note draft for finding feedback. */
+  outcomeNote: string;
+  /** Suppress-similar reason draft. */
+  suppressionReason: string;
+  /** Suppress-similar scope draft. */
+  suppressionScope: "repo" | "org";
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+  /** Save confirmation message. */
+  saved?: string | undefined;
+};
+
+/** Field and action wiring for shared repository settings controls. */
+type SettingsFormRenderOptions = {
+  /** Data-field prefix used for repository settings fields. */
+  readonly settingsFieldPrefix: string;
+  /** Data-field prefix used for repository rule fields. */
+  readonly ruleFieldPrefix: string;
+  /** Container class for the shared settings form body. */
+  readonly formContainerClass: string;
+  /** Whether settings inputs are editable. */
+  readonly canManageSettings: boolean;
+  /** Whether rule inputs and rule mutations are available. */
+  readonly canManageRules: boolean;
+  /** Action used to save a rule. */
+  readonly saveRuleAction: string;
+  /** Action used to edit a rule. */
+  readonly editRuleAction: string;
+  /** Action used to cancel rule editing. */
+  readonly cancelRuleEditAction: string;
+  /** Action used to delete a rule. */
+  readonly deleteRuleAction: string;
 };
 
 /** Mutable overview view state. */
@@ -743,6 +1548,10 @@ type SettingsViewState = {
   form?: SettingsFormState | undefined;
   /** Rules that currently affect the loaded repository. */
   rules: readonly AdminRepoRuleSummary[];
+  /** Editable repository rule form. */
+  ruleForm: RuleFormState;
+  /** Latest effective policy preview for the current form state. */
+  preview?: ControlPlanePolicyPreview | undefined;
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -773,6 +1582,371 @@ type AdminAuditLogSummary = {
   readonly metadata?: unknown;
 };
 
+/** Usage rollup row returned by the API. */
+type AdminUsageRollupSummary = {
+  /** Organization that owns the usage. */
+  readonly orgId: string;
+  /** Repository that caused the usage when available. */
+  readonly repoId?: string;
+  /** Usage event type. */
+  readonly eventType: string;
+  /** Usage unit. */
+  readonly unit: string;
+  /** Number of ledger events in the rollup. */
+  readonly eventCount: number;
+  /** Signed quantity sum. */
+  readonly quantity: number;
+  /** Signed cost in micro-USD. */
+  readonly costMicros: number;
+};
+
+/** Usage totals returned by the API. */
+type AdminUsageTotals = {
+  /** Number of ledger events included in returned rollups. */
+  readonly eventCount: number;
+  /** Signed cost in micro-USD. */
+  readonly costMicros: number;
+  /** Completed review count. */
+  readonly reviewCount: number;
+  /** LLM token count. */
+  readonly llmTokens: number;
+};
+
+/** Usage summary returned by the API. */
+type AdminUsageSummary = {
+  /** Period start when applied. */
+  readonly periodStart?: string;
+  /** Period end when applied. */
+  readonly periodEnd?: string;
+  /** Aggregated usage rows. */
+  readonly rollups: readonly AdminUsageRollupSummary[];
+  /** Aggregated totals. */
+  readonly totals: AdminUsageTotals;
+};
+
+/** Stable plan snapshot returned by the entitlement API. */
+type AdminPlanSnapshot = {
+  /** Snapshot schema version. */
+  readonly schemaVersion: "plan_snapshot.v1";
+  /** Organization that owns the snapshot. */
+  readonly orgId: string;
+  /** Billing account ID used by the snapshot. */
+  readonly billingAccountId: string;
+  /** Plan key, such as free, team, business, or internal. */
+  readonly planKey: string;
+  /** Plan version ID. */
+  readonly planVersionId: string;
+  /** Subscription or local account status. */
+  readonly subscriptionStatus: string;
+  /** Payment status used for access decisions. */
+  readonly paymentStatus: string;
+  /** Feature values compiled from plan defaults and overrides. */
+  readonly features: Readonly<Record<string, unknown>>;
+  /** Limit values compiled from plan defaults and overrides. */
+  readonly limits: Readonly<Record<string, number | boolean | string>>;
+  /** Snapshot compile timestamp. */
+  readonly compiledAt: string;
+};
+
+/** Feature decision returned by the entitlement API. */
+type AdminEntitlementDecision = {
+  /** Organization checked by the decision. */
+  readonly orgId: string;
+  /** Feature or limit key checked by the decision. */
+  readonly featureKey: string;
+  /** Whether the feature is allowed. */
+  readonly allowed: boolean;
+  /** Stable decision reason. */
+  readonly reason: string;
+  /** Decision source. */
+  readonly source: string;
+  /** Optional decision value. */
+  readonly value?: unknown;
+};
+
+/** Entitlement override row returned by the entitlement API. */
+type AdminEntitlementRow = {
+  /** Entitlement row ID. */
+  readonly entitlementId: string;
+  /** Organization that owns the entitlement. */
+  readonly orgId: string;
+  /** Feature key affected by the entitlement. */
+  readonly featureKey: string;
+  /** Whether the entitlement enables access. */
+  readonly enabled: boolean;
+  /** Entitlement source. */
+  readonly source: string;
+  /** Optional source row ID. */
+  readonly sourceId?: string;
+  /** Entitlement value payload. */
+  readonly value: Readonly<Record<string, unknown>>;
+  /** Entitlement effective timestamp. */
+  readonly effectiveFrom: string;
+  /** Entitlement end timestamp when present. */
+  readonly effectiveTo?: string;
+};
+
+/** Entitlement summary returned by the API. */
+type AdminEntitlementSummary = {
+  /** Organization that owns the summary. */
+  readonly orgId: string;
+  /** Stable plan snapshot. */
+  readonly planSnapshot: AdminPlanSnapshot;
+  /** Feature decisions. */
+  readonly decisions: readonly AdminEntitlementDecision[];
+  /** Entitlement override rows. */
+  readonly entitlements: readonly AdminEntitlementRow[];
+  /** Summary compile timestamp. */
+  readonly checkedAt: string;
+};
+
+/** Billing account row returned by the billing API. */
+type AdminBillingAccount = {
+  /** Billing account ID. */
+  readonly billingAccountId: string;
+  /** Organization that owns the account. */
+  readonly orgId: string;
+  /** Billing mode, such as free, self_serve, or internal. */
+  readonly billingMode: string;
+  /** Local account status. */
+  readonly status: string;
+  /** Billing provider name. */
+  readonly provider: string;
+  /** Provider customer ID when present. */
+  readonly providerCustomerId?: string;
+  /** Current plan key. */
+  readonly currentPlanKey?: string;
+  /** Current plan version ID. */
+  readonly currentPlanVersionId?: string;
+  /** Payment status used for access decisions. */
+  readonly paymentStatus: string;
+  /** Account creation timestamp. */
+  readonly createdAt: string;
+  /** Account update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Subscription mirror returned by the billing API. */
+type AdminSubscription = {
+  /** Subscription ID. */
+  readonly subscriptionId: string;
+  /** Billing account ID. */
+  readonly billingAccountId: string;
+  /** Billing provider name. */
+  readonly provider: string;
+  /** Provider subscription ID when present. */
+  readonly providerSubscriptionId?: string;
+  /** Subscription status. */
+  readonly status: string;
+  /** Plan version ID when linked. */
+  readonly billingPlanVersionId?: string;
+  /** Current period start. */
+  readonly currentPeriodStart?: string;
+  /** Current period end. */
+  readonly currentPeriodEnd?: string;
+  /** Whether cancellation is scheduled. */
+  readonly cancelAtPeriodEnd: boolean;
+  /** Subscription quantity when present. */
+  readonly quantity?: number;
+};
+
+/** Subscription item mirror returned by the billing API. */
+type AdminSubscriptionItem = {
+  /** Subscription item ID. */
+  readonly subscriptionItemId: string;
+  /** Subscription ID. */
+  readonly subscriptionId: string;
+  /** Item type. */
+  readonly itemType: string;
+  /** Quantity when present. */
+  readonly quantity?: number;
+  /** Meter key when present. */
+  readonly meterKey?: string;
+  /** Whether the item is active. */
+  readonly active: boolean;
+};
+
+/** Credit grant returned by the billing API. */
+type AdminCreditGrant = {
+  /** Credit grant ID. */
+  readonly creditGrantId: string;
+  /** Credit type. */
+  readonly creditType: string;
+  /** Original quantity. */
+  readonly quantity: number;
+  /** Remaining quantity. */
+  readonly remainingQuantity: number;
+  /** Grant reason. */
+  readonly reason: string;
+  /** Grant source. */
+  readonly source: string;
+  /** Expiration timestamp when present. */
+  readonly expiresAt?: string;
+};
+
+/** Invoice mirror returned by the billing API. */
+type AdminInvoice = {
+  /** Invoice ID. */
+  readonly invoiceId: string;
+  /** Provider invoice ID. */
+  readonly providerInvoiceId: string;
+  /** Invoice status. */
+  readonly status: string;
+  /** Currency code. */
+  readonly currency: string;
+  /** Amount due in micros. */
+  readonly amountDueMicros: number;
+  /** Amount paid in micros. */
+  readonly amountPaidMicros: number;
+  /** Amount remaining in micros. */
+  readonly amountRemainingMicros: number;
+  /** Invoice period start when present. */
+  readonly periodStart?: string;
+  /** Invoice period end when present. */
+  readonly periodEnd?: string;
+  /** Hosted invoice URL when present. */
+  readonly hostedInvoiceUrl?: string;
+  /** Invoice PDF URL when present. */
+  readonly invoicePdfUrl?: string;
+};
+
+/** Billing summary returned by the API. */
+type AdminBillingSummary = {
+  /** Organization that owns the summary. */
+  readonly orgId: string;
+  /** Local billing account. */
+  readonly billingAccount: AdminBillingAccount;
+  /** Stable plan snapshot. */
+  readonly planSnapshot: AdminPlanSnapshot;
+  /** Current subscription mirror when present. */
+  readonly subscription?: AdminSubscription;
+  /** Subscription items for the current subscription. */
+  readonly subscriptionItems: readonly AdminSubscriptionItem[];
+  /** Manual or promotional credit grants. */
+  readonly creditGrants: readonly AdminCreditGrant[];
+  /** Provider invoice mirrors. */
+  readonly invoices: readonly AdminInvoice[];
+  /** Entitlement rows available to the compiler. */
+  readonly entitlements: readonly AdminEntitlementRow[];
+  /** Summary compile timestamp. */
+  readonly checkedAt: string;
+};
+
+/** Customer portal session returned by the billing API. */
+type AdminPortalSessionRef = {
+  /** Billing provider name. */
+  readonly provider: string;
+  /** Provider portal session ID. */
+  readonly portalSessionId: string;
+  /** URL that opens the provider customer portal. */
+  readonly url: string;
+};
+
+/** Billing meter event row returned by the billing debug API. */
+type AdminBillingMeterEventSummary = {
+  /** Local meter event row ID. */
+  readonly billingMeterEventId: string;
+  /** Local billing account ID. */
+  readonly billingAccountId: string;
+  /** Organization that owns the row. */
+  readonly orgId: string;
+  /** Billing provider name. */
+  readonly provider: string;
+  /** Provider customer ID. */
+  readonly providerCustomerId: string;
+  /** Internal meter key. */
+  readonly meterKey: string;
+  /** Provider event name configured on the meter. */
+  readonly providerEventName: string;
+  /** Billing period key. */
+  readonly periodKey: string;
+  /** Usage period start. */
+  readonly periodStart: string;
+  /** Usage period end. */
+  readonly periodEnd: string;
+  /** Planned provider quantity. */
+  readonly quantity: number;
+  /** Provider idempotency key. */
+  readonly idempotencyKey: string;
+  /** Send status. */
+  readonly status: string;
+  /** Provider meter event ID after send. */
+  readonly providerMeterEventId?: string;
+  /** Number of send attempts. */
+  readonly attemptCount: number;
+  /** Last provider error code when present. */
+  readonly lastErrorCode?: string;
+  /** Last provider error message when present. */
+  readonly lastErrorMessage?: string;
+  /** Usage event IDs rolled into this meter event. */
+  readonly sourceUsageEventIds: readonly string[];
+  /** Provider send timestamp when present. */
+  readonly sentAt?: string;
+  /** Row creation timestamp. */
+  readonly createdAt: string;
+  /** Row update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Billing meter event debug response. */
+type AdminBillingMeterEventsSummary = {
+  /** Organization that owns the rows. */
+  readonly orgId: string;
+  /** Status filter when applied. */
+  readonly status?: string;
+  /** Period filter when applied. */
+  readonly periodKey?: string;
+  /** Meter event rows. */
+  readonly meterEvents: readonly AdminBillingMeterEventSummary[];
+};
+
+/** Billing reconciliation issue severity. */
+type AdminBillingReconciliationSeverity = "warning" | "critical";
+
+/** Billing reconciliation issue shown on the billing dashboard. */
+type AdminBillingReconciliationIssue = {
+  /** Issue severity. */
+  readonly severity: AdminBillingReconciliationSeverity;
+  /** Machine-readable issue category. */
+  readonly category: string;
+  /** Human-readable issue title. */
+  readonly title: string;
+  /** Concise issue detail. */
+  readonly detail: string;
+  /** Related local resource type. */
+  readonly resourceType: string;
+  /** Related local resource ID when present. */
+  readonly resourceId?: string;
+  /** Issue timestamp. */
+  readonly occurredAt: string;
+};
+
+/** Billing reconciliation report returned by the admin API. */
+type AdminBillingReconciliationSummary = {
+  /** Organization that owns the report. */
+  readonly orgId: string;
+  /** Report generation timestamp. */
+  readonly checkedAt: string;
+  /** Billing period key filter when applied. */
+  readonly periodKey?: string;
+  /** Usage anomaly period start when applied. */
+  readonly periodStart?: string;
+  /** Usage anomaly period end when applied. */
+  readonly periodEnd?: string;
+  /** Reconciliation issues ordered by severity and recency. */
+  readonly issues: readonly AdminBillingReconciliationIssue[];
+};
+
+/** Durable billing reconciliation job returned by the admin API. */
+type AdminBillingReconciliationRunSummary = {
+  /** Durable background job row ID. */
+  readonly backgroundJobId: string;
+  /** Durable job idempotency key. */
+  readonly jobKey: string;
+  /** Current durable job status. */
+  readonly status: string;
+};
+
 /** Mutable audit history view state. */
 type AuditViewState = {
   /** Organization filter. */
@@ -795,14 +1969,92 @@ type AuditViewState = {
   error?: string | undefined;
 };
 
-/** Mutable product onboarding state. */
-type ProductViewState = {
-  /** Loaded product onboarding payload. */
-  data?: ProductOnboardingSummary | undefined;
+/** Mutable usage view state. */
+type UsageViewState = {
+  /** Organization filter. */
+  orgId: string;
+  /** Repository filter. */
+  repoId: string;
+  /** Inclusive period start. */
+  periodStart: string;
+  /** Exclusive period end. */
+  periodEnd: string;
+  /** Loaded usage summary. */
+  data?: AdminUsageSummary | undefined;
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
   error?: string | undefined;
+};
+
+/** Mutable plan and entitlement view state. */
+type EntitlementsViewState = {
+  /** Organization filter. */
+  orgId: string;
+  /** Feature keys to check, one per line. */
+  featureKeys: string;
+  /** Loaded entitlement summary. */
+  data?: AdminEntitlementSummary | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+};
+
+/** Mutable billing account view state. */
+type BillingViewState = {
+  /** Organization filter. */
+  orgId: string;
+  /** Meter event status filter. */
+  meterStatus: string;
+  /** Meter event billing period filter. */
+  meterPeriodKey: string;
+  /** Loaded billing summary. */
+  data?: AdminBillingSummary | undefined;
+  /** Current-month usage rollups for quota visibility. */
+  monthlyUsage?: AdminUsageSummary | undefined;
+  /** Loaded billing meter event rows. */
+  meterEvents?: AdminBillingMeterEventsSummary | undefined;
+  /** Loaded billing reconciliation report. */
+  reconciliation?: AdminBillingReconciliationSummary | undefined;
+  /** Last durable reconciliation job created by the operator. */
+  reconciliationRun?: AdminBillingReconciliationRunSummary | undefined;
+  /** Reconciliation run enqueue loading label. */
+  reconciliationRunLoading?: string | undefined;
+  /** Reconciliation run enqueue error. */
+  reconciliationRunError?: string | undefined;
+  /** Latest generated customer portal URL. */
+  portalUrl?: string | undefined;
+  /** Customer portal creation loading label. */
+  portalLoading?: string | undefined;
+  /** Customer portal creation error. */
+  portalError?: string | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+};
+
+/** Mutable product onboarding state. */
+type ProductViewState = {
+  /** Loaded product onboarding payload. */
+  data?: ProductOnboardingSummary | undefined;
+  /** Loaded product session payload. */
+  session?: ProductMeResponse | undefined;
+  /** Authenticated product workspace resources. */
+  resources?: ProductResourcesState | undefined;
+  /** Selected product repository settings and rules. */
+  repositorySettings?: ProductRepositorySettingsState | undefined;
+  /** Selected product review run and finding details. */
+  reviewDetail?: ProductReviewDetailState | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Product session loading label. */
+  sessionLoading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+  /** Product authentication error message. */
+  authError?: string | undefined;
 };
 
 /** Inspector API route builder configuration. */
@@ -820,19 +2072,33 @@ type InspectorConfig = {
   /** Builds the debug details route. */
   readonly detailsPath: (id: string) => string;
   /** Builds the replay plan route. */
-  readonly replayPlanPath: (id: string) => string;
+  readonly replayPlanPath?: (id: string) => string;
   /** Builds the replay execution route. */
-  readonly replayPath: (id: string) => string;
+  readonly replayPath?: (id: string) => string;
+  /** Builds the debug bundle export route when supported by the inspector. */
+  readonly debugBundlePath?: (id: string) => string;
+  /** Builds the eval import route when supported by the inspector. */
+  readonly evalImportPath?: (id: string) => string;
+  /** Builds the retrieval replay dry-run route when supported by the inspector. */
+  readonly retrievalReplayPath?: (id: string) => string;
+  /** Builds the validation replay dry-run route when supported by the inspector. */
+  readonly validationReplayPath?: (id: string) => string;
 };
 
 /** Inspector detail response union. */
 type InspectorDetails =
   | AdminWebhookDebugDetails
+  | AdminBackgroundJobDebugDetails
   | AdminReviewDebugDetails
-  | AdminPublisherDebugDetails;
+  | AdminPublisherDebugDetails
+  | AdminMemoryRulesDebugDetails;
 
 /** Inspector replay plan response union. */
-type InspectorReplayPlan = WebhookReplayPlan | ReviewReplayPlan | PublisherReplayPlan;
+type InspectorReplayPlan =
+  | WebhookReplayPlan
+  | BackgroundJobReplayPlan
+  | ReviewReplayPlan
+  | PublisherReplayPlan;
 
 /** Mutable view state for one inspector. */
 type InspectorViewState = {
@@ -844,6 +2110,14 @@ type InspectorViewState = {
   plan?: InspectorReplayPlan | undefined;
   /** Last replay execution result. */
   result?: AdminReplayExecutionResult | undefined;
+  /** Last exported redacted debug bundle. */
+  debugBundle?: AdminReviewRunDebugBundle | undefined;
+  /** Last generated eval import draft. */
+  evalImportDraft?: AdminReviewRunEvalImportDraft | undefined;
+  /** Last retrieval replay dry-run result. */
+  retrievalReplay?: RetrievalReplayDryRun | undefined;
+  /** Last validation replay dry-run result. */
+  validationReplay?: ValidationReplayDryRun | undefined;
   /** Typed confirmation token for replay execution. */
   confirmationTokenInput: string;
   /** Current inspector-specific error. */
@@ -880,6 +2154,12 @@ type AppState = {
   settings: SettingsViewState;
   /** Audit history view state. */
   audit: AuditViewState;
+  /** Usage ledger inspection state. */
+  usage: UsageViewState;
+  /** Plan and entitlement inspection state. */
+  entitlements: EntitlementsViewState;
+  /** Billing account inspection state. */
+  billing: BillingViewState;
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -895,6 +2175,40 @@ const gatewayBaseUrl = import.meta.env.VITE_HEIMDALL_ADMIN_GATEWAY_BASE_URL ?? "
 const API_BASE_URL_STORAGE_KEY = "heimdall:admin-api-base-url";
 const GATEWAY_BASE_URL_STORAGE_KEY = "heimdall:admin-gateway-base-url";
 const PENDING_GATEWAY_LOGIN_STORAGE_KEY = "heimdall:pending-admin-gateway-login";
+const DEFAULT_ENTITLEMENT_FEATURE_KEYS = [
+  "reviews.enabled",
+  "reviews.inline_comments",
+  "reviews.pr_summary",
+  "reviews.max_comments_per_pr",
+  "reviews.max_monthly_review_credits",
+  "memory.enabled",
+  "rules.advanced",
+  "static_analysis.enabled",
+  "security.audit_logs",
+].join("\n");
+const ADMIN_SETTINGS_RENDER_OPTIONS: SettingsFormRenderOptions = {
+  settingsFieldPrefix: "settings",
+  ruleFieldPrefix: "rule",
+  formContainerClass: "panel",
+  canManageSettings: true,
+  canManageRules: true,
+  saveRuleAction: "save-rule",
+  editRuleAction: "edit-rule",
+  cancelRuleEditAction: "cancel-rule-edit",
+  deleteRuleAction: "delete-rule",
+};
+const PRODUCT_SETTINGS_RENDER_OPTIONS: Omit<
+  SettingsFormRenderOptions,
+  "canManageSettings" | "canManageRules"
+> = {
+  settingsFieldPrefix: "productSettings",
+  ruleFieldPrefix: "productRule",
+  formContainerClass: "settings-inline-panel",
+  saveRuleAction: "save-product-rule",
+  editRuleAction: "edit-product-rule",
+  cancelRuleEditAction: "cancel-product-rule-edit",
+  deleteRuleAction: "delete-product-rule",
+};
 
 const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
   webhook: {
@@ -907,6 +2221,16 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
     replayPlanPath: (id) => `/admin/debug/webhooks/${encodeURIComponent(id)}/replay-plan`,
     replayPath: (id) => `/admin/debug/webhooks/${encodeURIComponent(id)}/replay`,
   },
+  job: {
+    kind: "job",
+    label: "Job",
+    title: "Job Inspector",
+    idLabel: "Background job ID",
+    placeholder: "job_...",
+    detailsPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}`,
+    replayPlanPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}/replay-plan`,
+    replayPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}/replay`,
+  },
   review: {
     kind: "review",
     label: "Review",
@@ -916,6 +2240,11 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
     detailsPath: (id) => `/admin/debug/reviews/${encodeURIComponent(id)}`,
     replayPlanPath: (id) => `/admin/debug/reviews/${encodeURIComponent(id)}/replay-plan`,
     replayPath: (id) => `/admin/debug/reviews/${encodeURIComponent(id)}/replay`,
+    debugBundlePath: (id) => `/admin/debug/reviews/${encodeURIComponent(id)}/debug-bundle`,
+    evalImportPath: (id) => `/admin/debug/reviews/${encodeURIComponent(id)}/import-eval`,
+    retrievalReplayPath: (id) => `/admin/debug/reviews/${encodeURIComponent(id)}/retrieval-replay`,
+    validationReplayPath: (id) =>
+      `/admin/debug/reviews/${encodeURIComponent(id)}/validation-replay`,
   },
   publisher: {
     kind: "publisher",
@@ -927,6 +2256,14 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
     replayPlanPath: (id) => `/admin/debug/publisher/${encodeURIComponent(id)}/replay-plan`,
     replayPath: (id) => `/admin/debug/publisher/${encodeURIComponent(id)}/replay`,
   },
+  memory: {
+    kind: "memory",
+    label: "Memory",
+    title: "Memory & Rules Inspector",
+    idLabel: "Repository ID",
+    placeholder: "repo_...",
+    detailsPath: (id) => `/admin/debug/repos/${encodeURIComponent(id)}/memory-rules`,
+  },
 };
 
 const state: AppState = {
@@ -937,8 +2274,10 @@ const state: AppState = {
   gatewayBaseUrl: sessionStorage.getItem(GATEWAY_BASE_URL_STORAGE_KEY) ?? gatewayBaseUrl,
   inspectors: {
     webhook: { id: "", confirmationTokenInput: "" },
+    job: { id: "", confirmationTokenInput: "" },
     review: { id: "", confirmationTokenInput: "" },
     publisher: { id: "", confirmationTokenInput: "" },
+    memory: { id: "", confirmationTokenInput: "" },
   },
   product: {},
   overview: {
@@ -953,7 +2292,7 @@ const state: AppState = {
     repositoriesLoaded: false,
     reviewsLoaded: false,
   },
-  settings: { repoId: "", rules: [] },
+  settings: { repoId: "", ruleForm: defaultRuleForm(), rules: [] },
   audit: {
     orgId: "",
     action: "",
@@ -963,6 +2302,21 @@ const state: AppState = {
     search: "",
     rows: [],
   },
+  usage: {
+    orgId: "",
+    repoId: "",
+    periodStart: currentMonthStartIso(),
+    periodEnd: "",
+  },
+  entitlements: {
+    orgId: "",
+    featureKeys: DEFAULT_ENTITLEMENT_FEATURE_KEYS,
+  },
+  billing: {
+    orgId: "",
+    meterPeriodKey: currentMonthKey(),
+    meterStatus: "all",
+  },
 };
 
 app.addEventListener("click", (event) => {
@@ -971,6 +2325,8 @@ app.addEventListener("click", (event) => {
 app.addEventListener("input", handleInput);
 
 render();
+readProductAuthReturn();
+void loadProductSession();
 void loadProductOnboarding();
 void completePendingGatewayLogin();
 
@@ -988,6 +2344,15 @@ async function handleClick(event: MouseEvent): Promise<void> {
     render();
     if (view === "overview" && state.session && state.overview.repositories.length === 0) {
       await loadOverview();
+    }
+    if (view === "usage" && state.session && !state.usage.data) {
+      await loadUsageSummary();
+    }
+    if (view === "plan" && state.session && !state.entitlements.data) {
+      await loadEntitlementSummary();
+    }
+    if (view === "billing" && state.session && !state.billing.data) {
+      await loadBillingSummary();
     }
     return;
   }
@@ -1027,6 +2392,134 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "install-github-app") {
     openGitHubInstall();
+    return;
+  }
+
+  if (action === "login-product-github") {
+    startProductGitHubLogin();
+    return;
+  }
+
+  if (action === "refresh-product-session") {
+    await loadProductSession();
+    return;
+  }
+
+  if (action === "load-product-resources") {
+    await loadProductResources();
+    return;
+  }
+
+  if (action === "select-product-org") {
+    await loadProductResources(requiredDatasetValue(element, "orgId"));
+    return;
+  }
+
+  if (action === "toggle-product-repository") {
+    await setProductRepositoryEnabled(
+      requiredDatasetValue(element, "repoId"),
+      requiredDatasetValue(element, "enabled") === "true",
+    );
+    return;
+  }
+
+  if (action === "open-product-repository-settings") {
+    await loadProductRepositorySettings(requiredDatasetValue(element, "repoId"));
+    return;
+  }
+
+  if (action === "open-product-review-detail") {
+    await loadProductReviewDetail(requiredDatasetValue(element, "reviewRunId"));
+    return;
+  }
+
+  if (action === "refresh-product-review-detail") {
+    const reviewRunId = state.product.reviewDetail?.reviewRunId;
+    if (reviewRunId) {
+      await loadProductReviewDetail(reviewRunId);
+    }
+    return;
+  }
+
+  if (action === "load-product-review-artifacts") {
+    await loadProductReviewArtifacts(requiredDatasetValue(element, "reviewRunId"));
+    return;
+  }
+
+  if (action === "load-product-review-artifact-payload") {
+    await loadProductReviewArtifactPayload(
+      requiredDatasetValue(element, "reviewRunId"),
+      requiredDatasetValue(element, "artifactId"),
+    );
+    return;
+  }
+
+  if (action === "download-product-review-artifact-payload") {
+    await downloadProductReviewArtifactPayload(
+      requiredDatasetValue(element, "reviewRunId"),
+      requiredDatasetValue(element, "artifactId"),
+    );
+    return;
+  }
+
+  if (action === "select-product-finding") {
+    await loadProductFindingDetail(requiredDatasetValue(element, "findingId"));
+    return;
+  }
+
+  if (action === "set-product-finding-outcome") {
+    await recordProductFindingOutcome(
+      requiredDatasetValue(element, "findingId"),
+      requiredDatasetValue(element, "outcome"),
+    );
+    return;
+  }
+
+  if (action === "suppress-product-finding-similar") {
+    await suppressProductFindingSimilar(requiredDatasetValue(element, "findingId"));
+    return;
+  }
+
+  if (action === "rerun-product-review") {
+    await rerunProductReview(requiredDatasetValue(element, "reviewRunId"));
+    return;
+  }
+
+  if (action === "preview-product-policy") {
+    await previewProductPolicy();
+    return;
+  }
+
+  if (action === "save-product-settings") {
+    await saveProductRepositorySettings();
+    return;
+  }
+
+  if (action === "save-product-rule") {
+    await saveProductRepositoryRule();
+    return;
+  }
+
+  if (action === "edit-product-rule") {
+    editProductRepositoryRule(requiredDatasetValue(element, "ruleId"));
+    return;
+  }
+
+  if (action === "cancel-product-rule-edit") {
+    if (state.product.repositorySettings) {
+      state.product.repositorySettings.ruleForm = defaultRuleForm();
+    }
+    render();
+    return;
+  }
+
+  if (action === "delete-product-rule") {
+    await deleteProductRepositoryRule(requiredDatasetValue(element, "ruleId"));
+    return;
+  }
+
+  if (action === "logout-product") {
+    await logoutProductSession();
     return;
   }
 
@@ -1130,8 +2623,28 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "run-retrieval-replay") {
+    await runRetrievalReplay(state.activeKind);
+    return;
+  }
+
+  if (action === "run-validation-replay") {
+    await runValidationReplay(state.activeKind);
+    return;
+  }
+
   if (action === "execute-replay") {
     await executeReplay(state.activeKind);
+    return;
+  }
+
+  if (action === "export-debug-bundle") {
+    await exportDebugBundle(state.activeKind);
+    return;
+  }
+
+  if (action === "import-eval") {
+    await importToEval(state.activeKind);
     return;
   }
 
@@ -1140,13 +2653,64 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "preview-policy") {
+    await previewPolicy();
+    return;
+  }
+
   if (action === "save-settings") {
     await saveSettings();
     return;
   }
 
+  if (action === "save-rule") {
+    await saveRepositoryRule();
+    return;
+  }
+
+  if (action === "edit-rule") {
+    editRepositoryRule(requiredDatasetValue(element, "ruleId"));
+    return;
+  }
+
+  if (action === "cancel-rule-edit") {
+    state.settings.ruleForm = defaultRuleForm();
+    render();
+    return;
+  }
+
+  if (action === "delete-rule") {
+    await deleteRepositoryRule(requiredDatasetValue(element, "ruleId"));
+    return;
+  }
+
   if (action === "load-audit") {
     await loadAuditHistory();
+    return;
+  }
+
+  if (action === "load-usage") {
+    await loadUsageSummary();
+    return;
+  }
+
+  if (action === "load-entitlements") {
+    await loadEntitlementSummary();
+    return;
+  }
+
+  if (action === "load-billing") {
+    await loadBillingSummary();
+    return;
+  }
+
+  if (action === "create-billing-portal-session") {
+    await createBillingPortalSession();
+    return;
+  }
+
+  if (action === "run-billing-reconciliation") {
+    await runBillingReconciliation();
   }
 }
 
@@ -1202,8 +2766,66 @@ function handleInput(event: Event): void {
     return;
   }
 
+  if (field?.startsWith("productSettings.")) {
+    updateProductSettingsFormField(field.slice("productSettings.".length), target);
+    return;
+  }
+
+  if (field?.startsWith("rule.")) {
+    updateRuleFormField(field.slice("rule.".length), target);
+    return;
+  }
+
+  if (field?.startsWith("productRule.")) {
+    updateProductRuleFormField(field.slice("productRule.".length), target);
+    return;
+  }
+
+  if (field === "productFinding.outcomeNote") {
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.outcomeNote = target.value;
+    }
+    return;
+  }
+
+  if (field === "productReview.artifactAccessReason") {
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.artifactAccessReason = target.value;
+    }
+    return;
+  }
+
+  if (field === "productFinding.suppressionReason") {
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.suppressionReason = target.value;
+    }
+    return;
+  }
+
+  if (field === "productFinding.suppressionScope") {
+    if (state.product.reviewDetail && (target.value === "repo" || target.value === "org")) {
+      state.product.reviewDetail.suppressionScope = target.value;
+    }
+    return;
+  }
+
   if (field?.startsWith("audit.")) {
     updateAuditField(field.slice("audit.".length), target.value);
+    return;
+  }
+
+  if (field?.startsWith("usage.")) {
+    updateUsageField(field.slice("usage.".length), target.value);
+    return;
+  }
+
+  if (field?.startsWith("entitlements.")) {
+    updateEntitlementsField(field.slice("entitlements.".length), target.value);
+    return;
+  }
+
+  if (field?.startsWith("billing.")) {
+    updateBillingField(field.slice("billing.".length), target.value);
   }
 }
 
@@ -1215,6 +2837,27 @@ async function completePendingGatewayLogin(): Promise<void> {
 
   state.activeMode = "admin";
   await connectAdminSession();
+}
+
+/** Reads product OAuth callback status from the dashboard URL. */
+function readProductAuthReturn(): void {
+  const url = new URL(window.location.href);
+  const authError = url.searchParams.get("authError");
+  if (!authError) {
+    return;
+  }
+
+  state.activeMode = "product";
+  state.product.authError = authErrorMessage(authError);
+  url.searchParams.delete("authError");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+/** Starts the product GitHub OAuth login flow through the API. */
+function startProductGitHubLogin(): void {
+  state.product.authError = undefined;
+  persistLoginConfig();
+  window.location.assign(productGitHubLoginStartUrl());
 }
 
 /** Starts the GitHub OAuth login flow through the configured admin gateway. */
@@ -1300,6 +2943,741 @@ async function clearAuth(): Promise<void> {
   }
 }
 
+/** Loads the current product session when the user has a product cookie. */
+async function loadProductSession(): Promise<void> {
+  state.product.sessionLoading = "Checking product session";
+  state.product.authError = undefined;
+  render();
+  try {
+    state.product.session = await requestProductData<ProductMeResponse>("/api/v1/me");
+    await loadProductResources();
+  } catch (error) {
+    state.product.session = undefined;
+    state.product.resources = undefined;
+    state.product.repositorySettings = undefined;
+    state.product.reviewDetail = undefined;
+    if (!isUnauthorizedError(error)) {
+      state.product.authError = errorMessage(error);
+    }
+  } finally {
+    state.product.sessionLoading = undefined;
+    render();
+  }
+}
+
+/** Revokes the current product session and clears product UI state. */
+async function logoutProductSession(): Promise<void> {
+  state.product.sessionLoading = "Signing out";
+  state.product.authError = undefined;
+  render();
+  try {
+    if (state.product.session) {
+      await requestProductData<{ readonly ok: boolean }>("/api/v1/auth/logout", {
+        method: "POST",
+      });
+    }
+  } catch (error) {
+    state.product.authError = errorMessage(error);
+  } finally {
+    state.product.session = undefined;
+    state.product.resources = undefined;
+    state.product.repositorySettings = undefined;
+    state.product.reviewDetail = undefined;
+    state.product.sessionLoading = undefined;
+    render();
+  }
+}
+
+/** Loads authenticated product organizations, repositories, reviews, and usage. */
+async function loadProductResources(orgId?: string): Promise<void> {
+  if (!state.product.session) {
+    return;
+  }
+
+  state.product.resources = {
+    ...defaultProductResources(state.product.resources),
+    loading: "Loading product workspace",
+  };
+  render();
+
+  try {
+    const orgsResponse = await requestProductData<{
+      readonly orgs: readonly ProductOrganizationSummary[];
+    }>("/api/v1/orgs?limit=50");
+    const selectedOrgId = selectedProductOrgId(orgsResponse.orgs, orgId);
+    if (!selectedOrgId) {
+      state.product.resources = {
+        orgs: orgsResponse.orgs,
+        repositories: [],
+        reviews: [],
+        loaded: true,
+      };
+      return;
+    }
+
+    const [repositoriesResponse, reviewsResponse, usage] = await Promise.all([
+      requestProductData<{ readonly repositories: readonly AdminRepositorySummary[] }>(
+        `/api/v1/orgs/${encodeURIComponent(selectedOrgId)}/repositories?limit=50`,
+      ),
+      requestProductData<{ readonly reviews: readonly AdminReviewRunSummary[] }>(
+        `/api/v1/orgs/${encodeURIComponent(selectedOrgId)}/review-runs?limit=10`,
+      ),
+      requestProductData<ProductUsageSummary>(
+        `/api/v1/orgs/${encodeURIComponent(selectedOrgId)}/usage/summary?groupBy=repo`,
+      ),
+    ]);
+
+    state.product.resources = {
+      orgs: orgsResponse.orgs,
+      repositories: repositoriesResponse.repositories,
+      reviews: reviewsResponse.reviews,
+      selectedOrgId,
+      usage,
+      loaded: true,
+    };
+  } catch (error) {
+    state.product.resources = {
+      ...defaultProductResources(state.product.resources),
+      error: errorMessage(error),
+    };
+  } finally {
+    render();
+  }
+}
+
+/** Enables or disables a repository through the authenticated product API. */
+async function setProductRepositoryEnabled(repoId: string, enabled: boolean): Promise<void> {
+  const resources = defaultProductResources(state.product.resources);
+  state.product.resources = {
+    ...resources,
+    loading: enabled ? "Enabling repository" : "Disabling repository",
+  };
+  render();
+
+  try {
+    await requestProductData<unknown>(
+      `/api/v1/repositories/${encodeURIComponent(repoId)}/${enabled ? "enable" : "disable"}`,
+      { method: "POST" },
+    );
+    await loadProductResources(resources.selectedOrgId);
+  } catch (error) {
+    state.product.resources = {
+      ...resources,
+      error: errorMessage(error),
+    };
+    render();
+  }
+}
+
+/** Loads product repository settings, rules, and effective policy preview. */
+async function loadProductRepositorySettings(repoId: string): Promise<void> {
+  state.product.repositorySettings = {
+    repoId,
+    ruleForm: defaultRuleForm(),
+    rules: [],
+    loading: "Loading repository settings",
+  };
+  render();
+
+  try {
+    const [data, rulesData] = await Promise.all([
+      requestProductData<ControlPlaneSettingsResponse>(
+        `/api/v1/repositories/${encodeURIComponent(repoId)}`,
+      ),
+      requestProductData<{ readonly rules: readonly AdminRepoRuleSummary[] }>(
+        `/api/v1/repositories/${encodeURIComponent(repoId)}/rules`,
+      ),
+    ]);
+    const form = settingsFormFromResponse(data);
+    state.product.repositorySettings = {
+      data,
+      form,
+      preview: await requestProductPolicyPreview(repoId, form),
+      repoId,
+      ruleForm: defaultRuleForm(),
+      rules: rulesData.rules,
+    };
+  } catch (error) {
+    state.product.repositorySettings = {
+      repoId,
+      ruleForm: defaultRuleForm(),
+      rules: [],
+      error: errorMessage(error),
+    };
+  } finally {
+    render();
+  }
+}
+
+/** Saves the selected product repository settings through the product API. */
+async function saveProductRepositorySettings(): Promise<void> {
+  const settings = state.product.repositorySettings;
+  const form = settings?.form;
+  if (!settings || !form) {
+    return;
+  }
+
+  settings.loading = "Saving repository settings";
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+
+  try {
+    const data = await requestProductData<ControlPlaneSettingsResponse>(
+      `/api/v1/repositories/${encodeURIComponent(settings.repoId)}/settings`,
+      {
+        body: JSON.stringify(settingsPatchFromForm(form)),
+        method: "PATCH",
+      },
+    );
+    settings.data = data;
+    settings.form = settingsFormFromResponse(data);
+    settings.preview = await requestProductPolicyPreview(settings.repoId, settings.form);
+    settings.saved = "Settings saved and policy preview refreshed.";
+    if (state.product.resources?.selectedOrgId) {
+      await loadProductResources(state.product.resources.selectedOrgId);
+    }
+  } catch (error) {
+    settings.error = errorMessage(error);
+  } finally {
+    settings.loading = undefined;
+    render();
+  }
+}
+
+/** Refreshes the product policy preview for the current unsaved settings form. */
+async function previewProductPolicy(): Promise<void> {
+  const settings = state.product.repositorySettings;
+  const form = settings?.form;
+  if (!settings || !form) {
+    return;
+  }
+
+  settings.loading = "Compiling policy preview";
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+
+  try {
+    settings.preview = await requestProductPolicyPreview(settings.repoId, form);
+  } catch (error) {
+    settings.error = errorMessage(error);
+  } finally {
+    settings.loading = undefined;
+    render();
+  }
+}
+
+/** Requests a product policy preview for one repository settings form. */
+async function requestProductPolicyPreview(
+  repoId: string,
+  form: SettingsFormState,
+): Promise<ControlPlanePolicyPreview> {
+  return requestProductData<ControlPlanePolicyPreview>(
+    `/api/v1/repositories/${encodeURIComponent(repoId)}/policy-preview`,
+    {
+      body: JSON.stringify(settingsPatchFromForm(form)),
+      method: "POST",
+    },
+  );
+}
+
+/** Saves the product repository rule form as a new or updated rule. */
+async function saveProductRepositoryRule(): Promise<void> {
+  const settings = state.product.repositorySettings;
+  if (!settings?.form) {
+    return;
+  }
+
+  const ruleForm = settings.ruleForm;
+  settings.loading = ruleForm.editingRuleId ? "Updating repository rule" : "Creating rule";
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+
+  try {
+    const editingRuleId = ruleForm.editingRuleId.trim();
+    await requestProductData<AdminRepoRuleSummary>(
+      editingRuleId
+        ? `/api/v1/repositories/${encodeURIComponent(settings.repoId)}/rules/${encodeURIComponent(editingRuleId)}`
+        : `/api/v1/repositories/${encodeURIComponent(settings.repoId)}/rules`,
+      {
+        body: JSON.stringify(ruleRequestFromForm(ruleForm)),
+        method: editingRuleId ? "PATCH" : "POST",
+      },
+    );
+    await refreshProductRepositoryRulesAndPreview(settings.repoId);
+    settings.ruleForm = defaultRuleForm();
+    settings.saved = editingRuleId ? "Rule updated." : "Rule created.";
+  } catch (error) {
+    settings.error = errorMessage(error);
+  } finally {
+    settings.loading = undefined;
+    render();
+  }
+}
+
+/** Deletes one product repository rule after explicit confirmation. */
+async function deleteProductRepositoryRule(ruleId: string): Promise<void> {
+  const settings = state.product.repositorySettings;
+  if (!settings?.form) {
+    return;
+  }
+  if (!window.confirm(`Delete repository rule ${ruleId}?`)) {
+    return;
+  }
+
+  settings.loading = "Deleting repository rule";
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+
+  try {
+    await requestProductData<AdminRepoRuleSummary>(
+      `/api/v1/repositories/${encodeURIComponent(settings.repoId)}/rules/${encodeURIComponent(ruleId)}`,
+      { method: "DELETE" },
+    );
+    await refreshProductRepositoryRulesAndPreview(settings.repoId);
+    if (settings.ruleForm.editingRuleId === ruleId) {
+      settings.ruleForm = defaultRuleForm();
+    }
+    settings.saved = "Rule deleted.";
+  } catch (error) {
+    settings.error = errorMessage(error);
+  } finally {
+    settings.loading = undefined;
+    render();
+  }
+}
+
+/** Loads an existing product rule into the repository rule form. */
+function editProductRepositoryRule(ruleId: string): void {
+  const settings = state.product.repositorySettings;
+  const rule = settings?.rules.find((candidate) => candidate.ruleId === ruleId);
+  if (!settings || !rule) {
+    return;
+  }
+
+  settings.ruleForm = ruleFormFromSummary(rule);
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+}
+
+/** Refreshes product rule rows and policy preview after a rule mutation. */
+async function refreshProductRepositoryRulesAndPreview(repoId: string): Promise<void> {
+  const settings = state.product.repositorySettings;
+  if (!settings) {
+    return;
+  }
+
+  settings.rules = await requestProductRepositoryRules(repoId);
+  if (settings.form) {
+    settings.preview = await requestProductPolicyPreview(repoId, settings.form);
+  }
+}
+
+/** Requests product repository and organization rules for one repository. */
+async function requestProductRepositoryRules(
+  repoId: string,
+): Promise<readonly AdminRepoRuleSummary[]> {
+  const data = await requestProductData<{ readonly rules: readonly AdminRepoRuleSummary[] }>(
+    `/api/v1/repositories/${encodeURIComponent(repoId)}/rules`,
+  );
+  return data.rules;
+}
+
+/** Loads product review details and validated findings for one review run. */
+async function loadProductReviewDetail(reviewRunId: string): Promise<void> {
+  const previousDetail = state.product.reviewDetail;
+  const previousArtifacts =
+    previousDetail?.reviewRunId === reviewRunId ? previousDetail.artifacts : undefined;
+  const previousArtifactsLoaded =
+    previousDetail?.reviewRunId === reviewRunId ? previousDetail.artifactsLoaded : undefined;
+  const previousArtifactAccessReason =
+    previousDetail?.reviewRunId === reviewRunId ? previousDetail.artifactAccessReason : "";
+  const previousArtifactPayload =
+    previousDetail?.reviewRunId === reviewRunId ? previousDetail.artifactPayload : undefined;
+  const previousSelectedFindingId =
+    previousDetail?.reviewRunId === reviewRunId
+      ? previousDetail.selectedFinding?.findingId
+      : undefined;
+
+  state.product.reviewDetail = {
+    reviewRunId,
+    artifactAccessReason: previousArtifactAccessReason,
+    artifactPayload: previousArtifactPayload,
+    artifacts: previousArtifacts,
+    artifactsLoaded: previousArtifactsLoaded,
+    findings: previousDetail?.reviewRunId === reviewRunId ? previousDetail.findings : [],
+    outcomeNote: "",
+    suppressionReason:
+      previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionReason : "",
+    suppressionScope:
+      previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionScope : "repo",
+    loading: "Loading review detail",
+  };
+  render();
+
+  try {
+    const [detailResponse, findingsResponse] = await Promise.all([
+      requestProductData<{ readonly reviewRun: AdminReviewRunSummary }>(
+        `/api/v1/review-runs/${encodeURIComponent(reviewRunId)}`,
+      ),
+      requestProductData<{
+        readonly findings: readonly AdminReviewFindingSummary[];
+        readonly reviewRun: AdminReviewRunSummary;
+      }>(`/api/v1/review-runs/${encodeURIComponent(reviewRunId)}/findings?limit=50`),
+    ]);
+    const selectedFinding =
+      findingsResponse.findings.find(
+        (finding) => finding.findingId === previousSelectedFindingId,
+      ) ?? findingsResponse.findings[0];
+    state.product.reviewDetail = {
+      artifactAccessReason: previousArtifactAccessReason,
+      artifactPayload: previousArtifactPayload,
+      artifacts: previousArtifacts,
+      artifactsLoaded: previousArtifactsLoaded,
+      findings: findingsResponse.findings,
+      outcomeNote: selectedFinding?.latestOutcome?.notes ?? "",
+      reviewRun: detailResponse.reviewRun,
+      reviewRunId,
+      selectedFinding,
+      suppressionReason:
+        previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionReason : "",
+      suppressionScope:
+        previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionScope : "repo",
+    };
+  } catch (error) {
+    state.product.reviewDetail = {
+      reviewRunId,
+      artifactAccessReason: "",
+      artifacts: previousArtifacts,
+      artifactsLoaded: previousArtifactsLoaded,
+      findings: [],
+      outcomeNote: "",
+      suppressionReason: "",
+      suppressionScope: "repo",
+      error: errorMessage(error),
+    };
+  } finally {
+    render();
+  }
+}
+
+/** Loads payload-free artifact metadata for the selected product review. */
+async function loadProductReviewArtifacts(reviewRunId: string): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (!detail || detail.reviewRunId !== reviewRunId) {
+    return;
+  }
+
+  detail.loading = "Loading artifact metadata";
+  detail.error = undefined;
+  detail.saved = undefined;
+  render();
+
+  try {
+    const data = await requestProductData<{
+      readonly artifacts: readonly AdminReviewArtifactSummary[];
+      readonly reviewRun: AdminReviewRunSummary;
+    }>(`/api/v1/review-runs/${encodeURIComponent(reviewRunId)}/artifacts`);
+    const activeDetail = state.product.reviewDetail;
+    if (!activeDetail || activeDetail.reviewRunId !== reviewRunId) {
+      return;
+    }
+
+    activeDetail.artifacts = data.artifacts;
+    activeDetail.artifactsLoaded = true;
+    activeDetail.reviewRun = data.reviewRun;
+  } catch (error) {
+    const activeDetail = state.product.reviewDetail;
+    if (activeDetail?.reviewRunId === reviewRunId) {
+      activeDetail.error = errorMessage(error);
+    }
+  } finally {
+    const activeDetail = state.product.reviewDetail;
+    if (activeDetail?.reviewRunId === reviewRunId) {
+      activeDetail.loading = undefined;
+    }
+    render();
+  }
+}
+
+/** Loads a redacted artifact payload for the selected product review. */
+async function loadProductReviewArtifactPayload(
+  reviewRunId: string,
+  artifactId: string,
+): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (!detail || detail.reviewRunId !== reviewRunId) {
+    return;
+  }
+
+  const reason = detail.artifactAccessReason.trim();
+  if (!reason) {
+    detail.error = "Enter an access reason before viewing an artifact payload.";
+    render();
+    return;
+  }
+
+  detail.loading = "Loading redacted artifact payload";
+  detail.error = undefined;
+  detail.saved = undefined;
+  render();
+
+  try {
+    const query = new URLSearchParams({ reason });
+    const data = await requestProductData<{
+      readonly accessLevel: "redacted" | "raw_allowed";
+      readonly artifact: AdminReviewArtifactSummary;
+      readonly artifactAccessEventId: string;
+      readonly payload: unknown;
+      readonly reviewRun: AdminReviewRunSummary;
+    }>(
+      `/api/v1/review-runs/${encodeURIComponent(reviewRunId)}/artifacts/${encodeURIComponent(
+        artifactId,
+      )}/payload?${query.toString()}`,
+    );
+    const activeDetail = state.product.reviewDetail;
+    if (!activeDetail || activeDetail.reviewRunId !== reviewRunId) {
+      return;
+    }
+
+    activeDetail.artifactPayload = {
+      accessLevel: data.accessLevel,
+      artifact: data.artifact,
+      artifactAccessEventId: data.artifactAccessEventId,
+      payload: data.payload,
+    };
+    activeDetail.reviewRun = data.reviewRun;
+    activeDetail.saved = "Redacted artifact payload loaded.";
+  } catch (error) {
+    const activeDetail = state.product.reviewDetail;
+    if (activeDetail?.reviewRunId === reviewRunId) {
+      activeDetail.error = errorMessage(error);
+    }
+  } finally {
+    const activeDetail = state.product.reviewDetail;
+    if (activeDetail?.reviewRunId === reviewRunId) {
+      activeDetail.loading = undefined;
+    }
+    render();
+  }
+}
+
+/** Downloads a redacted artifact payload for the selected product review. */
+async function downloadProductReviewArtifactPayload(
+  reviewRunId: string,
+  artifactId: string,
+): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (!detail || detail.reviewRunId !== reviewRunId) {
+    return;
+  }
+
+  const reason = detail.artifactAccessReason.trim();
+  if (!reason) {
+    detail.error = "Enter an access reason before downloading an artifact payload.";
+    render();
+    return;
+  }
+
+  detail.loading = "Downloading redacted artifact payload";
+  detail.error = undefined;
+  detail.saved = undefined;
+  render();
+
+  try {
+    const query = new URLSearchParams({ reason });
+    const blob = await requestProductBlob(
+      `/api/v1/review-runs/${encodeURIComponent(reviewRunId)}/artifacts/${encodeURIComponent(
+        artifactId,
+      )}/download?${query.toString()}`,
+    );
+    const artifact = detail.artifacts?.find(
+      (candidate) => candidate.reviewArtifactId === artifactId,
+    );
+    downloadBlob(blob, artifactDownloadName(artifact, artifactId));
+    detail.saved = "Redacted artifact payload downloaded.";
+  } catch (error) {
+    detail.error = errorMessage(error);
+  } finally {
+    detail.loading = undefined;
+    render();
+  }
+}
+
+/** Loads full product finding detail for the selected finding panel. */
+async function loadProductFindingDetail(findingId: string): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (!detail) {
+    return;
+  }
+
+  detail.loading = "Loading finding detail";
+  detail.error = undefined;
+  detail.saved = undefined;
+  render();
+
+  try {
+    const data = await requestProductData<{ readonly finding: AdminReviewFindingSummary }>(
+      `/api/v1/findings/${encodeURIComponent(findingId)}`,
+    );
+    detail.selectedFinding = data.finding;
+    detail.outcomeNote = data.finding.latestOutcome?.notes ?? "";
+    detail.suppressionReason = "";
+    detail.findings = detail.findings.map((finding) =>
+      finding.findingId === data.finding.findingId ? data.finding : finding,
+    );
+  } catch (error) {
+    detail.error = errorMessage(error);
+  } finally {
+    detail.loading = undefined;
+    render();
+  }
+}
+
+/** Records one product finding outcome and refreshes the selected finding. */
+async function recordProductFindingOutcome(findingId: string, outcome: string): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (!detail) {
+    return;
+  }
+
+  detail.loading = "Recording finding outcome";
+  detail.error = undefined;
+  detail.saved = undefined;
+  render();
+
+  try {
+    await requestProductData<unknown>(`/api/v1/findings/${encodeURIComponent(findingId)}/outcome`, {
+      body: JSON.stringify({
+        notes: detail.outcomeNote.trim(),
+        outcome,
+      }),
+      method: "PATCH",
+    });
+    await loadProductFindingDetail(findingId);
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.saved = `Outcome recorded: ${outcome}.`;
+    }
+  } catch (error) {
+    detail.error = errorMessage(error);
+  } finally {
+    detail.loading = undefined;
+    render();
+  }
+}
+
+/** Creates a suppress-similar rule from the selected product finding. */
+async function suppressProductFindingSimilar(findingId: string): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (!detail) {
+    return;
+  }
+
+  const reason = detail.suppressionReason.trim();
+  if (!reason) {
+    detail.error = "Enter a reason before suppressing similar findings.";
+    render();
+    return;
+  }
+
+  detail.loading = "Creating suppression rule";
+  detail.error = undefined;
+  detail.saved = undefined;
+  render();
+
+  try {
+    const suppression = await requestProductData<AdminFindingSuppressionSummary>(
+      `/api/v1/findings/${encodeURIComponent(findingId)}/suppress-similar`,
+      {
+        body: JSON.stringify({
+          reason,
+          scope: detail.suppressionScope,
+        }),
+        headers: {
+          "idempotency-key": `finding-suppress-${findingId}-${crypto.randomUUID()}`,
+        },
+        method: "POST",
+      },
+    );
+    detail.suppressionReason = "";
+    detail.saved = `Suppression rule created: ${suppression.rule.name}.`;
+    if (state.product.repositorySettings?.repoId === suppression.finding.repoId) {
+      await refreshProductRepositoryRulesAndPreview(suppression.finding.repoId);
+    }
+  } catch (error) {
+    detail.error = errorMessage(error);
+  } finally {
+    detail.loading = undefined;
+    render();
+  }
+}
+
+/** Enqueues a product review rerun when the current role permits it. */
+async function rerunProductReview(reviewRunId: string): Promise<void> {
+  const detail = state.product.reviewDetail;
+  if (detail) {
+    detail.loading = "Queueing review rerun";
+    detail.error = undefined;
+    detail.saved = undefined;
+  }
+  render();
+
+  try {
+    await requestProductData<unknown>(
+      `/api/v1/review-runs/${encodeURIComponent(reviewRunId)}/rerun`,
+      {
+        method: "POST",
+      },
+    );
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.saved = "Review rerun queued.";
+    }
+  } catch (error) {
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.error = errorMessage(error);
+    }
+  } finally {
+    if (state.product.reviewDetail) {
+      state.product.reviewDetail.loading = undefined;
+    }
+    render();
+  }
+}
+
+/** Returns product resource state with stable empty collections. */
+function defaultProductResources(
+  resources: ProductResourcesState | undefined,
+): ProductResourcesState {
+  return (
+    resources ?? {
+      orgs: [],
+      repositories: [],
+      reviews: [],
+      loaded: false,
+    }
+  );
+}
+
+/** Selects an organization for product workspace API calls. */
+function selectedProductOrgId(
+  orgs: readonly ProductOrganizationSummary[],
+  requestedOrgId: string | undefined,
+): string | undefined {
+  if (requestedOrgId && orgs.some((org) => org.orgId === requestedOrgId)) {
+    return requestedOrgId;
+  }
+  const sessionOrgId = state.product.session?.selectedOrgId;
+  if (sessionOrgId && orgs.some((org) => org.orgId === sessionOrgId)) {
+    return sessionOrgId;
+  }
+
+  return orgs[0]?.orgId;
+}
+
 /** Loads the product onboarding dashboard. */
 async function loadProductOnboarding(): Promise<void> {
   state.product.loading = "Loading GitHub App setup";
@@ -1340,6 +3718,12 @@ async function loadDetails(kind: InspectorKind): Promise<void> {
 
   inspector.loading = "Loading inspector";
   inspector.error = undefined;
+  inspector.debugBundle = undefined;
+  inspector.evalImportDraft = undefined;
+  inspector.plan = undefined;
+  inspector.result = undefined;
+  inspector.retrievalReplay = undefined;
+  inspector.validationReplay = undefined;
   try {
     inspector.details = await requestAdminData<InspectorDetails>(config.detailsPath(id));
   } catch (error) {
@@ -1355,6 +3739,11 @@ async function createReplayPlan(kind: InspectorKind): Promise<void> {
   const config = inspectorConfigs[kind];
   const inspector = state.inspectors[kind];
   const id = inspector.id.trim();
+  if (!config.replayPlanPath) {
+    inspector.error = "Replay planning is not available for this inspector.";
+    render();
+    return;
+  }
   if (!id) {
     inspector.error = `${config.idLabel} is required.`;
     render();
@@ -1364,11 +3753,81 @@ async function createReplayPlan(kind: InspectorKind): Promise<void> {
   inspector.loading = "Creating replay plan";
   inspector.error = undefined;
   inspector.result = undefined;
+  inspector.retrievalReplay = undefined;
+  inspector.validationReplay = undefined;
   inspector.confirmationTokenInput = "";
   try {
     inspector.plan = await requestAdminData<InspectorReplayPlan>(config.replayPlanPath(id), {
       method: "POST",
     });
+  } catch (error) {
+    inspector.error = errorMessage(error);
+  } finally {
+    inspector.loading = undefined;
+    render();
+  }
+}
+
+/** Runs retrieval replay in dry-run mode for the selected review inspector. */
+async function runRetrievalReplay(kind: InspectorKind): Promise<void> {
+  const config = inspectorConfigs[kind];
+  const inspector = state.inspectors[kind];
+  const id = inspector.id.trim();
+  if (!config.retrievalReplayPath) {
+    inspector.error = "Retrieval replay is not available for this inspector.";
+    render();
+    return;
+  }
+  if (!id) {
+    inspector.error = `${config.idLabel} is required.`;
+    render();
+    return;
+  }
+
+  inspector.loading = "Running retrieval replay";
+  inspector.error = undefined;
+  inspector.retrievalReplay = undefined;
+  try {
+    inspector.retrievalReplay = await requestAdminData<RetrievalReplayDryRun>(
+      config.retrievalReplayPath(id),
+      {
+        method: "POST",
+      },
+    );
+  } catch (error) {
+    inspector.error = errorMessage(error);
+  } finally {
+    inspector.loading = undefined;
+    render();
+  }
+}
+
+/** Runs validation replay in dry-run mode for the selected review inspector. */
+async function runValidationReplay(kind: InspectorKind): Promise<void> {
+  const config = inspectorConfigs[kind];
+  const inspector = state.inspectors[kind];
+  const id = inspector.id.trim();
+  if (!config.validationReplayPath) {
+    inspector.error = "Validation replay is not available for this inspector.";
+    render();
+    return;
+  }
+  if (!id) {
+    inspector.error = `${config.idLabel} is required.`;
+    render();
+    return;
+  }
+
+  inspector.loading = "Running validation replay";
+  inspector.error = undefined;
+  inspector.validationReplay = undefined;
+  try {
+    inspector.validationReplay = await requestAdminData<ValidationReplayDryRun>(
+      config.validationReplayPath(id),
+      {
+        method: "POST",
+      },
+    );
   } catch (error) {
     inspector.error = errorMessage(error);
   } finally {
@@ -1384,6 +3843,11 @@ async function executeReplay(kind: InspectorKind): Promise<void> {
   const id = inspector.id.trim();
   const expectedToken = inspector.plan?.confirmationToken;
   const providedToken = inspector.confirmationTokenInput.trim();
+  if (!config.replayPath) {
+    inspector.error = "Replay execution is not available for this inspector.";
+    render();
+    return;
+  }
   if (!expectedToken) {
     inspector.error = "Create a replay plan before dispatch.";
     render();
@@ -1403,6 +3867,79 @@ async function executeReplay(kind: InspectorKind): Promise<void> {
       body: JSON.stringify({ confirmationToken: providedToken }),
     });
     inspector.details = await requestAdminData<InspectorDetails>(config.detailsPath(id));
+  } catch (error) {
+    inspector.error = errorMessage(error);
+  } finally {
+    inspector.loading = undefined;
+    render();
+  }
+}
+
+/** Exports a redacted debug bundle for the selected review inspector. */
+async function exportDebugBundle(kind: InspectorKind): Promise<void> {
+  const config = inspectorConfigs[kind];
+  const inspector = state.inspectors[kind];
+  const id = inspector.id.trim();
+  if (!config.debugBundlePath) {
+    inspector.error = "Debug bundle export is not available for this inspector.";
+    render();
+    return;
+  }
+  if (!id) {
+    inspector.error = `${config.idLabel} is required.`;
+    render();
+    return;
+  }
+
+  inspector.loading = "Exporting debug bundle";
+  inspector.error = undefined;
+  try {
+    inspector.debugBundle = await requestAdminData<AdminReviewRunDebugBundle>(
+      config.debugBundlePath(id),
+      {
+        method: "POST",
+      },
+    );
+  } catch (error) {
+    inspector.error = errorMessage(error);
+  } finally {
+    inspector.loading = undefined;
+    render();
+  }
+}
+
+/** Creates a review-run eval import draft for the selected review inspector. */
+async function importToEval(kind: InspectorKind): Promise<void> {
+  const config = inspectorConfigs[kind];
+  const inspector = state.inspectors[kind];
+  const id = inspector.id.trim();
+  if (!config.evalImportPath) {
+    inspector.error = "Eval import is not available for this inspector.";
+    render();
+    return;
+  }
+  if (!id) {
+    inspector.error = `${config.idLabel} is required.`;
+    render();
+    return;
+  }
+
+  inspector.loading = "Creating eval import draft";
+  inspector.error = undefined;
+  try {
+    inspector.evalImportDraft = await requestAdminData<AdminReviewRunEvalImportDraft>(
+      config.evalImportPath(id),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          caseName: `Imported review ${id}`,
+          labels: ["admin-import"],
+          reason: "Imported from the admin review inspector.",
+          redactionLevel: "redacted",
+          suiteId: "smoke-full-pipeline-v1",
+        }),
+      },
+    );
   } catch (error) {
     inspector.error = errorMessage(error);
   } finally {
@@ -1518,6 +4055,7 @@ async function loadSettings(): Promise<void> {
   state.settings.loading = "Loading repository settings";
   state.settings.error = undefined;
   state.settings.saved = undefined;
+  state.settings.preview = undefined;
   try {
     const [data, rulesData] = await Promise.all([
       requestAdminData<ControlPlaneSettingsResponse>(
@@ -1530,6 +4068,8 @@ async function loadSettings(): Promise<void> {
     state.settings.data = data;
     state.settings.form = settingsFormFromResponse(data);
     state.settings.rules = rulesData.rules;
+    state.settings.ruleForm = defaultRuleForm();
+    state.settings.preview = await requestPolicyPreview(repoId, state.settings.form);
   } catch (error) {
     state.settings.error = errorMessage(error);
   } finally {
@@ -1561,13 +4101,150 @@ async function saveSettings(): Promise<void> {
     );
     state.settings.data = data;
     state.settings.form = settingsFormFromResponse(data);
-    state.settings.saved = "Settings saved.";
+    state.settings.preview = await requestPolicyPreview(repoId, state.settings.form);
+    state.settings.saved = "Settings saved and policy preview refreshed.";
   } catch (error) {
     state.settings.error = errorMessage(error);
   } finally {
     state.settings.loading = undefined;
     render();
   }
+}
+
+/** Refreshes the effective policy preview for the current unsaved settings form. */
+async function previewPolicy(): Promise<void> {
+  const repoId = state.settings.repoId.trim();
+  const form = state.settings.form;
+  if (!repoId || !form) {
+    state.settings.error = "Load repository settings before previewing policy.";
+    render();
+    return;
+  }
+
+  state.settings.loading = "Compiling policy preview";
+  state.settings.error = undefined;
+  state.settings.saved = undefined;
+  try {
+    state.settings.preview = await requestPolicyPreview(repoId, form);
+  } catch (error) {
+    state.settings.error = errorMessage(error);
+  } finally {
+    state.settings.loading = undefined;
+    render();
+  }
+}
+
+/** Requests a policy preview for one repository settings form. */
+async function requestPolicyPreview(
+  repoId: string,
+  form: SettingsFormState,
+): Promise<ControlPlanePolicyPreview> {
+  return requestAdminData<ControlPlanePolicyPreview>(
+    `/admin/repos/${encodeURIComponent(repoId)}/policy-preview`,
+    {
+      method: "POST",
+      body: JSON.stringify(settingsPatchFromForm(form)),
+    },
+  );
+}
+
+/** Saves the repository rule form as a new or updated rule. */
+async function saveRepositoryRule(): Promise<void> {
+  const repoId = state.settings.repoId.trim();
+  const ruleForm = state.settings.ruleForm;
+  if (!repoId || !state.settings.form) {
+    state.settings.error = "Load repository settings before saving a rule.";
+    render();
+    return;
+  }
+
+  state.settings.loading = ruleForm.editingRuleId ? "Updating repository rule" : "Creating rule";
+  state.settings.error = undefined;
+  state.settings.saved = undefined;
+  try {
+    const editingRuleId = ruleForm.editingRuleId.trim();
+    await requestAdminData<AdminRepoRuleSummary>(
+      editingRuleId
+        ? `/admin/repos/${encodeURIComponent(repoId)}/rules/${encodeURIComponent(editingRuleId)}`
+        : `/admin/repos/${encodeURIComponent(repoId)}/rules`,
+      {
+        method: editingRuleId ? "PATCH" : "POST",
+        body: JSON.stringify(ruleRequestFromForm(ruleForm)),
+      },
+    );
+    await refreshRepositoryRulesAndPreview(repoId);
+    state.settings.ruleForm = defaultRuleForm();
+    state.settings.saved = editingRuleId ? "Rule updated." : "Rule created.";
+  } catch (error) {
+    state.settings.error = errorMessage(error);
+  } finally {
+    state.settings.loading = undefined;
+    render();
+  }
+}
+
+/** Deletes one repository-scoped rule after operator confirmation. */
+async function deleteRepositoryRule(ruleId: string): Promise<void> {
+  const repoId = state.settings.repoId.trim();
+  if (!repoId || !state.settings.form) {
+    state.settings.error = "Load repository settings before deleting a rule.";
+    render();
+    return;
+  }
+  if (!window.confirm(`Delete repository rule ${ruleId}?`)) {
+    return;
+  }
+
+  state.settings.loading = "Deleting repository rule";
+  state.settings.error = undefined;
+  state.settings.saved = undefined;
+  try {
+    await requestAdminData<AdminRepoRuleSummary>(
+      `/admin/repos/${encodeURIComponent(repoId)}/rules/${encodeURIComponent(ruleId)}`,
+      { method: "DELETE" },
+    );
+    await refreshRepositoryRulesAndPreview(repoId);
+    if (state.settings.ruleForm.editingRuleId === ruleId) {
+      state.settings.ruleForm = defaultRuleForm();
+    }
+    state.settings.saved = "Rule deleted.";
+  } catch (error) {
+    state.settings.error = errorMessage(error);
+  } finally {
+    state.settings.loading = undefined;
+    render();
+  }
+}
+
+/** Loads an existing rule into the repository rule form. */
+function editRepositoryRule(ruleId: string): void {
+  const rule = state.settings.rules.find((candidate) => candidate.ruleId === ruleId);
+  if (!rule) {
+    state.settings.error = `Rule ${ruleId} was not found in the loaded settings.`;
+    render();
+    return;
+  }
+
+  state.settings.ruleForm = ruleFormFromSummary(rule);
+  state.settings.error = undefined;
+  state.settings.saved = undefined;
+  render();
+}
+
+/** Refreshes rule rows and policy preview after a rule mutation. */
+async function refreshRepositoryRulesAndPreview(repoId: string): Promise<void> {
+  state.settings.rules = await requestRepositoryRules(repoId);
+  if (state.settings.form) {
+    state.settings.preview = await requestPolicyPreview(repoId, state.settings.form);
+  }
+}
+
+/** Requests repository and organization rules for one repository. */
+async function requestRepositoryRules(repoId: string): Promise<readonly AdminRepoRuleSummary[]> {
+  const data = await requestAdminData<{ readonly rules: readonly AdminRepoRuleSummary[] }>(
+    `/admin/repos/${encodeURIComponent(repoId)}/rules`,
+  );
+  return data.rules;
 }
 
 /** Loads audit history using the current filters. */
@@ -1591,6 +4268,146 @@ async function loadAuditHistory(): Promise<void> {
     state.audit.error = errorMessage(error);
   } finally {
     state.audit.loading = undefined;
+    render();
+  }
+}
+
+/** Loads internal usage rollups using the current filters. */
+async function loadUsageSummary(): Promise<void> {
+  state.usage.loading = "Loading usage rollups";
+  state.usage.error = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "orgId", state.usage.orgId);
+    appendQueryParam(params, "repoId", state.usage.repoId);
+    appendQueryParam(params, "periodStart", state.usage.periodStart);
+    appendQueryParam(params, "periodEnd", state.usage.periodEnd);
+    params.set("limit", "50");
+    state.usage.data = await requestAdminData<AdminUsageSummary>(
+      `/admin/usage?${params.toString()}`,
+    );
+  } catch (error) {
+    state.usage.error = errorMessage(error);
+  } finally {
+    state.usage.loading = undefined;
+    render();
+  }
+}
+
+/** Loads the current plan snapshot and entitlement decisions. */
+async function loadEntitlementSummary(): Promise<void> {
+  state.entitlements.loading = "Loading plan snapshot";
+  state.entitlements.error = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "orgId", state.entitlements.orgId);
+    for (const featureKey of linesFromText(state.entitlements.featureKeys)) {
+      params.append("featureKey", featureKey);
+    }
+    state.entitlements.data = await requestAdminData<AdminEntitlementSummary>(
+      `/admin/entitlements?${params.toString()}`,
+    );
+  } catch (error) {
+    state.entitlements.error = errorMessage(error);
+  } finally {
+    state.entitlements.loading = undefined;
+    render();
+  }
+}
+
+/** Loads local billing account, subscription, credit, invoice, and plan state. */
+async function loadBillingSummary(): Promise<void> {
+  state.billing.loading = "Loading billing account";
+  state.billing.error = undefined;
+  state.billing.portalError = undefined;
+  state.billing.portalUrl = undefined;
+  try {
+    const billingParams = new URLSearchParams();
+    appendQueryParam(billingParams, "orgId", state.billing.orgId);
+    const usageParams = new URLSearchParams();
+    appendQueryParam(usageParams, "orgId", state.billing.orgId);
+    appendQueryParam(usageParams, "periodStart", currentMonthStartIso());
+    appendQueryParam(usageParams, "periodEnd", currentMonthEndIso());
+    usageParams.set("limit", "50");
+    const meterParams = new URLSearchParams();
+    appendQueryParam(meterParams, "orgId", state.billing.orgId);
+    appendQueryParam(meterParams, "periodKey", state.billing.meterPeriodKey);
+    if (state.billing.meterStatus !== "all") {
+      appendQueryParam(meterParams, "status", state.billing.meterStatus);
+    }
+    meterParams.set("limit", "25");
+    const reconciliationParams = new URLSearchParams();
+    appendQueryParam(reconciliationParams, "orgId", state.billing.orgId);
+    appendQueryParam(reconciliationParams, "periodKey", state.billing.meterPeriodKey);
+    appendQueryParam(reconciliationParams, "periodStart", currentMonthStartIso());
+    appendQueryParam(reconciliationParams, "periodEnd", currentMonthEndIso());
+    reconciliationParams.set("costAnomalyMicros", "5000000");
+    reconciliationParams.set("limit", "25");
+    reconciliationParams.set("meterLagMinutes", "120");
+    const [summary, monthlyUsage, meterEvents, reconciliation] = await Promise.all([
+      requestAdminData<AdminBillingSummary>(`/admin/billing?${billingParams.toString()}`),
+      requestAdminData<AdminUsageSummary>(`/admin/usage?${usageParams.toString()}`),
+      requestAdminData<AdminBillingMeterEventsSummary>(
+        `/admin/billing/meter-events?${meterParams.toString()}`,
+      ),
+      requestAdminData<AdminBillingReconciliationSummary>(
+        `/admin/billing/reconciliation?${reconciliationParams.toString()}`,
+      ),
+    ]);
+
+    state.billing.data = summary;
+    state.billing.monthlyUsage = monthlyUsage;
+    state.billing.meterEvents = meterEvents;
+    state.billing.reconciliation = reconciliation;
+  } catch (error) {
+    state.billing.error = errorMessage(error);
+  } finally {
+    state.billing.loading = undefined;
+    render();
+  }
+}
+
+/** Creates a customer portal session for the loaded billing account. */
+async function createBillingPortalSession(): Promise<void> {
+  state.billing.portalLoading = "Creating portal link";
+  state.billing.portalError = undefined;
+  try {
+    const session = await requestAdminData<AdminPortalSessionRef>("/admin/billing/portal-session", {
+      body: JSON.stringify({
+        ...(state.billing.orgId.trim().length > 0 ? { orgId: state.billing.orgId.trim() } : {}),
+        returnUrl: window.location.href,
+      }),
+      method: "POST",
+    });
+    state.billing.portalUrl = session.url;
+  } catch (error) {
+    state.billing.portalError = errorMessage(error);
+  } finally {
+    state.billing.portalLoading = undefined;
+    render();
+  }
+}
+
+/** Enqueues a durable billing reconciliation repair job for the current billing scope. */
+async function runBillingReconciliation(): Promise<void> {
+  state.billing.reconciliationRunLoading = "Queueing reconciliation";
+  state.billing.reconciliationRunError = undefined;
+  state.billing.reconciliationRun = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "orgId", state.billing.orgId);
+    appendQueryParam(params, "periodKey", state.billing.meterPeriodKey);
+    appendQueryParam(params, "periodStart", currentMonthStartIso());
+    appendQueryParam(params, "periodEnd", currentMonthEndIso());
+    params.set("limit", "100");
+    state.billing.reconciliationRun = await requestAdminData<AdminBillingReconciliationRunSummary>(
+      `/admin/billing/reconciliation/run?${params.toString()}`,
+      { method: "POST" },
+    );
+  } catch (error) {
+    state.billing.reconciliationRunError = errorMessage(error);
+  } finally {
+    state.billing.reconciliationRunLoading = undefined;
     render();
   }
 }
@@ -1622,11 +4439,28 @@ async function requestAdminData<T>(path: string, init: RequestInit = {}): Promis
   return (body as ApiEnvelope<T>).data;
 }
 
-/** Requests a typed data payload from the public product API. */
-async function requestProductData<T>(path: string): Promise<T> {
-  const response = await fetch(adminUrl(path), { credentials: "omit" });
+/** Requests a typed data payload from the product API. */
+async function requestProductData<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const method = init.method ?? "GET";
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+
+  const response = await fetch(adminUrl(path), {
+    ...init,
+    credentials: "include",
+    headers,
+    method,
+  });
   const body = await response.json().catch(() => undefined);
   if (!response.ok) {
+    if (response.status === 401) {
+      state.product.session = undefined;
+      state.product.resources = undefined;
+      state.product.repositorySettings = undefined;
+      state.product.reviewDetail = undefined;
+    }
     throw new Error(apiErrorMessage(body, response.status));
   }
 
@@ -1636,6 +4470,26 @@ async function requestProductData<T>(path: string): Promise<T> {
   }
 
   return envelope.data;
+}
+
+/** Requests a blob payload from the product API. */
+async function requestProductBlob(path: string): Promise<Blob> {
+  const response = await fetch(adminUrl(path), {
+    credentials: "include",
+    method: "GET",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => undefined);
+    if (response.status === 401) {
+      state.product.session = undefined;
+      state.product.resources = undefined;
+      state.product.repositorySettings = undefined;
+      state.product.reviewDetail = undefined;
+    }
+    throw new Error(apiErrorMessage(body, response.status));
+  }
+
+  return response.blob();
 }
 
 /** Requests a signed identity assertion from the configured admin gateway. */
@@ -1665,6 +4519,18 @@ function githubLoginStartUrl(): string {
   const url = new URL("/auth/github/start", gatewayBaseOriginUrl());
   url.searchParams.set("returnTo", window.location.href);
   return url.toString();
+}
+
+/** Returns the product GitHub OAuth start URL for the configured API. */
+function productGitHubLoginStartUrl(): string {
+  const url = new URL(adminUrl("/api/v1/auth/github/start"), window.location.origin);
+  url.searchParams.set("redirectTo", productReturnPath());
+  return url.toString();
+}
+
+/** Returns the current dashboard path used after product login. */
+function productReturnPath(): string {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}` || "/";
 }
 
 /** Returns the signed assertion endpoint URL for the configured admin gateway. */
@@ -1817,6 +4683,7 @@ function renderProductDashboard(): string {
           </p>
         </div>
         <div class="product-actions">
+          ${renderProductAuthPanel()}
           <button
             class="primary"
             data-action="install-github-app"
@@ -1835,6 +4702,52 @@ function renderProductDashboard(): string {
   `;
 }
 
+/** Renders product session controls. */
+function renderProductAuthPanel(): string {
+  const session = state.product.session;
+  const disabled = state.product.sessionLoading ? "disabled" : "";
+  const loadingMessage = state.product.sessionLoading
+    ? `<p class="notice compact">${escapeHtml(state.product.sessionLoading)}...</p>`
+    : "";
+  if (session) {
+    const label = session.user.displayName ?? session.user.primaryEmail ?? session.user.userId;
+    const orgLabel =
+      session.memberships.length === 0
+        ? "No org membership"
+        : `${session.memberships.length} org${session.memberships.length === 1 ? "" : "s"}`;
+    return `
+      <div class="product-session connected">
+        <div class="product-session-summary">
+          <span class="status ok">signed in</span>
+          <strong>${escapeHtml(label)}</strong>
+          <small>${escapeHtml(orgLabel)}</small>
+        </div>
+        <button class="ghost small" data-action="refresh-product-session" type="button" ${disabled}>
+          Refresh
+        </button>
+        <button class="ghost small" data-action="logout-product" type="button" ${disabled}>
+          Sign out
+        </button>
+        ${loadingMessage}
+        ${state.product.authError ? `<p class="error-line">${escapeHtml(state.product.authError)}</p>` : ""}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="product-session">
+      <button class="primary" data-action="login-product-github" type="button" ${disabled}>
+        Sign in with GitHub
+      </button>
+      <button class="ghost small" data-action="refresh-product-session" type="button" ${disabled}>
+        Check session
+      </button>
+      ${loadingMessage}
+      ${state.product.authError ? `<p class="error-line">${escapeHtml(state.product.authError)}</p>` : ""}
+    </div>
+  `;
+}
+
 /** Renders product setup and activity state. */
 function renderProductReadiness(data: ProductOnboardingSummary): string {
   return `
@@ -1844,12 +4757,847 @@ function renderProductReadiness(data: ProductOnboardingSummary): string {
       ${renderMetric("Repositories", String(data.repositories.length))}
       ${renderMetric("Webhooks", String(data.webhook.totalDeliveries))}
     </section>
+    ${state.product.session ? renderProductWorkspace() : ""}
     <section class="product-grid">
       ${renderProductSetupPanel(data)}
       ${renderProductInstallations(data.installations)}
       ${renderProductRepositories(data.repositories)}
       ${renderProductReviews(data.recentReviews)}
     </section>
+  `;
+}
+
+/** Renders authenticated product workspace resources. */
+function renderProductWorkspace(): string {
+  const resources = state.product.resources;
+  if (!resources) {
+    return `
+      <section class="panel product-panel product-resource-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Workspace</p>
+            <h3>Organizations and repositories</h3>
+          </div>
+          <button class="ghost small" data-action="load-product-resources" type="button">
+            Load workspace
+          </button>
+        </div>
+      </section>
+    `;
+  }
+
+  const selectedOrg = resources.orgs.find((org) => org.orgId === resources.selectedOrgId);
+  const membership = state.product.session?.memberships.find(
+    (row) => row.orgId === resources.selectedOrgId,
+  );
+  const canManageRepositories = Boolean(membership?.capabilities.canManageRepositorySettings);
+  const canManageRules = Boolean(membership?.permissions.includes("rule:write"));
+  const canWriteFindings = Boolean(membership?.permissions.includes("finding:write"));
+  const canSuppressFindings = Boolean(membership?.permissions.includes("rule:write"));
+  const canRerunReviews = Boolean(membership?.capabilities.canRerunReviews);
+  const canReadReviewDebug = Boolean(membership?.permissions.includes("review:debug:read"));
+
+  return `
+    <section class="panel product-panel product-resource-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Workspace</p>
+          <h3>${escapeHtml(selectedOrg?.name ?? "Organizations")}</h3>
+        </div>
+        <button class="ghost small" data-action="load-product-resources" type="button">
+          Refresh
+        </button>
+      </div>
+      ${resources.loading ? `<p class="notice compact">${escapeHtml(resources.loading)}...</p>` : ""}
+      ${resources.error ? `<p class="error-line">${escapeHtml(resources.error)}</p>` : ""}
+      ${renderProductOrgSwitcher(resources)}
+      ${
+        resources.selectedOrgId
+          ? `
+            ${renderProductUsageCards(resources.usage)}
+            <div class="product-resource-grid">
+              ${renderAuthenticatedProductRepositories(resources.repositories, canManageRepositories)}
+            ${renderAuthenticatedProductReviews(resources.reviews)}
+            </div>
+            ${renderProductRepositorySettingsPanel(canManageRepositories, canManageRules)}
+            ${renderProductReviewDetailPanel(
+              canWriteFindings,
+              canSuppressFindings,
+              canRerunReviews,
+              canReadReviewDebug,
+            )}
+          `
+          : `<p class="inline-empty">No organizations are connected to this product user yet.</p>`
+      }
+    </section>
+  `;
+}
+
+/** Renders product organization selection controls. */
+function renderProductOrgSwitcher(resources: ProductResourcesState): string {
+  if (resources.orgs.length === 0) {
+    return "";
+  }
+
+  return `
+    <div class="org-switcher">
+      ${resources.orgs
+        .map((org) => {
+          const selected = org.orgId === resources.selectedOrgId;
+          return `
+            <button
+              class="${selected ? "primary" : "ghost"} small"
+              data-action="select-product-org"
+              data-org-id="${escapeAttribute(org.orgId)}"
+              type="button"
+            >
+              ${escapeHtml(org.name)}
+            </button>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+/** Renders basic product usage cards. */
+function renderProductUsageCards(usage: ProductUsageSummary | undefined): string {
+  if (!usage) {
+    return "";
+  }
+
+  return `
+    <section class="summary-grid product-summary compact-summary">
+      ${renderMetric("Reviews", String(usage.reviewRuns))}
+      ${renderMetric("Indexed commits", String(usage.indexedCommits))}
+      ${renderMetric("LLM tokens", formatCompactNumber(usage.reviewInputTokens + usage.reviewOutputTokens))}
+      ${renderMetric("Estimated cost", `$${usage.estimatedCostUsd}`)}
+    </section>
+  `;
+}
+
+/** Renders authenticated repository controls. */
+function renderAuthenticatedProductRepositories(
+  rows: readonly AdminRepositorySummary[],
+  canManageRepositories: boolean,
+): string {
+  return `
+    <section>
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Repositories</p>
+          <h3>Synced repositories</h3>
+        </div>
+      </div>
+      ${
+        rows.length === 0
+          ? `<p class="inline-empty">No repositories are visible for this organization yet.</p>`
+          : `<div class="repo-list">${rows.map((row) => renderAuthenticatedProductRepository(row, canManageRepositories)).join("")}</div>`
+      }
+    </section>
+  `;
+}
+
+/** Renders one authenticated product repository row. */
+function renderAuthenticatedProductRepository(
+  repository: AdminRepositorySummary,
+  canManageRepositories: boolean,
+): string {
+  return `
+    <article class="repo-card">
+      <div>
+        <div class="repo-title">
+          <strong>${escapeHtml(repository.fullName)}</strong>
+          <span class="status ${repository.enabled ? "ok" : "muted"}">
+            ${repository.enabled ? "reviewing" : "paused"}
+          </span>
+        </div>
+        <p class="muted-text">
+          ${escapeHtml(repository.visibility)}${repository.defaultBranch ? ` · ${escapeHtml(repository.defaultBranch)}` : ""}
+        </p>
+      </div>
+      <div class="row-actions">
+        ${
+          repository.latestReviewStatus
+            ? `<span class="status ${statusClass(repository.latestReviewStatus)}">${escapeHtml(repository.latestReviewStatus)}</span>`
+            : `<span class="status muted">no reviews</span>`
+        }
+        <button
+          class="small"
+          data-action="open-product-repository-settings"
+          data-repo-id="${escapeAttribute(repository.repoId)}"
+          type="button"
+        >
+          Settings
+        </button>
+        <button
+          class="ghost small"
+          data-action="toggle-product-repository"
+          data-enabled="${repository.enabled ? "false" : "true"}"
+          data-repo-id="${escapeAttribute(repository.repoId)}"
+          type="button"
+          ${canManageRepositories ? "" : "disabled"}
+        >
+          ${repository.enabled ? "Pause" : "Enable"}
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+/** Renders the selected product repository settings and rules panel. */
+function renderProductRepositorySettingsPanel(
+  canManageSettings: boolean,
+  canManageRules: boolean,
+): string {
+  const settings = state.product.repositorySettings;
+  if (!settings) {
+    return "";
+  }
+
+  const form = settings.form;
+  const options: SettingsFormRenderOptions = {
+    ...PRODUCT_SETTINGS_RENDER_OPTIONS,
+    canManageRules: Boolean(canManageRules && form),
+    canManageSettings: Boolean(canManageSettings && form),
+  };
+
+  return `
+    <section class="product-repository-settings">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Repository Settings</p>
+          <h3>${escapeHtml(settings.data?.repository.fullName ?? settings.repoId)}</h3>
+        </div>
+        <div class="row-actions">
+          <button
+            data-action="save-product-settings"
+            type="button"
+            ${options.canManageSettings ? "" : "disabled"}
+          >
+            Save
+          </button>
+          <button
+            class="ghost small"
+            data-action="preview-product-policy"
+            type="button"
+            ${form ? "" : "disabled"}
+          >
+            Preview
+          </button>
+        </div>
+      </div>
+      ${renderSettingsNotice(settings)}
+      ${
+        form
+          ? renderSettingsForm(
+              form,
+              settings.ruleForm,
+              settings.data,
+              settings.rules,
+              settings.preview,
+              options,
+            )
+          : `<p class="inline-empty">Select Settings on a repository to load review policy controls.</p>`
+      }
+    </section>
+  `;
+}
+
+/** Renders product review detail, finding list, and selected finding inspection. */
+function renderProductReviewDetailPanel(
+  canWriteFindings: boolean,
+  canSuppressFindings: boolean,
+  canRerunReviews: boolean,
+  canReadReviewDebug: boolean,
+): string {
+  const detail = state.product.reviewDetail;
+  if (!detail) {
+    return "";
+  }
+
+  const reviewRun = detail.reviewRun;
+  const title = reviewRun
+    ? `#${reviewRun.pullRequestNumber} ${reviewRun.pullRequestTitle ?? reviewRun.trigger}`
+    : detail.reviewRunId;
+
+  return `
+    <section class="product-review-detail">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Review Detail</p>
+          <h3>${escapeHtml(title)}</h3>
+        </div>
+        <div class="row-actions">
+          <button
+            class="ghost small"
+            data-action="refresh-product-review-detail"
+            type="button"
+          >
+            Refresh
+          </button>
+          <button
+            class="ghost small"
+            data-action="rerun-product-review"
+            data-review-run-id="${escapeAttribute(detail.reviewRunId)}"
+            type="button"
+            ${canRerunReviews ? "" : "disabled"}
+          >
+            Rerun
+          </button>
+        </div>
+      </div>
+      ${detail.loading ? `<p class="notice compact">${escapeHtml(detail.loading)}...</p>` : ""}
+      ${detail.error ? `<p class="error-line">${escapeHtml(detail.error)}</p>` : ""}
+      ${detail.saved ? `<p class="notice success compact">${escapeHtml(detail.saved)}</p>` : ""}
+      ${reviewRun ? renderProductReviewSummary(reviewRun) : ""}
+      <div class="product-review-grid">
+        ${renderProductFindingList(detail.findings, detail.selectedFinding)}
+        ${renderProductFindingDetail(
+          detail,
+          detail.selectedFinding,
+          canWriteFindings,
+          canSuppressFindings,
+        )}
+      </div>
+      ${renderProductReviewArtifacts(detail, canReadReviewDebug)}
+    </section>
+  `;
+}
+
+/** Renders compact product review metadata. */
+function renderProductReviewSummary(reviewRun: AdminReviewRunSummary): string {
+  return `
+    <div class="detail-grid compact-detail-grid">
+      <div class="detail-item">
+        <span>Status</span>
+        <strong>${escapeHtml(reviewRun.status)}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Repository</span>
+        <strong>${escapeHtml(reviewRun.repoFullName)}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Findings</span>
+        <strong>${reviewRun.counts.publishedFindings}/${reviewRun.counts.validatedFindings}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Updated</span>
+        <strong>${formatTime(reviewRun.updatedAt)}</strong>
+      </div>
+    </div>
+    ${
+      reviewRun.summary
+        ? `<p class="muted-text product-review-summary">${escapeHtml(reviewRun.summary)}</p>`
+        : ""
+    }
+    ${renderProductReviewFailure(reviewRun.failure)}
+    ${renderProductReviewJobs(reviewRun.relatedJobs ?? [])}
+  `;
+}
+
+/** Renders one product-safe review failure summary. */
+function renderProductReviewFailure(failure: AdminFailureDetail | undefined): string {
+  if (!failure) {
+    return "";
+  }
+
+  return `
+    <div class="review-failure">
+      <strong>${escapeHtml(failure.code)}</strong>
+      <p>${escapeHtml(failure.message)}</p>
+      <small>
+        ${failure.occurredAt ? escapeHtml(formatTime(failure.occurredAt)) : ""}
+        ${failure.retryable === undefined ? "" : ` · retryable: ${String(failure.retryable)}`}
+      </small>
+    </div>
+  `;
+}
+
+/** Renders product-safe durable jobs tied to one review run. */
+function renderProductReviewJobs(jobs: readonly AdminBackgroundJobDebugSummary[]): string {
+  if (jobs.length === 0) {
+    return "";
+  }
+  const failedCount = jobs.filter(
+    (job) => job.status === "failed" || job.status === "dead_lettered",
+  ).length;
+
+  return `
+    <section class="product-review-jobs">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Jobs</p>
+          <h4>Durable timeline</h4>
+        </div>
+        <span class="status ${failedCount > 0 ? "bad" : "ok"}">
+          ${failedCount > 0 ? `${failedCount} failed` : `${jobs.length} tracked`}
+        </span>
+      </div>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Queue</th>
+              <th>Type</th>
+              <th>Attempts</th>
+              <th>Updated</th>
+              <th>Failure</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${jobs.map(renderProductReviewJobRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders one product-safe durable job row. */
+function renderProductReviewJobRow(job: AdminBackgroundJobDebugSummary): string {
+  const attempts =
+    job.attempts === undefined || job.maxAttempts === undefined
+      ? "n/a"
+      : `${job.attempts}/${job.maxAttempts}`;
+  const updatedAt = job.updatedAt ?? job.completedAt ?? job.startedAt ?? job.createdAt;
+
+  return `
+    <tr>
+      <td><span class="status ${statusClass(job.status)}">${escapeHtml(job.status)}</span></td>
+      <td>${escapeHtml(job.queueName)}</td>
+      <td>${escapeHtml(job.jobType)}</td>
+      <td>${escapeHtml(attempts)}</td>
+      <td>${updatedAt ? formatTime(updatedAt) : "n/a"}</td>
+      <td>
+        ${
+          job.failure
+            ? `<strong>${escapeHtml(job.failure.code)}</strong><small>${escapeHtml(
+                job.failure.message,
+              )}</small>`
+            : `<span class="muted-text">none</span>`
+        }
+      </td>
+    </tr>
+  `;
+}
+
+/** Renders payload-free artifact metadata attached to a product review. */
+function renderProductReviewArtifacts(
+  detail: ProductReviewDetailState,
+  canReadReviewDebug: boolean,
+): string {
+  const artifacts = detail.artifacts ?? [];
+
+  return `
+    <section class="product-review-artifacts">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Artifacts</p>
+          <h4>Debug references</h4>
+        </div>
+        <button
+          class="ghost small"
+          data-action="load-product-review-artifacts"
+          data-review-run-id="${escapeAttribute(detail.reviewRunId)}"
+          type="button"
+          ${canReadReviewDebug ? "" : "disabled"}
+        >
+          ${detail.artifactsLoaded ? "Refresh" : "Load metadata"}
+        </button>
+      </div>
+      ${
+        canReadReviewDebug
+          ? renderProductReviewArtifactRows(detail, artifacts, Boolean(detail.artifactsLoaded))
+          : `<p class="inline-empty">This role cannot view review debug artifact metadata.</p>`
+      }
+    </section>
+  `;
+}
+
+/** Renders product artifact metadata rows or the current empty state. */
+function renderProductReviewArtifactRows(
+  detail: ProductReviewDetailState,
+  artifacts: readonly AdminReviewArtifactSummary[],
+  artifactsLoaded: boolean,
+): string {
+  if (!artifactsLoaded) {
+    return `<p class="inline-empty">Artifact metadata has not been loaded for this review.</p>`;
+  }
+  if (artifacts.length === 0) {
+    return `<p class="inline-empty">No artifacts are attached to this review run.</p>`;
+  }
+  const hasStoredPayload = artifacts.some((artifact) => Boolean(artifact.hasStoredPayload));
+
+  return `
+    ${
+      hasStoredPayload
+        ? `<div class="artifact-access-row">
+            <label>
+              Access reason
+              <input
+                data-field="productReview.artifactAccessReason"
+                placeholder="Support ticket or incident reason"
+                type="text"
+                value="${escapeAttribute(detail.artifactAccessReason)}"
+              />
+            </label>
+          </div>`
+        : ""
+    }
+    <div class="table-wrap artifact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Kind</th>
+            <th>Class</th>
+            <th>Size</th>
+            <th>Hash</th>
+            <th>Metadata</th>
+            <th>Created</th>
+            <th>Payload</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${artifacts.map((artifact) => renderProductReviewArtifactRow(detail, artifact)).join("")}
+        </tbody>
+      </table>
+    </div>
+    ${renderProductReviewArtifactPayload(detail)}
+  `;
+}
+
+/** Renders one product artifact metadata row. */
+function renderProductReviewArtifactRow(
+  detail: ProductReviewDetailState,
+  artifact: AdminReviewArtifactSummary,
+): string {
+  const metadataKeys = artifact.metadataKeys ?? [];
+
+  return `
+    <tr>
+      <td>
+        <strong>${escapeHtml(artifact.name)}</strong>
+        <small>${escapeHtml(artifact.uri)}</small>
+      </td>
+      <td>${escapeHtml(artifact.kind)}</td>
+      <td>${escapeHtml(artifact.classification ?? "n/a")}</td>
+      <td>${formatBytes(artifact.sizeBytes)}</td>
+      <td>${artifact.hash ? `<code>${escapeHtml(shortHash(artifact.hash))}</code>` : "n/a"}</td>
+      <td>
+        ${
+          metadataKeys.length > 0
+            ? `<span>${escapeHtml(metadataKeys.join(", "))}</span>`
+            : `<span class="muted-text">none</span>`
+        }
+        ${artifact.hasStoredPayload ? `<small>stored payload</small>` : ""}
+      </td>
+      <td>${formatTime(artifact.createdAt)}</td>
+      <td>
+        <div class="artifact-actions">
+          <button
+            class="ghost small"
+            data-action="load-product-review-artifact-payload"
+            data-artifact-id="${escapeAttribute(artifact.reviewArtifactId)}"
+            data-review-run-id="${escapeAttribute(detail.reviewRunId)}"
+            type="button"
+            ${artifact.hasStoredPayload ? "" : "disabled"}
+          >
+            View
+          </button>
+          <button
+            class="ghost small"
+            data-action="download-product-review-artifact-payload"
+            data-artifact-id="${escapeAttribute(artifact.reviewArtifactId)}"
+            data-review-run-id="${escapeAttribute(detail.reviewRunId)}"
+            type="button"
+            ${artifact.hasStoredPayload ? "" : "disabled"}
+          >
+            Download
+          </button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+/** Renders the selected redacted artifact payload preview. */
+function renderProductReviewArtifactPayload(detail: ProductReviewDetailState): string {
+  const payload = detail.artifactPayload;
+  if (!payload) {
+    return "";
+  }
+
+  return `
+    <section class="artifact-payload-preview">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Payload</p>
+          <h4>${escapeHtml(payload.artifact.name)}</h4>
+        </div>
+        <span class="status">${escapeHtml(payload.accessLevel)}</span>
+      </div>
+      <p class="meta-line">
+        Audit event <code>${escapeHtml(payload.artifactAccessEventId)}</code>
+      </p>
+      <pre>${escapeHtml(JSON.stringify(payload.payload, null, 2))}</pre>
+    </section>
+  `;
+}
+
+/** Renders validated finding rows for one product review. */
+function renderProductFindingList(
+  findings: readonly AdminReviewFindingSummary[],
+  selectedFinding: AdminReviewFindingSummary | undefined,
+): string {
+  return `
+    <section>
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Findings</p>
+          <h4>Validated findings</h4>
+        </div>
+        <span class="status muted">${findings.length}</span>
+      </div>
+      ${
+        findings.length === 0
+          ? `<p class="inline-empty">No validated findings are attached to this review run.</p>`
+          : `<div class="finding-list">${findings.map((finding) => renderProductFindingRow(finding, selectedFinding?.findingId === finding.findingId)).join("")}</div>`
+      }
+    </section>
+  `;
+}
+
+/** Renders one selectable product finding row. */
+function renderProductFindingRow(finding: AdminReviewFindingSummary, selected: boolean): string {
+  return `
+    <button
+      class="finding-row ${selected ? "selected" : ""}"
+      data-action="select-product-finding"
+      data-finding-id="${escapeAttribute(finding.findingId)}"
+      type="button"
+    >
+      <span class="status ${statusClass(finding.decision)}">${escapeHtml(finding.decision)}</span>
+      <strong>${escapeHtml(finding.title)}</strong>
+      <small>${escapeHtml(`${finding.severity} / ${finding.category}`)}</small>
+      <small>${escapeHtml(locationLabel(finding.location))}</small>
+    </button>
+  `;
+}
+
+/** Renders selected product finding detail and outcome controls. */
+function renderProductFindingDetail(
+  detail: ProductReviewDetailState,
+  finding: AdminReviewFindingSummary | undefined,
+  canWriteFindings: boolean,
+  canSuppressFindings: boolean,
+): string {
+  if (!finding) {
+    return `
+      <section>
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">Finding</p>
+            <h4>Detail</h4>
+          </div>
+        </div>
+        <p class="inline-empty">Select a finding to inspect validation, publication, and outcome state.</p>
+      </section>
+    `;
+  }
+
+  return `
+    <section>
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Finding</p>
+          <h4>${escapeHtml(finding.title)}</h4>
+        </div>
+        <span class="status ${statusClass(finding.severity)}">${escapeHtml(finding.severity)}</span>
+      </div>
+      <div class="finding-detail">
+        <p>${escapeHtml(finding.body)}</p>
+        <dl>
+          <div><dt>Location</dt><dd>${escapeHtml(locationLabel(finding.location))}</dd></div>
+          <div><dt>Confidence</dt><dd>${formatPercent(finding.confidence)}</dd></div>
+          <div><dt>Fingerprint</dt><dd>${escapeHtml(shortHash(finding.fingerprint))}</dd></div>
+          <div><dt>Publication</dt><dd>${escapeHtml(finding.publication?.status ?? "not published")}</dd></div>
+          <div><dt>Latest outcome</dt><dd>${escapeHtml(finding.latestOutcome?.outcome ?? "none")}</dd></div>
+        </dl>
+        ${renderProductFindingJson("Validation", finding.validation)}
+        ${renderProductFindingJson("Evidence", finding.evidence)}
+        ${renderProductFindingOutcomeControls(finding, detail.outcomeNote, canWriteFindings)}
+        ${renderProductFindingSuppressionControls(finding, detail, canSuppressFindings)}
+      </div>
+    </section>
+  `;
+}
+
+/** Renders one compact JSON payload for finding detail tabs. */
+function renderProductFindingJson(title: string, value: unknown): string {
+  return `
+    <details class="finding-json">
+      <summary class="finding-json-summary">${escapeHtml(title)}</summary>
+      <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
+    </details>
+  `;
+}
+
+/** Renders product finding outcome controls. */
+function renderProductFindingOutcomeControls(
+  finding: AdminReviewFindingSummary,
+  outcomeNote: string,
+  canWriteFindings: boolean,
+): string {
+  const disabled = canWriteFindings ? "" : "disabled";
+  const outcomes = ["accepted", "rejected", "false_positive", "not_actionable", "resolved"];
+  return `
+    <div class="finding-outcome-controls">
+      <label>
+        <span>Outcome note</span>
+        <textarea
+          data-field="productFinding.outcomeNote"
+          rows="3"
+          ${disabled}
+        >${escapeHtml(outcomeNote)}</textarea>
+      </label>
+      <div class="row-actions">
+        ${outcomes
+          .map(
+            (outcome) => `
+              <button
+                class="ghost small"
+                data-action="set-product-finding-outcome"
+                data-finding-id="${escapeAttribute(finding.findingId)}"
+                data-outcome="${escapeAttribute(outcome)}"
+                type="button"
+                ${disabled}
+              >
+                ${escapeHtml(outcome.replaceAll("_", " "))}
+              </button>
+            `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+/** Renders product finding suppression controls. */
+function renderProductFindingSuppressionControls(
+  finding: AdminReviewFindingSummary,
+  detail: ProductReviewDetailState,
+  canSuppressFindings: boolean,
+): string {
+  const disabled = canSuppressFindings ? "" : "disabled";
+  return `
+    <div class="finding-suppression-controls">
+      <div class="form-grid compact-form">
+        <label>
+          <span>Suppress scope</span>
+          <select data-field="productFinding.suppressionScope" ${disabled}>
+            <option value="repo" ${detail.suppressionScope === "repo" ? "selected" : ""}>Repository</option>
+            <option value="org" ${detail.suppressionScope === "org" ? "selected" : ""}>Organization</option>
+          </select>
+        </label>
+        <label>
+          <span>Reason</span>
+          <input
+            data-field="productFinding.suppressionReason"
+            maxlength="1000"
+            placeholder="Repeated false positive"
+            type="text"
+            value="${escapeAttribute(detail.suppressionReason)}"
+            ${disabled}
+          />
+        </label>
+        <button
+          class="ghost small"
+          data-action="suppress-product-finding-similar"
+          data-finding-id="${escapeAttribute(finding.findingId)}"
+          type="button"
+          ${disabled}
+        >
+          Suppress similar
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+/** Renders authenticated product review history. */
+function renderAuthenticatedProductReviews(rows: readonly AdminReviewRunSummary[]): string {
+  return `
+    <section>
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Reviews</p>
+          <h3>Recent review runs</h3>
+        </div>
+      </div>
+      ${
+        rows.length === 0
+          ? `<p class="inline-empty">No review runs are visible for this organization yet.</p>`
+          : renderAuthenticatedProductReviewRows(rows)
+      }
+    </section>
+  `;
+}
+
+/** Renders authenticated product review rows. */
+function renderAuthenticatedProductReviewRows(rows: readonly AdminReviewRunSummary[]): string {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Pull request</th>
+            <th>Repository</th>
+            <th>Status</th>
+            <th>Findings</th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (row) => `
+                <tr>
+                  <td>
+                    <strong>#${row.pullRequestNumber}</strong>
+                    <p class="muted-text">${escapeHtml(row.pullRequestTitle ?? row.trigger)}</p>
+                  </td>
+                  <td>${escapeHtml(row.repoFullName)}</td>
+                  <td>
+                    <span class="status ${statusClass(row.status)}">${escapeHtml(row.status)}</span>
+                    ${
+                      row.failure
+                        ? `<p class="error-line compact-error">${escapeHtml(row.failure.message)}</p>`
+                        : ""
+                    }
+                  </td>
+                  <td>${row.counts.publishedFindings}/${row.counts.validatedFindings}</td>
+                  <td>${formatTime(row.updatedAt)}</td>
+                  <td>
+                    <button
+                      class="small"
+                      data-action="open-product-review-detail"
+                      data-review-run-id="${escapeAttribute(row.reviewRunId)}"
+                      type="button"
+                    >
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -2038,6 +5786,17 @@ function renderProductLoadingState(): string {
 
 /** Renders the current session badge. */
 function renderSessionBadge(): string {
+  if (state.activeMode === "product" && state.product.session) {
+    const user = state.product.session.user;
+    const label = user.displayName ?? user.primaryEmail ?? user.userId;
+    return `
+      <div class="actor">
+        <span class="status ok">product</span>
+        <strong>${escapeHtml(label)}</strong>
+      </div>
+    `;
+  }
+
   if (!state.session) {
     return "";
   }
@@ -2238,6 +5997,9 @@ function renderPrimaryNav(): string {
     { kind: "overview", label: "Overview" },
     { kind: "inspectors", label: "Inspectors" },
     { kind: "settings", label: "Settings" },
+    { kind: "usage", label: "Usage" },
+    { kind: "plan", label: "Plan" },
+    { kind: "billing", label: "Billing" },
     { kind: "audit", label: "Audit" },
   ];
   return `
@@ -2269,6 +6031,15 @@ function renderActiveView(): string {
   }
   if (state.activeView === "audit") {
     return renderAuditView();
+  }
+  if (state.activeView === "usage") {
+    return renderUsageView();
+  }
+  if (state.activeView === "plan") {
+    return renderEntitlementsView();
+  }
+  if (state.activeView === "billing") {
+    return renderBillingView();
   }
 
   return `
@@ -2633,6 +6404,11 @@ function renderSettingsView(): string {
   const settings = state.settings;
   const form = settings.form;
   const canSave = Boolean(state.session?.capabilities.canManageSettings && form);
+  const options: SettingsFormRenderOptions = {
+    ...ADMIN_SETTINGS_RENDER_OPTIONS,
+    canManageRules: canSave,
+    canManageSettings: canSave,
+  };
   return `
     <main class="inspector">
       <section class="inspector-header">
@@ -2657,10 +6433,28 @@ function renderSettingsView(): string {
           >
             Save Changes
           </button>
+          <button
+            data-action="preview-policy"
+            type="button"
+            ${form ? "" : "disabled"}
+          >
+            Preview Policy
+          </button>
         </div>
       </section>
       ${renderSettingsNotice(settings)}
-      ${form ? renderSettingsForm(form, settings.data, settings.rules) : renderEmptyState("Enter a repository ID and click Load to view settings.")}
+      ${
+        form
+          ? renderSettingsForm(
+              form,
+              settings.ruleForm,
+              settings.data,
+              settings.rules,
+              settings.preview,
+              options,
+            )
+          : renderEmptyState("Enter a repository ID and click Load to view settings.")
+      }
     </main>
   `;
 }
@@ -2683,11 +6477,15 @@ function renderSettingsNotice(settings: SettingsViewState): string {
 /** Renders the repository settings form. */
 function renderSettingsForm(
   form: SettingsFormState,
+  ruleForm: RuleFormState,
   data: ControlPlaneSettingsResponse | undefined,
   rules: readonly AdminRepoRuleSummary[],
+  preview: ControlPlanePolicyPreview | undefined,
+  options: SettingsFormRenderOptions,
 ): string {
+  const disabled = options.canManageSettings ? "" : "disabled";
   return `
-    <section class="panel">
+    <section class="${escapeAttribute(options.formContainerClass)}">
       ${
         data
           ? `
@@ -2709,90 +6507,298 @@ function renderSettingsForm(
           : ""
       }
       <div class="form-grid">
-        ${renderCheckbox("settings.repositoryEnabled", "Review automation", form.repositoryEnabled)}
-        ${renderSelect("settings.reviewPolicy", "Review policy", form.reviewPolicy, [
-          "disabled",
-          "summary_only",
-          "inline_comments",
-          "inline_comments_and_summary",
-          "check_run_only",
-          "inline_comments_summary_and_check_run",
-        ])}
-        ${renderSelect("settings.severityThreshold", "Severity threshold", form.severityThreshold, [
-          "low",
-          "medium",
-          "high",
-          "critical",
-        ])}
+        ${renderCheckbox(`${options.settingsFieldPrefix}.repositoryEnabled`, "Review automation", form.repositoryEnabled, !options.canManageSettings)}
+        ${renderSelect(
+          `${options.settingsFieldPrefix}.reviewPolicy`,
+          "Review policy",
+          form.reviewPolicy,
+          [
+            "disabled",
+            "summary_only",
+            "inline_comments",
+            "inline_comments_and_summary",
+            "check_run_only",
+            "inline_comments_summary_and_check_run",
+          ],
+          !options.canManageSettings,
+        )}
+        ${renderSelect(
+          `${options.settingsFieldPrefix}.severityThreshold`,
+          "Severity threshold",
+          form.severityThreshold,
+          ["low", "medium", "high", "critical"],
+          !options.canManageSettings,
+        )}
         <label>
           <span>Max comments</span>
           <input
-            data-field="settings.maxCommentsPerReview"
+            data-field="${escapeAttribute(`${options.settingsFieldPrefix}.maxCommentsPerReview`)}"
             min="0"
             max="50"
             type="number"
             value="${escapeAttribute(form.maxCommentsPerReview)}"
+            ${disabled}
           />
         </label>
         <label>
           <span>Required label</span>
           <input
-            data-field="settings.requireLabel"
+            data-field="${escapeAttribute(`${options.settingsFieldPrefix}.requireLabel`)}"
             placeholder="security-review"
             value="${escapeAttribute(form.requireLabel)}"
+            ${disabled}
           />
         </label>
-        ${renderCheckbox("settings.skipGeneratedFiles", "Skip generated files", form.skipGeneratedFiles)}
+        ${renderCheckbox(`${options.settingsFieldPrefix}.skipGeneratedFiles`, "Skip generated files", form.skipGeneratedFiles, !options.canManageSettings)}
         ${renderCheckbox(
-          "settings.skipDraftPullRequests",
+          `${options.settingsFieldPrefix}.skipDraftPullRequests`,
           "Skip draft pull requests",
           form.skipDraftPullRequests,
+          !options.canManageSettings,
         )}
       </div>
       <div class="form-grid textareas">
-        ${renderTextarea("settings.ignoredPaths", "Ignored paths", form.ignoredPaths)}
-        ${renderTextarea("settings.ignoredAuthors", "Ignored authors", form.ignoredAuthors)}
-        ${renderTextarea("settings.ignoredLabels", "Ignored labels", form.ignoredLabels)}
+        ${renderTextarea(`${options.settingsFieldPrefix}.ignoredPaths`, "Ignored paths", form.ignoredPaths, !options.canManageSettings)}
+        ${renderTextarea(`${options.settingsFieldPrefix}.ignoredAuthors`, "Ignored authors", form.ignoredAuthors, !options.canManageSettings)}
+        ${renderTextarea(`${options.settingsFieldPrefix}.ignoredLabels`, "Ignored labels", form.ignoredLabels, !options.canManageSettings)}
       </div>
       <label>
         <span>Custom instructions</span>
         <textarea
-          data-field="settings.customInstructions"
+          data-field="${escapeAttribute(`${options.settingsFieldPrefix}.customInstructions`)}"
           rows="8"
+          ${disabled}
         >${escapeHtml(form.customInstructions)}</textarea>
       </label>
-      ${renderRepositoryRules(rules)}
+      ${renderPolicyPreview(preview)}
+      ${renderRepositoryRules(rules, ruleForm, options)}
     </section>
   `;
 }
 
+/** Renders the effective policy preview for the current settings form. */
+function renderPolicyPreview(preview: ControlPlanePolicyPreview | undefined): string {
+  if (!preview) {
+    return `
+      <section class="settings-subsection">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Policy</p>
+            <h3>Effective Policy Preview</h3>
+          </div>
+          <span class="status muted">not compiled</span>
+        </div>
+        <p class="inline-empty">No policy preview is available for the current form state.</p>
+      </section>
+    `;
+  }
+
+  const policy = preview.effectivePolicy;
+  return `
+    <section class="settings-subsection">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Policy</p>
+          <h3>Effective Policy Preview</h3>
+        </div>
+        <span class="status ${policy.enabled ? "ok" : "muted"}">
+          ${policy.enabled ? "enabled" : "disabled"}
+        </span>
+      </div>
+      <div class="summary-grid">
+        <div class="metric">
+          <span>Policy hash</span>
+          <strong>${escapeHtml(shortHash(preview.policyHash))}</strong>
+        </div>
+        <div class="metric">
+          <span>Review mode</span>
+          <strong>${escapeHtml(policy.reviewPolicy)}</strong>
+        </div>
+        <div class="metric">
+          <span>Severity</span>
+          <strong>${escapeHtml(policy.findings.severityThreshold)}</strong>
+        </div>
+        <div class="metric">
+          <span>Comments</span>
+          <strong>${policy.findings.maxCommentsPerReview}</strong>
+        </div>
+      </div>
+      ${renderPolicyPreviewDetails(preview)}
+    </section>
+  `;
+}
+
+/** Renders detailed policy preview rows. */
+function renderPolicyPreviewDetails(preview: ControlPlanePolicyPreview): string {
+  const policy = preview.effectivePolicy;
+  const rows = [
+    ["Check run", policy.publishing.publishCheckRun ? "on" : "off"],
+    ["Inline comments", policy.publishing.publishInlineComments ? "on" : "off"],
+    ["Summary comment", policy.publishing.publishSummaryComment ? "on" : "off"],
+    ["Trigger actions", policy.trigger.enabledActions.join(", ")],
+    ["Ignored labels", policy.trigger.ignoredLabels.join(", ") || "none"],
+    ["Ignored authors", policy.trigger.ignoredAuthors.join(", ") || "none"],
+    ["Required label", policy.trigger.requireLabel ?? "none"],
+    ["Draft PRs", policy.trigger.skipDraftPullRequests ? "skipped" : "reviewed"],
+    ["Instructions", String(policy.instructions.length)],
+    ["Trace", `${preview.trace.decisionType}:${preview.trace.reasonCode}`],
+  ] as const;
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <tbody>
+          ${rows
+            .map(
+              ([label, value]) => `
+                <tr>
+                  <th>${escapeHtml(label)}</th>
+                  <td>${escapeHtml(value)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+    ${renderPolicyWarnings(preview.warnings)}
+  `;
+}
+
+/** Renders policy compiler warnings. */
+function renderPolicyWarnings(warnings: readonly ControlPlanePolicyWarning[]): string {
+  if (warnings.length === 0) {
+    return `<p class="notice success">Policy compiled without warnings.</p>`;
+  }
+
+  return `
+    <div class="notice warning">
+      ${warnings
+        .map(
+          (warning) =>
+            `<p><strong>${escapeHtml(warning.code)}</strong>: ${escapeHtml(warning.message)}</p>`,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 /** Renders repository rules that affect the loaded repository. */
-function renderRepositoryRules(rules: readonly AdminRepoRuleSummary[]): string {
+function renderRepositoryRules(
+  rules: readonly AdminRepoRuleSummary[],
+  ruleForm: RuleFormState,
+  options: SettingsFormRenderOptions,
+): string {
   return `
     <section class="settings-subsection">
       <div class="section-heading">
         <div>
           <p class="eyebrow">Rules</p>
-          <h3>Effective Rules</h3>
+          <h3>Repository Rules</h3>
         </div>
         <span class="status muted">${rules.length} rule${rules.length === 1 ? "" : "s"}</span>
       </div>
       ${
+        options.canManageRules
+          ? renderRepositoryRuleForm(ruleForm, options)
+          : `<p class="inline-empty">Repository rules are read-only for your current role.</p>`
+      }
+      ${
         rules.length === 0
           ? `<p class="inline-empty">No repository or organization rules found.</p>`
-          : renderRepositoryRuleRows(rules)
+          : renderRepositoryRuleRows(rules, options)
       }
     </section>
   `;
 }
 
+/** Renders the repository rule create/edit form. */
+function renderRepositoryRuleForm(form: RuleFormState, options: SettingsFormRenderOptions): string {
+  const editing = form.editingRuleId.length > 0;
+  return `
+    <div class="settings-rule-form">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${editing ? "Edit" : "Create"}</p>
+          <h4>${editing ? escapeHtml(form.editingRuleId) : "New Repository Rule"}</h4>
+        </div>
+        ${
+          editing
+            ? `<button class="ghost small" data-action="${escapeAttribute(options.cancelRuleEditAction)}" type="button">Cancel</button>`
+            : ""
+        }
+      </div>
+      <div class="form-grid">
+        <label>
+          <span>Name</span>
+          <input
+            data-field="${escapeAttribute(`${options.ruleFieldPrefix}.name`)}"
+            placeholder="Suppress generated client findings"
+            value="${escapeAttribute(form.name)}"
+          />
+        </label>
+        ${renderSelect(`${options.ruleFieldPrefix}.effect`, "Effect", form.effect, [
+          "suppress",
+          "promote",
+          "require",
+          "context",
+          "style_preference",
+        ])}
+        <label>
+          <span>Priority</span>
+          <input
+            data-field="${escapeAttribute(`${options.ruleFieldPrefix}.priority`)}"
+            min="0"
+            max="1000"
+            type="number"
+            value="${escapeAttribute(form.priority)}"
+          />
+        </label>
+        ${renderCheckbox(`${options.ruleFieldPrefix}.enabled`, "Enabled", form.enabled)}
+      </div>
+      <div class="form-grid textareas">
+        ${renderTextarea(`${options.ruleFieldPrefix}.matcherPaths`, "Path matchers", form.matcherPaths)}
+        ${renderTextarea(`${options.ruleFieldPrefix}.matcherCategories`, "Category matchers", form.matcherCategories)}
+        ${renderTextarea(`${options.ruleFieldPrefix}.matcherSeverities`, "Severity matchers", form.matcherSeverities)}
+      </div>
+      <label>
+        <span>Title regex</span>
+        <input
+          data-field="${escapeAttribute(`${options.ruleFieldPrefix}.titleRegex`)}"
+          placeholder="generated|snapshot"
+          value="${escapeAttribute(form.titleRegex)}"
+        />
+      </label>
+      <label>
+        <span>Instruction</span>
+        <textarea data-field="${escapeAttribute(`${options.ruleFieldPrefix}.instruction`)}" rows="5">${escapeHtml(form.instruction)}</textarea>
+      </label>
+      <div class="row-actions">
+        <button class="primary" data-action="${escapeAttribute(options.saveRuleAction)}" type="button">
+          ${editing ? "Update Rule" : "Create Rule"}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 /** Renders repository rule rows. */
-function renderRepositoryRuleRows(rules: readonly AdminRepoRuleSummary[]): string {
+function renderRepositoryRuleRows(
+  rules: readonly AdminRepoRuleSummary[],
+  options: SettingsFormRenderOptions,
+): string {
   return `
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>State</th><th>Scope</th><th>Type</th><th>Body</th><th>Updated</th></tr>
+          <tr>
+            <th>State</th>
+            <th>Rule</th>
+            <th>Effect</th>
+            <th>Matcher</th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
         </thead>
         <tbody>
           ${rules
@@ -2800,14 +6806,1033 @@ function renderRepositoryRuleRows(rules: readonly AdminRepoRuleSummary[]): strin
               (rule) => `
                 <tr>
                   <td>
-                    <span class="status ${rule.isEnabled ? "ok" : "muted"}">
-                      ${rule.isEnabled ? "enabled" : "disabled"}
+                    <span class="status ${rule.enabled ? "ok" : "muted"}">
+                      ${rule.enabled ? "enabled" : "disabled"}
                     </span>
                   </td>
-                  <td>${escapeHtml(rule.repoId ? "repository" : "organization")}</td>
-                  <td>${escapeHtml(`${rule.scope}:${rule.ruleType}`)}</td>
-                  <td>${escapeHtml(rule.body)}</td>
+                  <td>
+                    <strong>${escapeHtml(rule.name)}</strong>
+                    <p class="muted-text">${escapeHtml(rule.instruction)}</p>
+                  </td>
+                  <td>${escapeHtml(`${rule.repoId ? "repository" : "organization"}:${rule.effect}`)}</td>
+                  <td>${escapeHtml(ruleMatcherLabel(rule))}</td>
                   <td>${formatTime(rule.updatedAt)}</td>
+                  <td>
+                    <div class="row-actions">
+                      ${
+                        rule.repoId && options.canManageRules
+                          ? `
+                            <button class="small" data-action="${escapeAttribute(options.editRuleAction)}" data-rule-id="${escapeAttribute(rule.ruleId)}" type="button">Edit</button>
+                            <button class="danger small" data-action="${escapeAttribute(options.deleteRuleAction)}" data-rule-id="${escapeAttribute(rule.ruleId)}" type="button">Delete</button>
+                          `
+                          : `<span class="status muted">${rule.repoId ? "read only" : "org rule"}</span>`
+                      }
+                    </div>
+                  </td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Returns a compact matcher label for a repository rule row. */
+function ruleMatcherLabel(rule: { readonly matcher: AdminRepoRuleSummary["matcher"] }): string {
+  const parts = [
+    matcherPart("paths", rule.matcher.paths),
+    matcherPart("languages", rule.matcher.languages),
+    matcherPart("categories", rule.matcher.categories),
+    matcherPart("severities", rule.matcher.severities),
+    rule.matcher.titleRegex ? `title:${rule.matcher.titleRegex}` : "",
+  ].filter((part) => part.length > 0);
+
+  return parts.join(" | ") || "all findings";
+}
+
+/** Returns a compact label for one matcher field. */
+function matcherPart(label: string, values: readonly string[] | undefined): string {
+  return values && values.length > 0 ? `${label}:${values.join(",")}` : "";
+}
+
+/** Renders internal usage and cost rollups. */
+function renderUsageView(): string {
+  const usage = state.usage;
+  return `
+    <main class="inspector">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Usage</p>
+          <h2>Ledger Rollups</h2>
+        </div>
+        <button class="primary" data-action="load-usage" type="button">Refresh</button>
+      </section>
+      ${renderUsageNotice(usage)}
+      <section class="panel">
+        <div class="form-grid">
+          ${renderTextInput("usage.orgId", "Organization", usage.orgId, "org_...")}
+          ${renderTextInput("usage.repoId", "Repository", usage.repoId, "repo_...")}
+          ${renderTextInput("usage.periodStart", "Period start", usage.periodStart, "2026-05-01T00:00:00.000Z")}
+          ${renderTextInput("usage.periodEnd", "Period end", usage.periodEnd, "2026-06-01T00:00:00.000Z")}
+        </div>
+      </section>
+      ${usage.data ? renderUsageSummary(usage.data) : renderEmptyState("Refresh loads usage rollups for your admin scope.")}
+    </main>
+  `;
+}
+
+/** Renders usage loading and error state. */
+function renderUsageNotice(usage: UsageViewState): string {
+  if (usage.loading) {
+    return `<p class="notice">${escapeHtml(usage.loading)}...</p>`;
+  }
+  if (usage.error) {
+    return `<p class="error-line">${escapeHtml(usage.error)}</p>`;
+  }
+
+  return "";
+}
+
+/** Renders usage summary metrics and rollup rows. */
+function renderUsageSummary(summary: AdminUsageSummary): string {
+  return `
+    <section class="summary-grid">
+      ${renderMetric("Review Runs", String(summary.totals.reviewCount))}
+      ${renderMetric("LLM Tokens", formatCompactNumber(summary.totals.llmTokens))}
+      ${renderMetric("Cost", formatMicros(summary.totals.costMicros))}
+      ${renderMetric("Ledger Events", String(summary.totals.eventCount))}
+    </section>
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(usagePeriodLabel(summary))}</p>
+          <h3>Usage by Source</h3>
+        </div>
+        <span class="status muted">${summary.rollups.length} row${summary.rollups.length === 1 ? "" : "s"}</span>
+      </div>
+      ${
+        summary.rollups.length === 0
+          ? `<p class="inline-empty">No usage events matched these filters.</p>`
+          : renderUsageRollupRows(summary.rollups)
+      }
+    </section>
+  `;
+}
+
+/** Renders usage rollup table rows. */
+function renderUsageRollupRows(rollups: readonly AdminUsageRollupSummary[]): string {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Scope</th>
+            <th>Event</th>
+            <th>Quantity</th>
+            <th>Events</th>
+            <th>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rollups
+            .map(
+              (rollup) => `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(rollup.orgId)}</strong>
+                    <p class="muted-text">${escapeHtml(rollup.repoId ?? "all repositories")}</p>
+                  </td>
+                  <td>${escapeHtml(rollup.eventType)} <span class="status muted">${escapeHtml(rollup.unit)}</span></td>
+                  <td>${formatCompactNumber(rollup.quantity)}</td>
+                  <td>${rollup.eventCount}</td>
+                  <td>${formatMicros(rollup.costMicros)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Returns a compact label for a usage period. */
+function usagePeriodLabel(summary: AdminUsageSummary): string {
+  if (summary.periodStart && summary.periodEnd) {
+    return `${formatDateOnly(summary.periodStart)} to ${formatDateOnly(summary.periodEnd)}`;
+  }
+  if (summary.periodStart) {
+    return `Since ${formatDateOnly(summary.periodStart)}`;
+  }
+  if (summary.periodEnd) {
+    return `Before ${formatDateOnly(summary.periodEnd)}`;
+  }
+
+  return "All Time";
+}
+
+/** Renders the plan snapshot and entitlement decision view. */
+function renderEntitlementsView(): string {
+  const entitlements = state.entitlements;
+  return `
+    <main class="inspector">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Billing</p>
+          <h2>Plan Snapshot</h2>
+        </div>
+        <button class="primary" data-action="load-entitlements" type="button">Refresh</button>
+      </section>
+      ${renderEntitlementsNotice(entitlements)}
+      <section class="panel">
+        <div class="form-grid">
+          ${renderTextInput("entitlements.orgId", "Organization", entitlements.orgId, "org_...")}
+          ${renderTextarea("entitlements.featureKeys", "Feature keys", entitlements.featureKeys)}
+        </div>
+      </section>
+      ${
+        entitlements.data
+          ? renderEntitlementsSummary(entitlements.data)
+          : renderEmptyState(
+              "Refresh loads the plan snapshot and entitlement decisions for your org scope.",
+            )
+      }
+    </main>
+  `;
+}
+
+/** Renders entitlement loading and error state. */
+function renderEntitlementsNotice(entitlements: EntitlementsViewState): string {
+  if (entitlements.loading) {
+    return `<p class="notice">${escapeHtml(entitlements.loading)}...</p>`;
+  }
+  if (entitlements.error) {
+    return `<p class="error-line">${escapeHtml(entitlements.error)}</p>`;
+  }
+
+  return "";
+}
+
+/** Renders plan snapshot metrics, decisions, and overrides. */
+function renderEntitlementsSummary(summary: AdminEntitlementSummary): string {
+  const snapshot = summary.planSnapshot;
+  return `
+    <section class="summary-grid">
+      ${renderMetric("Plan", snapshot.planKey)}
+      ${renderMetric("Subscription", snapshot.subscriptionStatus, snapshot.subscriptionStatus !== "active")}
+      ${renderMetric("Payment", snapshot.paymentStatus, paymentNeedsAttention(snapshot.paymentStatus))}
+      ${renderMetric("Review Credits", String(snapshot.limits["reviews.max_monthly_review_credits"] ?? "n/a"))}
+    </section>
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(formatTime(summary.checkedAt))}</p>
+          <h3>Feature Decisions</h3>
+        </div>
+        <span class="status muted">${summary.decisions.length} checked</span>
+      </div>
+      ${renderEntitlementDecisionRows(summary.decisions)}
+    </section>
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(snapshot.planVersionId)}</p>
+          <h3>Active Overrides</h3>
+        </div>
+        <span class="status muted">${summary.entitlements.length} row${summary.entitlements.length === 1 ? "" : "s"}</span>
+      </div>
+      ${renderEntitlementRows(summary.entitlements)}
+    </section>
+  `;
+}
+
+/** Renders local billing account and provider mirror state. */
+function renderBillingView(): string {
+  const billing = state.billing;
+  return `
+    <main class="inspector">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Billing</p>
+          <h2>Account State</h2>
+        </div>
+        <button class="primary" data-action="load-billing" type="button">Refresh</button>
+      </section>
+      ${renderBillingNotice(billing)}
+      <section class="panel">
+        <div class="form-grid">
+          ${renderTextInput("billing.orgId", "Organization", billing.orgId, "org_...")}
+          ${renderTextInput("billing.meterPeriodKey", "Meter period", billing.meterPeriodKey, "2026-05")}
+          ${renderSelect("billing.meterStatus", "Meter status", billing.meterStatus, [
+            "all",
+            "ready_to_send",
+            "failed",
+            "sent",
+          ])}
+        </div>
+      </section>
+      ${
+        billing.data
+          ? renderBillingSummary(billing.data)
+          : renderEmptyState(
+              "Refresh loads billing account, subscription, credit, invoice, and plan state.",
+            )
+      }
+    </main>
+  `;
+}
+
+/** Renders billing loading and error state. */
+function renderBillingNotice(billing: BillingViewState): string {
+  if (billing.loading) {
+    return `<p class="notice">${escapeHtml(billing.loading)}...</p>`;
+  }
+  if (billing.error) {
+    return `<p class="error-line">${escapeHtml(billing.error)}</p>`;
+  }
+
+  return "";
+}
+
+/** Renders billing summary metrics and mirror rows. */
+function renderBillingSummary(summary: AdminBillingSummary): string {
+  const account = summary.billingAccount;
+  const subscription = summary.subscription;
+  const monthlyUsage = state.billing.monthlyUsage;
+  const meterEvents = state.billing.meterEvents?.meterEvents ?? [];
+  const reconciliation = state.billing.reconciliation;
+  const remainingCredits = summary.creditGrants.reduce(
+    (sum, grant) => sum + grant.remainingQuantity,
+    0,
+  );
+  const outstandingMicros = summary.invoices.reduce(
+    (sum, invoice) => sum + invoice.amountRemainingMicros,
+    0,
+  );
+  const reviewCreditUsage = monthlyUsage
+    ? usageQuantity(monthlyUsage, "review.credit", "credit")
+    : 0;
+  const reviewCreditLimit = numericLimit(
+    summary.planSnapshot.limits["reviews.max_monthly_review_credits"],
+  );
+
+  return `
+    ${renderBillingAlerts(summary, monthlyUsage, reconciliation)}
+    <section class="summary-grid">
+      ${renderMetric("Plan", summary.planSnapshot.planKey)}
+      ${renderMetric("Account", account.status, account.status !== "active")}
+      ${renderMetric("Payment", account.paymentStatus, paymentNeedsAttention(account.paymentStatus))}
+      ${renderMetric("Subscription", subscription?.status ?? "none", subscriptionStatusNeedsAttention(subscription?.status))}
+      ${renderMetric(
+        "Review Credits",
+        reviewCreditLimit
+          ? `${formatCompactNumber(reviewCreditUsage)} / ${formatCompactNumber(reviewCreditLimit)}`
+          : formatCompactNumber(reviewCreditUsage),
+        quotaNeedsAttention(reviewCreditUsage, reviewCreditLimit),
+      )}
+      ${renderMetric("Credits Left", formatCompactNumber(remainingCredits))}
+      ${renderMetric("Outstanding", formatMicros(outstandingMicros), outstandingMicros > 0)}
+    </section>
+    ${renderBillingReconciliationPanel(reconciliation)}
+    ${renderBillingPortalPanel(state.billing)}
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(formatTime(summary.checkedAt))}</p>
+          <h3>Billing Account</h3>
+        </div>
+        <span class="status muted">${escapeHtml(account.billingMode)}</span>
+      </div>
+      <div class="detail-grid">
+        ${renderDetail("Account ID", account.billingAccountId)}
+        ${renderDetail("Provider", account.provider)}
+        ${renderDetail("Provider Customer", account.providerCustomerId ?? "none")}
+        ${renderDetail("Plan Version", account.currentPlanVersionId ?? summary.planSnapshot.planVersionId)}
+      </div>
+    </section>
+    ${renderBillingUsagePanel(summary, monthlyUsage)}
+    ${renderSubscriptionSummary(subscription, summary.subscriptionItems)}
+    ${renderCreditGrantRows(summary.creditGrants)}
+    ${renderInvoiceRows(summary.invoices)}
+    ${renderMeterEventRows(meterEvents)}
+  `;
+}
+
+/** Renders billing risk banners for support and customer status. */
+function renderBillingAlerts(
+  summary: AdminBillingSummary,
+  monthlyUsage: AdminUsageSummary | undefined,
+  reconciliation: AdminBillingReconciliationSummary | undefined,
+): string {
+  const alerts: string[] = [];
+  const account = summary.billingAccount;
+  const unpaidInvoices = summary.invoices.filter(
+    (invoice) => invoice.amountRemainingMicros > 0 || invoiceStatusNeedsAttention(invoice.status),
+  );
+  const reviewCreditUsage = monthlyUsage
+    ? usageQuantity(monthlyUsage, "review.credit", "credit")
+    : 0;
+  const reviewCreditLimit = numericLimit(
+    summary.planSnapshot.limits["reviews.max_monthly_review_credits"],
+  );
+
+  if (paymentNeedsAttention(account.paymentStatus)) {
+    alerts.push(
+      `<p class="error-line">Payment status is ${escapeHtml(account.paymentStatus)}. Product access decisions may deny paid features until the provider state recovers.</p>`,
+    );
+  }
+  if (subscriptionStatusNeedsAttention(summary.subscription?.status)) {
+    alerts.push(
+      `<p class="notice warning">Subscription status is ${escapeHtml(summary.subscription?.status ?? "none")}. Confirm provider state before changing plan access manually.</p>`,
+    );
+  }
+  if (unpaidInvoices.length > 0) {
+    alerts.push(
+      `<p class="notice warning">${unpaidInvoices.length} invoice${unpaidInvoices.length === 1 ? "" : "s"} need attention.</p>`,
+    );
+  }
+  if (quotaNeedsAttention(reviewCreditUsage, reviewCreditLimit)) {
+    alerts.push(
+      `<p class="notice warning">Monthly review credit usage is at ${formatPercent(quotaRatio(reviewCreditUsage, reviewCreditLimit))} of the plan limit.</p>`,
+    );
+  }
+  if (reconciliation) {
+    const criticalIssues = reconciliation.issues.filter(
+      (issue) => issue.severity === "critical",
+    ).length;
+    const warningIssues = reconciliation.issues.length - criticalIssues;
+    if (criticalIssues > 0) {
+      alerts.push(
+        `<p class="error-line">Billing reconciliation found ${criticalIssues} critical issue${criticalIssues === 1 ? "" : "s"}.</p>`,
+      );
+    } else if (warningIssues > 0) {
+      alerts.push(
+        `<p class="notice warning">Billing reconciliation found ${warningIssues} warning${warningIssues === 1 ? "" : "s"}.</p>`,
+      );
+    }
+  }
+  if (state.billing.portalError) {
+    alerts.push(`<p class="error-line">${escapeHtml(state.billing.portalError)}</p>`);
+  }
+
+  return alerts.length > 0 ? `<section class="alert-stack">${alerts.join("")}</section>` : "";
+}
+
+/** Renders billing drift, sync failure, and usage anomaly issues. */
+function renderBillingReconciliationPanel(
+  reconciliation: AdminBillingReconciliationSummary | undefined,
+): string {
+  if (!reconciliation) {
+    return `
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Reconciliation</p>
+            <h3>Billing Drift</h3>
+          </div>
+          <span class="status muted">not loaded</span>
+        </div>
+        <p class="inline-empty">Refresh loads billing reconciliation state.</p>
+      </section>
+    `;
+  }
+
+  const criticalIssues = reconciliation.issues.filter(
+    (issue) => issue.severity === "critical",
+  ).length;
+  const statusClassName =
+    criticalIssues > 0 ? "bad" : reconciliation.issues.length > 0 ? "warn" : "ok";
+  const statusLabel =
+    reconciliation.issues.length === 0 ? "clear" : `${reconciliation.issues.length} issue(s)`;
+
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(formatTime(reconciliation.checkedAt))}</p>
+          <h3>Billing Reconciliation</h3>
+        </div>
+        <div class="row-actions">
+          <span class="status ${statusClassName}">${escapeHtml(statusLabel)}</span>
+          <button
+            class="small"
+            data-action="run-billing-reconciliation"
+            ${state.session?.capabilities.canManageSettings && !state.billing.reconciliationRunLoading ? "" : "disabled"}
+            type="button"
+          >
+            ${state.billing.reconciliationRunLoading ? "Queueing..." : "Queue repair"}
+          </button>
+        </div>
+      </div>
+      ${renderBillingReconciliationRunState(state.billing)}
+      <div class="detail-grid compact">
+        ${renderDetail("Period", reconciliation.periodKey ?? "current")}
+        ${renderDetail("Usage Window", reconciliationPeriodLabel(reconciliation))}
+        ${renderDetail("Critical", String(criticalIssues))}
+        ${renderDetail("Warnings", String(reconciliation.issues.length - criticalIssues))}
+      </div>
+      ${renderBillingReconciliationIssues(reconciliation.issues)}
+    </section>
+  `;
+}
+
+/** Renders the latest billing reconciliation run enqueue state. */
+function renderBillingReconciliationRunState(billing: BillingViewState): string {
+  if (billing.reconciliationRunError) {
+    return `<p class="error-line">${escapeHtml(billing.reconciliationRunError)}</p>`;
+  }
+  if (billing.reconciliationRun) {
+    return `
+      <p class="notice success">
+        Queued ${escapeHtml(shortHash(billing.reconciliationRun.backgroundJobId))}
+        with status ${escapeHtml(billing.reconciliationRun.status)}.
+      </p>
+    `;
+  }
+
+  return "";
+}
+
+/** Renders billing reconciliation issue rows. */
+function renderBillingReconciliationIssues(
+  issues: readonly AdminBillingReconciliationIssue[],
+): string {
+  if (issues.length === 0) {
+    return `<p class="inline-empty">No billing drift, sync lag, or usage anomalies are visible.</p>`;
+  }
+
+  return `
+    <ul class="issue-list billing-issues">
+      ${issues
+        .map(
+          (issue) => `
+            <li class="${issue.severity === "critical" ? "critical" : ""}">
+              <div class="issue-row-head">
+                <code>${escapeHtml(issue.category)}</code>
+                <span class="status ${reconciliationSeverityClass(issue.severity)}">${escapeHtml(issue.severity)}</span>
+              </div>
+              <strong>${escapeHtml(issue.title)}</strong>
+              <span>${escapeHtml(issue.detail)}</span>
+              <p class="issue-meta">
+                ${escapeHtml(issue.resourceType)}
+                ${issue.resourceId ? ` · ${escapeHtml(shortHash(issue.resourceId))}` : ""}
+                · ${escapeHtml(formatTime(issue.occurredAt))}
+              </p>
+            </li>
+          `,
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
+/** Renders customer portal controls and the latest generated portal link. */
+function renderBillingPortalPanel(billing: BillingViewState): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Customer Controls</p>
+          <h3>Billing Portal</h3>
+        </div>
+        <button
+          class="small"
+          data-action="create-billing-portal-session"
+          ${billing.portalLoading ? "disabled" : ""}
+          type="button"
+        >
+          ${billing.portalLoading ? "Creating..." : "Create portal link"}
+        </button>
+      </div>
+      ${
+        billing.portalUrl
+          ? `
+            <div class="portal-link-row">
+              <a class="button-link" href="${escapeAttribute(billing.portalUrl)}" rel="noreferrer" target="_blank">
+                Open portal
+              </a>
+              <code>${escapeHtml(shortHash(billing.portalUrl))}</code>
+            </div>
+          `
+          : `<p class="inline-empty">Create a portal link when a customer needs to manage billing details.</p>`
+      }
+    </section>
+  `;
+}
+
+/** Renders current-month usage against plan limits. */
+function renderBillingUsagePanel(
+  summary: AdminBillingSummary,
+  monthlyUsage: AdminUsageSummary | undefined,
+): string {
+  const reviewCreditUsage = monthlyUsage
+    ? usageQuantity(monthlyUsage, "review.credit", "credit")
+    : 0;
+  const reviewCreditLimit = numericLimit(
+    summary.planSnapshot.limits["reviews.max_monthly_review_credits"],
+  );
+  const ratio = quotaRatio(reviewCreditUsage, reviewCreditLimit);
+
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Current Month</p>
+          <h3>Usage and Limits</h3>
+        </div>
+        <span class="status ${quotaNeedsAttention(reviewCreditUsage, reviewCreditLimit) ? "warn" : "ok"}">
+          ${reviewCreditLimit ? formatPercent(ratio) : "unlimited"}
+        </span>
+      </div>
+      <div class="quota-meter">
+        <div>
+          <strong>${formatCompactNumber(reviewCreditUsage)}</strong>
+          <span>review credits used</span>
+        </div>
+        <div>
+          <strong>${reviewCreditLimit ? formatCompactNumber(reviewCreditLimit) : "n/a"}</strong>
+          <span>plan limit</span>
+        </div>
+        <div class="quota-track" aria-label="Monthly review credit quota">
+          <span style="width: ${Math.round(Math.min(1, ratio) * 100)}%"></span>
+        </div>
+      </div>
+      ${
+        monthlyUsage && monthlyUsage.rollups.length > 0
+          ? renderUsageBars(monthlyUsage.rollups)
+          : `<p class="inline-empty">No current-month usage rollups are loaded for this billing scope.</p>`
+      }
+    </section>
+  `;
+}
+
+/** Renders compact usage bars for the largest current-month usage rows. */
+function renderUsageBars(rollups: readonly AdminUsageRollupSummary[]): string {
+  const largestQuantity = Math.max(1, ...rollups.map((rollup) => Math.abs(rollup.quantity)));
+  return `
+    <div class="usage-bars">
+      ${rollups
+        .slice(0, 6)
+        .map((rollup) => {
+          const width = Math.round((Math.abs(rollup.quantity) / largestQuantity) * 100);
+          return `
+            <div class="usage-bar-row">
+              <div>
+                <strong>${escapeHtml(rollup.eventType)}</strong>
+                <span>${escapeHtml(rollup.unit)}</span>
+              </div>
+              <div class="usage-bar-track">
+                <span style="width: ${width}%"></span>
+              </div>
+              <code>${escapeHtml(formatCompactNumber(rollup.quantity))}</code>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+/** Renders the current subscription and item mirrors. */
+function renderSubscriptionSummary(
+  subscription: AdminSubscription | undefined,
+  items: readonly AdminSubscriptionItem[],
+): string {
+  if (!subscription) {
+    return `
+      <section class="panel">
+        <div class="section-heading">
+          <h3>Current Subscription</h3>
+          <span class="status muted">none</span>
+        </div>
+        <p class="inline-empty">This account does not have a subscription mirror.</p>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(subscription.providerSubscriptionId ?? subscription.subscriptionId)}</p>
+          <h3>Current Subscription</h3>
+        </div>
+        <span class="status ${subscriptionStatusNeedsAttention(subscription.status) ? "bad" : "ok"}">${escapeHtml(subscription.status)}</span>
+      </div>
+      <div class="detail-grid">
+        ${renderDetail("Provider", subscription.provider)}
+        ${renderDetail("Quantity", String(subscription.quantity ?? "n/a"))}
+        ${renderDetail("Period", subscriptionPeriodLabel(subscription))}
+        ${renderDetail("Cancel Scheduled", subscription.cancelAtPeriodEnd ? "yes" : "no")}
+      </div>
+      ${renderSubscriptionItemRows(items)}
+    </section>
+  `;
+}
+
+/** Renders subscription item rows. */
+function renderSubscriptionItemRows(items: readonly AdminSubscriptionItem[]): string {
+  if (items.length === 0) {
+    return `<p class="inline-empty">No subscription items are mirrored.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th>Quantity</th>
+            <th>Meter</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items
+            .map(
+              (item) => `
+                <tr>
+                  <td><code>${escapeHtml(item.itemType)}</code></td>
+                  <td>${escapeHtml(String(item.quantity ?? "n/a"))}</td>
+                  <td>${escapeHtml(item.meterKey ?? "none")}</td>
+                  <td><span class="status ${item.active ? "ok" : "muted"}">${item.active ? "active" : "inactive"}</span></td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders credit grant rows. */
+function renderCreditGrantRows(grants: readonly AdminCreditGrant[]): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <h3>Credit Grants</h3>
+        <span class="status muted">${grants.length} row${grants.length === 1 ? "" : "s"}</span>
+      </div>
+      ${
+        grants.length === 0
+          ? `<p class="inline-empty">No manual or promotional credits are mirrored.</p>`
+          : `
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Credit</th>
+                    <th>Remaining</th>
+                    <th>Reason</th>
+                    <th>Expires</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${grants
+                    .map(
+                      (grant) => `
+                        <tr>
+                          <td><code>${escapeHtml(grant.creditType)}</code></td>
+                          <td>${formatCompactNumber(grant.remainingQuantity)} / ${formatCompactNumber(grant.quantity)}</td>
+                          <td>${escapeHtml(grant.reason)} <span class="status muted">${escapeHtml(grant.source)}</span></td>
+                          <td>${escapeHtml(grant.expiresAt ? formatDateOnly(grant.expiresAt) : "never")}</td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+/** Renders invoice mirror rows. */
+function renderInvoiceRows(invoices: readonly AdminInvoice[]): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <h3>Invoices</h3>
+        <span class="status muted">${invoices.length} row${invoices.length === 1 ? "" : "s"}</span>
+      </div>
+      ${
+        invoices.length === 0
+          ? `<p class="inline-empty">No invoice mirrors are available.</p>`
+          : `
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Invoice</th>
+                    <th>Status</th>
+                    <th>Period</th>
+                    <th>Paid</th>
+                    <th>Remaining</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${invoices
+                    .map(
+                      (invoice) => `
+                        <tr>
+                          <td>
+                            ${renderInvoiceLink(invoice)}
+                            <p class="muted-text">${escapeHtml(invoice.providerInvoiceId)}</p>
+                            ${renderInvoicePdfLink(invoice)}
+                          </td>
+                          <td><span class="status ${invoiceStatusNeedsAttention(invoice.status) ? "bad" : "ok"}">${escapeHtml(invoice.status)}</span></td>
+                          <td>${escapeHtml(invoicePeriodLabel(invoice))}</td>
+                          <td>${formatMicros(invoice.amountPaidMicros)}</td>
+                          <td>${formatMicros(invoice.amountRemainingMicros)}</td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+/** Renders billing meter event debug rows. */
+function renderMeterEventRows(events: readonly AdminBillingMeterEventSummary[]): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Provider Sync</p>
+          <h3>Meter Events</h3>
+        </div>
+        <span class="status muted">${events.length} row${events.length === 1 ? "" : "s"}</span>
+      </div>
+      ${
+        events.length === 0
+          ? `<p class="inline-empty">No meter events matched the debug filters.</p>`
+          : `
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Meter</th>
+                    <th>Status</th>
+                    <th>Quantity</th>
+                    <th>Attempts</th>
+                    <th>Updated</th>
+                    <th>Source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${events
+                    .map(
+                      (event) => `
+                        <tr>
+                          <td>
+                            <strong>${escapeHtml(event.meterKey)}</strong>
+                            <p class="muted-text">${escapeHtml(event.periodKey)} · ${escapeHtml(event.providerEventName)}</p>
+                          </td>
+                          <td>
+                            <span class="status ${meterEventStatusClass(event.status)}">
+                              ${escapeHtml(event.status)}
+                            </span>
+                            ${event.lastErrorMessage ? `<p class="muted-text">${escapeHtml(event.lastErrorMessage)}</p>` : ""}
+                          </td>
+                          <td>${formatCompactNumber(event.quantity)}</td>
+                          <td>${event.attemptCount}</td>
+                          <td>${formatTime(event.updatedAt)}</td>
+                          <td>
+                            <code>${escapeHtml(shortHash(event.idempotencyKey))}</code>
+                            <p class="muted-text">${event.sourceUsageEventIds.length} usage events</p>
+                          </td>
+                        </tr>
+                      `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+/** Renders one compact label/value pair for detail grids. */
+function renderDetail(label: string, value: string): string {
+  return `
+    <div class="detail-item">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+/** Returns a compact subscription period label. */
+function subscriptionPeriodLabel(subscription: AdminSubscription): string {
+  if (subscription.currentPeriodStart && subscription.currentPeriodEnd) {
+    return `${formatDateOnly(subscription.currentPeriodStart)} to ${formatDateOnly(subscription.currentPeriodEnd)}`;
+  }
+  if (subscription.currentPeriodEnd) {
+    return `Until ${formatDateOnly(subscription.currentPeriodEnd)}`;
+  }
+
+  return "n/a";
+}
+
+/** Returns a compact invoice period label. */
+function invoicePeriodLabel(invoice: AdminInvoice): string {
+  if (invoice.periodStart && invoice.periodEnd) {
+    return `${formatDateOnly(invoice.periodStart)} to ${formatDateOnly(invoice.periodEnd)}`;
+  }
+  if (invoice.periodEnd) {
+    return `Until ${formatDateOnly(invoice.periodEnd)}`;
+  }
+
+  return "n/a";
+}
+
+/** Returns the usage window label for a billing reconciliation report. */
+function reconciliationPeriodLabel(reconciliation: AdminBillingReconciliationSummary): string {
+  if (reconciliation.periodStart && reconciliation.periodEnd) {
+    return `${formatDateOnly(reconciliation.periodStart)} to ${formatDateOnly(reconciliation.periodEnd)}`;
+  }
+  if (reconciliation.periodStart) {
+    return `Since ${formatDateOnly(reconciliation.periodStart)}`;
+  }
+
+  return "not filtered";
+}
+
+/** Renders an invoice label with a link when a hosted URL exists. */
+function renderInvoiceLink(invoice: AdminInvoice): string {
+  if (!invoice.hostedInvoiceUrl) {
+    return `<strong>${escapeHtml(invoice.invoiceId)}</strong>`;
+  }
+
+  return `
+    <a href="${escapeAttribute(invoice.hostedInvoiceUrl)}" rel="noreferrer" target="_blank">
+      ${escapeHtml(invoice.invoiceId)}
+    </a>
+  `;
+}
+
+/** Renders an invoice PDF link when the provider exposes one. */
+function renderInvoicePdfLink(invoice: AdminInvoice): string {
+  if (!invoice.invoicePdfUrl) {
+    return "";
+  }
+
+  return `
+    <a class="muted-link" href="${escapeAttribute(invoice.invoicePdfUrl)}" rel="noreferrer" target="_blank">
+      PDF
+    </a>
+  `;
+}
+
+/** Returns whether a subscription status needs operator attention. */
+function subscriptionStatusNeedsAttention(status: string | undefined): boolean {
+  return status === "past_due" || status === "cancelled" || status === "unpaid";
+}
+
+/** Returns whether an invoice status needs operator attention. */
+function invoiceStatusNeedsAttention(status: string): boolean {
+  return status === "open" || status === "uncollectible";
+}
+
+/** Returns a status badge class for a billing meter event. */
+function meterEventStatusClass(status: string): string {
+  if (status === "sent") {
+    return "ok";
+  }
+  if (status === "failed") {
+    return "bad";
+  }
+
+  return "warn";
+}
+
+/** Returns a status badge class for a billing reconciliation severity. */
+function reconciliationSeverityClass(severity: AdminBillingReconciliationSeverity): string {
+  return severity === "critical" ? "bad" : "warn";
+}
+
+/** Renders entitlement decision rows. */
+function renderEntitlementDecisionRows(decisions: readonly AdminEntitlementDecision[]): string {
+  if (decisions.length === 0) {
+    return `<p class="inline-empty">No feature keys were checked.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Decision</th>
+            <th>Source</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${decisions
+            .map(
+              (decision) => `
+                <tr>
+                  <td><code>${escapeHtml(decision.featureKey)}</code></td>
+                  <td>
+                    <span class="status ${decision.allowed ? "ok" : "warn"}">
+                      ${decision.allowed ? "allowed" : "blocked"}
+                    </span>
+                    <p class="muted-text">${escapeHtml(decision.reason)}</p>
+                  </td>
+                  <td>${escapeHtml(decision.source)}</td>
+                  <td>${escapeHtml(compactJson(decision.value))}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders entitlement override rows. */
+function renderEntitlementRows(rows: readonly AdminEntitlementRow[]): string {
+  if (rows.length === 0) {
+    return `<p class="inline-empty">No entitlement overrides are active for this organization.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>State</th>
+            <th>Source</th>
+            <th>Effective</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (row) => `
+                <tr>
+                  <td><code>${escapeHtml(row.featureKey)}</code></td>
+                  <td>${row.enabled ? "enabled" : "disabled"}</td>
+                  <td>${escapeHtml(row.sourceId ? `${row.source}:${row.sourceId}` : row.source)}</td>
+                  <td>
+                    ${formatDateOnly(row.effectiveFrom)}
+                    <p class="muted-text">${escapeHtml(row.effectiveTo ? `until ${formatDateOnly(row.effectiveTo)}` : "open-ended")}</p>
+                  </td>
                 </tr>
               `,
             )
@@ -2903,7 +7928,22 @@ function renderInspector(): string {
   const config = inspectorConfigs[state.activeKind];
   const inspector = currentInspectorState();
   const hasDetails = Boolean(inspector.details);
-  const canPlanReplay = state.session?.capabilities.canPlanReplay && hasDetails;
+  const canPlanReplay =
+    Boolean(config.replayPlanPath) && state.session?.capabilities.canPlanReplay && hasDetails;
+  const canExportDebugBundle =
+    Boolean(config.debugBundlePath) &&
+    Boolean(state.session?.capabilities.canInspect) &&
+    hasDetails;
+  const canImportToEval =
+    Boolean(config.evalImportPath) && Boolean(state.session?.capabilities.canInspect) && hasDetails;
+  const canRunRetrievalReplay =
+    Boolean(config.retrievalReplayPath) &&
+    Boolean(state.session?.capabilities.canPlanReplay) &&
+    hasDetails;
+  const canRunValidationReplay =
+    Boolean(config.validationReplayPath) &&
+    Boolean(state.session?.capabilities.canPlanReplay) &&
+    hasDetails;
 
   return `
     <main class="inspector">
@@ -2922,19 +7962,71 @@ function renderInspector(): string {
             />
           </label>
           <button class="primary" data-action="load-details" type="button">Load</button>
-          <button
-            data-action="create-plan"
-            type="button"
-            ${canPlanReplay ? "" : "disabled"}
-          >
-            Plan Replay
-          </button>
+          ${
+            config.replayPlanPath
+              ? `<button
+                  data-action="create-plan"
+                  type="button"
+                  ${canPlanReplay ? "" : "disabled"}
+                >
+                  Plan Replay
+                </button>`
+              : ""
+          }
+          ${
+            config.debugBundlePath
+              ? `<button
+                  data-action="export-debug-bundle"
+                  type="button"
+                  ${canExportDebugBundle ? "" : "disabled"}
+                >
+                  Export Bundle
+                </button>`
+              : ""
+          }
+          ${
+            config.evalImportPath
+              ? `<button
+                  data-action="import-eval"
+                  type="button"
+                  ${canImportToEval ? "" : "disabled"}
+                >
+                  Import to Eval
+                </button>`
+              : ""
+          }
+          ${
+            config.retrievalReplayPath
+              ? `<button
+                  data-action="run-retrieval-replay"
+                  type="button"
+                  ${canRunRetrievalReplay ? "" : "disabled"}
+                >
+                  Retrieve Dry-Run
+                </button>`
+              : ""
+          }
+          ${
+            config.validationReplayPath
+              ? `<button
+                  data-action="run-validation-replay"
+                  type="button"
+                  ${canRunValidationReplay ? "" : "disabled"}
+                >
+                  Validate Dry-Run
+                </button>`
+              : ""
+          }
         </div>
       </section>
       ${renderInspectorNotice(inspector)}
       ${inspector.details ? renderDetails(inspector.details) : renderEmptyState("Enter an ID and click Load to inspect debug details.")}
       ${inspector.plan ? renderReplayPlan(inspector.plan) : ""}
+      ${inspector.retrievalReplay ? renderRetrievalReplay(inspector.retrievalReplay) : ""}
+      ${inspector.validationReplay ? renderValidationReplay(inspector.validationReplay) : ""}
       ${inspector.result ? renderReplayResult(inspector.result) : ""}
+      ${inspector.debugBundle ? renderDebugBundle(inspector.debugBundle) : ""}
+      ${inspector.evalImportDraft ? renderEvalImportDraft(inspector.evalImportDraft) : ""}
     </main>
   `;
 }
@@ -2966,11 +8058,34 @@ function renderDetails(details: InspectorDetails): string {
   if (isWebhookDetails(details)) {
     return renderWebhookDetails(details);
   }
+  if (isBackgroundJobDetails(details)) {
+    return renderBackgroundJobDetails(details);
+  }
   if (isReviewDetails(details)) {
     return renderReviewDetails(details);
   }
+  if (isMemoryRulesDetails(details)) {
+    return renderMemoryRulesDetails(details);
+  }
 
   return renderPublisherDetails(details);
+}
+
+/** Renders durable background job debug details. */
+function renderBackgroundJobDetails(details: AdminBackgroundJobDebugDetails): string {
+  const job = details.job;
+  return `
+    <section class="summary-grid">
+      ${renderMetric("Status", job.status, job.status === "failed" || job.status === "dead_lettered")}
+      ${renderMetric("Queue", job.queueName)}
+      ${renderMetric("Type", job.jobType)}
+      ${renderMetric("Failures", String(details.failures.length), details.failures.length > 0)}
+    </section>
+    ${renderJobs([job])}
+    ${renderFailures(details.failures)}
+    ${renderAudits(details.replayAudits)}
+    ${renderJsonBlock("Payload", job.payload ?? job)}
+  `;
 }
 
 /** Renders webhook debug details. */
@@ -3039,6 +8154,171 @@ function renderPublisherDetails(details: AdminPublisherDebugDetails): string {
     ${renderFailures(details.failures)}
     ${renderJobs(details.relatedJobs)}
     ${renderAudits(details.replayAudits)}
+  `;
+}
+
+/** Renders repository memory facts and effective rules. */
+function renderMemoryRulesDetails(details: AdminMemoryRulesDebugDetails): string {
+  const repository = details.repository;
+  const enabledRuleCount = details.rules.filter((rule) => rule.enabled).length;
+  const activeFactCount = details.memoryFacts.filter((fact) => fact.status === "active").length;
+
+  return `
+    <section class="summary-grid">
+      ${renderMetric("Repository", repository.fullName)}
+      ${renderMetric("Active facts", String(activeFactCount))}
+      ${renderMetric("Enabled rules", String(enabledRuleCount))}
+      ${renderMetric("Warnings", String(details.warnings.length), details.warnings.length > 0)}
+    </section>
+    <section class="split">
+      <section class="panel">
+        <h3>Repository</h3>
+        <dl class="data-list compact">
+          <div><dt>Repository ID</dt><dd><code>${escapeHtml(repository.repoId)}</code></dd></div>
+          <div><dt>Organization ID</dt><dd><code>${escapeHtml(repository.orgId)}</code></dd></div>
+          <div><dt>Provider</dt><dd>${escapeHtml(repository.provider)}</dd></div>
+          <div><dt>Default branch</dt><dd>${escapeHtml(repository.defaultBranch ?? "n/a")}</dd></div>
+          <div><dt>Visibility</dt><dd>${escapeHtml(repository.visibility)}</dd></div>
+          <div><dt>State</dt><dd>${escapeHtml(repository.enabled ? "enabled" : "disabled")}</dd></div>
+        </dl>
+      </section>
+      ${renderMemoryRuleTools(details)}
+    </section>
+    ${renderMemoryWarnings(details.warnings)}
+    ${renderMemoryFacts(details.memoryFacts)}
+    ${renderEffectiveRules(details.rules)}
+  `;
+}
+
+/** Renders memory candidate and policy tool availability. */
+function renderMemoryRuleTools(details: AdminMemoryRulesDebugDetails): string {
+  return `
+    <section class="panel">
+      <h3>Tools</h3>
+      <dl class="data-list compact">
+        <div>
+          <dt>Candidate approval</dt>
+          <dd>${details.candidateActions.canApprove ? "available" : "unavailable"}</dd>
+        </div>
+        <div>
+          <dt>Candidate rejection</dt>
+          <dd>${details.candidateActions.canReject ? "available" : "unavailable"}</dd>
+        </div>
+      </dl>
+      <p class="muted-text">${escapeHtml(details.candidateActions.reason)}</p>
+      <div class="key-list">
+        ${details.evaluationTools
+          .map(
+            (tool) => `
+              <code>${escapeHtml(`${tool.status}:${tool.label}`)}</code>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+/** Renders memory and rules inspector warnings. */
+function renderMemoryWarnings(warnings: readonly string[]): string {
+  if (warnings.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Warnings</h3>
+      <ul class="issue-list">
+        ${warnings
+          .map(
+            (warning) => `
+              <li>
+                <code>notice</code>
+                <span>${escapeHtml(warning)}</span>
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    </section>
+  `;
+}
+
+/** Renders stored memory fact rows. */
+function renderMemoryFacts(facts: readonly AdminMemoryFactDebugSummary[]): string {
+  if (facts.length === 0) {
+    return renderEmptyState("No memory facts currently apply to this repository.");
+  }
+
+  return `
+    <section class="panel">
+      <h3>Memory Facts</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Fact</th><th>Scope</th><th>Status</th><th>Confidence</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            ${facts
+              .map(
+                (fact) => `
+                  <tr>
+                    <td>
+                      <strong>${escapeHtml(fact.factType)}</strong>
+                      <p class="muted-text">${escapeHtml(fact.body)}</p>
+                      ${fact.metadataKeys.length > 0 ? `<p class="muted-text">metadata: ${escapeHtml(fact.metadataKeys.join(", "))}</p>` : ""}
+                    </td>
+                    <td>${escapeHtml(fact.scope)}</td>
+                    <td><span class="status ${statusClass(fact.status)}">${escapeHtml(fact.status)}</span></td>
+                    <td>${Math.round(fact.confidence * 100)}%</td>
+                    <td>${formatTime(fact.updatedAt)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders effective repository and organization rules. */
+function renderEffectiveRules(rules: readonly AdminRepoRuleDebugSummary[]): string {
+  if (rules.length === 0) {
+    return renderEmptyState("No repository or organization rules currently apply.");
+  }
+
+  return `
+    <section class="panel">
+      <h3>Effective Rules</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>State</th><th>Rule</th><th>Effect</th><th>Matcher</th><th>Priority</th></tr>
+          </thead>
+          <tbody>
+            ${rules
+              .map(
+                (rule) => `
+                  <tr>
+                    <td><span class="status ${rule.enabled ? "ok" : "muted"}">${rule.enabled ? "enabled" : "disabled"}</span></td>
+                    <td>
+                      <strong>${escapeHtml(rule.name)}</strong>
+                      <p class="muted-text">${escapeHtml(rule.instruction)}</p>
+                      ${rule.metadataKeys.length > 0 ? `<p class="muted-text">metadata: ${escapeHtml(rule.metadataKeys.join(", "))}</p>` : ""}
+                    </td>
+                    <td>${escapeHtml(`${rule.scope}:${rule.effect}`)}</td>
+                    <td>${escapeHtml(ruleMatcherLabel(rule))}</td>
+                    <td>${rule.priority}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
   `;
 }
 
@@ -3340,6 +8620,245 @@ function renderReplayPlan(plan: InspectorReplayPlan): string {
   `;
 }
 
+/** Renders retrieval replay dry-run output. */
+function renderRetrievalReplay(dryRun: RetrievalReplayDryRun): string {
+  const unchangedCount = retrievalReplayStatusCount(dryRun, "unchanged");
+  const changedCount = retrievalReplayStatusCount(dryRun, "changed");
+  const addedCount = retrievalReplayStatusCount(dryRun, "added");
+  const removedCount = retrievalReplayStatusCount(dryRun, "removed");
+  return `
+    <section class="replay-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Retrieval Replay</p>
+          <h3>${escapeHtml(dryRun.reviewRunId)}</h3>
+        </div>
+        <span class="status ok">Dry-run</span>
+      </div>
+      <section class="diff-grid">
+        ${renderDiffColumn("Input", [
+          `snapshot: ${dryRun.pullRequestSnapshotId}`,
+          `generated: ${dryRun.generatedAt}`,
+        ])}
+        ${renderDiffColumn("Original bundle", retrievalReplayBundleLines(dryRun.original))}
+        ${renderDiffColumn("Replayed bundle", retrievalReplayBundleLines(dryRun.replayed))}
+        ${renderDiffColumn("Comparison", [
+          `${unchangedCount} unchanged`,
+          `${changedCount} changed`,
+          `${addedCount} added`,
+          `${removedCount} removed`,
+        ])}
+      </section>
+      ${renderRetrievalReplayWarnings(dryRun.warnings)}
+      ${renderRetrievalReplayComparisons(dryRun.comparisons)}
+    </section>
+  `;
+}
+
+/** Counts retrieval replay comparisons by status. */
+function retrievalReplayStatusCount(
+  dryRun: RetrievalReplayDryRun,
+  status: RetrievalReplayItemComparison["status"],
+): number {
+  return dryRun.comparisons.filter((comparison) => comparison.status === status).length;
+}
+
+/** Builds display lines for one retrieval replay bundle summary. */
+function retrievalReplayBundleLines(
+  bundle: RetrievalReplayBundleSummary | undefined,
+): readonly string[] {
+  if (!bundle) {
+    return ["missing"];
+  }
+
+  return [
+    `${bundle.itemCount} item(s)`,
+    `${bundle.estimatedTokens} / ${bundle.maxTokens} tokens`,
+    `mode: ${bundle.retrievalMode ?? "unknown"}`,
+    ...(bundle.indexVersionId ? [`index: ${bundle.indexVersionId}`] : []),
+  ];
+}
+
+/** Renders retrieval replay warning text. */
+function renderRetrievalReplayWarnings(warnings: readonly string[]): string {
+  if (warnings.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="warning-list">
+      <h4>Warnings</h4>
+      <ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>
+    </section>
+  `;
+}
+
+/** Renders item-level retrieval replay comparisons. */
+function renderRetrievalReplayComparisons(
+  comparisons: readonly RetrievalReplayItemComparison[],
+): string {
+  if (comparisons.length === 0) {
+    return `<p class="muted-text">No retrieval context items were present in either run.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Context</th>
+            <th>Original</th>
+            <th>Replayed</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${comparisons
+            .map(
+              (comparison) => `
+                <tr>
+                  <td>${escapeHtml(comparison.status)}</td>
+                  <td><code>${escapeHtml(comparison.key)}</code></td>
+                  <td>${escapeHtml(retrievalReplayItemLabel(comparison.originalKind, comparison.originalTitle, comparison.originalPriority))}</td>
+                  <td>${escapeHtml(retrievalReplayItemLabel(comparison.replayedKind, comparison.replayedTitle, comparison.replayedPriority))}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Builds a compact context item label for comparison tables. */
+function retrievalReplayItemLabel(
+  kind: string | undefined,
+  title: string | undefined,
+  priority: number | undefined,
+): string {
+  if (!kind && !title && priority === undefined) {
+    return "missing";
+  }
+
+  const priorityText = priority === undefined ? "" : ` / priority ${priority}`;
+  return `${kind ?? "unknown"} / ${title ?? "untitled"}${priorityText}`;
+}
+
+/** Renders validation replay dry-run output. */
+function renderValidationReplay(dryRun: ValidationReplayDryRun): string {
+  const unchangedCount = validationReplayStatusCount(dryRun, "unchanged");
+  const changedCount = validationReplayStatusCount(dryRun, "changed");
+  const addedCount = validationReplayStatusCount(dryRun, "added");
+  const removedCount = validationReplayStatusCount(dryRun, "removed");
+  return `
+    <section class="replay-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Validation Replay</p>
+          <h3>${escapeHtml(dryRun.reviewRunId)}</h3>
+        </div>
+        <span class="status ok">Dry-run</span>
+      </div>
+      <section class="diff-grid">
+        ${renderDiffColumn("Input", [
+          `snapshot: ${dryRun.pullRequestSnapshotId}`,
+          `${dryRun.candidateFindingCount} candidate finding(s)`,
+          `generated: ${dryRun.generatedAt}`,
+        ])}
+        ${renderDiffColumn("Original decisions", [
+          `${dryRun.original.publish} publish`,
+          `${dryRun.original.reject} reject`,
+        ])}
+        ${renderDiffColumn("Replayed decisions", [
+          `${dryRun.replayed.publish} publish`,
+          `${dryRun.replayed.reject} reject`,
+        ])}
+        ${renderDiffColumn("Comparison", [
+          `${unchangedCount} unchanged`,
+          `${changedCount} changed`,
+          `${addedCount} added`,
+          `${removedCount} removed`,
+        ])}
+      </section>
+      ${renderValidationReplayWarnings(dryRun.warnings)}
+      ${renderValidationReplayComparisons(dryRun.comparisons)}
+    </section>
+  `;
+}
+
+/** Counts validation replay comparisons by status. */
+function validationReplayStatusCount(
+  dryRun: ValidationReplayDryRun,
+  status: ValidationReplayFindingComparison["status"],
+): number {
+  return dryRun.comparisons.filter((comparison) => comparison.status === status).length;
+}
+
+/** Renders validation replay warning text. */
+function renderValidationReplayWarnings(warnings: readonly string[]): string {
+  if (warnings.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="warning-list">
+      <h4>Warnings</h4>
+      <ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>
+    </section>
+  `;
+}
+
+/** Renders finding-level validation replay comparisons. */
+function renderValidationReplayComparisons(
+  comparisons: readonly ValidationReplayFindingComparison[],
+): string {
+  if (comparisons.length === 0) {
+    return `<p class="muted-text">No validation findings were present in either run.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Finding</th>
+            <th>Original</th>
+            <th>Replayed</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${comparisons
+            .map(
+              (comparison) => `
+                <tr>
+                  <td>${escapeHtml(comparison.status)}</td>
+                  <td>
+                    <strong>${escapeHtml(comparison.title)}</strong>
+                    <p class="muted-text">${escapeHtml(comparison.candidateFindingId ?? comparison.key)}</p>
+                  </td>
+                  <td>${escapeHtml(validationReplayDecisionLabel(comparison.originalDecision, comparison.originalReasons))}</td>
+                  <td>${escapeHtml(validationReplayDecisionLabel(comparison.replayedDecision, comparison.replayedReasons))}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Builds a compact validation decision label for comparison tables. */
+function validationReplayDecisionLabel(
+  decision: string | undefined,
+  reasons: readonly string[],
+): string {
+  const reasonText = reasons.length > 0 ? ` (${reasons.join(", ")})` : "";
+  return `${decision ?? "missing"}${reasonText}`;
+}
+
 /** Renders the current-state versus replay-plan comparison. */
 function renderPlanDiff(plan: InspectorReplayPlan): string {
   if (isWebhookReplayPlan(plan)) {
@@ -3351,6 +8870,20 @@ function renderPlanDiff(plan: InspectorReplayPlan): string {
           "Replay jobs",
           plan.jobs.map((job) => `${job.queueName} / ${job.jobType} / ${job.replayJobKey}`),
         )}
+      </section>
+      ${renderFailures(plan.failures)}
+    `;
+  }
+
+  if (isBackgroundJobReplayPlan(plan)) {
+    return `
+      <section class="diff-grid">
+        ${renderDiffColumn("Current status", [plan.currentStatus])}
+        ${renderDiffColumn("Source job", [
+          plan.backgroundJobId,
+          `${plan.queueName} / ${plan.jobType}`,
+        ])}
+        ${renderDiffColumn("Replay jobs", [plan.job.replayJobKey])}
       </section>
       ${renderFailures(plan.failures)}
     `;
@@ -3415,6 +8948,11 @@ function renderReplayResult(result: AdminReplayExecutionResult): string {
         ${result.auditLogId ? `<span class="status ok">${escapeHtml(result.auditLogId)}</span>` : ""}
       </div>
       <section class="diff-grid">
+        ${renderDiffColumn("Action records", [
+          `action: ${result.adminActionId}`,
+          `replay: ${result.replayRunId}`,
+          ...(result.auditLogId ? [`audit: ${result.auditLogId}`] : []),
+        ])}
         ${renderDiffColumn("Inserted job IDs", result.insertedJobIds)}
         ${renderDiffColumn("Existing job IDs", result.existingJobIds)}
         ${renderDiffColumn(
@@ -3422,6 +8960,77 @@ function renderReplayResult(result: AdminReplayExecutionResult): string {
           result.replayJobs.map((job) => `${job.status} / ${job.backgroundJobId}`),
         )}
       </section>
+    </section>
+  `;
+}
+
+/** Renders a redacted debug bundle export result. */
+function renderDebugBundle(bundle: AdminReviewRunDebugBundle): string {
+  return `
+    <section class="panel result-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Debug Bundle</p>
+          <h3>${escapeHtml(bundle.bundleId)}</h3>
+        </div>
+        <span class="status ok">${escapeHtml(bundle.auditLogId)}</span>
+      </div>
+      <section class="diff-grid">
+        ${renderDiffColumn("Bundle", [
+          bundle.reviewRunId,
+          bundle.repoId,
+          bundle.redactionLevel,
+          bundle.payloadHash,
+          `export: ${bundle.debugExportId}`,
+          `action: ${bundle.adminActionId}`,
+        ])}
+        ${renderDiffColumn("Generated", [
+          formatTime(bundle.generatedAt),
+          `expires: ${formatTime(bundle.expiresAt)}`,
+        ])}
+      </section>
+      <h3>Redacted payload</h3>
+      <pre>${escapeHtml(JSON.stringify(bundle.payload, null, 2))}</pre>
+    </section>
+  `;
+}
+
+/** Renders a generated eval import draft. */
+function renderEvalImportDraft(draft: AdminReviewRunEvalImportDraft): string {
+  return `
+    <section class="panel result-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Eval Import Draft</p>
+          <h3>${escapeHtml(draft.evalCase.caseId)}</h3>
+        </div>
+        <span class="status ok">${escapeHtml(draft.auditLogId)}</span>
+      </div>
+      <section class="diff-grid">
+        ${renderDiffColumn("Action records", [
+          `action: ${draft.adminActionId}`,
+          `audit: ${draft.auditLogId}`,
+        ])}
+        ${renderDiffColumn("Case", [
+          draft.suiteId,
+          draft.evalCase.title,
+          `${draft.evalCase.expectedFindings.length} expected`,
+          `${draft.evalCase.actualFindings.length} actual`,
+        ])}
+        ${renderDiffColumn(
+          "Files",
+          draft.files.map((file) => `${file.kind} / ${file.path}`),
+        )}
+      </section>
+      ${renderIssueList(
+        draft.warnings.map((warning) => ({
+          code: "needs_review",
+          message: warning,
+          severity: "warning",
+        })),
+      )}
+      <h3>Eval case</h3>
+      <pre>${escapeHtml(JSON.stringify(draft.evalCase, null, 2))}</pre>
     </section>
   `;
 }
@@ -3579,10 +9188,10 @@ function renderTextInput(field: string, label: string, value: string, placeholde
 }
 
 /** Renders a checkbox control. */
-function renderCheckbox(field: string, label: string, checked: boolean): string {
+function renderCheckbox(field: string, label: string, checked: boolean, disabled = false): string {
   return `
     <label class="check-field">
-      <input data-field="${escapeAttribute(field)}" type="checkbox" ${checked ? "checked" : ""} />
+      <input data-field="${escapeAttribute(field)}" type="checkbox" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
       <span>${escapeHtml(label)}</span>
     </label>
   `;
@@ -3594,11 +9203,12 @@ function renderSelect(
   label: string,
   value: string,
   options: readonly string[],
+  disabled = false,
 ): string {
   return `
     <label>
       <span>${escapeHtml(label)}</span>
-      <select data-field="${escapeAttribute(field)}">
+      <select data-field="${escapeAttribute(field)}" ${disabled ? "disabled" : ""}>
         ${options
           .map(
             (option) => `
@@ -3614,11 +9224,11 @@ function renderSelect(
 }
 
 /** Renders a textarea control. */
-function renderTextarea(field: string, label: string, value: string): string {
+function renderTextarea(field: string, label: string, value: string, disabled = false): string {
   return `
     <label>
       <span>${escapeHtml(label)}</span>
-      <textarea data-field="${escapeAttribute(field)}" rows="7">${escapeHtml(value)}</textarea>
+      <textarea data-field="${escapeAttribute(field)}" rows="7" ${disabled ? "disabled" : ""}>${escapeHtml(value)}</textarea>
     </label>
   `;
 }
@@ -3657,14 +9267,86 @@ function updateSettingsFormField(
 
   if (field === "repositoryEnabled" && target instanceof HTMLInputElement) {
     form.repositoryEnabled = target.checked;
+    state.settings.preview = undefined;
     return;
   }
   if (field === "skipGeneratedFiles" && target instanceof HTMLInputElement) {
     form.skipGeneratedFiles = target.checked;
+    state.settings.preview = undefined;
     return;
   }
   if (field === "skipDraftPullRequests" && target instanceof HTMLInputElement) {
     form.skipDraftPullRequests = target.checked;
+    state.settings.preview = undefined;
+    return;
+  }
+
+  if (field in form) {
+    (form as Record<string, string | boolean>)[field] = target.value;
+    state.settings.preview = undefined;
+  }
+}
+
+/** Updates one repository rule form field from an input element. */
+function updateRuleFormField(
+  field: string,
+  target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+): void {
+  const form = state.settings.ruleForm;
+  if (field === "enabled" && target instanceof HTMLInputElement) {
+    form.enabled = target.checked;
+    return;
+  }
+
+  if (field in form) {
+    (form as Record<string, string | boolean>)[field] = target.value;
+  }
+}
+
+/** Updates one product settings form field from an input element. */
+function updateProductSettingsFormField(
+  field: string,
+  target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+): void {
+  const settings = state.product.repositorySettings;
+  const form = settings?.form;
+  if (!settings || !form) {
+    return;
+  }
+
+  if (field === "repositoryEnabled" && target instanceof HTMLInputElement) {
+    form.repositoryEnabled = target.checked;
+    settings.preview = undefined;
+    return;
+  }
+  if (field === "skipGeneratedFiles" && target instanceof HTMLInputElement) {
+    form.skipGeneratedFiles = target.checked;
+    settings.preview = undefined;
+    return;
+  }
+  if (field === "skipDraftPullRequests" && target instanceof HTMLInputElement) {
+    form.skipDraftPullRequests = target.checked;
+    settings.preview = undefined;
+    return;
+  }
+
+  if (field in form) {
+    (form as Record<string, string | boolean>)[field] = target.value;
+    settings.preview = undefined;
+  }
+}
+
+/** Updates one product repository rule form field from an input element. */
+function updateProductRuleFormField(
+  field: string,
+  target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+): void {
+  const form = state.product.repositorySettings?.ruleForm;
+  if (!form) {
+    return;
+  }
+  if (field === "enabled" && target instanceof HTMLInputElement) {
+    form.enabled = target.checked;
     return;
   }
 
@@ -3678,6 +9360,39 @@ function updateAuditField(field: string, value: string): void {
   if (field in state.audit) {
     (state.audit as Record<string, string | readonly AdminAuditLogSummary[] | undefined>)[field] =
       value;
+  }
+}
+
+/** Updates one usage filter field. */
+function updateUsageField(field: string, value: string): void {
+  if (field in state.usage) {
+    (state.usage as Record<string, string | AdminUsageSummary | undefined>)[field] = value;
+  }
+}
+
+/** Updates one plan and entitlement filter field. */
+function updateEntitlementsField(field: string, value: string): void {
+  if (field in state.entitlements) {
+    (state.entitlements as Record<string, string | AdminEntitlementSummary | undefined>)[field] =
+      value;
+  }
+}
+
+/** Updates one billing filter field. */
+function updateBillingField(field: string, value: string): void {
+  if (field in state.billing) {
+    (
+      state.billing as Record<
+        string,
+        | string
+        | AdminBillingSummary
+        | AdminUsageSummary
+        | AdminBillingMeterEventsSummary
+        | AdminBillingReconciliationSummary
+        | AdminBillingReconciliationRunSummary
+        | undefined
+      >
+    )[field] = value;
   }
 }
 
@@ -3712,6 +9427,67 @@ function settingsPatchFromForm(form: SettingsFormState): Record<string, unknown>
     skipGeneratedFiles: form.skipGeneratedFiles,
     skipDraftPullRequests: form.skipDraftPullRequests,
     customInstructions: form.customInstructions.trim(),
+  };
+}
+
+/** Creates the default repository rule form state. */
+function defaultRuleForm(): RuleFormState {
+  return {
+    editingRuleId: "",
+    name: "",
+    effect: "suppress",
+    priority: "500",
+    enabled: true,
+    matcherPaths: "",
+    matcherCategories: "",
+    matcherSeverities: "",
+    titleRegex: "",
+    instruction: "",
+  };
+}
+
+/** Converts a loaded rule row into editable form state. */
+function ruleFormFromSummary(rule: AdminRepoRuleSummary): RuleFormState {
+  return {
+    editingRuleId: rule.ruleId,
+    name: rule.name,
+    effect: rule.effect,
+    priority: String(rule.priority),
+    enabled: rule.enabled,
+    matcherPaths: (rule.matcher.paths ?? []).join("\n"),
+    matcherCategories: (rule.matcher.categories ?? []).join("\n"),
+    matcherSeverities: (rule.matcher.severities ?? []).join("\n"),
+    titleRegex: rule.matcher.titleRegex ?? "",
+    instruction: rule.instruction,
+  };
+}
+
+/** Converts the repository rule form into an API request payload. */
+function ruleRequestFromForm(form: RuleFormState): Record<string, unknown> {
+  const matcher: Record<string, unknown> = {};
+  const paths = linesFromText(form.matcherPaths);
+  const categories = linesFromText(form.matcherCategories);
+  const severities = linesFromText(form.matcherSeverities);
+  if (paths.length > 0) {
+    matcher.paths = paths;
+  }
+  if (categories.length > 0) {
+    matcher.categories = categories;
+  }
+  if (severities.length > 0) {
+    matcher.severities = severities;
+  }
+  if (form.titleRegex.trim().length > 0) {
+    matcher.titleRegex = form.titleRegex.trim();
+  }
+
+  return {
+    name: form.name.trim(),
+    effect: form.effect,
+    matcher,
+    instruction: form.instruction.trim(),
+    priority: boundedNumber(form.priority, 0, 1000),
+    enabled: form.enabled,
   };
 }
 
@@ -3765,7 +9541,7 @@ function requestIdFromMetadata(metadata: unknown): string | undefined {
 
 /** Returns a CSS class for a durable status. */
 function statusClass(status: string): string {
-  if (["completed", "processed", "published"].includes(status)) {
+  if (["active", "completed", "processed", "published"].includes(status)) {
     return "ok";
   }
   if (["failed", "dead_lettered"].includes(status)) {
@@ -3819,9 +9595,87 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Downloads a browser blob with a temporary object URL. */
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Returns a safe filename for a downloaded artifact payload. */
+function artifactDownloadName(
+  artifact: AdminReviewArtifactSummary | undefined,
+  artifactId: string,
+): string {
+  const source = artifact?.name || `${artifactId}.json`;
+  const baseName = source
+    .replace(/[^A-Za-z0-9._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 120);
+  const filename = baseName || artifactId;
+
+  return filename.endsWith(".json") ? filename : `${filename}.json`;
+}
+
 /** Formats micro currency units for compact tables. */
 function formatMicros(value: number): string {
   return `$${(value / 1_000_000).toFixed(4)}`;
+}
+
+/** Formats a number for dense dashboard metrics. */
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat(undefined, { notation: "compact" }).format(value);
+}
+
+/** Formats a ratio as a dashboard percentage. */
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 0,
+    style: "percent",
+  }).format(value);
+}
+
+/** Formats an ISO timestamp as a date-only label. */
+function formatDateOnly(value: string): string {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value));
+}
+
+/** Returns the first instant of the current month as an ISO string. */
+function currentMonthStartIso(): string {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+}
+
+/** Returns the first instant of next month as an ISO string. */
+function currentMonthEndIso(): string {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+}
+
+/** Returns the current UTC billing month key. */
+function currentMonthKey(): string {
+  const now = new Date();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${now.getUTCFullYear()}-${month}`;
+}
+
+/** Shortens a hash or opaque ID for compact dashboard display. */
+function shortHash(value: string): string {
+  if (value.length <= 18) {
+    return value;
+  }
+
+  return `${value.slice(0, 10)}...${value.slice(-6)}`;
 }
 
 /** Formats an ISO timestamp for dashboard display. */
@@ -3832,9 +9686,86 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
+/** Returns whether a payment status should be highlighted. */
+function paymentNeedsAttention(status: string): boolean {
+  return status === "blocked" || status === "failed" || status === "past_due";
+}
+
+/** Returns the summed quantity for a usage rollup type and optional unit. */
+function usageQuantity(
+  summary: AdminUsageSummary,
+  eventType: string,
+  unit?: string | undefined,
+): number {
+  return summary.rollups
+    .filter((rollup) => rollup.eventType === eventType && (!unit || rollup.unit === unit))
+    .reduce((sum, rollup) => sum + rollup.quantity, 0);
+}
+
+/** Parses a numeric limit from a plan snapshot value. */
+function numericLimit(value: number | boolean | string | undefined): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+/** Returns used divided by limit, defaulting to zero when no finite limit exists. */
+function quotaRatio(used: number, limit: number | undefined): number {
+  return limit && limit > 0 ? used / limit : 0;
+}
+
+/** Returns whether quota usage should be highlighted. */
+function quotaNeedsAttention(used: number, limit: number | undefined): boolean {
+  return quotaRatio(used, limit) >= 0.8;
+}
+
+/** Formats small JSON-like values for dense tables. */
+function compactJson(value: unknown): string {
+  if (value === undefined) {
+    return "n/a";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return JSON.stringify(value);
+}
+
 /** Returns the message for an unknown error. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected admin console error.";
+}
+
+/** Returns whether an error came from an unauthenticated product session check. */
+function isUnauthorizedError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message.includes("HTTP 401") || error.message.includes("product_auth.unauthorized"))
+  );
+}
+
+/** Maps product auth callback errors to user-facing copy. */
+function authErrorMessage(code: string): string {
+  if (code === "github_oauth.state_invalid") {
+    return "GitHub sign-in expired. Start the login flow again.";
+  }
+  if (code === "github_oauth.unconfigured") {
+    return "GitHub sign-in is not configured for this deployment.";
+  }
+  if (code.startsWith("github_oauth.")) {
+    return "GitHub sign-in failed. Try again.";
+  }
+
+  return code;
 }
 
 /** Escapes text content before injecting it into HTML. */
@@ -3859,13 +9790,25 @@ function objectValues<T extends Record<string, unknown>>(value: T): T[keyof T][]
 
 /** Narrows a string to an inspector kind. */
 function isInspectorKind(value: string): value is InspectorKind {
-  return value === "webhook" || value === "review" || value === "publisher";
+  return (
+    value === "webhook" ||
+    value === "job" ||
+    value === "review" ||
+    value === "publisher" ||
+    value === "memory"
+  );
 }
 
 /** Narrows a string to a primary view kind. */
 function isViewKind(value: string): value is ViewKind {
   return (
-    value === "overview" || value === "inspectors" || value === "settings" || value === "audit"
+    value === "overview" ||
+    value === "inspectors" ||
+    value === "settings" ||
+    value === "usage" ||
+    value === "plan" ||
+    value === "billing" ||
+    value === "audit"
   );
 }
 
@@ -3890,14 +9833,31 @@ function isWebhookDetails(details: InspectorDetails): details is AdminWebhookDeb
   return "webhookEvent" in details;
 }
 
+/** Narrows inspector details to durable background job details. */
+function isBackgroundJobDetails(
+  details: InspectorDetails,
+): details is AdminBackgroundJobDebugDetails {
+  return "job" in details && "replayAudits" in details && "failures" in details;
+}
+
 /** Narrows inspector details to review details. */
 function isReviewDetails(details: InspectorDetails): details is AdminReviewDebugDetails {
   return "reviewRun" in details;
 }
 
+/** Narrows inspector details to memory and rules details. */
+function isMemoryRulesDetails(details: InspectorDetails): details is AdminMemoryRulesDebugDetails {
+  return "memoryFacts" in details && "rules" in details && "repository" in details;
+}
+
 /** Narrows replay plans to webhook replay plans. */
 function isWebhookReplayPlan(plan: InspectorReplayPlan): plan is WebhookReplayPlan {
   return plan.action === "webhook.requeue_jobs";
+}
+
+/** Narrows replay plans to durable background job replay plans. */
+function isBackgroundJobReplayPlan(plan: InspectorReplayPlan): plan is BackgroundJobReplayPlan {
+  return plan.action === "job.requeue";
 }
 
 /** Narrows replay plans to review replay plans. */
