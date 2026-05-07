@@ -358,7 +358,7 @@ async function runDashboardBrowserLogin(
   env: DashboardGateEnvironment,
 ): Promise<LoginResult> {
   await clickSelectorAllowingNavigation(browser, page, "[data-action='login-github']");
-  await waitForTextAcrossNavigation(browser, page, "Active", 180_000);
+  await waitForTextAcrossNavigation(browser, page, "Connected to", 180_000);
   await assertNoDashboardErrors(browser, page);
 
   const cookie = await readAdminSessionCookie(browser, page, env);
@@ -405,7 +405,7 @@ async function runDashboardDrill(
   page: BrowserPage,
   env: DashboardGateEnvironment,
 ): Promise<void> {
-  await waitForText(browser, page, "Active", 20_000);
+  await waitForText(browser, page, "Connected to", 20_000);
   await assertNoDashboardErrors(browser, page);
 
   await runReplayDrill(browser, page, env);
@@ -416,7 +416,7 @@ async function runDashboardDrill(
 /** Logs out through the dashboard UI and verifies that the session state clears. */
 async function logoutDashboard(browser: CdpClient, page: BrowserPage): Promise<void> {
   await clickSelector(browser, page, "[data-action='clear-auth']");
-  await waitForText(browser, page, "No session cookie", 20_000);
+  await waitForText(browser, page, "Connect to Heimdall", 20_000);
 }
 
 /** Runs the replay inspector plan-and-dispatch workflow. */
