@@ -8,5 +8,8 @@
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"],
   "exclude": ["dist", "node_modules"],
-  "references": [{ "path": "../github/tsconfig.build.json" }]
+  "references": [
+    { "path": "../github/tsconfig.build.json" },
+    { "path": "../observability/tsconfig.build.json" }
+  ]
 }

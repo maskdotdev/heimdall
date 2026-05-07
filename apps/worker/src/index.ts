@@ -428,9 +428,15 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           ...repository,
           commitSha: payload.commitSha,
           keepWorkspace: true,
+          repoId: payload.repoId,
           ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
         },
-        { gitProvider: options.gitProvider },
+        {
+          gitProvider: options.gitProvider,
+          ...(options.metrics ? { metrics: options.metrics } : {}),
+          ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+          ...(options.traces ? { traces: options.traces } : {}),
+        },
       );
       try {
         const driver = withIndexerTimeout(

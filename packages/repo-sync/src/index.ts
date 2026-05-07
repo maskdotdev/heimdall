@@ -4,6 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +24,8 @@ export type GitCommandRunner = (
 
 /** Input required to sync one repository workspace. */
 export type SyncRepositoryWorkspaceInput = GitHubRepositoryRef & {
+  /** Heimdall repository ID used for product-safe span correlation. */
+  readonly repoId?: string;
   /** Commit SHA that must be checked out. */
   readonly commitSha: string;
   /** Parent directory used for temporary workspaces. */
@@ -29,6 +40,12 @@ export type SyncRepositoryWorkspaceDependencies = {
   readonly gitProvider: Pick<GitProvider, "getCloneAuth">;
   /** Optional Git command runner for tests. */
   readonly gitRunner?: GitCommandRunner;
+  /** Optional metric recorder for aggregate repo-sync telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional trace context propagated from the durable indexing job. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe repo-sync spans. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Result returned after a repository workspace sync finishes. */
@@ -41,11 +58,26 @@ export type SyncRepositoryWorkspaceResult = {
   readonly cleanedUp: boolean;
 };
 
+type RepoSyncTelemetryStatus = "failed" | "succeeded";
+
+type RepoSyncTelemetryState = {
+  /** Low-cardinality labels shared by repo-sync operation metrics. */
+  readonly labels: Readonly<{
+    readonly operation: "checkout_workspace";
+    readonly provider: "github";
+  }>;
+  /** Monotonic start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Product-safe span for the workspace checkout. */
+  readonly span: TelemetrySpanHandle | undefined;
+};
+
 /** Fetches a GitHub repository, checks out an exact commit, and cleans up the workspace. */
 export async function syncRepositoryWorkspace(
   input: SyncRepositoryWorkspaceInput,
   dependencies: SyncRepositoryWorkspaceDependencies,
 ): Promise<SyncRepositoryWorkspaceResult> {
+  const telemetry = startRepoSyncTelemetry(input, dependencies);
   const workspacePath = await mkdtemp(join(input.workspaceRoot ?? tmpdir(), "heimdall-repo-"));
   const git = dependencies.gitRunner ?? runGit;
   let cleanedUp = false;
@@ -75,17 +107,91 @@ export async function syncRepositoryWorkspace(
       cleanedUp = true;
     }
 
-    return {
+    const result = {
       workspacePath,
       checkedOutSha,
       cleanedUp,
     };
+    finishRepoSyncTelemetry(dependencies.metrics, telemetry, {
+      cleanedUp,
+      status: "succeeded",
+    });
+    return result;
   } catch (error) {
     if (!cleanedUp) {
       await rm(workspacePath, { force: true, recursive: true });
     }
+    finishRepoSyncTelemetry(dependencies.metrics, telemetry, {
+      cleanedUp: true,
+      error,
+      status: "failed",
+    });
     throw error;
   }
+}
+
+/** Starts product-safe repo-sync telemetry and returns shared metric labels. */
+function startRepoSyncTelemetry(
+  input: SyncRepositoryWorkspaceInput,
+  dependencies: SyncRepositoryWorkspaceDependencies,
+): RepoSyncTelemetryState {
+  const labels = { operation: "checkout_workspace", provider: "github" } as const;
+  const span = dependencies.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.repoSyncCheckoutWorkspace, {
+    attributes: {
+      ...(input.repoId ? { "app.repo_id": input.repoId } : {}),
+      "repo_sync.keep_workspace": Boolean(input.keepWorkspace),
+      "repo_sync.operation": labels.operation,
+      "repo_sync.provider": labels.provider,
+    },
+    kind: "client",
+    ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
+  });
+
+  return {
+    labels,
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Ends a repo-sync span and emits aggregate operation metrics. */
+function finishRepoSyncTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: RepoSyncTelemetryState,
+  input: {
+    /** Whether the workspace was cleaned up before return or failure. */
+    readonly cleanedUp: boolean;
+    /** Error raised while syncing, when the operation failed. */
+    readonly error?: unknown;
+    /** Final repo-sync operation status. */
+    readonly status: RepoSyncTelemetryStatus;
+  },
+): void {
+  const durationMs = Date.now() - telemetry.startedAtMs;
+  const labels = {
+    ...telemetry.labels,
+    ...(input.error === undefined ? {} : { error_class: classifyTelemetryError(input.error) }),
+    status: input.status,
+  };
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.repoSyncOperationsTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.repoSyncDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+
+  telemetry.span?.end({
+    ...(input.error === undefined ? {} : { error: input.error }),
+    attributes: {
+      "repo_sync.cleaned_up": input.cleanedUp,
+      "repo_sync.duration_ms": Math.max(0, durationMs),
+      ...(input.error === undefined
+        ? {}
+        : { "repo_sync.error_class": classifyTelemetryError(input.error) }),
+      "repo_sync.status": input.status,
+    },
+    status: input.status === "succeeded" ? "ok" : "error",
+  });
 }
 
 /** Removes a retained repository workspace. */
