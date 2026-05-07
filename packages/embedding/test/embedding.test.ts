@@ -22,7 +22,10 @@ import {
   DEFAULT_EMBEDDING_DIMENSIONS,
   type EmbeddingProvider,
   EmbeddingProviderError,
+  type EmbeddingTokenRateCard,
+  type EmbeddingUsageEventInput,
   embedChunkBatch,
+  estimateEmbeddingTokenCost,
   type OpenAIEmbeddingsFetch,
   roughTokenEstimate,
 } from "../src";
@@ -411,6 +414,100 @@ describe("embedChunkBatch", () => {
     );
   });
 
+  it("records one idempotent usage event for each provider request batch", async () => {
+    const usageEvents: EmbeddingUsageEventInput[] = [];
+    const providerInputs: string[][] = [];
+    const rateCard = {
+      effectiveAt: "2026-05-07T00:00:00.000Z",
+      inputTokenCostMicrosPer1k: 100,
+      model: "text-embedding-3-small",
+      provider: "fake",
+      rateCardId: "embedding_rate_manual_test_v1",
+      source: "manual",
+    } satisfies EmbeddingTokenRateCard;
+    const provider = {
+      dimensions: 2,
+      embedTexts: async (texts) => {
+        providerInputs.push([...texts]);
+        return texts.map(() => [0.1, 0.2]);
+      },
+      model: "text-embedding-3-small",
+      providerId: "fake",
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      embedChunkBatch(testEmbeddingPayload(["chunk_1", "chunk_2"]), {
+        batchPolicy: {
+          maxCharsPerRequest: 1_000,
+          maxInputsPerRequest: 1,
+          maxTokensPerRequest: 1_000,
+        },
+        db: createEmbeddingDatabaseStub({
+          repositoryOrgId: "org_1",
+          rows: [
+            testCodeChunkRow("chunk_1", {
+              metadata: { text: "export const firstValue = 1;" },
+              path: "src/first.ts",
+            }),
+            testCodeChunkRow("chunk_2", {
+              metadata: { text: "export const secondValue = 2;" },
+              path: "src/second.ts",
+            }),
+          ],
+        }),
+        now: () => new Date("2026-05-07T12:00:00.000Z"),
+        provider,
+        usageLedger: {
+          record: async (event) => {
+            usageEvents.push(event);
+          },
+        },
+        usageRateCard: rateCard,
+      }),
+    ).resolves.toEqual({
+      embeddedChunkCount: 2,
+      skippedChunkIds: [],
+    });
+
+    expect(providerInputs).toHaveLength(2);
+    expect(usageEvents).toHaveLength(2);
+    expect(usageEvents.map((event) => event.idempotencyKey)).toEqual([
+      expect.stringContaining("embedding.token:idx_01HREVIEW:repo_01HREVIEW"),
+      expect.stringContaining("embedding.token:idx_01HREVIEW:repo_01HREVIEW"),
+    ]);
+    expect(new Set(usageEvents.map((event) => event.idempotencyKey)).size).toBe(2);
+    expect(usageEvents).toEqual(
+      providerInputs.map((batch, batchIndex) => {
+        const tokenCount = roughTokenEstimate(batch[0] ?? "");
+
+        return expect.objectContaining({
+          costMicros: estimateEmbeddingTokenCost({ rateCard, tokenCount }),
+          eventType: "embedding.token",
+          metadata: expect.objectContaining({
+            batchIndex,
+            dimensions: 2,
+            inputCount: 1,
+            inputKind: "code_chunk",
+            inputTokens: tokenCount,
+            model: "text-embedding-3-small",
+            provider: "fake",
+            rateCardId: "embedding_rate_manual_test_v1",
+            requestedModel: "text-embedding-3-small",
+          }),
+          occurredAt: "2026-05-07T12:00:00.000Z",
+          orgId: "org_1",
+          quantity: tokenCount,
+          repoId: "repo_01HREVIEW",
+          unit: "token",
+        });
+      }),
+    );
+    expect(JSON.stringify(usageEvents)).not.toContain("src/first.ts");
+    expect(JSON.stringify(usageEvents)).not.toContain("src/second.ts");
+    expect(JSON.stringify(usageEvents)).not.toContain("firstValue");
+    expect(JSON.stringify(usageEvents)).not.toContain("secondValue");
+  });
+
   it("records failed embedding telemetry when vector validation fails", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -626,6 +723,8 @@ function createEmbeddingDatabaseStub(options: {
   readonly cachedEmbeddingRows?: readonly TestCachedEmbeddingRow[];
   /** Captures values passed to the fake embedding insert. */
   readonly insertedValues?: unknown[] | undefined;
+  /** Owning org returned by repository lookups for usage-recording tests. */
+  readonly repositoryOrgId?: string;
   /** Chunk rows returned by the fake initial chunk lookup. */
   readonly rows: readonly TestCodeChunkRow[];
   /** Chunk IDs returned by the fake embedding insert. */
@@ -662,12 +761,20 @@ function createEmbeddingDatabaseStub(options: {
   const db = {
     select: () => ({
       from: (_table: unknown) => ({
-        where: async (_condition: unknown) => {
+        where: (_condition: unknown) => {
           const selectedRows =
-            rootSelectCount === 0 ? options.rows : (options.cachedEmbeddingRows ?? []);
+            rootSelectCount === 0
+              ? options.rows
+              : rootSelectCount === 1
+                ? (options.cachedEmbeddingRows ?? [])
+                : options.repositoryOrgId
+                  ? [{ orgId: options.repositoryOrgId }]
+                  : [];
           rootSelectCount += 1;
 
-          return selectedRows;
+          return Object.assign(Promise.resolve(selectedRows), {
+            limit: async (count: number) => selectedRows.slice(0, count),
+          });
         },
       }),
     }),

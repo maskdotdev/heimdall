@@ -5,6 +5,7 @@ import {
   codeChunks,
   codeIndexVersions,
   type HeimdallDatabase,
+  repositories,
 } from "@repo/db";
 import {
   classifyTelemetryError,
@@ -255,6 +256,62 @@ export type EmbeddingBatchPolicy = {
   readonly maxCharsPerRequest: number;
 };
 
+/** Versioned token price data used to estimate internal embedding cost. */
+export type EmbeddingTokenRateCard = {
+  /** ISO timestamp when this rate card became effective. */
+  readonly effectiveAt: string;
+  /** Input-token cost in micro-USD per 1,000 tokens. */
+  readonly inputTokenCostMicrosPer1k: number;
+  /** Embedding model the rate card applies to. */
+  readonly model: string;
+  /** Provider that owns the embedding model. */
+  readonly provider: string;
+  /** Stable rate-card version ID used in ledger metadata. */
+  readonly rateCardId: string;
+  /** Human-readable source for the rate card. */
+  readonly source: "manual" | "provider_api" | "imported_invoice" | "static";
+};
+
+/** Zero-cost rate card used by deterministic local embedding providers and tests. */
+export const ZERO_COST_EMBEDDING_RATE_CARD = {
+  effectiveAt: "1970-01-01T00:00:00.000Z",
+  inputTokenCostMicrosPer1k: 0,
+  model: "static",
+  provider: "static",
+  rateCardId: "embedding_rate_static_zero_v1",
+  source: "static",
+} as const satisfies EmbeddingTokenRateCard;
+
+/** Usage event shape emitted for embedding provider token usage. */
+export type EmbeddingUsageEventInput = {
+  /** Signed internal cost estimate in micro-USD. */
+  readonly costMicros?: number;
+  /** Product usage event type. */
+  readonly eventType: "embedding.token";
+  /** Stable key used by the ledger to derive a deterministic event ID. */
+  readonly idempotencyKey?: string;
+  /** Optional non-secret metadata for attribution and support. */
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Event occurrence time. Defaults to the ledger clock when omitted. */
+  readonly occurredAt?: string;
+  /** Organization that owns the usage. */
+  readonly orgId: string;
+  /** Signed integer quantity. */
+  readonly quantity: number;
+  /** Repository that caused the embedding usage. */
+  readonly repoId?: string;
+  /** Unit for the quantity. */
+  readonly unit: "token";
+  /** Optional explicit event ID for migrations and replay tools. */
+  readonly usageEventId?: string;
+};
+
+/** Minimal ledger boundary used to record embedding usage without coupling to one store. */
+export type EmbeddingUsageLedger = {
+  /** Records one embedding token usage event idempotently. */
+  readonly record: (input: EmbeddingUsageEventInput) => Promise<unknown>;
+};
+
 /** Result produced after embedding one chunk batch. */
 export type EmbedChunkBatchResult = {
   /** Number of chunks newly embedded and stored. */
@@ -275,10 +332,16 @@ export type EmbedChunkBatchOptions = {
   readonly batchPolicy?: EmbeddingBatchPolicy;
   /** Optional metric recorder for product-safe aggregate embedding telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
+  /** Optional clock used for deterministic usage event timestamps. */
+  readonly now?: () => Date;
   /** Optional trace context propagated from the durable embedding job. */
   readonly traceContext?: TelemetryTraceContextInput | undefined;
   /** Optional span recorder for product-safe embedding spans. */
   readonly traces?: TelemetrySpanRecorder;
+  /** Optional token rate card used to estimate internal embedding provider cost. */
+  readonly usageRateCard?: EmbeddingTokenRateCard;
+  /** Optional usage ledger for recording provider token events. */
+  readonly usageLedger?: EmbeddingUsageLedger;
 };
 
 type EmbeddingTelemetryStatus = "failed" | "succeeded";
@@ -398,8 +461,12 @@ export async function embedChunkBatch(
       providerInputs,
       skippedChunkCount: skippedChunkIds.length,
     });
+    const usageOrgId =
+      options.usageLedger && providerInputs.length > 0
+        ? await loadEmbeddingRepositoryOrgId(options.db, payload.repoId)
+        : undefined;
 
-    for (const inputBatch of inputBatches) {
+    for (const [batchIndex, inputBatch] of inputBatches.entries()) {
       const vectors = validateEmbeddingVectors(
         await options.provider.embedTexts(inputBatch.map((input) => input.text)),
         inputBatch.length,
@@ -408,6 +475,13 @@ export async function embedChunkBatch(
       for (const [index, input] of inputBatch.entries()) {
         vectorsByInputId.set(input.inputId, vectors[index] ?? []);
       }
+      await recordEmbeddingProviderUsage({
+        batchIndex,
+        inputBatch,
+        options,
+        orgId: usageOrgId,
+        payload,
+      });
     }
 
     let insertedChunkCount = 0;
@@ -727,6 +801,20 @@ export function roughTokenEstimate(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
+/** Estimates internal embedding provider cost from token usage and a rate card. */
+export function estimateEmbeddingTokenCost(input: {
+  /** Rate card to apply. Defaults to the zero-cost static rate card. */
+  readonly rateCard?: EmbeddingTokenRateCard;
+  /** Estimated provider input tokens. */
+  readonly tokenCount: number;
+}): number {
+  const rateCard = input.rateCard ?? ZERO_COST_EMBEDDING_RATE_CARD;
+  assertSafeInteger("tokenCount", input.tokenCount);
+  assertSafeInteger("inputTokenCostMicrosPer1k", rateCard.inputTokenCostMicrosPer1k);
+
+  return Math.ceil((input.tokenCount * rateCard.inputTokenCostMicrosPer1k) / 1_000);
+}
+
 /** Deterministic local embedding provider for tests and offline retrieval smoke checks. */
 export function createHashEmbeddingProvider(
   model = "heimdall-hash-embedding",
@@ -992,6 +1080,90 @@ async function loadCachedEmbeddingVectors(input: {
   return vectorsByInputId;
 }
 
+/** Loads the owning organization for a repository before recording provider usage. */
+async function loadEmbeddingRepositoryOrgId(db: HeimdallDatabase, repoId: string): Promise<string> {
+  const [repository] = await db
+    .select({ orgId: repositories.orgId })
+    .from(repositories)
+    .where(eq(repositories.repoId, repoId))
+    .limit(1);
+
+  if (!repository) {
+    throw new Error(`Repository ${repoId} was not found for embedding usage recording.`);
+  }
+
+  return repository.orgId;
+}
+
+/** Records one idempotent embedding-token usage event for a successful provider batch call. */
+async function recordEmbeddingProviderUsage(input: {
+  /** Zero-based provider batch sequence inside the embedding job. */
+  readonly batchIndex: number;
+  /** Provider inputs sent by this call. */
+  readonly inputBatch: readonly BuiltEmbeddingInput[];
+  /** Embedding options that may carry usage dependencies. */
+  readonly options: EmbedChunkBatchOptions;
+  /** Organization that owns the repository, when usage recording is enabled. */
+  readonly orgId: string | undefined;
+  /** Durable embedding job payload. */
+  readonly payload: EmbeddingBatchJobPayload;
+}): Promise<void> {
+  if (!input.options.usageLedger || !input.orgId || input.inputBatch.length === 0) {
+    return;
+  }
+
+  const tokenCount = input.inputBatch.reduce((total, entry) => total + entry.tokenEstimate, 0);
+  if (tokenCount <= 0) {
+    return;
+  }
+
+  const provider = input.options.provider.providerId ?? "unknown";
+  const rateCard = input.options.usageRateCard ?? ZERO_COST_EMBEDDING_RATE_CARD;
+  const inputSetHash = sha256(
+    input.inputBatch
+      .map((entry) => `${entry.inputId}:${entry.inputHash}`)
+      .sort()
+      .join("\n"),
+  );
+
+  await input.options.usageLedger.record({
+    costMicros: estimateEmbeddingTokenCost({ rateCard, tokenCount }),
+    eventType: "embedding.token",
+    idempotencyKey: [
+      "embedding.token",
+      input.payload.indexVersionId,
+      input.payload.repoId,
+      input.payload.embeddingModel,
+      provider,
+      input.options.provider.dimensions,
+      DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+      inputSetHash,
+    ].join(":"),
+    metadata: {
+      batchIndex: input.batchIndex,
+      dimensions: input.options.provider.dimensions,
+      embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+      inputCount: input.inputBatch.length,
+      inputKind: "code_chunk",
+      inputSetHash,
+      inputTokens: tokenCount,
+      model: input.options.provider.model,
+      provider,
+      rateCardEffectiveAt: rateCard.effectiveAt,
+      rateCardId: rateCard.rateCardId,
+      rateCardModel: rateCard.model,
+      rateCardProvider: rateCard.provider,
+      rateCardSource: rateCard.source,
+      requestedModel: input.payload.embeddingModel,
+    },
+    occurredAt: (input.options.now ?? (() => new Date()))().toISOString(),
+    orgId: input.orgId,
+    quantity: tokenCount,
+    repoId: input.payload.repoId,
+    unit: "token",
+  });
+}
+
 /** Validates that provider output matches the storage contract before writing rows. */
 function validateEmbeddingVectors(
   vectors: readonly (readonly number[])[],
@@ -1117,6 +1289,13 @@ function stableId(prefix: string, parts: readonly unknown[]): string {
     .update(parts.map((part) => String(part)).join(":"))
     .digest("base64url")
     .slice(0, 26)}`;
+}
+
+/** Fails when a value cannot be safely stored in an integer usage field. */
+function assertSafeInteger(name: string, value: number): void {
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`Embedding usage ${name} must be a safe integer.`);
+  }
 }
 
 /** Normalizes one cache-key component without allowing empty fields. */

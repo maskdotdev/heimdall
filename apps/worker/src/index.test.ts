@@ -2,6 +2,7 @@ import { REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY } from "@repo/artifacts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
   validBillingReconcileJobPayloadFixture,
+  validEmbeddingBatchJobPayloadFixture,
   validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
@@ -329,6 +330,55 @@ describe("createWorkerEmbeddingProviderFromEnvironment", () => {
 });
 
 describe("createWorkerHandlers", () => {
+  it("records embedding usage events through the configured ledger", async () => {
+    const usageEvents: unknown[] = [];
+    const payload = validEmbeddingBatchJobPayloadFixture;
+    const handlers = createWorkerHandlers({
+      db: createWorkerEmbeddingDatabaseStub(payload.chunkIds),
+      embeddingProvider: {
+        dimensions: 2,
+        embedTexts: async (texts) => texts.map(() => [0.1, 0.2]),
+        model: payload.embeddingModel,
+        providerId: "fake",
+      },
+      gitProvider: {} as never,
+      usageLedger: {
+        record: async (event: unknown) => {
+          usageEvents.push(event);
+        },
+      } as never,
+    });
+
+    await handlers[JOB_TYPES.EmbeddingBatch]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "embedding:batch:idx_01HXAMPLE:chunk_01HXAMPLE",
+      jobId: "job_embedding_batch",
+      jobType: JOB_TYPES.EmbeddingBatch,
+      maxAttempts: 3,
+      payload,
+      schemaVersion: "embedding_batch_job.v1",
+    });
+
+    expect(usageEvents).toEqual([
+      expect.objectContaining({
+        eventType: "embedding.token",
+        metadata: expect.objectContaining({
+          dimensions: 2,
+          inputCount: 1,
+          inputKind: "code_chunk",
+          provider: "fake",
+          requestedModel: payload.embeddingModel,
+        }),
+        orgId: "org_1",
+        repoId: payload.repoId,
+        unit: "token",
+      }),
+    ]);
+    expect(JSON.stringify(usageEvents)).not.toContain("src/private.ts");
+    expect(JSON.stringify(usageEvents)).not.toContain("secretValue");
+  });
+
   it("dispatches billing reconciliation jobs through the configured reconciler", async () => {
     const payloads: unknown[] = [];
     const handlers = createWorkerHandlers({
@@ -1175,6 +1225,57 @@ function createWorkerRecordingMetrics(records: WorkerRecordedMetric[]): Telemetr
       });
     },
   };
+}
+
+/** Creates a database stub that supports the embedding handler path. */
+function createWorkerEmbeddingDatabaseStub(chunkIds: readonly string[]): never {
+  const rows = chunkIds.map((chunkId, index) => ({
+    chunkId,
+    contentHash: `sha256:${"a".repeat(64)}`,
+    endLine: index + 1,
+    metadata: { text: "export const secretValue = process.env.SECRET_VALUE;" },
+    path: "src/private.ts",
+    startLine: index + 1,
+    symbolId: null,
+  }));
+  let rootSelectCount = 0;
+  const transaction = {
+    insert: () => ({
+      values: () => ({
+        onConflictDoNothing: () => ({
+          returning: async () => chunkIds.map((chunkId) => ({ chunkId })),
+        }),
+      }),
+    }),
+    select: () => ({
+      from: () => ({
+        where: async () => [{ embeddedChunkCount: chunkIds.length }],
+      }),
+    }),
+    update: () => ({
+      set: () => ({
+        where: async () => undefined,
+      }),
+    }),
+  };
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => {
+          const selectedRows =
+            rootSelectCount === 0 ? rows : rootSelectCount === 1 ? [] : [{ orgId: "org_1" }];
+          rootSelectCount += 1;
+
+          return Object.assign(Promise.resolve(selectedRows), {
+            limit: async (count: number) => selectedRows.slice(0, count),
+          });
+        },
+      }),
+    }),
+    transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback(transaction),
+  };
+
+  return db as never;
 }
 
 /** In-memory Redis script harness shared by cross-process throttle unit tests. */

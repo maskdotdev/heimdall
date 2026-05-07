@@ -51,6 +51,7 @@ import {
   createEmbeddingProviderFromEnvironment,
   createOpenAIEmbeddingProvider,
   type EmbeddingProvider,
+  type EmbeddingTokenRateCard,
   embedChunkBatch,
   type OpenAIEmbeddingsFetch,
 } from "@repo/embedding";
@@ -129,7 +130,7 @@ import {
 } from "@repo/sandbox";
 import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } from "@repo/security";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
-import { reconcileBillingState } from "@repo/usage";
+import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Worker } from "bullmq";
 import { and, asc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
 import IORedis from "ioredis";
@@ -168,6 +169,8 @@ export type CreateWorkerHandlersOptions = {
   readonly gitProvider: GitProvider;
   /** Optional embedding provider used by embedding jobs. */
   readonly embeddingProvider?: EmbeddingProvider;
+  /** Optional token rate card used to estimate embedding provider costs. */
+  readonly embeddingUsageRateCard?: EmbeddingTokenRateCard;
   /** Optional model gateway used by review jobs. */
   readonly llmGateway?: LLMGateway;
   /** Optional static-analysis runner used by review jobs. */
@@ -188,6 +191,8 @@ export type CreateWorkerHandlersOptions = {
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder passed into review orchestration. */
   readonly traces?: TelemetrySpanRecorder;
+  /** Optional usage ledger shared by review and embedding jobs. */
+  readonly usageLedger?: UsageLedger;
 };
 
 /** Environment values used to select the worker indexer driver. */
@@ -558,6 +563,11 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           (await createWorkerEmbeddingProviderFromEnvironment(process.env, {
             model: payload.embeddingModel,
           })),
+        ...(options.embeddingUsageRateCard
+          ? { usageRateCard: options.embeddingUsageRateCard }
+          : {}),
+        usageLedger:
+          options.usageLedger ?? new UsageLedger(new PostgresUsageLedgerStore(options.db)),
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
@@ -579,6 +589,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
+        ...(options.usageLedger ? { usageLedger: options.usageLedger } : {}),
         ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       });
     },
