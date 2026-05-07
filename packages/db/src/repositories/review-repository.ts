@@ -14,6 +14,7 @@ import {
   publishedFindings,
   publishPlans,
   reviewArtifacts,
+  reviewRunMetrics,
   reviewRunStageEvents,
   reviewRuns,
   validatedFindings,
@@ -108,6 +109,40 @@ export type PublishPlanInsert = {
   readonly metadata?: Record<string, unknown>;
   /** Plan creation time. */
   readonly createdAt?: Date | string;
+};
+
+/** Durable review-run metric rollup values to upsert. */
+export type ReviewRunMetricsInput = {
+  /** Review run that owns the metrics row. */
+  readonly reviewRunId: string;
+  /** Total review duration in milliseconds. */
+  readonly totalDurationMs?: number | null;
+  /** Snapshot stage duration in milliseconds. */
+  readonly snapshotDurationMs?: number | null;
+  /** Index-wait stage duration in milliseconds. */
+  readonly indexWaitDurationMs?: number | null;
+  /** Retrieval stage duration in milliseconds. */
+  readonly retrievalDurationMs?: number | null;
+  /** Review-engine stage duration in milliseconds. */
+  readonly reviewEngineDurationMs?: number | null;
+  /** Validation stage duration in milliseconds. */
+  readonly validationDurationMs?: number | null;
+  /** Publishing stage duration in milliseconds. */
+  readonly publishingDurationMs?: number | null;
+  /** Candidate finding count produced by review passes. */
+  readonly candidateFindings?: number | null;
+  /** Validated finding count retained for publish decisions. */
+  readonly validatedFindings?: number | null;
+  /** Finding count marked publishable. */
+  readonly publishedFindings?: number | null;
+  /** Finding count rejected by validation or policy. */
+  readonly rejectedFindings?: number | null;
+  /** Estimated model input tokens for the run. */
+  readonly inputTokens?: number | null;
+  /** Estimated model output tokens for the run. */
+  readonly outputTokens?: number | null;
+  /** Estimated model cost in USD, serialized for numeric storage. */
+  readonly estimatedCostUsd?: string | null;
 };
 
 /** Published finding fields used by validation to avoid duplicate comments on reruns. */
@@ -384,6 +419,33 @@ export class ReviewRepository {
       status: input.status,
       message: input.message,
       metadata: input.metadata,
+    });
+  }
+
+  /** Upserts dashboard-friendly rollup metrics for a terminal review run. */
+  public async upsertReviewRunMetrics(input: ReviewRunMetricsInput): Promise<void> {
+    const values = {
+      reviewRunId: input.reviewRunId,
+      totalDurationMs: input.totalDurationMs ?? null,
+      snapshotDurationMs: input.snapshotDurationMs ?? null,
+      indexWaitDurationMs: input.indexWaitDurationMs ?? null,
+      retrievalDurationMs: input.retrievalDurationMs ?? null,
+      reviewEngineDurationMs: input.reviewEngineDurationMs ?? null,
+      validationDurationMs: input.validationDurationMs ?? null,
+      publishingDurationMs: input.publishingDurationMs ?? null,
+      candidateFindings: input.candidateFindings ?? null,
+      validatedFindings: input.validatedFindings ?? null,
+      publishedFindings: input.publishedFindings ?? null,
+      rejectedFindings: input.rejectedFindings ?? null,
+      inputTokens: input.inputTokens ?? null,
+      outputTokens: input.outputTokens ?? null,
+      estimatedCostUsd: input.estimatedCostUsd ?? null,
+      updatedAt: new Date(),
+    };
+
+    await this.db.insert(reviewRunMetrics).values(values).onConflictDoUpdate({
+      target: reviewRunMetrics.reviewRunId,
+      set: values,
     });
   }
 }

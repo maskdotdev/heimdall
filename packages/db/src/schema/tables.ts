@@ -6,6 +6,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   primaryKey,
   real,
@@ -543,6 +544,28 @@ export const reviewRunStageEvents = pgTable("review_run_stage_events", {
   message: text("message"),
   occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   metadata: jsonb("metadata"),
+});
+
+/** Durable rollup metrics for dashboard and analytics queries. */
+export const reviewRunMetrics = pgTable("review_run_metrics", {
+  reviewRunId: text("review_run_id")
+    .primaryKey()
+    .references(() => reviewRuns.reviewRunId),
+  totalDurationMs: integer("total_duration_ms"),
+  snapshotDurationMs: integer("snapshot_duration_ms"),
+  indexWaitDurationMs: integer("index_wait_duration_ms"),
+  retrievalDurationMs: integer("retrieval_duration_ms"),
+  reviewEngineDurationMs: integer("review_engine_duration_ms"),
+  validationDurationMs: integer("validation_duration_ms"),
+  publishingDurationMs: integer("publishing_duration_ms"),
+  candidateFindings: integer("candidate_findings"),
+  validatedFindings: integer("validated_findings"),
+  publishedFindings: integer("published_findings"),
+  rejectedFindings: integer("rejected_findings"),
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 6 }),
+  ...timestamps,
 });
 
 /** Index versions and other durable inputs used by a review run. */

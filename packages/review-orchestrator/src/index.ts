@@ -26,6 +26,7 @@ import {
   RepoRuleRepository,
   RepositoryRepository,
   ReviewRepository,
+  type ReviewRunMetricsInput,
   repositories,
 } from "@repo/db";
 import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
@@ -441,6 +442,7 @@ export async function runPullRequestReview(
         status: "skipped",
         metadata: { decision: quotaReservation.decision },
       });
+      await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
 
       const result = {
         reviewRunId: reviewRun.reviewRunId,
@@ -1128,6 +1130,7 @@ export async function runPullRequestReview(
           },
         },
       });
+      await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
 
       const result = {
         reviewRunId: reviewRun.reviewRunId,
@@ -1238,6 +1241,7 @@ export async function runPullRequestReview(
           },
         },
       });
+      await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
 
       const result = {
         reviewRunId: reviewRun.reviewRunId,
@@ -1367,6 +1371,7 @@ export async function runPullRequestReview(
         publishPlanArtifactId: publishPlanArtifact.artifactId,
       },
     });
+    await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
 
     const result = {
       reviewRunId: reviewRun.reviewRunId,
@@ -1390,7 +1395,7 @@ export async function runPullRequestReview(
         quotaReservationId: quotaReservation.reservation.quotaReservationId,
       });
     }
-    await reviewRepository.upsertReviewRun({
+    const failedReviewRun = await reviewRepository.upsertReviewRun({
       ...reviewRun,
       status: "failed",
       completedAt: failedAt,
@@ -1412,6 +1417,7 @@ export async function runPullRequestReview(
           : {}),
       },
     });
+    await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(failedReviewRun));
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: currentStage,
@@ -2111,6 +2117,32 @@ function createReviewRun(input: {
       policySnapshot: policySnapshotMetadata(input.policySnapshot),
     },
   };
+}
+
+/** Builds durable dashboard metrics from a terminal review run row. */
+function reviewRunMetricsFromReviewRun(reviewRun: ReviewRun): ReviewRunMetricsInput {
+  return {
+    reviewRunId: reviewRun.reviewRunId,
+    totalDurationMs: reviewRunTotalDurationMs(reviewRun),
+    candidateFindings: reviewRun.counts.candidateFindings,
+    validatedFindings: reviewRun.counts.validatedFindings,
+    publishedFindings: reviewRun.counts.publishedFindings,
+    rejectedFindings: reviewRun.counts.rejectedFindings,
+  };
+}
+
+/** Returns total review duration in milliseconds when both timestamps are known. */
+function reviewRunTotalDurationMs(reviewRun: ReviewRun): number | null {
+  if (!reviewRun.startedAt || !reviewRun.completedAt) {
+    return null;
+  }
+  const startedAtMs = Date.parse(reviewRun.startedAt);
+  const completedAtMs = Date.parse(reviewRun.completedAt);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)) {
+    return null;
+  }
+
+  return Math.max(0, completedAtMs - startedAtMs);
 }
 
 /** Returns compact policy metadata safe to store on review runs and traces. */

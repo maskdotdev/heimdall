@@ -41,6 +41,7 @@ import {
   repositories,
   repositorySettings,
   reviewArtifacts,
+  reviewRunMetrics,
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
@@ -79,6 +80,10 @@ const sandboxRepositorySettingsMigrationPath = resolve(
   "../migrations/0015_spicy_piledriver.sql",
 );
 const evalHistoryMigrationPath = resolve(testDirectory, "../migrations/0016_grey_ozymandias.sql");
+const reviewRunMetricsMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0017_secret_ironclad.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -99,6 +104,8 @@ describe("database schema foundation", () => {
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
     expect(indexedFiles.fileId.name).toBe("file_id");
     expect(reviewArtifacts.reviewArtifactId.name).toBe("review_artifact_id");
+    expect(reviewRunMetrics.reviewRunId.name).toBe("review_run_id");
+    expect(reviewRunMetrics.totalDurationMs.name).toBe("total_duration_ms");
     expect(sandboxRuns.sandboxRunId.name).toBe("sandbox_run_id");
     expect(sandboxArtifacts.sandboxArtifactId.name).toBe("sandbox_artifact_id");
     expect(sandboxPolicyDecisions.sandboxPolicyDecisionId.name).toBe("sandbox_policy_decision_id");
@@ -160,6 +167,7 @@ describe("database schema foundation", () => {
       "utf8",
     );
     const evalHistoryMigration = await readFile(evalHistoryMigrationPath, "utf8");
+    const reviewRunMetricsMigration = await readFile(reviewRunMetricsMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -211,6 +219,8 @@ describe("database schema foundation", () => {
     expect(evalHistoryMigration).toContain('CREATE TABLE "eval_case_results"');
     expect(evalHistoryMigration).toContain('CREATE TABLE "eval_human_labels"');
     expect(evalHistoryMigration).toContain('CREATE TABLE "eval_baselines"');
+    expect(reviewRunMetricsMigration).toContain('CREATE TABLE "review_run_metrics"');
+    expect(reviewRunMetricsMigration).toContain('"estimated_cost_usd" numeric(12, 6)');
   });
 });
 
@@ -373,6 +383,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('eval_case_results')::text) AS eval_case_results_table,
         (SELECT to_regclass('eval_human_labels')::text) AS eval_human_labels_table,
         (SELECT to_regclass('eval_baselines')::text) AS eval_baselines_table,
+        (SELECT to_regclass('review_run_metrics')::text) AS review_run_metrics_table,
         (SELECT to_regclass('users')::text) AS users_table,
         (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
     `;
@@ -395,6 +406,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       publish_plans_table: "publish_plans",
       oauth_states_table: "oauth_states",
       replay_runs_table: "replay_runs",
+      review_run_metrics_table: "review_run_metrics",
       sandbox_artifacts_table: "sandbox_artifacts",
       sandbox_policy_decisions_table: "sandbox_policy_decisions",
       sandbox_runs_table: "sandbox_runs",
