@@ -121,6 +121,15 @@ type ReviewSnapshotFetchResult = {
   readonly rawDiffBytes?: number;
 };
 
+/** Input used to check whether a review run still targets the current PR head. */
+export type ReviewRunCurrentCheckInput = GitHubPullRequestRef & {
+  /** Head commit SHA the review run is about to publish. */
+  readonly expectedHeadSha: string;
+};
+
+/** Current-head state for a review run just before publish handoff. */
+export type ReviewRunCurrentStatus = "current" | "superseded" | "closed" | "unknown";
+
 /** Workspace sync function used by review orchestration. */
 export type SyncWorkspace = (
   input: GitHubRepositoryRef & {
@@ -238,6 +247,7 @@ export async function runPullRequestReview(
     }),
   );
   let quotaReservation: ReserveQuotaResult | undefined;
+  let quotaReservationFinalized = false;
   let currentStage = "snapshot";
 
   try {
@@ -588,6 +598,60 @@ export async function runPullRequestReview(
         validatedFindingCount: validatedFindings.length,
       },
     });
+    const currentStatus = await checkReviewRunCurrent(dependencies.gitProvider, {
+      ...pullRequestRef,
+      expectedHeadSha: snapshot.headSha,
+    });
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "staleness",
+      status: currentStatus,
+      metadata: {
+        expectedHeadSha: snapshot.headSha,
+        pullRequestNumber: snapshot.pullRequestNumber,
+      },
+    });
+    if (currentStatus === "superseded" || currentStatus === "closed") {
+      const completedAt = now().toISOString();
+      await quotaService.releaseReservation({
+        now: completedAt,
+        quotaReservationId: quotaReservation.reservation.quotaReservationId,
+      });
+      quotaReservationFinalized = true;
+      reviewRun = await reviewRepository.upsertReviewRun({
+        ...reviewRun,
+        status: currentStatus === "superseded" ? "superseded" : "skipped",
+        completedAt,
+        updatedAt: completedAt,
+        summary:
+          currentStatus === "superseded"
+            ? "Review superseded before publish because the pull request head changed."
+            : "Review skipped before publish because the pull request is no longer open.",
+        artifactRefs: [...artifacts, contextArtifact, candidateArtifact, validatedArtifact],
+        counts: {
+          candidateFindings: candidateFindings.length,
+          validatedFindings: publishedFindingCount,
+          publishedFindings: 0,
+          rejectedFindings: rejectedFindingCount,
+        },
+        metadata: {
+          ...reviewRun.metadata,
+          currentStage: "staleness",
+          staleness: {
+            expectedHeadSha: snapshot.headSha,
+            status: currentStatus,
+          },
+        },
+      });
+
+      return {
+        reviewRunId: reviewRun.reviewRunId,
+        snapshotId: snapshot.snapshotId,
+        candidateFindingCount: candidateFindings.length,
+        validatedFindingCount: publishedFindingCount,
+      };
+    }
+
     const publishJobKey = createPublishJobKey(reviewRunId);
     reviewRun = await transitionReviewRunStage(
       reviewRepository,
@@ -613,6 +677,7 @@ export async function runPullRequestReview(
       now: completedAt,
       quotaReservationId: quotaReservation.reservation.quotaReservationId,
     });
+    quotaReservationFinalized = true;
     await usageLedger.recordMany([
       {
         idempotencyKey: `review.run.completed:${reviewRunId}`,
@@ -690,7 +755,7 @@ export async function runPullRequestReview(
     };
   } catch (error) {
     const failedAt = now().toISOString();
-    if (quotaReservation?.reservation?.status === "reserved") {
+    if (quotaReservation?.reservation?.status === "reserved" && !quotaReservationFinalized) {
       await quotaService.releaseReservation({
         now: failedAt,
         quotaReservationId: quotaReservation.reservation.quotaReservationId,
@@ -794,6 +859,29 @@ async function fetchPullRequestSnapshotForReview(
   return {
     snapshot: await gitProvider.fetchPullRequestSnapshot(input),
   };
+}
+
+/** Checks whether the provider PR state still matches the review run's expected head. */
+export async function checkReviewRunCurrent(
+  gitProvider: Pick<GitProvider, "fetchPullRequestSnapshot">,
+  input: ReviewRunCurrentCheckInput,
+): Promise<ReviewRunCurrentStatus> {
+  try {
+    const snapshot = await gitProvider.fetchPullRequestSnapshot(input);
+    if (snapshot.state === "closed" || snapshot.state === "merged") {
+      return "closed";
+    }
+    if (snapshot.state !== "open") {
+      return "unknown";
+    }
+    if (snapshot.headSha !== input.expectedHeadSha) {
+      return "superseded";
+    }
+
+    return "current";
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Loads a GitHub repository reference for review orchestration. */

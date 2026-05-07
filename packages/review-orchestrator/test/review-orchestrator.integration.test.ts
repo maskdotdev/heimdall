@@ -110,7 +110,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       line_anchor_artifacts: 1,
       raw_diff_artifacts: 1,
       validated_findings: 1,
-      stage_events: 8,
+      stage_events: 9,
       llm_calls: 1,
       llm_usage_events: 1,
       review_credit_events: 1,
