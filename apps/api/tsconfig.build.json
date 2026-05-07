@@ -13,6 +13,7 @@
     { "path": "../../packages/artifacts/tsconfig.build.json" },
     { "path": "../../packages/billing/tsconfig.build.json" },
     { "path": "../../packages/config/tsconfig.build.json" },
+    { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/db/tsconfig.build.json" },
     { "path": "../../packages/queue/tsconfig.build.json" },
     { "path": "../../packages/security/tsconfig.build.json" },

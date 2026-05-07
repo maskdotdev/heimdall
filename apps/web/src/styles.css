@@ -1290,6 +1290,11 @@ button.small {
   background: var(--surface-3);
 }
 
+.repo-card.selected {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary-muted);
+}
+
 .repo-title {
   display: flex;
   align-items: center;

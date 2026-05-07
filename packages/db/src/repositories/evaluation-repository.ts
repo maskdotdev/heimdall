@@ -1,4 +1,4 @@
-import { desc, eq, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   evalBaselines,
@@ -57,6 +57,12 @@ export type EvalHistoryWrite = {
 export type ListEvalRunsForSuiteInput = {
   /** Suite ID to filter by. */
   readonly evalSuiteId: string;
+  /** Maximum rows to return. */
+  readonly limit?: number;
+};
+
+/** Options for listing evaluation suites. */
+export type ListEvalSuitesInput = {
   /** Maximum rows to return. */
   readonly limit?: number;
 };
@@ -249,6 +255,27 @@ export class EvaluationRepository {
   /** Gets one eval run by ID. */
   public async getEvalRun(evalRunId: string): Promise<EvalRunRow | undefined> {
     const [row] = await this.db.select().from(evalRuns).where(eq(evalRuns.evalRunId, evalRunId));
+
+    return row;
+  }
+
+  /** Lists persisted eval suites in stable display order. */
+  public async listEvalSuites(input: ListEvalSuitesInput = {}): Promise<readonly EvalSuiteRow[]> {
+    return await this.db
+      .select()
+      .from(evalSuites)
+      .orderBy(asc(evalSuites.name), desc(evalSuites.updatedAt))
+      .limit(input.limit ?? 25);
+  }
+
+  /** Gets the active baseline pointer for one eval suite. */
+  public async getActiveEvalBaseline(evalSuiteId: string): Promise<EvalBaselineRow | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(evalBaselines)
+      .where(and(eq(evalBaselines.evalSuiteId, evalSuiteId), eq(evalBaselines.active, true)))
+      .orderBy(desc(evalBaselines.createdAt))
+      .limit(1);
 
     return row;
   }

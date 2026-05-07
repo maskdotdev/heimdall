@@ -1024,7 +1024,15 @@ type AdminMemoryRulesDebugDetails = {
 type InspectorKind = "webhook" | "job" | "review" | "publisher" | "memory";
 
 /** Primary dashboard view. */
-type ViewKind = "overview" | "inspectors" | "settings" | "usage" | "plan" | "billing" | "audit";
+type ViewKind =
+  | "overview"
+  | "inspectors"
+  | "settings"
+  | "evaluation"
+  | "usage"
+  | "plan"
+  | "billing"
+  | "audit";
 
 /** Top-level console mode. */
 type ConsoleMode = "product" | "admin";
@@ -1180,6 +1188,122 @@ type AdminReviewRunSummary = {
   readonly failure?: AdminFailureDetail;
   /** Durable jobs tied to this review when detail data is loaded. */
   readonly relatedJobs?: readonly AdminBackgroundJobDebugSummary[];
+};
+
+/** Evaluation run summary returned by admin history routes. */
+type EvaluationRunSummary = {
+  /** Baseline variant ID when this run compares against one. */
+  readonly baselineVariantId?: string;
+  /** Source branch associated with the run when known. */
+  readonly branch?: string;
+  /** Number of cases evaluated. */
+  readonly caseCount: number;
+  /** Completion timestamp when the run finished. */
+  readonly completedAt?: string;
+  /** Execution environment label. */
+  readonly environment: string;
+  /** Structured run error when present. */
+  readonly error?: unknown;
+  /** Evaluation run ID. */
+  readonly evalRunId: string;
+  /** Evaluation suite ID. */
+  readonly evalSuiteId: string;
+  /** Evaluation variant ID. */
+  readonly evalVariantId: string;
+  /** Source commit SHA when known. */
+  readonly gitCommitSha?: string;
+  /** Report artifact URI when available. */
+  readonly reportUri?: string;
+  /** Run start timestamp. */
+  readonly startedAt: string;
+  /** Run status. */
+  readonly status: string;
+  /** Structured metric summary. */
+  readonly summary?: unknown;
+  /** Actor or system that triggered the run. */
+  readonly triggeredBy: string;
+};
+
+/** Active baseline pointer returned with an evaluation suite. */
+type EvaluationBaselineSummary = {
+  /** Whether the baseline pointer is active. */
+  readonly active: boolean;
+  /** Baseline variant ID. */
+  readonly baselineVariantId: string;
+  /** Baseline creation timestamp. */
+  readonly createdAt: string;
+  /** Evaluation run ID when the baseline points at a run. */
+  readonly evalRunId?: string;
+  /** Evaluation suite ID. */
+  readonly evalSuiteId: string;
+};
+
+/** Evaluation suite summary returned by admin history routes. */
+type EvaluationSuiteSummary = {
+  /** Active baseline pointer when configured. */
+  readonly activeBaseline?: EvaluationBaselineSummary;
+  /** Suite creation timestamp. */
+  readonly createdAt: string;
+  /** Default grader configuration. */
+  readonly defaultGraders: unknown;
+  /** Default runner key. */
+  readonly defaultRunner: string;
+  /** Suite description. */
+  readonly description: string;
+  /** Evaluation suite ID. */
+  readonly evalSuiteId: string;
+  /** Latest run summary when one exists. */
+  readonly latestRun?: EvaluationRunSummary;
+  /** Suite display name. */
+  readonly name: string;
+  /** Owning team or subsystem. */
+  readonly owner: string;
+  /** Suite tags. */
+  readonly tags: unknown;
+  /** Gate thresholds. */
+  readonly thresholds: unknown;
+  /** Suite update timestamp. */
+  readonly updatedAt: string;
+  /** Suite version. */
+  readonly version: string;
+};
+
+/** Per-case result row returned for one evaluation run. */
+type EvaluationCaseResultSummary = {
+  /** Artifact references emitted for the case result. */
+  readonly artifacts: unknown;
+  /** Cost metrics emitted for the case result. */
+  readonly costs: unknown;
+  /** Case result creation timestamp. */
+  readonly createdAt: string;
+  /** Structured case error when present. */
+  readonly error?: unknown;
+  /** Evaluation case ID. */
+  readonly evalCaseId: string;
+  /** Evaluation case result ID. */
+  readonly evalCaseResultId: string;
+  /** Evaluation run ID. */
+  readonly evalRunId: string;
+  /** Matched finding references. */
+  readonly matchedFindings: unknown;
+  /** Score rows emitted by graders. */
+  readonly scores: unknown;
+  /** Case result status. */
+  readonly status: string;
+  /** Timing metrics emitted for the case result. */
+  readonly timings: unknown;
+  /** Expected finding references that were not matched. */
+  readonly unmatchedExpectedFindings: unknown;
+  /** Generated finding references that were not matched. */
+  readonly unmatchedGeneratedFindings: unknown;
+};
+
+/** Evaluation run details returned by admin history routes. */
+type EvaluationRunDetails = {
+  /** Per-case result rows. */
+  readonly caseResults: readonly EvaluationCaseResultSummary[];
+  /** Evaluation run summary. */
+  readonly run: EvaluationRunSummary;
 };
 
 /** Provider publication state attached to one review finding. */
@@ -2384,6 +2508,22 @@ type BillingViewState = {
   error?: string | undefined;
 };
 
+/** Mutable evaluation history view state. */
+type EvaluationViewState = {
+  /** Persisted evaluation suites. */
+  suites: readonly EvaluationSuiteSummary[];
+  /** Recent runs for the selected suite. */
+  runs: readonly EvaluationRunSummary[];
+  /** Selected suite ID. */
+  selectedSuiteId: string;
+  /** Loaded details for the selected run. */
+  selectedRun?: EvaluationRunDetails | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+};
+
 /** Mutable product onboarding state. */
 type ProductViewState = {
   /** Loaded product onboarding payload. */
@@ -2523,6 +2663,8 @@ type AppState = {
   entitlements: EntitlementsViewState;
   /** Billing account inspection state. */
   billing: BillingViewState;
+  /** Evaluation history inspection state. */
+  evaluation: EvaluationViewState;
 };
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -2705,6 +2847,11 @@ const state: AppState = {
     meterPeriodKey: currentMonthKey(),
     meterStatus: "all",
   },
+  evaluation: {
+    runs: [],
+    selectedSuiteId: "",
+    suites: [],
+  },
 };
 
 app.addEventListener("click", (event) => {
@@ -2741,6 +2888,9 @@ async function handleClick(event: MouseEvent): Promise<void> {
     }
     if (view === "billing" && state.session && !state.billing.data) {
       await loadBillingSummary();
+    }
+    if (view === "evaluation" && state.session && state.evaluation.suites.length === 0) {
+      await loadEvaluationSuites();
     }
     return;
   }
@@ -3136,6 +3286,21 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "load-evaluation") {
+    await loadEvaluationSuites();
+    return;
+  }
+
+  if (action === "select-evaluation-suite") {
+    await loadEvaluationRuns(requiredDatasetValue(element, "suiteId"));
+    return;
+  }
+
+  if (action === "open-evaluation-run") {
+    await loadEvaluationRun(requiredDatasetValue(element, "runId"));
+    return;
+  }
+
   if (action === "create-billing-portal-session") {
     await createBillingPortalSession();
     return;
@@ -3369,6 +3534,11 @@ async function clearAuth(): Promise<void> {
       repositoriesLoaded: false,
       reviews: [],
       reviewsLoaded: false,
+    };
+    state.evaluation = {
+      runs: [],
+      selectedSuiteId: "",
+      suites: [],
     };
     state.authLoading = undefined;
     render();
@@ -4592,6 +4762,69 @@ async function loadReviewHistory(): Promise<void> {
     state.overview.error = errorMessage(error);
   } finally {
     state.overview.loading = undefined;
+    render();
+  }
+}
+
+/** Loads persisted evaluation suites for the operator dashboard. */
+async function loadEvaluationSuites(): Promise<void> {
+  state.evaluation.loading = "Loading evaluation suites";
+  state.evaluation.error = undefined;
+  try {
+    const data = await requestAdminData<{
+      readonly suites: readonly EvaluationSuiteSummary[];
+    }>("/admin/evaluation/suites?limit=25");
+    state.evaluation.suites = data.suites;
+    const selectedSuiteId =
+      data.suites.find((suite) => suite.evalSuiteId === state.evaluation.selectedSuiteId)
+        ?.evalSuiteId ??
+      data.suites[0]?.evalSuiteId ??
+      "";
+    state.evaluation.selectedSuiteId = selectedSuiteId;
+    state.evaluation.selectedRun = undefined;
+    state.evaluation.runs = [];
+    if (selectedSuiteId) {
+      await loadEvaluationRuns(selectedSuiteId);
+    }
+  } catch (error) {
+    state.evaluation.error = errorMessage(error);
+  } finally {
+    state.evaluation.loading = undefined;
+    render();
+  }
+}
+
+/** Loads recent evaluation runs for one persisted suite. */
+async function loadEvaluationRuns(evalSuiteId: string): Promise<void> {
+  state.evaluation.loading = "Loading evaluation runs";
+  state.evaluation.error = undefined;
+  state.evaluation.selectedSuiteId = evalSuiteId;
+  state.evaluation.selectedRun = undefined;
+  try {
+    const data = await requestAdminData<{
+      readonly runs: readonly EvaluationRunSummary[];
+    }>(`/admin/evaluation/suites/${encodeURIComponent(evalSuiteId)}/runs?limit=25`);
+    state.evaluation.runs = data.runs;
+  } catch (error) {
+    state.evaluation.error = errorMessage(error);
+  } finally {
+    state.evaluation.loading = undefined;
+    render();
+  }
+}
+
+/** Loads case-level details for one persisted evaluation run. */
+async function loadEvaluationRun(evalRunId: string): Promise<void> {
+  state.evaluation.loading = "Loading evaluation run";
+  state.evaluation.error = undefined;
+  try {
+    state.evaluation.selectedRun = await requestAdminData<EvaluationRunDetails>(
+      `/admin/evaluation/runs/${encodeURIComponent(evalRunId)}`,
+    );
+  } catch (error) {
+    state.evaluation.error = errorMessage(error);
+  } finally {
+    state.evaluation.loading = undefined;
     render();
   }
 }
@@ -6730,6 +6963,7 @@ function renderPrimaryNav(): string {
     { kind: "overview", label: "Overview" },
     { kind: "inspectors", label: "Inspectors" },
     { kind: "settings", label: "Settings" },
+    { kind: "evaluation", label: "Evaluation" },
     { kind: "usage", label: "Usage" },
     { kind: "plan", label: "Plan" },
     { kind: "billing", label: "Billing" },
@@ -6761,6 +6995,9 @@ function renderActiveView(): string {
   }
   if (state.activeView === "settings") {
     return renderSettingsView();
+  }
+  if (state.activeView === "evaluation") {
+    return renderEvaluationView();
   }
   if (state.activeView === "audit") {
     return renderAuditView();
@@ -6868,6 +7105,301 @@ function renderOverviewNotice(overview: OverviewViewState): string {
   }
 
   return "";
+}
+
+/** Renders the evaluation history dashboard. */
+function renderEvaluationView(): string {
+  const evaluation = state.evaluation;
+  return `
+    <main class="inspector evaluation-view">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Quality Gates</p>
+          <h2>Evaluation History</h2>
+        </div>
+        <button class="primary" data-action="load-evaluation" type="button">Refresh</button>
+      </section>
+      ${renderEvaluationNotice(evaluation)}
+      <section class="overview-grid evaluation-grid">
+        ${renderEvaluationSuites(evaluation)}
+        ${renderEvaluationRuns(evaluation)}
+      </section>
+      ${evaluation.selectedRun ? renderEvaluationRunDetails(evaluation.selectedRun) : ""}
+    </main>
+  `;
+}
+
+/** Renders evaluation loading and error state. */
+function renderEvaluationNotice(evaluation: EvaluationViewState): string {
+  if (evaluation.loading) {
+    return `<p class="notice">${escapeHtml(evaluation.loading)}...</p>`;
+  }
+  if (evaluation.error) {
+    return `<p class="error-line">${escapeHtml(evaluation.error)}</p>`;
+  }
+
+  return "";
+}
+
+/** Renders persisted evaluation suite cards. */
+function renderEvaluationSuites(evaluation: EvaluationViewState): string {
+  return `
+    <section class="panel discovery-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Suites</p>
+          <h3>Persisted Suites</h3>
+        </div>
+        <span class="status muted">${escapeHtml(String(evaluation.suites.length))}</span>
+      </div>
+      ${
+        evaluation.suites.length === 0
+          ? `<p class="inline-empty">No evaluation suites have been persisted yet.</p>`
+          : `<div class="repo-list">${evaluation.suites.map(renderEvaluationSuiteCard).join("")}</div>`
+      }
+    </section>
+  `;
+}
+
+/** Renders one evaluation suite card. */
+function renderEvaluationSuiteCard(suite: EvaluationSuiteSummary): string {
+  const latestRun = suite.latestRun;
+  const selected = suite.evalSuiteId === state.evaluation.selectedSuiteId;
+  const status = latestRun?.status ?? "no runs";
+  return `
+    <article class="repo-card ${selected ? "selected" : ""}">
+      <div>
+        <div class="repo-title">
+          <strong>${escapeHtml(suite.name)}</strong>
+          <span class="status ${latestRun ? statusClass(latestRun.status) : "muted"}">${escapeHtml(status)}</span>
+        </div>
+        <p class="muted-text">
+          ${escapeHtml(suite.evalSuiteId)}
+          · ${escapeHtml(suite.owner)}
+          · v${escapeHtml(suite.version)}
+        </p>
+        ${
+          latestRun
+            ? `<p class="muted-text">${escapeHtml(String(latestRun.caseCount))} cases · ${escapeHtml(formatTime(latestRun.startedAt))}</p>`
+            : ""
+        }
+      </div>
+      <div class="card-actions">
+        <button
+          class="small"
+          data-action="select-evaluation-suite"
+          data-suite-id="${escapeAttribute(suite.evalSuiteId)}"
+          type="button"
+        >
+          Runs
+        </button>
+      </div>
+    </article>
+  `;
+}
+
+/** Renders recent evaluation runs for the selected suite. */
+function renderEvaluationRuns(evaluation: EvaluationViewState): string {
+  const selectedSuite = evaluation.suites.find(
+    (suite) => suite.evalSuiteId === evaluation.selectedSuiteId,
+  );
+  return `
+    <section class="panel discovery-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(selectedSuite?.evalSuiteId ?? "No suite selected")}</p>
+          <h3>Recent Runs</h3>
+        </div>
+        ${
+          selectedSuite?.activeBaseline
+            ? `<span class="status ok">baseline</span>`
+            : `<span class="status muted">no baseline</span>`
+        }
+      </div>
+      ${selectedSuite ? renderEvaluationSuiteMeta(selectedSuite) : ""}
+      ${
+        evaluation.runs.length === 0
+          ? `<p class="inline-empty">No runs are stored for this suite.</p>`
+          : renderEvaluationRunTable(evaluation.runs)
+      }
+    </section>
+  `;
+}
+
+/** Renders compact metadata for the selected evaluation suite. */
+function renderEvaluationSuiteMeta(suite: EvaluationSuiteSummary): string {
+  return `
+    <div class="detail-grid compact">
+      ${renderDetail("Runner", suite.defaultRunner)}
+      ${renderDetail("Updated", formatTime(suite.updatedAt))}
+      ${renderDetail("Baseline", suite.activeBaseline?.baselineVariantId ?? "none")}
+      ${renderDetail("Tags", unknownListLabel(suite.tags))}
+    </div>
+  `;
+}
+
+/** Renders evaluation run rows. */
+function renderEvaluationRunTable(runs: readonly EvaluationRunSummary[]): string {
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Status</th>
+            <th>Cases</th>
+            <th>Started</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${runs
+            .map(
+              (run) => `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(shortHash(run.evalRunId))}</strong>
+                    <p class="muted-text">${escapeHtml(run.environment)}${run.branch ? ` · ${escapeHtml(run.branch)}` : ""}</p>
+                  </td>
+                  <td><span class="status ${statusClass(run.status)}">${escapeHtml(run.status)}</span></td>
+                  <td>${escapeHtml(String(run.caseCount))}</td>
+                  <td>${formatTime(run.startedAt)}</td>
+                  <td>
+                    <button
+                      class="small"
+                      data-action="open-evaluation-run"
+                      data-run-id="${escapeAttribute(run.evalRunId)}"
+                      type="button"
+                    >
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders case-level details for one evaluation run. */
+function renderEvaluationRunDetails(details: EvaluationRunDetails): string {
+  const run = details.run;
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">${escapeHtml(run.evalSuiteId)}</p>
+          <h3>${escapeHtml(run.evalRunId)}</h3>
+        </div>
+        <span class="status ${statusClass(run.status)}">${escapeHtml(run.status)}</span>
+      </div>
+      <div class="summary-grid">
+        ${renderMetric("Cases", String(run.caseCount))}
+        ${renderMetric("Passed", String(countEvaluationResults(details.caseResults, "passed")))}
+        ${renderMetric("Failed", String(countEvaluationResults(details.caseResults, "failed")), countEvaluationResults(details.caseResults, "failed") > 0)}
+        ${renderMetric("Started", formatTime(run.startedAt))}
+      </div>
+      <div class="detail-grid compact">
+        ${renderDetail("Variant", run.evalVariantId)}
+        ${renderDetail("Baseline Variant", run.baselineVariantId ?? "none")}
+        ${renderDetail("Triggered By", run.triggeredBy)}
+        ${renderDetail("Commit", run.gitCommitSha ? shortHash(run.gitCommitSha) : "n/a")}
+        ${renderDetail("Report", run.reportUri ?? "n/a")}
+        ${renderDetail("Completed", run.completedAt ? formatTime(run.completedAt) : "n/a")}
+      </div>
+      ${run.summary ? renderEvaluationJsonBlock("Summary", run.summary) : ""}
+      ${renderEvaluationCaseResultRows(details.caseResults)}
+    </section>
+  `;
+}
+
+/** Counts case results that match one status. */
+function countEvaluationResults(
+  results: readonly EvaluationCaseResultSummary[],
+  status: string,
+): number {
+  return results.filter((result) => result.status === status).length;
+}
+
+/** Renders case-level evaluation result rows. */
+function renderEvaluationCaseResultRows(results: readonly EvaluationCaseResultSummary[]): string {
+  if (results.length === 0) {
+    return `<p class="inline-empty">This run has no persisted case results.</p>`;
+  }
+
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Case</th>
+            <th>Status</th>
+            <th>Scores</th>
+            <th>Unmatched</th>
+            <th>Artifacts</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${results
+            .map(
+              (result) => `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(result.evalCaseId)}</strong>
+                    <p class="muted-text">${escapeHtml(shortHash(result.evalCaseResultId))}</p>
+                  </td>
+                  <td><span class="status ${statusClass(result.status)}">${escapeHtml(result.status)}</span></td>
+                  <td>${escapeHtml(unknownListLabel(result.scores))}</td>
+                  <td>${escapeHtml(evaluationUnmatchedLabel(result))}</td>
+                  <td>${escapeHtml(unknownListLabel(result.artifacts))}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+/** Renders a compact JSON block for structured evaluation data. */
+function renderEvaluationJsonBlock(title: string, value: unknown): string {
+  return `
+    <details class="finding-json">
+      <summary class="finding-json-summary">${escapeHtml(title)}</summary>
+      <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
+    </details>
+  `;
+}
+
+/** Returns a compact label for unknown list-like JSON values. */
+function unknownListLabel(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `${value.length} item${value.length === 1 ? "" : "s"}`;
+  }
+  if (value && typeof value === "object") {
+    return `${Object.keys(value).length} key${Object.keys(value).length === 1 ? "" : "s"}`;
+  }
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+
+  return "none";
+}
+
+/** Returns compact unmatched finding counts for one case result. */
+function evaluationUnmatchedLabel(result: EvaluationCaseResultSummary): string {
+  const expected = Array.isArray(result.unmatchedExpectedFindings)
+    ? result.unmatchedExpectedFindings.length
+    : 0;
+  const generated = Array.isArray(result.unmatchedGeneratedFindings)
+    ? result.unmatchedGeneratedFindings.length
+    : 0;
+
+  return `${expected} expected / ${generated} generated`;
 }
 
 /** Renders repository discovery cards. */
@@ -10880,7 +11412,7 @@ function requestIdFromMetadata(metadata: unknown): string | undefined {
 
 /** Returns a CSS class for a durable status. */
 function statusClass(status: string): string {
-  if (["active", "completed", "processed", "published", "succeeded"].includes(status)) {
+  if (["active", "completed", "passed", "processed", "published", "succeeded"].includes(status)) {
     return "ok";
   }
   if (
@@ -11154,6 +11686,7 @@ function isViewKind(value: string): value is ViewKind {
     value === "overview" ||
     value === "inspectors" ||
     value === "settings" ||
+    value === "evaluation" ||
     value === "usage" ||
     value === "plan" ||
     value === "billing" ||

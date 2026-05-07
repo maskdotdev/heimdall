@@ -97,6 +97,15 @@ type AdminDebugBundleFixture = Awaited<ReturnType<AdminDebugService["exportRevie
 type AdminEvalImportDraftFixture = Awaited<
   ReturnType<AdminDebugService["createReviewRunEvalImportDraft"]>
 >;
+type AdminEvaluationSuiteFixture = Awaited<
+  ReturnType<AdminControlPlaneService["listEvaluationSuites"]>
+>[number];
+type AdminEvaluationRunFixture = Awaited<
+  ReturnType<AdminControlPlaneService["listEvaluationRuns"]>
+>[number];
+type AdminEvaluationRunDetailsFixture = Awaited<
+  ReturnType<AdminControlPlaneService["getEvaluationRun"]>
+>;
 type AdminMemoryRulesDebugFixture = Awaited<
   ReturnType<AdminDebugService["getMemoryRulesDebugDetails"]>
 >;
@@ -4928,6 +4937,79 @@ describe("api app", () => {
     expect(auditQueries).toContainEqual(expect.objectContaining({ orgId: "org_1" }));
   });
 
+  it("serves evaluation history suites, runs, and case results", async () => {
+    const suiteQueries: Parameters<AdminControlPlaneService["listEvaluationSuites"]>[0][] = [];
+    const runQueries: Parameters<AdminControlPlaneService["listEvaluationRuns"]>[0][] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        getEvaluationRun: async (evalRunId) =>
+          evaluationRunDetailsFixture({
+            run: evaluationRunFixture({ evalRunId }),
+          }),
+        listEvaluationRuns: async (query) => {
+          runQueries.push(query);
+          return [evaluationRunFixture({ evalSuiteId: query.evalSuiteId })];
+        },
+        listEvaluationSuites: async (query) => {
+          suiteQueries.push(query);
+          return [evaluationSuiteFixture()];
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      permissions: ["admin.inspect"],
+      providerSubject: "usr_support",
+    });
+
+    const suitesResponse = await app.handle(
+      new Request("http://localhost/admin/evaluation/suites?limit=5", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+    const runsResponse = await app.handle(
+      new Request("http://localhost/admin/evaluation/suites/smoke-full-pipeline-v1/runs?limit=3", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+    const runResponse = await app.handle(
+      new Request("http://localhost/admin/evaluation/runs/eval_run_1", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+
+    expect(suitesResponse.status).toBe(200);
+    expect(runsResponse.status).toBe(200);
+    expect(runResponse.status).toBe(200);
+    await expect(suitesResponse.json()).resolves.toMatchObject({
+      data: {
+        suites: [
+          {
+            activeBaseline: { baselineVariantId: "variant_baseline" },
+            evalSuiteId: "smoke-full-pipeline-v1",
+            latestRun: { evalRunId: "eval_run_1", status: "passed" },
+          },
+        ],
+      },
+    });
+    await expect(runsResponse.json()).resolves.toMatchObject({
+      data: {
+        runs: [{ evalSuiteId: "smoke-full-pipeline-v1", evalRunId: "eval_run_1" }],
+      },
+    });
+    await expect(runResponse.json()).resolves.toMatchObject({
+      data: {
+        caseResults: [{ evalCaseId: "case_auth_regression", status: "passed" }],
+        run: { evalRunId: "eval_run_1" },
+      },
+    });
+    expect(suiteQueries).toEqual([expect.objectContaining({ limit: 5 })]);
+    expect(runQueries).toEqual([
+      expect.objectContaining({ evalSuiteId: "smoke-full-pipeline-v1", limit: 3 }),
+    ]);
+  });
+
   it("scope-checks publisher debug details by review repository even without publish jobs", async () => {
     const app = createApiApp({
       adminControlPlaneAuth: auth,
@@ -5191,6 +5273,7 @@ function createMockControlPlaneService(
     getBillingSummary: async () => billingSummaryFixture(),
     getEntitlementSummary: async () => entitlementSummaryFixture(),
     getBillingReconciliation: async () => billingReconciliationFixture(),
+    getEvaluationRun: async () => evaluationRunDetailsFixture(),
     getMemoryCandidate: async () => memoryCandidateFixture(),
     getMemoryFact: async () => memoryFactFixture(),
     getOrganization: async () => organizationFixture(),
@@ -5207,6 +5290,8 @@ function createMockControlPlaneService(
     listProductUsageEvents: async () => [productUsageEventFixture()],
     listProviderInstallations: async () => [providerInstallationFixture()],
     listRepositories: async () => [repositoryFixture],
+    listEvaluationRuns: async () => [evaluationRunFixture()],
+    listEvaluationSuites: async () => [evaluationSuiteFixture()],
     listRepositoryRules: async () => [],
     listReviewFindings: async () => [reviewFindingFixture()],
     listReviewRuns: async () => [reviewRunSummaryFixture],
@@ -5615,6 +5700,95 @@ function memoryCandidateRejectionFixture(
       decidedByUserId: "usr_admin",
       status: "rejected",
     }),
+    ...overrides,
+  };
+}
+
+/** Creates an evaluation run fixture. */
+function evaluationRunFixture(
+  overrides: Partial<AdminEvaluationRunFixture> = {},
+): AdminEvaluationRunFixture {
+  return {
+    branch: "main",
+    caseCount: 12,
+    completedAt: "2026-05-05T12:10:00.000Z",
+    environment: "ci",
+    evalRunId: "eval_run_1",
+    evalSuiteId: "smoke-full-pipeline-v1",
+    evalVariantId: "variant_current",
+    gitCommitSha: "abc1234",
+    reportUri: "file:///tmp/eval-report.md",
+    startedAt: "2026-05-05T12:00:00.000Z",
+    status: "passed",
+    summary: {
+      anchorAccuracy: 1,
+      falsePositiveCount: 0,
+      recall: 1,
+    },
+    triggeredBy: "ci",
+    ...overrides,
+  };
+}
+
+/** Creates an evaluation suite fixture. */
+function evaluationSuiteFixture(
+  overrides: Partial<AdminEvaluationSuiteFixture> = {},
+): AdminEvaluationSuiteFixture {
+  return {
+    activeBaseline: {
+      active: true,
+      baselineVariantId: "variant_baseline",
+      createdAt: "2026-05-05T11:00:00.000Z",
+      evalRunId: "eval_run_baseline",
+      evalSuiteId: "smoke-full-pipeline-v1",
+    },
+    createdAt: "2026-05-05T11:00:00.000Z",
+    defaultGraders: ["exact_finding", "anchor"],
+    defaultRunner: "full_pipeline",
+    description: "Deterministic smoke suite.",
+    evalSuiteId: "smoke-full-pipeline-v1",
+    latestRun: evaluationRunFixture(),
+    name: "Smoke full pipeline",
+    owner: "quality",
+    tags: ["smoke", "deterministic"],
+    thresholds: {
+      maxFalsePositives: 0,
+      minRecall: 1,
+    },
+    updatedAt: "2026-05-05T12:10:00.000Z",
+    version: "1",
+    ...overrides,
+  };
+}
+
+/** Creates an evaluation case result fixture. */
+function evaluationCaseResultFixture(
+  overrides: Partial<AdminEvaluationRunDetailsFixture["caseResults"][number]> = {},
+): AdminEvaluationRunDetailsFixture["caseResults"][number] {
+  return {
+    artifacts: [{ kind: "markdown", uri: "file:///tmp/eval-report.md" }],
+    costs: { estimatedUsd: 0 },
+    createdAt: "2026-05-05T12:10:00.000Z",
+    evalCaseId: "case_auth_regression",
+    evalCaseResultId: "eval_result_1",
+    evalRunId: "eval_run_1",
+    matchedFindings: [{ expectedId: "expected_auth_regression", fingerprint: "finding_1" }],
+    scores: [{ name: "exact_finding", score: 1 }],
+    status: "passed",
+    timings: { durationMs: 10 },
+    unmatchedExpectedFindings: [],
+    unmatchedGeneratedFindings: [],
+    ...overrides,
+  };
+}
+
+/** Creates an evaluation run details fixture. */
+function evaluationRunDetailsFixture(
+  overrides: Partial<AdminEvaluationRunDetailsFixture> = {},
+): AdminEvaluationRunDetailsFixture {
+  return {
+    caseResults: [evaluationCaseResultFixture()],
+    run: evaluationRunFixture(),
     ...overrides,
   };
 }

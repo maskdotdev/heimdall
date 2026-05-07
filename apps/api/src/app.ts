@@ -41,6 +41,10 @@ import {
   DEFAULT_REPOSITORY_SETTINGS,
   type Entitlement,
   type EntitlementDecision,
+  type EvaluationBaselineSummary,
+  type EvaluationCaseResultSummary,
+  type EvaluationRunSummary,
+  type EvaluationSuiteSummary,
   type FindingOutcomeSignalSource,
   type FindingOutcomeType,
   type IndexRepoCommitJobPayload,
@@ -78,6 +82,11 @@ import {
   billingWebhookEvents,
   createDatabaseClient,
   type DatabaseClient,
+  type EvalBaselineRow,
+  type EvalCaseResultRow,
+  type EvalRunRow,
+  type EvalSuiteRow,
+  EvaluationRepository,
   findingOutcomes,
   type HeimdallDatabase,
   invoices,
@@ -958,6 +967,28 @@ type AdminReviewFindingListQuery = {
   readonly severity?: string | undefined;
   /** Maximum rows to return. */
   readonly limit?: number | undefined;
+};
+
+/** Query options for evaluation suite discovery. */
+type AdminEvaluationSuiteListQuery = {
+  /** Maximum rows to return. */
+  readonly limit?: number | undefined;
+};
+
+/** Query options for persisted evaluation runs under one suite. */
+type AdminEvaluationRunListQuery = {
+  /** Evaluation suite ID to inspect. */
+  readonly evalSuiteId: string;
+  /** Maximum rows to return. */
+  readonly limit?: number | undefined;
+};
+
+/** Details returned for one persisted evaluation run. */
+type AdminEvaluationRunDetails = {
+  /** Evaluation run summary. */
+  readonly run: EvaluationRunSummary;
+  /** Per-case evaluation results for the run. */
+  readonly caseResults: readonly EvaluationCaseResultSummary[];
 };
 
 /** Provider publication state attached to one finding when available. */
@@ -2220,6 +2251,16 @@ export type AdminControlPlaneService = {
   readonly listReviewRuns: (
     query: AdminReviewRunListQuery,
   ) => Promise<readonly AdminReviewRunSummary[]>;
+  /** Lists persisted evaluation suites and latest run hints. */
+  readonly listEvaluationSuites: (
+    query: AdminEvaluationSuiteListQuery,
+  ) => Promise<readonly EvaluationSuiteSummary[]>;
+  /** Lists persisted evaluation runs for one suite. */
+  readonly listEvaluationRuns: (
+    query: AdminEvaluationRunListQuery,
+  ) => Promise<readonly EvaluationRunSummary[]>;
+  /** Gets one persisted evaluation run and its case results. */
+  readonly getEvaluationRun: (evalRunId: string) => Promise<AdminEvaluationRunDetails>;
   /** Gets one review run with repository and pull-request context. */
   readonly getReviewRun: (reviewRunId: string) => Promise<AdminReviewRunSummary>;
   /** Lists artifact metadata for one review run. */
@@ -5399,6 +5440,60 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       const reviews = await getAdminControlPlaneService().listReviewRuns(query);
       return { data: { reviews } };
     })
+    .get("/admin/evaluation/suites", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const suites = await getAdminControlPlaneService().listEvaluationSuites({
+        limit: listLimitFromUrl(new URL(request.url)),
+      });
+      return { data: { suites } };
+    })
+    .get("/admin/evaluation/suites/:evalSuiteId/runs", async ({ params, request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const runs = await getAdminControlPlaneService().listEvaluationRuns({
+        evalSuiteId: params.evalSuiteId,
+        limit: listLimitFromUrl(new URL(request.url)),
+      });
+      return { data: { runs } };
+    })
+    .get("/admin/evaluation/runs/:evalRunId", async ({ params, request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      try {
+        const details = await getAdminControlPlaneService().getEvaluationRun(params.evalRunId);
+        return { data: details };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
     .get("/admin/repos/:repoId/rules", async ({ params, request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -6181,6 +6276,7 @@ function createAdminControlPlaneService(dependencies: {
       enqueueRepositorySync(dependencies.db, repoId, request),
     getBillingSummary: (query) => getBillingSummary(dependencies.db, query),
     getBillingReconciliation: (query) => getBillingReconciliation(dependencies.db, query),
+    getEvaluationRun: (evalRunId) => getEvaluationRun(dependencies.db, evalRunId),
     getMemoryCandidate: (memoryCandidateId) =>
       getMemoryCandidate(dependencies.db, memoryCandidateId),
     getMemoryFact: (memoryFactId) => getMemoryFact(dependencies.db, memoryFactId),
@@ -6218,6 +6314,8 @@ function createAdminControlPlaneService(dependencies: {
     listProductUsageEvents: (query) => listProductUsageEvents(dependencies.db, query),
     listProviderInstallations: (query) => listProviderInstallations(dependencies.db, query),
     listRepositories: (query) => listRepositories(dependencies.db, query),
+    listEvaluationRuns: (query) => listEvaluationRuns(dependencies.db, query),
+    listEvaluationSuites: (query) => listEvaluationSuites(dependencies.db, query),
     listAuditLogs: (query) => listAuditLogs(dependencies.db, query),
     listRepositoryRules: (repoId) => listRepositoryRules(dependencies.db, repoId),
     listReviewFindings: (reviewRunId, query) =>
@@ -8131,6 +8229,133 @@ async function listReviewRuns(
     .limit(boundedListLimit(query.limit));
 
   return rows.map(toAdminReviewRunSummary);
+}
+
+/** Lists persisted evaluation suites with latest run and active baseline hints. */
+async function listEvaluationSuites(
+  db: HeimdallDatabase,
+  query: AdminEvaluationSuiteListQuery,
+): Promise<readonly EvaluationSuiteSummary[]> {
+  const repository = new EvaluationRepository(db);
+  const suites = await repository.listEvalSuites({ limit: boundedListLimit(query.limit) });
+  return await Promise.all(
+    suites.map(async (suite) => {
+      const [latestRuns, activeBaseline] = await Promise.all([
+        repository.listEvalRunsForSuite({ evalSuiteId: suite.evalSuiteId, limit: 1 }),
+        repository.getActiveEvalBaseline(suite.evalSuiteId),
+      ]);
+
+      return toEvaluationSuiteSummary(suite, latestRuns[0], activeBaseline);
+    }),
+  );
+}
+
+/** Lists persisted evaluation runs for one suite. */
+async function listEvaluationRuns(
+  db: HeimdallDatabase,
+  query: AdminEvaluationRunListQuery,
+): Promise<readonly EvaluationRunSummary[]> {
+  const repository = new EvaluationRepository(db);
+  const runs = await repository.listEvalRunsForSuite({
+    evalSuiteId: query.evalSuiteId,
+    limit: boundedListLimit(query.limit),
+  });
+
+  return runs.map(toEvaluationRunSummary);
+}
+
+/** Gets one persisted evaluation run with per-case result rows. */
+async function getEvaluationRun(
+  db: HeimdallDatabase,
+  evalRunId: string,
+): Promise<AdminEvaluationRunDetails> {
+  const repository = new EvaluationRepository(db);
+  const [run, caseResults] = await Promise.all([
+    repository.getEvalRun(evalRunId),
+    repository.listEvalCaseResults(evalRunId),
+  ]);
+  if (!run) {
+    throw new AdminControlPlaneNotFoundError("eval_run", evalRunId);
+  }
+
+  return {
+    caseResults: caseResults.map(toEvaluationCaseResultSummary),
+    run: toEvaluationRunSummary(run),
+  };
+}
+
+/** Converts an evaluation suite row into an API summary. */
+function toEvaluationSuiteSummary(
+  suite: EvalSuiteRow,
+  latestRun: EvalRunRow | undefined,
+  activeBaseline: EvalBaselineRow | undefined,
+): EvaluationSuiteSummary {
+  return {
+    ...(activeBaseline ? { activeBaseline: toEvaluationBaselineSummary(activeBaseline) } : {}),
+    createdAt: suite.createdAt.toISOString(),
+    defaultGraders: suite.defaultGraders,
+    defaultRunner: suite.defaultRunner,
+    description: suite.description,
+    evalSuiteId: suite.evalSuiteId,
+    ...(latestRun ? { latestRun: toEvaluationRunSummary(latestRun) } : {}),
+    name: suite.name,
+    owner: suite.owner,
+    tags: suite.tags,
+    thresholds: suite.thresholds,
+    updatedAt: suite.updatedAt.toISOString(),
+    version: suite.version,
+  };
+}
+
+/** Converts an evaluation baseline row into an API summary. */
+function toEvaluationBaselineSummary(row: EvalBaselineRow): EvaluationBaselineSummary {
+  return {
+    active: row.active,
+    baselineVariantId: row.baselineVariantId,
+    createdAt: row.createdAt.toISOString(),
+    ...(row.evalRunId ? { evalRunId: row.evalRunId } : {}),
+    evalSuiteId: row.evalSuiteId,
+  };
+}
+
+/** Converts an evaluation run row into an API summary. */
+function toEvaluationRunSummary(row: EvalRunRow): EvaluationRunSummary {
+  return {
+    ...(row.baselineVariantId ? { baselineVariantId: row.baselineVariantId } : {}),
+    ...(row.branch ? { branch: row.branch } : {}),
+    caseCount: row.caseCount,
+    ...(row.completedAt ? { completedAt: row.completedAt.toISOString() } : {}),
+    environment: row.environment,
+    ...(row.error ? { error: row.error } : {}),
+    evalRunId: row.evalRunId,
+    evalSuiteId: row.evalSuiteId,
+    evalVariantId: row.evalVariantId,
+    ...(row.gitCommitSha ? { gitCommitSha: row.gitCommitSha } : {}),
+    ...(row.reportUri ? { reportUri: row.reportUri } : {}),
+    startedAt: row.startedAt.toISOString(),
+    status: row.status,
+    ...(row.summary ? { summary: row.summary } : {}),
+    triggeredBy: row.triggeredBy,
+  };
+}
+
+/** Converts an evaluation case result row into an API summary. */
+function toEvaluationCaseResultSummary(row: EvalCaseResultRow): EvaluationCaseResultSummary {
+  return {
+    artifacts: row.artifacts,
+    costs: row.costs,
+    createdAt: row.createdAt.toISOString(),
+    ...(row.error ? { error: row.error } : {}),
+    evalCaseId: row.evalCaseId,
+    evalCaseResultId: row.evalCaseResultId,
+    evalRunId: row.evalRunId,
+    matchedFindings: row.matchedFindings,
+    scores: row.scores,
+    status: row.status,
+    timings: row.timings,
+    unmatchedExpectedFindings: row.unmatchedExpectedFindings,
+    unmatchedGeneratedFindings: row.unmatchedGeneratedFindings,
+  };
 }
 
 /** Gets one review run with repository and pull-request context. */
