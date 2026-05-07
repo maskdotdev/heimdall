@@ -404,10 +404,24 @@ export type EmbeddingJobProgressSnapshot = {
   readonly status: "failed" | "running" | "succeeded";
 };
 
+/** Database boundary used by embedding repair and optional vector cleanup. */
+export type EmbeddingRepairDatabase = Pick<HeimdallDatabase, "select" | "update"> &
+  Partial<Pick<HeimdallDatabase, "delete">>;
+
+/** Cleanup policy applied while reconciling durable embedding jobs. */
+export type EmbeddingRepairCleanupPolicy = {
+  /** Delete same-job chunk vectors that use the wrong dimension, provider, or profile. */
+  readonly deleteIncompatibleVectors?: boolean;
+  /** Delete exactly scoped vectors that are not referenced by the targeted embedding job. */
+  readonly deleteOrphanedVectors?: boolean;
+};
+
 /** Input used to reconcile one durable embedding job from stored vector rows. */
 export type ReconcileEmbeddingJobInput = {
+  /** Optional vector cleanup policy. Defaults to detection-only reconciliation. */
+  readonly cleanup?: EmbeddingRepairCleanupPolicy;
   /** Database used to inspect embedding rows and repair job state. */
-  readonly db: Pick<HeimdallDatabase, "select" | "update">;
+  readonly db: EmbeddingRepairDatabase;
   /** Durable embedding job row ID to reconcile. */
   readonly embeddingJobId: string;
   /** Optional clock used for deterministic repaired timestamps. */
@@ -416,6 +430,10 @@ export type ReconcileEmbeddingJobInput = {
 
 /** Result returned after reconciling one durable embedding job. */
 export type ReconcileEmbeddingJobResult = {
+  /** Incompatible vector rows deleted during cleanup. */
+  readonly deletedIncompatibleVectorCount: number;
+  /** Orphaned vector rows deleted during cleanup. */
+  readonly deletedOrphanedVectorCount: number;
   /** Durable embedding job row ID. */
   readonly embeddingJobId: string;
   /** Stored vector rows for job chunks that do not match the job provider/model/profile scope. */
@@ -434,8 +452,10 @@ export type ReconcileEmbeddingJobResult = {
 
 /** Input used to repair a scoped set of durable embedding jobs. */
 export type RepairEmbeddingJobsInput = {
+  /** Optional vector cleanup policy. Defaults to detection-only repair. */
+  readonly cleanup?: EmbeddingRepairCleanupPolicy;
   /** Database used to find embedding jobs and repair progress drift. */
-  readonly db: Pick<HeimdallDatabase, "select" | "update">;
+  readonly db: EmbeddingRepairDatabase;
   /** Optional vector dimensions used to narrow repair scope. */
   readonly dimensions?: number;
   /** Optional single durable embedding job row ID to repair. */
@@ -458,6 +478,10 @@ export type RepairEmbeddingJobsInput = {
 
 /** Summary returned after repairing a scoped set of embedding jobs. */
 export type RepairEmbeddingJobsResult = {
+  /** Total incompatible vector rows deleted during repair cleanup. */
+  readonly deletedIncompatibleVectorCount: number;
+  /** Total orphaned vector rows deleted during repair cleanup. */
+  readonly deletedOrphanedVectorCount: number;
   /** Number of durable embedding jobs inspected and refreshed. */
   readonly embeddingJobCount: number;
   /** Total stored vector rows for job chunks that do not match the repaired job scope. */
@@ -766,6 +790,8 @@ export async function reconcileEmbeddingJob(
     .where(eq(embeddingJobItems.embeddingJobId, input.embeddingJobId));
   const chunkIds = items.map((item) => item.chunkId);
   const now = input.now?.() ?? new Date();
+  let deletedIncompatibleVectorCount = 0;
+  let deletedOrphanedVectorCount = 0;
   let missingChunkIds: string[] = [];
   let incompatibleVectorCount = 0;
   let orphanedVectorCount = 0;
@@ -780,6 +806,7 @@ export async function reconcileEmbeddingJob(
     const embeddedChunkIds = new Set(embeddedRows.map((row) => row.chunkId));
     const sameModelRows = await input.db
       .select({
+        chunkEmbeddingId: codeChunkEmbeddings.chunkEmbeddingId,
         chunkId: codeChunkEmbeddings.chunkId,
         embeddingDimension: codeChunkEmbeddings.embeddingDimension,
         embeddingProfileVersion: codeChunkEmbeddings.embeddingProfileVersion,
@@ -787,18 +814,36 @@ export async function reconcileEmbeddingJob(
       })
       .from(codeChunkEmbeddings)
       .where(embeddingRowsForJobChunkScanCondition(job, chunkIds));
-    incompatibleVectorCount = sameModelRows.filter(
-      (row) =>
-        row.embeddingDimension !== job.dimensions ||
-        row.embeddingProfileVersion !== job.embeddingProfileVersion ||
-        row.provider !== job.provider,
-    ).length;
+    const incompatibleVectorIds = sameModelRows
+      .filter(
+        (row) =>
+          row.embeddingDimension !== job.dimensions ||
+          row.embeddingProfileVersion !== job.embeddingProfileVersion ||
+          row.provider !== job.provider,
+      )
+      .map((row) => row.chunkEmbeddingId);
+    incompatibleVectorCount = incompatibleVectorIds.length;
+    if (input.cleanup?.deleteIncompatibleVectors) {
+      deletedIncompatibleVectorCount = await deleteEmbeddingVectorRows(
+        input.db,
+        incompatibleVectorIds,
+      );
+    }
     const scopedRows = await input.db
-      .select({ chunkId: codeChunkEmbeddings.chunkId })
+      .select({
+        chunkEmbeddingId: codeChunkEmbeddings.chunkEmbeddingId,
+        chunkId: codeChunkEmbeddings.chunkId,
+      })
       .from(codeChunkEmbeddings)
       .where(embeddingRowsForJobScopeCondition(job));
     const plannedChunkIds = new Set(chunkIds);
-    orphanedVectorCount = scopedRows.filter((row) => !plannedChunkIds.has(row.chunkId)).length;
+    const orphanedVectorIds = scopedRows
+      .filter((row) => !plannedChunkIds.has(row.chunkId))
+      .map((row) => row.chunkEmbeddingId);
+    orphanedVectorCount = orphanedVectorIds.length;
+    if (input.cleanup?.deleteOrphanedVectors) {
+      deletedOrphanedVectorCount = await deleteEmbeddingVectorRows(input.db, orphanedVectorIds);
+    }
     const repairableChunkIds = items
       .filter((item) => item.status !== "embedded" && embeddedChunkIds.has(item.chunkId))
       .map((item) => item.chunkId);
@@ -846,6 +891,8 @@ export async function reconcileEmbeddingJob(
   }
 
   return {
+    deletedIncompatibleVectorCount,
+    deletedOrphanedVectorCount,
     embeddingJobId: input.embeddingJobId,
     incompatibleVectorCount,
     missingChunkIds,
@@ -866,9 +913,11 @@ export async function repairEmbeddingJobs(
     .where(embeddingRepairJobCondition(input))
     .limit(repairEmbeddingJobLimit(input.limit));
   const jobs: ReconcileEmbeddingJobResult[] = [];
+  const cleanup = repairEmbeddingCleanupPolicy(input);
 
   for (const row of rows) {
     const result = await reconcileEmbeddingJob({
+      ...(cleanup ? { cleanup } : {}),
       db: input.db,
       embeddingJobId: row.embeddingJobId,
       ...(input.now ? { now: input.now } : {}),
@@ -879,6 +928,11 @@ export async function repairEmbeddingJobs(
   }
 
   return {
+    deletedIncompatibleVectorCount: jobs.reduce(
+      (sum, job) => sum + job.deletedIncompatibleVectorCount,
+      0,
+    ),
+    deletedOrphanedVectorCount: jobs.reduce((sum, job) => sum + job.deletedOrphanedVectorCount, 0),
     embeddingJobCount: jobs.length,
     incompatibleVectorCount: jobs.reduce((sum, job) => sum + job.incompatibleVectorCount, 0),
     jobs,
@@ -887,6 +941,41 @@ export async function repairEmbeddingJobs(
     repairedItemCount: jobs.reduce((sum, job) => sum + job.repairedItemCount, 0),
     resetItemCount: jobs.reduce((sum, job) => sum + job.resetItemCount, 0),
   };
+}
+
+/** Derives the cleanup policy for a scoped repair scan. */
+function repairEmbeddingCleanupPolicy(
+  input: RepairEmbeddingJobsInput,
+): EmbeddingRepairCleanupPolicy | undefined {
+  if (!input.cleanup) {
+    return undefined;
+  }
+
+  return {
+    ...(input.cleanup.deleteIncompatibleVectors ? { deleteIncompatibleVectors: true } : {}),
+    ...(input.cleanup.deleteOrphanedVectors && input.embeddingJobId
+      ? { deleteOrphanedVectors: true }
+      : {}),
+  };
+}
+
+/** Deletes known-stale embedding vector rows by primary key and returns the planned delete count. */
+async function deleteEmbeddingVectorRows(
+  db: EmbeddingRepairDatabase,
+  chunkEmbeddingIds: readonly string[],
+): Promise<number> {
+  const uniqueIds = [...new Set(chunkEmbeddingIds)];
+  if (uniqueIds.length === 0) {
+    return 0;
+  }
+  if (!db.delete) {
+    throw new Error("Embedding repair cleanup requires a delete-capable database.");
+  }
+
+  await db
+    .delete(codeChunkEmbeddings)
+    .where(inArray(codeChunkEmbeddings.chunkEmbeddingId, uniqueIds));
+  return uniqueIds.length;
 }
 
 /** Builds the embedding job predicate used by scoped repair jobs. */

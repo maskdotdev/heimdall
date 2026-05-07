@@ -591,6 +591,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
 
       if (payload.embeddingJobId) {
         const result = await reconcileEmbeddingJob({
+          cleanup: {
+            deleteIncompatibleVectors: true,
+            deleteOrphanedVectors: true,
+          },
           db: options.db,
           embeddingJobId: payload.embeddingJobId,
         });
@@ -601,6 +605,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       }
 
       const result = await repairEmbeddingJobs({
+        cleanup: {
+          deleteIncompatibleVectors: true,
+        },
         db: options.db,
         ...(payload.dimensions ? { dimensions: payload.dimensions } : {}),
         embeddingProfileVersion: payload.embeddingProfileVersion,

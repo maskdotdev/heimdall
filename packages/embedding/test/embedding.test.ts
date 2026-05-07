@@ -735,6 +735,8 @@ describe("reconcileEmbeddingJob", () => {
         now: () => now,
       }),
     ).resolves.toEqual({
+      deletedIncompatibleVectorCount: 0,
+      deletedOrphanedVectorCount: 0,
       embeddingJobId: "embjob_1",
       incompatibleVectorCount: 0,
       missingChunkIds: [],
@@ -782,6 +784,8 @@ describe("reconcileEmbeddingJob", () => {
         now: () => now,
       }),
     ).resolves.toEqual({
+      deletedIncompatibleVectorCount: 0,
+      deletedOrphanedVectorCount: 0,
       embeddingJobId: "embjob_1",
       incompatibleVectorCount: 0,
       missingChunkIds: ["chunk_1"],
@@ -825,6 +829,8 @@ describe("reconcileEmbeddingJob", () => {
         now: () => now,
       }),
     ).resolves.toEqual({
+      deletedIncompatibleVectorCount: 0,
+      deletedOrphanedVectorCount: 0,
       embeddingJobId: "embjob_1",
       incompatibleVectorCount: 1,
       missingChunkIds: ["chunk_1"],
@@ -851,6 +857,45 @@ describe("reconcileEmbeddingJob", () => {
       ]),
     );
   });
+
+  it("deletes incompatible and orphaned vector rows when cleanup is enabled", async () => {
+    const deletedConditions: unknown[] = [];
+    const updatedValues: unknown[] = [];
+    const now = new Date("2026-05-07T12:00:00.000Z");
+
+    await expect(
+      reconcileEmbeddingJob({
+        cleanup: {
+          deleteIncompatibleVectors: true,
+          deleteOrphanedVectors: true,
+        },
+        db: createEmbeddingIncompatibleVectorDatabaseStub({
+          deletedConditions,
+          updatedValues,
+        }),
+        embeddingJobId: "embjob_1",
+        now: () => now,
+      }),
+    ).resolves.toEqual({
+      deletedIncompatibleVectorCount: 1,
+      deletedOrphanedVectorCount: 1,
+      embeddingJobId: "embjob_1",
+      incompatibleVectorCount: 1,
+      missingChunkIds: ["chunk_1"],
+      orphanedVectorCount: 1,
+      repairedItemCount: 0,
+      progress: {
+        chunkCountEmbedded: 0,
+        chunkCountFailed: 0,
+        chunkCountSkipped: 0,
+        chunkCountTotal: 1,
+        embeddingJobId: "embjob_1",
+        status: "running",
+      },
+      resetItemCount: 1,
+    });
+    expect(deletedConditions).toHaveLength(2);
+  });
 });
 
 describe("repairEmbeddingJobs", () => {
@@ -871,10 +916,14 @@ describe("repairEmbeddingJobs", () => {
         repoId: "repo_01HREVIEW",
       }),
     ).resolves.toEqual({
+      deletedIncompatibleVectorCount: 0,
+      deletedOrphanedVectorCount: 0,
       embeddingJobCount: 1,
       incompatibleVectorCount: 0,
       jobs: [
         {
+          deletedIncompatibleVectorCount: 0,
+          deletedOrphanedVectorCount: 0,
           embeddingJobId: "embjob_1",
           incompatibleVectorCount: 0,
           missingChunkIds: [],
@@ -1190,19 +1239,24 @@ function createEmbeddingReconcileDatabaseStub(options: {
     [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
     [
       {
+        chunkEmbeddingId: "emb_chunk_1",
         chunkId: "chunk_1",
         embeddingDimension: 2,
         embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
         provider: "hash",
       },
       {
+        chunkEmbeddingId: "emb_chunk_2",
         chunkId: "chunk_2",
         embeddingDimension: 2,
         embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
         provider: "hash",
       },
     ],
-    [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
+    [
+      { chunkEmbeddingId: "emb_chunk_1", chunkId: "chunk_1" },
+      { chunkEmbeddingId: "emb_chunk_2", chunkId: "chunk_2" },
+    ],
     [{ embedded: 2, failed: 0, skipped: 0, total: 2 }],
   ];
   let selectIndex = 0;
@@ -1282,9 +1336,11 @@ function createEmbeddingMissingVectorDatabaseStub(options: {
 }
 
 function createEmbeddingIncompatibleVectorDatabaseStub(options: {
+  /** Captures delete conditions used by cleanup statements. */
+  readonly deletedConditions?: unknown[];
   /** Captures values passed to fake update statements. */
   readonly updatedValues: unknown[];
-}): Pick<HeimdallDatabase, "select" | "update"> {
+}): Pick<HeimdallDatabase, "delete" | "select" | "update"> {
   const selectedRows: readonly (readonly unknown[])[] = [
     [
       {
@@ -1301,18 +1357,24 @@ function createEmbeddingIncompatibleVectorDatabaseStub(options: {
     [],
     [
       {
+        chunkEmbeddingId: "emb_incompatible",
         chunkId: "chunk_1",
         embeddingDimension: 3,
         embeddingProfileVersion: "code_embedding_profile.v0",
         provider: "hash",
       },
     ],
-    [{ chunkId: "chunk_orphan" }],
+    [{ chunkEmbeddingId: "emb_orphan", chunkId: "chunk_orphan" }],
     [{ embedded: 0, failed: 0, skipped: 0, total: 1 }],
   ];
   let selectIndex = 0;
 
   return {
+    delete: (_table: unknown) => ({
+      where: async (condition: unknown) => {
+        options.deletedConditions?.push(condition);
+      },
+    }),
     select: () => ({
       from: (_table: unknown) => ({
         where: (_condition: unknown) => {
@@ -1334,7 +1396,7 @@ function createEmbeddingIncompatibleVectorDatabaseStub(options: {
         };
       },
     }),
-  } as unknown as Pick<HeimdallDatabase, "select" | "update">;
+  } as unknown as Pick<HeimdallDatabase, "delete" | "select" | "update">;
 }
 
 function createEmbeddingRepairDatabaseStub(options: {
@@ -1361,19 +1423,24 @@ function createEmbeddingRepairDatabaseStub(options: {
     [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
     [
       {
+        chunkEmbeddingId: "emb_chunk_1",
         chunkId: "chunk_1",
         embeddingDimension: 2,
         embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
         provider: "hash",
       },
       {
+        chunkEmbeddingId: "emb_chunk_2",
         chunkId: "chunk_2",
         embeddingDimension: 2,
         embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
         provider: "hash",
       },
     ],
-    [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
+    [
+      { chunkEmbeddingId: "emb_chunk_1", chunkId: "chunk_1" },
+      { chunkEmbeddingId: "emb_chunk_2", chunkId: "chunk_2" },
+    ],
     [{ embedded: 2, failed: 0, skipped: 0, total: 2 }],
   ];
   let selectIndex = 0;
