@@ -66,6 +66,49 @@ rename to src/new.ts
     });
   });
 
+  it("parses copied files without treating them as renames", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/src/source.ts b/src/copied.ts
+similarity index 93%
+copy from src/source.ts
+copy to src/copied.ts
+--- a/src/source.ts
++++ b/src/copied.ts
+@@ -1 +1,2 @@
+ export const source = true;
++export const copied = true;
+`);
+
+    expect(parseWithSchema("ChangedFile", ChangedFileSchema, file)).toMatchObject({
+      additions: 1,
+      deletions: 0,
+      oldPath: "src/source.ts",
+      path: "src/copied.ts",
+      status: "copied",
+    });
+  });
+
+  it("parses mode-only changes as metadata type changes", () => {
+    const [file] = parseUnifiedDiff(`diff --git a/scripts/run.sh b/scripts/run.sh
+old mode 100644
+new mode 100755
+`);
+
+    expect(parseWithSchema("ChangedFile", ChangedFileSchema, file)).toMatchObject({
+      additions: 0,
+      changes: 0,
+      deletions: 0,
+      hunks: [],
+      path: "scripts/run.sh",
+      status: "type_changed",
+    });
+    expect(resolveFileAnchor(file ? [file] : [], "scripts/run.sh")).toEqual({
+      path: "scripts/run.sh",
+      reason: "metadata_only",
+      status: "type_changed",
+      subjectType: "file",
+    });
+  });
+
   it("parses quoted Git paths with spaces", () => {
     const [file] = parseUnifiedDiff(`diff --git "a/src/old file.ts" "b/src/new file.ts"
 similarity index 88%

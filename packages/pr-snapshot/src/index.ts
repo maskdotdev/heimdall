@@ -130,6 +130,7 @@ type MutableChangedFile = {
   oldPath?: string;
   status?: FileChangeStatus;
   isBinary: boolean;
+  hasModeChange: boolean;
   hunks: DiffHunk[];
   additions: number;
   deletions: number;
@@ -168,6 +169,10 @@ export function parseUnifiedDiff(diff: string): readonly ChangedFile[] {
       currentFile.status = "deleted";
       continue;
     }
+    if (rawLine.startsWith("old mode ") || rawLine.startsWith("new mode ")) {
+      currentFile.hasModeChange = true;
+      continue;
+    }
     if (rawLine.startsWith("rename from ")) {
       currentFile.oldPath = normalizeDiffPath(rawLine.slice("rename from ".length));
       currentFile.status = "renamed";
@@ -176,6 +181,16 @@ export function parseUnifiedDiff(diff: string): readonly ChangedFile[] {
     if (rawLine.startsWith("rename to ")) {
       currentFile.path = normalizeDiffPath(rawLine.slice("rename to ".length));
       currentFile.status = "renamed";
+      continue;
+    }
+    if (rawLine.startsWith("copy from ")) {
+      currentFile.oldPath = normalizeDiffPath(rawLine.slice("copy from ".length));
+      currentFile.status = "copied";
+      continue;
+    }
+    if (rawLine.startsWith("copy to ")) {
+      currentFile.path = normalizeDiffPath(rawLine.slice("copy to ".length));
+      currentFile.status = "copied";
       continue;
     }
     if (rawLine.startsWith("Binary files ")) {
@@ -381,6 +396,7 @@ function beginChangedFile(line: string): MutableChangedFile {
   return {
     additions: 0,
     deletions: 0,
+    hasModeChange: false,
     hunks: [],
     isBinary: false,
     path,
@@ -481,6 +497,9 @@ function finalizeChangedFile(file: MutableChangedFile): ChangedFile {
 function inferStatus(file: MutableChangedFile): FileChangeStatus {
   if (file.oldPath && file.oldPath !== file.path) {
     return "renamed";
+  }
+  if (file.hasModeChange) {
+    return "type_changed";
   }
 
   return "modified";
