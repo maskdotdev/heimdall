@@ -1,5 +1,13 @@
 import { type LLMFindingOutput, LLMFindingOutputSchema } from "@repo/contracts/review/finding";
 import { parseWithSchema } from "@repo/contracts/validation/parse";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import type { Static, TSchema } from "@sinclair/typebox";
 
 /** Task names supported by the gateway MVP. */
@@ -30,8 +38,14 @@ export type LLMGatewayRetryPolicy = {
 
 /** Options used to create a schema-validating gateway. */
 export type CreateLLMGatewayOptions = {
+  /** Default low-cardinality model profile label used when metadata does not provide one. */
+  readonly defaultModelProfile?: string;
+  /** Optional metric recorder for product-safe aggregate LLM telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional bounded retry policy for transient provider failures. */
   readonly retryPolicy?: Partial<LLMGatewayRetryPolicy>;
+  /** Optional span recorder for product-safe LLM call spans. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Details used to construct a normalized LLM gateway error. */
@@ -197,8 +211,18 @@ export function createLLMGateway(
   const generateObject = async <TSchemaValue extends TSchema>(
     input: GenerateObjectInput<TSchemaValue>,
   ): Promise<Static<TSchemaValue>> => {
-    const output = await executeProviderObject(provider, input, retryPolicy);
-    return validateObjectOutput(provider, input, output);
+    const telemetry = startLLMCallTelemetry(provider, input, options);
+    try {
+      const output = await executeProviderObject(provider, input, retryPolicy, {
+        onRetry: (error) => recordLLMRetryMetric(options.metrics, telemetry, error),
+      });
+      const validated = validateObjectOutput(provider, input, output);
+      finishLLMCallTelemetry(options.metrics, telemetry, { status: "succeeded" });
+      return validated;
+    } catch (error) {
+      finishLLMCallTelemetry(options.metrics, telemetry, { error, status: "failed" });
+      throw error;
+    }
   };
 
   return {
@@ -217,8 +241,11 @@ export function createLLMGateway(
 }
 
 /** Creates a deterministic gateway for tests and local no-provider execution. */
-export function createStaticLLMGateway(output: LLMFindingOutput = { findings: [] }): LLMGateway {
-  return createLLMGateway(new FakeLLMProvider({ defaultObject: output }));
+export function createStaticLLMGateway(
+  output: LLMFindingOutput = { findings: [] },
+  options: CreateLLMGatewayOptions = {},
+): LLMGateway {
+  return createLLMGateway(new FakeLLMProvider({ defaultObject: output }), options);
 }
 
 /** Normalizes unknown provider failures into gateway-owned errors. */
@@ -269,6 +296,10 @@ async function executeProviderObject<TSchemaValue extends TSchema>(
   provider: LLMProvider,
   input: GenerateObjectInput<TSchemaValue>,
   retryPolicy: LLMGatewayRetryPolicy,
+  telemetry?: {
+    /** Records one retryable provider failure before the next attempt. */
+    readonly onRetry?: (error: LLMGatewayError) => void;
+  },
 ): Promise<Static<TSchemaValue>> {
   for (let attempt = 1; attempt <= retryPolicy.maxAttempts; attempt += 1) {
     try {
@@ -286,6 +317,7 @@ async function executeProviderObject<TSchemaValue extends TSchema>(
       if (!canRetry) {
         throw gatewayError;
       }
+      telemetry?.onRetry?.(gatewayError);
     }
   }
 
@@ -317,4 +349,160 @@ function validateObjectOutput<TSchemaValue extends TSchema>(
 
 function isRetryableLLMErrorCode(code: LLMErrorCode): boolean {
   return DEFAULT_RETRYABLE_ERROR_CODES.includes(code);
+}
+
+type LLMCallTelemetryStatus = "failed" | "succeeded";
+
+type LLMCallTelemetryState = {
+  /** Low-cardinality labels shared by LLM gateway metrics. */
+  readonly labels: Readonly<{
+    readonly model_profile: string;
+    readonly provider: string;
+    readonly task: string;
+  }>;
+  /** Monotonic start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Product-safe span for this LLM gateway call. */
+  readonly span: TelemetrySpanHandle | undefined;
+};
+
+/** Starts a product-safe LLM gateway span and returns shared metric labels. */
+function startLLMCallTelemetry<TSchemaValue extends TSchema>(
+  provider: LLMProvider,
+  input: GenerateObjectInput<TSchemaValue>,
+  options: CreateLLMGatewayOptions,
+): LLMCallTelemetryState {
+  const labels = llmMetricLabels(provider, input, options);
+  const span = options.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.llmGenerateObject, {
+    attributes: {
+      "llm.model_profile": labels.model_profile,
+      "llm.provider": labels.provider,
+      "llm.schema_name": normalizeLLMLabel(input.schemaName, "unknown"),
+      "llm.task": labels.task,
+      "llm.user_prompt_chars": input.prompt.length,
+    },
+    kind: "client",
+  });
+
+  return {
+    labels,
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Ends an LLM gateway span and emits bounded aggregate metrics. */
+function finishLLMCallTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: LLMCallTelemetryState,
+  input: {
+    /** Error raised by the provider or schema validation layer. */
+    readonly error?: unknown;
+    /** Final call status. */
+    readonly status: LLMCallTelemetryStatus;
+  },
+): void {
+  const durationMs = Date.now() - telemetry.startedAtMs;
+  const labels = {
+    ...telemetry.labels,
+    ...(input.error === undefined ? {} : { error_class: classifyTelemetryError(input.error) }),
+    status: input.status,
+  };
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.llmCallsTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.llmDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+
+  if (isStructuredOutputFailure(input.error)) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.llmStructuredOutputFailuresTotal, {
+      labels: telemetry.labels,
+    });
+  }
+  if (isRateLimitedFailure(input.error)) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.llmRateLimitedTotal, {
+      labels: {
+        model_profile: telemetry.labels.model_profile,
+        provider: telemetry.labels.provider,
+      },
+    });
+  }
+
+  telemetry.span?.end({
+    ...(input.error === undefined ? {} : { error: input.error }),
+    attributes: {
+      "llm.duration_ms": Math.max(0, durationMs),
+      ...(input.error === undefined
+        ? {}
+        : { "llm.error_class": classifyTelemetryError(input.error) }),
+      "llm.status": input.status,
+    },
+    status: input.status === "succeeded" ? "ok" : "error",
+  });
+}
+
+/** Records one retry attempt for a transient provider failure. */
+function recordLLMRetryMetric(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: LLMCallTelemetryState,
+  error: LLMGatewayError,
+): void {
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.llmRetriesTotal, {
+    labels: {
+      model_profile: telemetry.labels.model_profile,
+      provider: telemetry.labels.provider,
+      reason: normalizeLLMLabel(error.code, "unknown"),
+      task: telemetry.labels.task,
+    },
+  });
+}
+
+/** Returns low-cardinality labels shared by LLM gateway metrics. */
+function llmMetricLabels<TSchemaValue extends TSchema>(
+  provider: LLMProvider,
+  input: GenerateObjectInput<TSchemaValue>,
+  options: CreateLLMGatewayOptions,
+): LLMCallTelemetryState["labels"] {
+  return {
+    model_profile: normalizeLLMLabel(
+      stringMetadata(input.metadata, "modelProfile") ??
+        stringMetadata(input.metadata, "model_profile") ??
+        options.defaultModelProfile,
+      "default",
+    ),
+    provider: normalizeLLMLabel(provider.id, "unknown"),
+    task: normalizeLLMLabel(input.task, "unknown"),
+  };
+}
+
+/** Reads one string metadata field without widening unknown metadata values. */
+function stringMetadata(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/** Returns whether an error came from structured output schema validation. */
+function isStructuredOutputFailure(error: unknown): boolean {
+  return error instanceof LLMGatewayError && error.code === "schema_validation_failed";
+}
+
+/** Returns whether an error came from a provider rate limit. */
+function isRateLimitedFailure(error: unknown): boolean {
+  return error instanceof LLMGatewayError && error.code === "provider_rate_limited";
+}
+
+/** Normalizes bounded LLM telemetry label values. */
+function normalizeLLMLabel(value: string | undefined, fallback: string): string {
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized && normalized.length > 0 ? normalized : fallback;
 }

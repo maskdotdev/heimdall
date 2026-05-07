@@ -586,6 +586,11 @@ export const OBSERVABILITY_METRIC_NAMES = {
   apiRequestsTotal: "code_review_agent.api.requests_total",
   apiServiceStartsTotal: "code_review_agent.api.service_starts_total",
   apiServiceStopsTotal: "code_review_agent.api.service_stops_total",
+  llmCallsTotal: "code_review_agent.llm.calls_total",
+  llmDurationMs: "code_review_agent.llm.duration_ms",
+  llmRateLimitedTotal: "code_review_agent.llm.rate_limited_total",
+  llmRetriesTotal: "code_review_agent.llm.retries_total",
+  llmStructuredOutputFailuresTotal: "code_review_agent.llm.structured_output_failures_total",
   queueJobDurationMs: "code_review_agent.queue.job_duration_ms",
   queueJobsCompletedTotal: "code_review_agent.queue.jobs_completed_total",
   queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
@@ -603,6 +608,7 @@ export const OBSERVABILITY_METRIC_NAMES = {
 export const OBSERVABILITY_SPAN_NAMES = {
   apiRequest: "code_review_agent.api.request",
   durableJobProcess: "code_review_agent.durable_job.process",
+  llmGenerateObject: "code_review_agent.llm.generate_object",
   pullRequestReview: "code_review_agent.review.pull_request",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
   webhookDelivery: "code_review_agent.webhook.delivery",
@@ -857,6 +863,13 @@ export function classifyTelemetryError(error: unknown): TelemetryErrorClass {
     return "db_error";
   }
   if (
+    searchable.includes("validation") ||
+    searchable.includes("schema") ||
+    searchable.includes("parse")
+  ) {
+    return "validation_error";
+  }
+  if (
     searchable.includes("github") ||
     searchable.includes("openai") ||
     searchable.includes("stripe") ||
@@ -864,13 +877,6 @@ export function classifyTelemetryError(error: unknown): TelemetryErrorClass {
     searchable.includes("llm")
   ) {
     return "provider_error";
-  }
-  if (
-    searchable.includes("validation") ||
-    searchable.includes("schema") ||
-    searchable.includes("parse")
-  ) {
-    return "validation_error";
   }
   if (
     searchable.includes("auth") ||

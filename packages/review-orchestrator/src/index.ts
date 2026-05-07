@@ -34,6 +34,7 @@ import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import {
   OBSERVABILITY_SPAN_NAMES,
   type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
   type TelemetrySpanHandle,
   type TelemetrySpanRecorder,
   type TelemetryTraceContext,
@@ -177,6 +178,8 @@ export type ReviewOrchestratorDependencies = {
   readonly now?: () => Date;
   /** Optional trace context propagated from the durable review job. */
   readonly traceContext?: TelemetryTraceContext;
+  /** Optional metric recorder used for review-adjacent component instrumentation. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder used for review pipeline instrumentation. */
   readonly traces?: TelemetrySpanRecorder;
 };
@@ -791,7 +794,15 @@ export async function runPullRequestReview(
             ...(staticAnalysisReport ? { staticAnalysisReport } : {}),
             llmGateway: createUsageRecordingLlmGateway({
               db: dependencies.db,
-              gateway: dependencies.llmGateway ?? createStaticLLMGateway(),
+              gateway:
+                dependencies.llmGateway ??
+                createStaticLLMGateway(
+                  { findings: [] },
+                  {
+                    ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
+                    ...(dependencies.traces ? { traces: dependencies.traces } : {}),
+                  },
+                ),
               now,
               orgId: repositoryRecord.orgId,
               rateCard: dependencies.llmUsageRateCard ?? ZERO_COST_LLM_RATE_CARD,

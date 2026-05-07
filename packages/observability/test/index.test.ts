@@ -200,6 +200,11 @@ describe("structured telemetry metrics", () => {
     expect(OBSERVABILITY_METRIC_NAMES).toMatchObject({
       apiRequestDurationMs: "code_review_agent.api.request_duration_ms",
       apiRequestsTotal: "code_review_agent.api.requests_total",
+      llmCallsTotal: "code_review_agent.llm.calls_total",
+      llmDurationMs: "code_review_agent.llm.duration_ms",
+      llmRateLimitedTotal: "code_review_agent.llm.rate_limited_total",
+      llmRetriesTotal: "code_review_agent.llm.retries_total",
+      llmStructuredOutputFailuresTotal: "code_review_agent.llm.structured_output_failures_total",
       queueJobDurationMs: "code_review_agent.queue.job_duration_ms",
       queueJobsCompletedTotal: "code_review_agent.queue.jobs_completed_total",
       queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
@@ -312,6 +317,7 @@ describe("structured telemetry spans", () => {
     expect(OBSERVABILITY_SPAN_NAMES).toMatchObject({
       apiRequest: "code_review_agent.api.request",
       durableJobProcess: "code_review_agent.durable_job.process",
+      llmGenerateObject: "code_review_agent.llm.generate_object",
       pullRequestReview: "code_review_agent.review.pull_request",
       reviewPipelineStage: "code_review_agent.review.pipeline_stage",
       webhookDelivery: "code_review_agent.webhook.delivery",

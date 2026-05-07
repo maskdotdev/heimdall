@@ -22,7 +22,6 @@ import {
   JOB_TYPES,
   type JobPayload,
   type LLMFindingOutput,
-  LLMFindingOutputSchema,
   type PublishReviewJobPayload,
   parseWithSchema,
   type ReviewPullRequestJobPayload,
@@ -62,7 +61,7 @@ import {
   withIndexerTimeout,
 } from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
-import type { LLMGateway } from "@repo/llm-gateway";
+import { createLLMGateway, type LLMGateway, type LLMProvider } from "@repo/llm-gateway";
 import {
   createMemoryCandidatesFromCommand,
   type FeedbackCommand,
@@ -75,6 +74,7 @@ import {
 import {
   createObservabilityRuntime,
   OBSERVABILITY_METRIC_NAMES,
+  type TelemetryMetricRecorder,
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import {
@@ -155,6 +155,8 @@ export type CreateWorkerHandlersOptions = {
   readonly indexerDriver?: CodeIndexerDriver;
   /** Maximum time allowed for one indexer run. */
   readonly indexerTimeoutMs?: number;
+  /** Optional metric recorder passed into review-adjacent component instrumentation. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder passed into review orchestration. */
   readonly traces?: TelemetrySpanRecorder;
 };
@@ -493,6 +495,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           ? { staticAnalysisRunner: options.staticAnalysisRunner }
           : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+        ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
         ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       });
@@ -558,7 +561,10 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   });
   const llmGateway =
     process.env.HEIMDALL_REVIEW_SMOKE_FINDING === "true"
-      ? createWorkerReviewSmokeGateway()
+      ? createWorkerReviewSmokeGateway({
+          metrics: observability.metrics,
+          traces: observability.traces,
+        })
       : undefined;
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
   const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env, {
@@ -589,6 +595,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       indexArtifactRoot,
       indexerDriver,
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
+      metrics: observability.metrics,
       traces: observability.traces,
     }),
     metrics: observability.metrics,
@@ -1120,17 +1127,25 @@ function parseIndexerCliArgsJson(value: string): readonly string[] {
 }
 
 /** Creates a deterministic smoke-only gateway for live PR review smoke runs. */
-export function createWorkerReviewSmokeGateway(): LLMGateway {
-  return {
+export function createWorkerReviewSmokeGateway(
+  options: {
+    /** Optional metric recorder used for smoke LLM gateway telemetry. */
+    readonly metrics?: TelemetryMetricRecorder;
+    /** Optional span recorder used for smoke LLM gateway telemetry. */
+    readonly traces?: TelemetrySpanRecorder;
+  } = {},
+): LLMGateway {
+  const provider: LLMProvider = {
+    id: "worker_smoke",
     generateObject: async (input) =>
       parseWithSchema(input.schemaName, input.schema, createSmokeFindingOutput(input.prompt)),
-    generateReviewFindings: async (input) =>
-      parseWithSchema(
-        "LLMFindingOutput",
-        LLMFindingOutputSchema,
-        createSmokeFindingOutput(input.prompt),
-      ),
   };
+
+  return createLLMGateway(provider, {
+    defaultModelProfile: "review_smoke",
+    ...(options.metrics ? { metrics: options.metrics } : {}),
+    ...(options.traces ? { traces: options.traces } : {}),
+  });
 }
 
 type SmokePromptFile = {
