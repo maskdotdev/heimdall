@@ -88,7 +88,7 @@ export function getTypeScriptIndexerCapabilities(): IndexerCapabilities {
     supportedRecordTypes: ["file", "symbol", "edge", "chunk"],
     supportedRequestSchemaVersions: [INDEX_REQUEST_SCHEMA_VERSION],
     supportsCancellation: false,
-    supportsIncremental: true,
+    supportsIncremental: false,
     supportsPreviousArtifact: false,
     supportsRemoteArtifacts: false,
     supportsStreamingProgress: false,

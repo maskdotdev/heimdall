@@ -3,7 +3,16 @@ import { homedir, tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { validateIndexArtifact } from "@repo/indexer-driver";
 import { describe, expect, it } from "vitest";
-import { indexTypeScriptRepository } from "../src/index";
+import { getTypeScriptIndexerCapabilities, indexTypeScriptRepository } from "../src/index";
+
+describe("getTypeScriptIndexerCapabilities", () => {
+  it("does not advertise incremental indexing before previous-artifact reuse exists", () => {
+    expect(getTypeScriptIndexerCapabilities()).toMatchObject({
+      supportsIncremental: false,
+      supportsPreviousArtifact: false,
+    });
+  });
+});
 
 describe("indexTypeScriptRepository", () => {
   it("emits files, symbols, chunks, and edges for TypeScript sources", async () => {
