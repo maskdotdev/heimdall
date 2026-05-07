@@ -165,6 +165,22 @@ export const TelemetryMetricPointSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Telemetry span kind compatible with common OpenTelemetry span roles. */
+export const TelemetrySpanKindSchema = Type.Union([
+  Type.Literal("internal"),
+  Type.Literal("server"),
+  Type.Literal("client"),
+  Type.Literal("producer"),
+  Type.Literal("consumer"),
+]);
+
+/** Product-safe telemetry span status. */
+export const TelemetrySpanStatusSchema = Type.Union([
+  Type.Literal("unset"),
+  Type.Literal("ok"),
+  Type.Literal("error"),
+]);
+
 /** Trace context propagated between requests, durable jobs, and workers. */
 export const TelemetryTraceContextSchema = Type.Object(
   {
@@ -178,6 +194,40 @@ export const TelemetryTraceContextSchema = Type.Object(
       }),
     ),
     tracestate: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Product-safe span event attached to a structured telemetry span. */
+export const TelemetrySpanEventSchema = Type.Object(
+  {
+    attributes: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    name: Type.String({ minLength: 1, maxLength: 160 }),
+    timestamp: Type.String({ minLength: 1 }),
+  },
+  { additionalProperties: false },
+);
+
+/** Structured span record emitted by the observability tracer facade. */
+export const TelemetrySpanRecordSchema = Type.Object(
+  {
+    attributes: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    durationMs: Type.Number({ minimum: 0 }),
+    endTime: Type.String({ minLength: 1 }),
+    error: Type.Optional(SerializedTelemetryErrorSchema),
+    events: Type.Optional(Type.Array(TelemetrySpanEventSchema, { maxItems: 32 })),
+    kind: TelemetrySpanKindSchema,
+    name: Type.String({ minLength: 1, maxLength: 240 }),
+    resource: Type.Optional(
+      Type.Record(Type.String({ minLength: 1 }), TelemetryAttributeValueSchema),
+    ),
+    startTime: Type.String({ minLength: 1 }),
+    status: TelemetrySpanStatusSchema,
+    traceContext: Type.Optional(TelemetryTraceContextSchema),
   },
   { additionalProperties: false },
 );
@@ -232,8 +282,20 @@ export type TelemetryMetricKind = Static<typeof TelemetryMetricKindSchema>;
 /** Structured metric point emitted by the observability metric recorder. */
 export type TelemetryMetricPoint = Static<typeof TelemetryMetricPointSchema>;
 
+/** Telemetry span kind compatible with common OpenTelemetry span roles. */
+export type TelemetrySpanKind = Static<typeof TelemetrySpanKindSchema>;
+
+/** Product-safe telemetry span status. */
+export type TelemetrySpanStatus = Static<typeof TelemetrySpanStatusSchema>;
+
 /** Trace context propagated between requests, durable jobs, and workers. */
 export type TelemetryTraceContext = Static<typeof TelemetryTraceContextSchema>;
+
+/** Product-safe span event attached to a structured telemetry span. */
+export type TelemetrySpanEvent = Static<typeof TelemetrySpanEventSchema>;
+
+/** Structured span record emitted by the observability tracer facade. */
+export type TelemetrySpanRecord = Static<typeof TelemetrySpanRecordSchema>;
 
 /** Input accepted when normalizing trace context. */
 export type TelemetryTraceContextInput = {
@@ -344,6 +406,56 @@ export type TelemetryMetricRecorder = {
   readonly histogram: (name: string, value: number, options?: TelemetryMetricOptions) => void;
 };
 
+/** Options accepted when starting a telemetry span. */
+export type TelemetrySpanOptions = {
+  /** Product-safe attributes attached when the span starts. */
+  readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>>;
+  /** Span role compatible with common OpenTelemetry span kinds. */
+  readonly kind?: TelemetrySpanKind;
+  /** Optional deterministic start timestamp for tests. */
+  readonly startTime?: string;
+  /** Optional trace context propagated from request or job boundaries. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+};
+
+/** Options accepted when ending a telemetry span. */
+export type TelemetrySpanEndOptions = {
+  /** Product-safe attributes attached when the span ends. */
+  readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>>;
+  /** Optional error to classify and serialize on failed spans. */
+  readonly error?: unknown;
+  /** Explicit span status. Defaults to `error` when error is present and `ok` otherwise. */
+  readonly status?: TelemetrySpanStatus;
+  /** Optional deterministic end timestamp for tests. */
+  readonly timestamp?: string;
+};
+
+/** Handle returned for a started telemetry span. */
+export type TelemetrySpanHandle = {
+  /** Ends the span once and returns the emitted record when one is written. */
+  readonly end: (options?: TelemetrySpanEndOptions) => TelemetrySpanRecord | undefined;
+};
+
+/** Sink that receives structured telemetry span records. */
+export type TelemetrySpanSink = {
+  /** Writes one normalized span record. */
+  readonly write: (span: TelemetrySpanRecord) => void;
+};
+
+/** In-memory span sink used by tests. */
+export type MemoryTelemetrySpanSink = TelemetrySpanSink & {
+  /** Removes all recorded spans from the sink. */
+  readonly clear: () => void;
+  /** Returns recorded spans in insertion order. */
+  readonly spans: () => readonly TelemetrySpanRecord[];
+};
+
+/** Tracer facade used by application services. */
+export type TelemetrySpanRecorder = {
+  /** Starts a span and returns a handle that records it on end. */
+  readonly startSpan: (name: string, options?: TelemetrySpanOptions) => TelemetrySpanHandle;
+};
+
 /** Options accepted by the observability runtime bootstrap. */
 export type ObservabilityRuntimeOptions = {
   /** Optional preloaded config. Defaults to environment parsing. */
@@ -366,6 +478,8 @@ export type ObservabilityRuntime = {
   readonly logger: StructuredTelemetryLogger;
   /** Metric recorder selected by config. */
   readonly metrics: TelemetryMetricRecorder;
+  /** Span recorder selected by config. */
+  readonly traces: TelemetrySpanRecorder;
   /** Stable resource attributes attached to logs, spans, and metrics. */
   readonly resourceAttributes: ObservabilityResourceAttributes;
   /** Flushes and closes observability providers. No-op until OTel providers are wired. */
@@ -419,6 +533,11 @@ export const OBSERVABILITY_METRIC_NAMES = {
   apiServiceStopsTotal: "code_review_agent.api.service_stops_total",
   workerServiceStartsTotal: "code_review_agent.worker.service_starts_total",
   workerServiceStopsTotal: "code_review_agent.worker.service_stops_total",
+} as const;
+
+/** Stable span names emitted directly by service and queue boundaries. */
+export const OBSERVABILITY_SPAN_NAMES = {
+  durableJobProcess: "code_review_agent.durable_job.process",
 } as const;
 
 /** Error raised when observability configuration is invalid. */
@@ -928,6 +1047,155 @@ export function createTelemetryMetricRecorder(
   };
 }
 
+/** Builds a structured span record with safe attributes and resource data. */
+export function createTelemetrySpanRecord(
+  config: ObservabilityConfig,
+  input: TelemetrySpanOptions &
+    TelemetrySpanEndOptions & {
+      /** Low-cardinality span name. */
+      readonly name: string;
+      /** Span end timestamp. */
+      readonly endTime: string;
+      /** Span start timestamp. */
+      readonly startTime: string;
+    },
+  env: EnvironmentRecord = getProcessEnvironment(),
+): TelemetrySpanRecord {
+  if (!/^code_review_agent\.[A-Za-z0-9_.]+$/u.test(input.name)) {
+    throw new Error("Telemetry span name must use the code_review_agent prefix.");
+  }
+
+  const startMs = Date.parse(input.startTime);
+  const endMs = Date.parse(input.endTime);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) {
+    throw new Error("Telemetry span timestamps must be parseable.");
+  }
+
+  const attributes = input.attributes
+    ? sanitizeTelemetryAttributes(input.attributes, config.redaction)
+    : undefined;
+  const status = input.status ?? (input.error === undefined ? "ok" : "error");
+  const span = withoutUndefinedValues({
+    attributes,
+    durationMs: Math.max(0, endMs - startMs),
+    endTime: input.endTime,
+    error:
+      input.error === undefined
+        ? undefined
+        : serializeTelemetryError(input.error, config.redaction),
+    kind: input.kind ?? "internal",
+    name: input.name,
+    resource: createObservabilityResourceAttributes(config, env),
+    startTime: input.startTime,
+    status,
+    traceContext: input.traceContext
+      ? normalizeTelemetryTraceContext(input.traceContext)
+      : undefined,
+  });
+
+  if (!Value.Check(TelemetrySpanRecordSchema, span)) {
+    throw new Error("Telemetry span record does not match the schema.");
+  }
+
+  return span as TelemetrySpanRecord;
+}
+
+/** Renders a structured telemetry span as one JSON line. */
+export function renderTelemetrySpanLine(span: TelemetrySpanRecord): string {
+  if (!Value.Check(TelemetrySpanRecordSchema, span)) {
+    throw new Error("Telemetry span record does not match the schema.");
+  }
+
+  return JSON.stringify({
+    level: span.status === "error" ? "error" : "info",
+    span,
+    target: "heimdall.traces",
+  });
+}
+
+/** Creates a console-backed sink for structured telemetry spans. */
+export function createConsoleTelemetrySpanSink(
+  logger: ObservabilityConsoleLogger = console,
+): TelemetrySpanSink {
+  return {
+    write: (span) => {
+      const line = renderTelemetrySpanLine(span);
+      if (span.status === "error") {
+        (logger.error ?? logger.warn)(line);
+        return;
+      }
+
+      logger.info(line);
+    },
+  };
+}
+
+/** Creates an in-memory telemetry span sink for tests. */
+export function createMemoryTelemetrySpanSink(
+  initialSpans: readonly TelemetrySpanRecord[] = [],
+): MemoryTelemetrySpanSink {
+  const recordedSpans = [...initialSpans];
+  return {
+    clear: () => {
+      recordedSpans.length = 0;
+    },
+    spans: () => [...recordedSpans],
+    write: (span) => {
+      recordedSpans.push(span);
+    },
+  };
+}
+
+/** Creates a product-safe span recorder facade. */
+export function createTelemetrySpanRecorder(
+  config: ObservabilityConfig,
+  sink: TelemetrySpanSink = createConsoleTelemetrySpanSink(),
+  env: EnvironmentRecord = getProcessEnvironment(),
+): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options = {}) => {
+      const startTime = options.startTime ?? new Date().toISOString();
+      let ended = false;
+
+      return {
+        end: (endOptions = {}) => {
+          if (ended) {
+            return undefined;
+          }
+          ended = true;
+          if (!config.enabled || config.exporter !== "console") {
+            return undefined;
+          }
+
+          try {
+            const span = createTelemetrySpanRecord(
+              config,
+              {
+                attributes: {
+                  ...(options.attributes ?? {}),
+                  ...(endOptions.attributes ?? {}),
+                },
+                endTime: endOptions.timestamp ?? new Date().toISOString(),
+                name,
+                startTime,
+                ...(endOptions.error !== undefined ? { error: endOptions.error } : {}),
+                ...(options.kind ? { kind: options.kind } : {}),
+                ...(endOptions.status ? { status: endOptions.status } : {}),
+                ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+              },
+              env,
+            );
+            sink.write(span);
+            return span;
+          } catch {
+            return undefined;
+          }
+        },
+      };
+    },
+  };
+}
+
 /** Normalizes product-safe trace context fields for propagation. */
 export function normalizeTelemetryTraceContext(
   input: TelemetryTraceContextInput,
@@ -1010,6 +1278,11 @@ export function createObservabilityRuntime(
     createConsoleTelemetryMetricSink(consoleLogger),
     env,
   );
+  const traces = createTelemetrySpanRecorder(
+    config,
+    createConsoleTelemetrySpanSink(consoleLogger),
+    env,
+  );
 
   return {
     adminControlPlaneSink,
@@ -1018,6 +1291,7 @@ export function createObservabilityRuntime(
     metrics,
     resourceAttributes: createObservabilityResourceAttributes(config, env),
     shutdown: async () => undefined,
+    traces,
   };
 }
 

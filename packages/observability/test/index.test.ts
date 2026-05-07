@@ -6,6 +6,7 @@ import {
   createStructuredTelemetryLogger,
   createTelemetryMetricPoint,
   createTelemetryMetricRecorder,
+  createTelemetrySpanRecorder,
   createTelemetryTraceContextFromHeaders,
   createTelemetryTraceHeaders,
   DEFAULT_OBSERVABILITY_CONFIG,
@@ -13,10 +14,12 @@ import {
   normalizeAdminControlPlaneTelemetryEvent,
   normalizeTelemetryTraceContext,
   OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
   ObservabilityConfigValidationError,
   recordAdminControlPlaneTelemetryEvent,
   renderStructuredTelemetryLogLine,
   renderTelemetryMetricLine,
+  renderTelemetrySpanLine,
   sanitizeTelemetryAttributes,
   sanitizeTelemetryMetricLabels,
   serializeTelemetryError,
@@ -277,6 +280,73 @@ describe("structured telemetry metrics", () => {
       },
       target: "heimdall.metrics",
     });
+  });
+});
+
+describe("structured telemetry spans", () => {
+  it("records console spans with resource attributes and trace context", () => {
+    const lines: string[] = [];
+    const config = loadObservabilityConfig({
+      APP_VERSION: "sha-span",
+      OBSERVABILITY_ENABLED: "true",
+      OBSERVABILITY_EXPORTER: "console",
+      OBSERVABILITY_SERVICE_NAME: "code-review-worker",
+    });
+    const recorder = createTelemetrySpanRecorder(
+      config,
+      {
+        write: (span) => {
+          lines.push(renderTelemetrySpanLine(span));
+        },
+      },
+      { HOSTNAME: "worker-1" },
+    );
+
+    const span = recorder.startSpan(OBSERVABILITY_SPAN_NAMES.durableJobProcess, {
+      attributes: {
+        "debug.internal_state": "drop",
+        "job.type": "github.sync_installation.v1",
+        "provider.token": "ghp_1234567890",
+      },
+      kind: "consumer",
+      startTime: "2026-05-07T12:04:00.000Z",
+      traceContext: {
+        requestId: "req_1",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
+    });
+    span.end({
+      attributes: { "job.run_state": "completed" },
+      timestamp: "2026-05-07T12:04:00.250Z",
+    });
+
+    const [entry] = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(entry).toMatchObject({
+      level: "info",
+      span: {
+        attributes: {
+          "job.run_state": "completed",
+          "job.type": "github.sync_installation.v1",
+        },
+        durationMs: 250,
+        kind: "consumer",
+        name: OBSERVABILITY_SPAN_NAMES.durableJobProcess,
+        resource: {
+          "host.name": "worker-1",
+          "service.name": "code-review-worker",
+          "service.version": "sha-span",
+        },
+        status: "ok",
+        traceContext: {
+          requestId: "req_1",
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        },
+      },
+      target: "heimdall.traces",
+    });
+    expect(JSON.stringify(entry)).not.toContain("internal_state");
+    expect(JSON.stringify(entry)).not.toContain("ghp_1234567890");
   });
 });
 

@@ -582,6 +582,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       indexerDriver,
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
     }),
+    traces: observability.traces,
   });
   const workers = [
     QUEUE_NAMES.repoSync,

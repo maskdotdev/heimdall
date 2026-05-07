@@ -9,6 +9,7 @@ import {
   parseWithSchema,
 } from "@repo/contracts";
 import { backgroundJobs, type HeimdallDatabase } from "@repo/db";
+import { OBSERVABILITY_SPAN_NAMES, type TelemetrySpanRecorder } from "@repo/observability";
 import { type Job as BullMqJob, Queue } from "bullmq";
 import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import IORedis from "ioredis";
@@ -120,6 +121,8 @@ export type DurableJobProcessorOptions = {
   readonly store: DurableJobStore;
   /** Registered job handlers keyed by job type. */
   readonly handlers: DurableJobHandlerMap;
+  /** Optional span recorder used to trace durable job processing. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 const jobEnvelopeSchema = JobEnvelopeSchema(JobPayloadSchema);
@@ -470,36 +473,73 @@ export async function dispatchPendingJobs(options: {
 export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
   return async (job: BullMqJob<unknown>): Promise<void> => {
     const envelope = parseJobEnvelope(job.data);
-    const runState = await options.store.markRunning(envelope);
+    const span = options.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.durableJobProcess, {
+      attributes: durableJobSpanAttributes(envelope),
+      kind: "consumer",
+      ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+    });
+    let runState: DurableJobRunState;
+    try {
+      runState = await options.store.markRunning(envelope);
+    } catch (error) {
+      span?.end({ attributes: { "job.run_state": "mark_running_failed" }, error });
+      throw error;
+    }
     if (runState === "already_completed") {
+      span?.end({ attributes: { "job.run_state": runState } });
       return;
     }
     if (runState === "missing") {
-      throw new Error(
+      const error = new Error(
         `Durable job ${envelope.jobType}:${envelope.idempotencyKey} was not found or is not runnable.`,
       );
+      span?.end({ attributes: { "job.run_state": runState }, error });
+      throw error;
     }
 
     const handler = options.handlers[envelope.jobType];
     if (!handler) {
       const error = new Error(`No handler registered for job type ${envelope.jobType}.`);
-      await options.store.markFailed(envelope, serializeJobError(error));
+      try {
+        await options.store.markFailed(envelope, serializeJobError(error));
+      } finally {
+        span?.end({ attributes: { "job.run_state": "missing_handler" }, error });
+      }
       throw error;
     }
 
     try {
       await handler(envelope);
       await options.store.markCompleted(envelope);
+      span?.end({ attributes: { "job.run_state": "completed" } });
     } catch (error) {
       const serialized = serializeJobError(error);
       const isFinalAttempt = job.attemptsMade + 1 >= envelope.maxAttempts;
-      if (isFinalAttempt) {
-        await options.store.markFailed(envelope, serialized);
-      } else {
-        await options.store.markRetrying(envelope, serialized);
+      try {
+        if (isFinalAttempt) {
+          await options.store.markFailed(envelope, serialized);
+        } else {
+          await options.store.markRetrying(envelope, serialized);
+        }
+      } finally {
+        span?.end({
+          attributes: { "job.run_state": isFinalAttempt ? "failed" : "retrying" },
+          error,
+        });
       }
       throw error;
     }
+  };
+}
+
+/** Returns low-cardinality span attributes for one durable job envelope. */
+function durableJobSpanAttributes(
+  envelope: JobEnvelope<JobPayload>,
+): Readonly<Record<string, string | number>> {
+  return {
+    "job.attempt": envelope.attempt,
+    "job.max_attempts": envelope.maxAttempts,
+    "job.type": envelope.jobType,
   };
 }
 

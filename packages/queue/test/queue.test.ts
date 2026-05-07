@@ -1,4 +1,10 @@
 import { JOB_TYPES } from "@repo/contracts";
+import {
+  createTelemetrySpanRecorder,
+  DEFAULT_OBSERVABILITY_CONFIG,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetrySpanRecord,
+} from "@repo/observability";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 import { afterAll, describe, expect, it } from "vitest";
@@ -99,6 +105,43 @@ describe("durable worker processor", () => {
 
     expect(handled).toEqual(["sync:inst_test"]);
     expect(store.list()[0]).toMatchObject({ attempts: 1, status: "completed" });
+  });
+
+  it("records durable job spans with trace context", async () => {
+    const store = new InMemoryDurableJobStore([durableJob({ status: "queued" })]);
+    const spans: TelemetrySpanRecord[] = [];
+    const processor = createDurableJobProcessor({
+      store,
+      handlers: {
+        [JOB_TYPES.SyncInstallation]: async () => undefined,
+      },
+      traces: createTelemetrySpanRecorder(
+        {
+          ...DEFAULT_OBSERVABILITY_CONFIG,
+          enabled: true,
+          exporter: "console",
+          serviceName: "code-review-worker",
+        },
+        { write: (span) => spans.push(span) },
+      ),
+    });
+
+    await processor({ data: syncInstallationEnvelope, attemptsMade: 0 } as never);
+
+    expect(spans).toEqual([
+      expect.objectContaining({
+        attributes: {
+          "job.attempt": 0,
+          "job.max_attempts": 3,
+          "job.run_state": "completed",
+          "job.type": JOB_TYPES.SyncInstallation,
+        },
+        kind: "consumer",
+        name: OBSERVABILITY_SPAN_NAMES.durableJobProcess,
+        status: "ok",
+        traceContext: syncInstallationEnvelope.traceContext,
+      }),
+    ]);
   });
 
   it("keeps retryable failures queued and marks final failures failed", async () => {
