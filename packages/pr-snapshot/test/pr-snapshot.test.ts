@@ -66,6 +66,31 @@ rename to src/new.ts
     });
   });
 
+  it("parses quoted Git paths with spaces", () => {
+    const [file] = parseUnifiedDiff(`diff --git "a/src/old file.ts" "b/src/new file.ts"
+similarity index 88%
+rename from "src/old file.ts"
+rename to "src/new file.ts"
+--- "a/src/old file.ts"
++++ "b/src/new file.ts"
+@@ -1 +1 @@
+-export const label = "old";
++export const label = "new";
+`);
+
+    expect(parseWithSchema("ChangedFile", ChangedFileSchema, file)).toMatchObject({
+      oldPath: "src/old file.ts",
+      path: "src/new file.ts",
+      status: "renamed",
+    });
+    expect(buildCommentableLineIndex(file ? [file] : [])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 1, path: "src/new file.ts", side: "RIGHT" }),
+        expect.objectContaining({ line: 1, path: "src/new file.ts", side: "LEFT" }),
+      ]),
+    );
+  });
+
   it("marks binary files as non-hunk changed files", () => {
     const [file] = parseUnifiedDiff(`diff --git a/assets/logo.png b/assets/logo.png
 index 1111111..2222222 100644

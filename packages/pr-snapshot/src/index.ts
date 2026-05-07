@@ -169,12 +169,12 @@ export function parseUnifiedDiff(diff: string): readonly ChangedFile[] {
       continue;
     }
     if (rawLine.startsWith("rename from ")) {
-      currentFile.oldPath = rawLine.slice("rename from ".length);
+      currentFile.oldPath = normalizeDiffPath(rawLine.slice("rename from ".length));
       currentFile.status = "renamed";
       continue;
     }
     if (rawLine.startsWith("rename to ")) {
-      currentFile.path = rawLine.slice("rename to ".length);
+      currentFile.path = normalizeDiffPath(rawLine.slice("rename to ".length));
       currentFile.status = "renamed";
       continue;
     }
@@ -374,7 +374,7 @@ export function patchForChangedFile(file: ChangedFile): string {
 }
 
 function beginChangedFile(line: string): MutableChangedFile {
-  const [, rawOldPath, rawNewPath] = /^diff --git (.+) (.+)$/u.exec(line) ?? [];
+  const [rawOldPath, rawNewPath] = parseDiffGitPaths(line);
   const oldPath = normalizeDiffPath(rawOldPath ?? "");
   const path = normalizeDiffPath(rawNewPath ?? oldPath);
 
@@ -692,12 +692,99 @@ function isSameSideRangeCommentable(
 }
 
 function normalizeDiffPath(path: string): string {
-  const trimmed = path.trim();
+  const trimmed = unquoteGitPath(path.trim());
   if (trimmed === "/dev/null") {
     return trimmed;
   }
 
   return trimmed.replace(/^[ab]\//u, "");
+}
+
+/** Splits a diff --git header into old and new path tokens, preserving quoted spaces. */
+function parseDiffGitPaths(line: string): readonly [string | undefined, string | undefined] {
+  const remainder = line.slice("diff --git ".length);
+  const tokens = tokenizeGitPathHeader(remainder);
+
+  return [tokens[0], tokens[1]];
+}
+
+/** Tokenizes a Git diff path header while respecting simple double-quoted path tokens. */
+function tokenizeGitPathHeader(input: string): readonly string[] {
+  const tokens: string[] = [];
+  let cursor = 0;
+
+  while (cursor < input.length) {
+    while (input[cursor] === " ") {
+      cursor += 1;
+    }
+    if (cursor >= input.length) {
+      break;
+    }
+
+    const parsed =
+      input[cursor] === '"' ? readQuotedToken(input, cursor) : readBareToken(input, cursor);
+    tokens.push(parsed.token);
+    cursor = parsed.nextCursor;
+  }
+
+  return tokens;
+}
+
+/** Reads one quoted path token from a Git diff header. */
+function readQuotedToken(
+  input: string,
+  startCursor: number,
+): { readonly token: string; readonly nextCursor: number } {
+  let cursor = startCursor + 1;
+  let token = '"';
+  let escaped = false;
+
+  while (cursor < input.length) {
+    const char = input[cursor] ?? "";
+    token += char;
+    cursor += 1;
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      break;
+    }
+  }
+
+  return { nextCursor: cursor, token };
+}
+
+/** Reads one unquoted path token from a Git diff header. */
+function readBareToken(
+  input: string,
+  startCursor: number,
+): { readonly token: string; readonly nextCursor: number } {
+  let cursor = startCursor;
+  while (cursor < input.length && input[cursor] !== " ") {
+    cursor += 1;
+  }
+
+  return { nextCursor: cursor, token: input.slice(startCursor, cursor) };
+}
+
+/** Removes simple Git double-quote wrapping and unescapes common quoted path sequences. */
+function unquoteGitPath(path: string): string {
+  if (!path.startsWith('"') || !path.endsWith('"')) {
+    return path;
+  }
+
+  return path.slice(1, -1).replace(/\\(["\\nt])/gu, (_match, escaped: string) => {
+    if (escaped === "n") return "\n";
+    if (escaped === "t") return "\t";
+
+    return escaped;
+  });
 }
 
 function numberFromGroup(value: string | undefined, fallback: number): number {
