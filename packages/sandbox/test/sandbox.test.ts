@@ -9,9 +9,11 @@ import {
   DEFAULT_SANDBOX_RESOURCE_LIMITS,
   DEFAULT_SANDBOX_SECURITY_POLICY,
   evaluateSandboxRequestSafety,
+  evaluateToolSandboxPolicy,
   parseSandboxRunRequest,
   parseSandboxRunResult,
   type SandboxRunRequest,
+  type ToolSandboxPolicy,
 } from "../src/index";
 
 describe("sandbox contracts", () => {
@@ -123,6 +125,88 @@ describe("FakeSandboxRunner", () => {
     expect(result.status).toBe("policy_denied");
     expect(result.exitCode).toBeNull();
     expect(result.error?.code).toBe("image_class_blocked");
+  });
+});
+
+describe("evaluateToolSandboxPolicy", () => {
+  it("allows requests that match the tool command, image, path, and limit policy", () => {
+    const request = createRequest();
+    const result = evaluateToolSandboxPolicy({
+      request,
+      toolPolicy: createToolPolicy(),
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.decisions.some((decision) => decision.status === "denied")).toBe(false);
+  });
+
+  it("denies commands outside the tool allowlist", () => {
+    const request = createRequest({
+      command: {
+        argv: ["npm", "install"],
+        expectedExitCodes: [0],
+        shell: false,
+        stdin: "none",
+        workingDirectory: "/workspace",
+      },
+    });
+    const result = evaluateToolSandboxPolicy({
+      request,
+      toolPolicy: createToolPolicy(),
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.decisions).toContainEqual({
+      code: "command_not_allowlisted",
+      message: "Sandbox command is not allowlisted for this tool.",
+      status: "denied",
+    });
+  });
+
+  it("denies secret-looking environment variables", () => {
+    const request = createRequest({
+      environment: {
+        env: { NPM_TOKEN: "secret" },
+        inheritHostEnv: false,
+        redactedEnvKeys: ["NPM_TOKEN"],
+      },
+    });
+    const result = evaluateToolSandboxPolicy({
+      request,
+      toolPolicy: createToolPolicy(),
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.decisions).toContainEqual({
+      code: "secret_environment_denied",
+      message: "Secret-looking environment variables must not be passed to sandbox commands.",
+      status: "denied",
+    });
+  });
+
+  it("denies unsafe path arguments and limits above policy maximums", () => {
+    const request = createRequest({
+      command: {
+        argv: ["eslint", "../outside.ts"],
+        expectedExitCodes: [0],
+        shell: false,
+        stdin: "none",
+        workingDirectory: "/workspace",
+      },
+      limits: {
+        ...DEFAULT_SANDBOX_RESOURCE_LIMITS,
+        maxMemoryBytes: DEFAULT_SANDBOX_RESOURCE_LIMITS.maxMemoryBytes + 1,
+      },
+    });
+    const result = evaluateToolSandboxPolicy({
+      request,
+      toolPolicy: createToolPolicy(),
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.decisions.map((decision) => decision.code)).toEqual(
+      expect.arrayContaining(["resource_limit_exceeds_policy", "unsafe_command_argument"]),
+    );
   });
 });
 
@@ -265,6 +349,28 @@ function createRequest(overrides: Partial<SandboxRunRequest> = {}): SandboxRunRe
       workspaceId: "workspace_123",
       workspacePath: "/tmp/workspace",
     },
+    ...overrides,
+  };
+}
+
+/** Creates a tool sandbox policy fixture with optional overrides. */
+function createToolPolicy(overrides: Partial<ToolSandboxPolicy> = {}): ToolSandboxPolicy {
+  return {
+    allowDependencyInstall: false,
+    allowedCommands: [["eslint"]],
+    allowedImages: ["reviewer-tools-node"],
+    allowedWritePaths: ["/tmp", "/out"],
+    allowNetwork: false,
+    allowRepoConfigExecution: true,
+    allowShell: false,
+    defaultImage: {
+      allowedImageClass: "first_party_static_tools",
+      image: "reviewer-tools-node",
+      pullPolicy: "never",
+    },
+    defaultLimits: { ...DEFAULT_SANDBOX_RESOURCE_LIMITS },
+    maxLimits: { ...DEFAULT_SANDBOX_RESOURCE_LIMITS },
+    toolName: "eslint",
     ...overrides,
   };
 }

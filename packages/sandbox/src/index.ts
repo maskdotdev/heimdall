@@ -433,6 +433,48 @@ export const SandboxRunErrorSchema = Type.Object(
 /** Product-safe sandbox error. */
 export type SandboxRunError = Static<typeof SandboxRunErrorSchema>;
 
+/** Tool-specific sandbox policy used to validate one requested command. */
+export type ToolSandboxPolicy = {
+  /** Tool name used in decisions and dashboards. */
+  readonly toolName: string;
+  /** Container image names or digests allowed for this tool. */
+  readonly allowedImages: readonly string[];
+  /** Default image selected when planning this tool. */
+  readonly defaultImage: SandboxImageSpec;
+  /** Allowed argv prefixes for this tool. */
+  readonly allowedCommands: readonly (readonly string[])[];
+  /** Whether this tool may use shell execution. */
+  readonly allowShell: boolean;
+  /** Whether this tool may request network access. */
+  readonly allowNetwork: boolean;
+  /** Whether repository configuration for this tool may execute code. */
+  readonly allowRepoConfigExecution: boolean;
+  /** Whether this tool may install dependencies. */
+  readonly allowDependencyInstall: boolean;
+  /** Writable sandbox paths allowed for this tool. */
+  readonly allowedWritePaths: readonly string[];
+  /** Default resource limits selected when planning this tool. */
+  readonly defaultLimits: SandboxResourceLimits;
+  /** Maximum resource limits allowed for this tool. */
+  readonly maxLimits: SandboxResourceLimits;
+};
+
+/** Input for evaluating one sandbox request against a tool policy. */
+export type EvaluateToolSandboxPolicyInput = {
+  /** Sandbox request to evaluate. */
+  readonly request: SandboxRunRequest;
+  /** Tool-specific policy to evaluate. */
+  readonly toolPolicy: ToolSandboxPolicy;
+};
+
+/** Result of evaluating one sandbox request against a tool policy. */
+export type EvaluateToolSandboxPolicyResult = {
+  /** Whether all policy decisions allow execution. */
+  readonly allowed: boolean;
+  /** Product-safe policy decisions emitted by the evaluator. */
+  readonly decisions: readonly SandboxPolicyDecision[];
+};
+
 /** Sandbox run result boundary schema. */
 export const SandboxRunResultSchema = Type.Object(
   {
@@ -1153,9 +1195,243 @@ export function evaluateSandboxRequestSafety(request: SandboxRunRequest): Sandbo
   return decisions;
 }
 
+/** Evaluates a sandbox request against a tool-specific execution policy. */
+export function evaluateToolSandboxPolicy(
+  input: EvaluateToolSandboxPolicyInput,
+): EvaluateToolSandboxPolicyResult {
+  const request = parseSandboxRunRequest(input.request);
+  const decisions = [
+    ...evaluateSandboxRequestSafety(request),
+    ...evaluateToolPolicyDecisions(request, input.toolPolicy),
+  ];
+
+  return {
+    allowed: decisions.every((decision) => decision.status !== "denied"),
+    decisions,
+  };
+}
+
 /** Returns true when a sandbox result is terminal and successful. */
 export function isSuccessfulSandboxResult(result: SandboxRunResult): boolean {
   return result.status === "succeeded" && result.exitCode !== null;
+}
+
+/** Evaluates tool-specific policy decisions for one request. */
+function evaluateToolPolicyDecisions(
+  request: SandboxRunRequest,
+  policy: ToolSandboxPolicy,
+): SandboxPolicyDecision[] {
+  const decisions: SandboxPolicyDecision[] = [
+    {
+      code: "tool_policy_loaded",
+      message: `Sandbox tool policy loaded for ${policy.toolName}.`,
+      status: "allowed",
+    },
+  ];
+
+  if (!policy.allowShell && request.command.shell !== false) {
+    decisions.push({
+      code: "tool_shell_denied",
+      message: "Tool policy does not allow shell execution.",
+      status: "denied",
+    });
+  }
+
+  if (!commandMatchesAllowedPrefix(request.command.argv, policy.allowedCommands)) {
+    decisions.push({
+      code: "command_not_allowlisted",
+      message: "Sandbox command is not allowlisted for this tool.",
+      status: "denied",
+    });
+  }
+
+  if (!policy.allowNetwork && request.network.mode !== "none") {
+    decisions.push({
+      code: "tool_network_denied",
+      message: "Tool policy does not allow network access.",
+      status: "denied",
+    });
+  }
+
+  if (!imageAllowedByToolPolicy(request.image, policy.allowedImages)) {
+    decisions.push({
+      code: "tool_image_denied",
+      message: "Sandbox image is not allowlisted for this tool.",
+      status: "denied",
+    });
+  }
+
+  if (resourceLimitKeys().some((key) => request.limits[key] > policy.maxLimits[key])) {
+    decisions.push({
+      code: "resource_limit_exceeds_policy",
+      message: "Sandbox resource limits exceed the tool policy maximum.",
+      status: "denied",
+    });
+  }
+
+  if (
+    request.workspace.allowedWritePaths.some(
+      (path) => !sandboxPathAllowed(path, policy.allowedWritePaths),
+    )
+  ) {
+    decisions.push({
+      code: "workspace_write_path_denied",
+      message: "Sandbox workspace write path is not allowed for this tool.",
+      status: "denied",
+    });
+  }
+
+  if (
+    request.mounts.some(
+      (mount) => !mount.readOnly && !sandboxPathAllowed(mount.target, policy.allowedWritePaths),
+    )
+  ) {
+    decisions.push({
+      code: "writable_mount_denied",
+      message: "Sandbox writable mount is not allowed for this tool.",
+      status: "denied",
+    });
+  }
+
+  if (secretEnvironmentKeys(request.environment.env).length > 0) {
+    decisions.push({
+      code: "secret_environment_denied",
+      message: "Secret-looking environment variables must not be passed to sandbox commands.",
+      status: "denied",
+    });
+  }
+
+  if (request.command.argv.some(hasUnsafeCommandArgument)) {
+    decisions.push({
+      code: "unsafe_command_argument",
+      message: "Sandbox command includes an unsafe path or control argument.",
+      status: "denied",
+    });
+  }
+
+  if (!policy.allowDependencyInstall && commandLooksLikeDependencyInstall(request.command.argv)) {
+    decisions.push({
+      code: "dependency_install_denied",
+      message: "Tool policy does not allow dependency installation.",
+      status: "denied",
+    });
+  }
+
+  return decisions;
+}
+
+/** Resource limit key checked by tool policy maximums. */
+type ResourceLimitKey = keyof SandboxResourceLimits;
+
+/** Returns resource limit keys that must stay within tool policy maximums. */
+function resourceLimitKeys(): readonly ResourceLimitKey[] {
+  return [
+    "gracefulShutdownMs",
+    "maxArtifactBytes",
+    "maxCpuCount",
+    "maxDiskBytes",
+    "maxMemoryBytes",
+    "maxPids",
+    "maxStderrBytes",
+    "maxStdoutBytes",
+    "timeoutMs",
+  ];
+}
+
+/** Returns true when argv starts with any allowed command prefix. */
+function commandMatchesAllowedPrefix(
+  argv: readonly string[],
+  allowedCommands: readonly (readonly string[])[],
+): boolean {
+  return allowedCommands.some(
+    (allowedCommand) =>
+      allowedCommand.length > 0 &&
+      allowedCommand.length <= argv.length &&
+      allowedCommand.every((part, index) => argv[index] === part),
+  );
+}
+
+/** Returns true when the requested image is allowlisted by name or digest. */
+function imageAllowedByToolPolicy(
+  image: SandboxImageSpec,
+  allowedImages: readonly string[],
+): boolean {
+  const candidates = [
+    image.image,
+    image.digest,
+    image.digest ? `${image.image}@${image.digest}` : undefined,
+  ].filter(isNonEmptyString);
+
+  return candidates.some((candidate) => allowedImages.includes(candidate));
+}
+
+/** Returns true when a sandbox path is inside an allowed sandbox path. */
+function sandboxPathAllowed(path: string, allowedPaths: readonly string[]): boolean {
+  const normalizedPath = posix.resolve("/", path);
+
+  return allowedPaths.some((allowedPath) => {
+    const normalizedAllowedPath = posix.resolve("/", allowedPath);
+
+    return (
+      normalizedPath === normalizedAllowedPath ||
+      normalizedPath.startsWith(`${normalizedAllowedPath}/`)
+    );
+  });
+}
+
+/** Returns environment keys that look like secrets. */
+function secretEnvironmentKeys(env: Readonly<Record<string, string>>): string[] {
+  return Object.keys(env).filter((key) =>
+    /token|secret|password|api[_-]?key|access[_-]?key|private[_-]?key/iu.test(key),
+  );
+}
+
+/** Returns true when an argv item contains unsafe path or control syntax. */
+function hasUnsafeCommandArgument(argument: string): boolean {
+  const normalizedArgument = argument.replaceAll("\\", "/");
+  if (normalizedArgument.includes("\0")) {
+    return true;
+  }
+
+  if (normalizedArgument.split("/").includes("..")) {
+    return true;
+  }
+
+  return (
+    posix.isAbsolute(normalizedArgument) &&
+    !sandboxPathAllowed(normalizedArgument, ["/workspace", "/tmp", "/out"])
+  );
+}
+
+/** Returns true when an argv command appears to install dependencies. */
+function commandLooksLikeDependencyInstall(argv: readonly string[]): boolean {
+  const executable = (argv[0] ?? "").split("/").at(-1)?.toLowerCase() ?? "";
+  const subcommands = argv.slice(1).map((argument) => argument.toLowerCase());
+
+  if (
+    executable === "npm" ||
+    executable === "pnpm" ||
+    executable === "yarn" ||
+    executable === "bun"
+  ) {
+    return subcommands.some((argument) =>
+      ["add", "ci", "install", "update", "upgrade"].includes(argument),
+    );
+  }
+
+  if (executable === "pip" || executable === "pip3") {
+    return subcommands.includes("install");
+  }
+
+  if (executable === "cargo") {
+    return subcommands.some((argument) => ["fetch", "install", "update"].includes(argument));
+  }
+
+  if (executable === "go") {
+    return subcommands.some((argument) => ["get", "install"].includes(argument));
+  }
+
+  return false;
 }
 
 /** Builds one deterministic fake sandbox run result. */
