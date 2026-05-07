@@ -630,6 +630,12 @@ export const OBSERVABILITY_METRIC_NAMES = {
   sandboxOutputBytes: "code_review_agent.sandbox.output_bytes",
   sandboxRunsTotal: "code_review_agent.sandbox.runs_total",
   sandboxViolationsTotal: "code_review_agent.sandbox.violations_total",
+  staticAnalysisDiagnosticsTotal: "code_review_agent.static_analysis.diagnostics_total",
+  staticAnalysisDurationMs: "code_review_agent.static_analysis.duration_ms",
+  staticAnalysisOutputBytes: "code_review_agent.static_analysis.output_bytes",
+  staticAnalysisParseFailuresTotal: "code_review_agent.static_analysis.parse_failures_total",
+  staticAnalysisRunsTotal: "code_review_agent.static_analysis.runs_total",
+  staticAnalysisTimeoutsTotal: "code_review_agent.static_analysis.timeouts_total",
   webhookDeliveriesTotal: "code_review_agent.webhook.deliveries_total",
   webhookDeliveryDurationMs: "code_review_agent.webhook.delivery_duration_ms",
   webhookDuplicateDeliveriesTotal: "code_review_agent.webhook.duplicate_deliveries_total",
@@ -660,6 +666,10 @@ export const OBSERVABILITY_SPAN_NAMES = {
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
   retrievalBuildContext: "code_review_agent.retrieval.build_context",
   sandboxRun: "code_review_agent.sandbox.run",
+  staticAnalysisNormalizeDiagnostics: "code_review_agent.static_analysis.normalize_diagnostics",
+  staticAnalysisParseOutput: "code_review_agent.static_analysis.parse_output",
+  staticAnalysisPlan: "code_review_agent.static_analysis.plan",
+  staticAnalysisRunTool: "code_review_agent.static_analysis.run_tool",
   webhookDelivery: "code_review_agent.webhook.delivery",
 } as const;
 

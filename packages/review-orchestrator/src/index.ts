@@ -541,6 +541,7 @@ export async function runPullRequestReview(
             Boolean(dependencies.staticAnalysisRunner) &&
             !dependencies.syncWorkspace &&
             !workspace.cleanedUp,
+          metrics: dependencies.metrics,
           mode: dependencies.staticAnalysisMode,
           now: now().toISOString(),
           orgId: repositoryRecord.orgId,
@@ -549,6 +550,8 @@ export async function runPullRequestReview(
           reviewRunId,
           runner: dependencies.staticAnalysisRunner,
           snapshot,
+          traceContext: dependencies.traceContext,
+          traces: dependencies.traces,
           workspace,
         }),
       {
@@ -1927,6 +1930,8 @@ async function runStaticAnalysisForReview(input: {
   readonly budgets?: StaticAnalysisBudgets | undefined;
   /** Whether to remove the retained workspace after static-analysis execution. */
   readonly cleanupWorkspace: boolean;
+  /** Optional metric recorder used for static-analysis component telemetry. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
   /** Optional static-analysis mode. */
   readonly mode?: StaticAnalysisMode | undefined;
   /** Timestamp used for the static-analysis request. */
@@ -1943,6 +1948,10 @@ async function runStaticAnalysisForReview(input: {
   readonly runner?: ToolRunner | undefined;
   /** Pull request snapshot being reviewed. */
   readonly snapshot: PullRequestSnapshot;
+  /** Optional trace context propagated from the durable review job. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
+  /** Optional span recorder used for static-analysis component telemetry. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
   /** Synced workspace for the review run. */
   readonly workspace: SyncRepositoryWorkspaceResult;
 }): Promise<ReviewStaticAnalysisResult> {
@@ -1974,7 +1983,10 @@ async function runStaticAnalysisForReview(input: {
         timestamp: input.now,
         workspace: input.workspace,
       }),
+      ...(input.metrics ? { metrics: input.metrics } : {}),
       runner: input.runner,
+      ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+      ...(input.traces ? { traces: input.traces } : {}),
     });
     await input.reviewRepository.insertStageEvent({
       reviewRunId: input.reviewRunId,

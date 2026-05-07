@@ -1,4 +1,11 @@
 import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { createFakeToolRunner } from "@repo/tool-runner";
 import { describe, expect, it } from "vitest";
 import {
@@ -88,6 +95,133 @@ describe("static analysis", () => {
     expect(report.diagnostics[0]?.toolRunId).toBe(report.toolRuns[0]?.toolRunId);
   });
 
+  it("records static-analysis telemetry without raw output or workspace paths", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+
+    const report = await runStaticAnalysis({
+      metrics: createRecordingMetrics(metrics),
+      request,
+      runner: createFakeToolRunner([
+        {
+          durationMs: 19,
+          executable: "eslint",
+          stdout: JSON.stringify([
+            {
+              filePath: "/workspace/repo/src/math.ts",
+              messages: [
+                {
+                  line: 2,
+                  message: "raw diagnostic text",
+                  ruleId: "no-undef",
+                  severity: 2,
+                },
+              ],
+            },
+          ]),
+        },
+      ]),
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(report.summary.diagnosticCount).toBe(1);
+    expect(metrics).toContainEqual({
+      kind: "counter",
+      labels: {
+        mode: "changed_files_fast",
+        operation: "run",
+        reason: "review",
+        status: "succeeded",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.staticAnalysisRunsTotal,
+      value: 1,
+    });
+    expect(metrics).toContainEqual({
+      kind: "histogram",
+      labels: {
+        mode: "changed_files_fast",
+        operation: "tool",
+        status: "succeeded",
+        tool: "eslint",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.staticAnalysisDurationMs,
+      unit: "ms",
+      value: 19,
+    });
+    expect(metrics).toContainEqual({
+      kind: "counter",
+      labels: {
+        mode: "changed_files_fast",
+        operation: "run",
+        reason: "review",
+        status: "succeeded",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.staticAnalysisDiagnosticsTotal,
+      value: 1,
+    });
+    expect(spans.map((span) => span.name)).toEqual(
+      expect.arrayContaining([
+        OBSERVABILITY_SPAN_NAMES.staticAnalysisPlan,
+        OBSERVABILITY_SPAN_NAMES.staticAnalysisRunTool,
+        OBSERVABILITY_SPAN_NAMES.staticAnalysisParseOutput,
+        OBSERVABILITY_SPAN_NAMES.staticAnalysisNormalizeDiagnostics,
+      ]),
+    );
+    expect(spans).toContainEqual({
+      endAttributes: expect.objectContaining({
+        "static_analysis.diagnostic_count": 1,
+        "static_analysis.parse_failure_count": 0,
+      }),
+      name: OBSERVABILITY_SPAN_NAMES.staticAnalysisParseOutput,
+      startAttributes: expect.objectContaining({
+        "static_analysis.tool": "eslint",
+      }),
+      status: "ok",
+    });
+    const serializedTelemetry = JSON.stringify({ metrics, spans });
+    expect(serializedTelemetry).not.toContain("raw diagnostic text");
+    expect(serializedTelemetry).not.toContain("/workspace/repo");
+  });
+
+  it("records static-analysis parse failures and timeouts", async () => {
+    const metrics: RecordedMetric[] = [];
+
+    const report = await runStaticAnalysis({
+      metrics: createRecordingMetrics(metrics),
+      request,
+      runner: createFakeToolRunner([
+        {
+          executable: "eslint",
+          status: "timed_out",
+          stdout: "not-json",
+        },
+      ]),
+    });
+
+    expect(report.status).toBe("partially_succeeded");
+    expect(metrics).toContainEqual({
+      kind: "counter",
+      labels: {
+        mode: "changed_files_fast",
+        operation: "tool",
+        status: "timed_out",
+        tool: "eslint",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.staticAnalysisTimeoutsTotal,
+      value: 1,
+    });
+    expect(metrics).toContainEqual({
+      kind: "counter",
+      labels: {
+        mode: "changed_files_fast",
+        reason: "tool_output_parse_failed",
+        tool: "eslint",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.staticAnalysisParseFailuresTotal,
+      value: 1,
+    });
+  });
+
   it("parses ESLint JSON output into normalized report diagnostics", async () => {
     const report = await runStaticAnalysis({
       request,
@@ -167,3 +301,75 @@ describe("static analysis", () => {
     ]);
   });
 });
+
+/** Metric record captured by telemetry assertions. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels attached to the record. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Span record captured by telemetry assertions. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric records in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}

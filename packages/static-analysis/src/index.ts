@@ -7,6 +7,14 @@ import {
   type PullRequestSnapshot,
 } from "@repo/contracts";
 import { type CodeLanguage, CodeLanguageSchema } from "@repo/contracts/enums/language";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import type {
   ToolCommandSpec,
   ToolRunner,
@@ -424,8 +432,18 @@ export type ParseToolOutputDiagnosticsResult = {
   readonly warnings: readonly StaticAnalysisWarning[];
 };
 
+/** Optional telemetry dependencies used to instrument static-analysis execution. */
+export type StaticAnalysisTelemetryOptions = {
+  /** Optional metric recorder for aggregate and per-tool static-analysis telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional trace context propagated from the parent review job. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe static-analysis spans. */
+  readonly traces?: TelemetrySpanRecorder;
+};
+
 /** Input for running a deterministic static-analysis report. */
-export type RunStaticAnalysisInput = {
+export type RunStaticAnalysisInput = StaticAnalysisTelemetryOptions & {
   /** Static-analysis request. */
   readonly request: StaticAnalysisRequest;
   /** Tool runner implementation. */
@@ -433,6 +451,33 @@ export type RunStaticAnalysisInput = {
   /** Additional deterministic diagnostic fixtures, keyed by tool name. */
   readonly diagnosticsByTool?: Partial<Record<StaticToolName, readonly CreateDiagnosticInput[]>>;
 };
+
+/** Final telemetry status for a static-analysis run. */
+type StaticAnalysisTelemetryStatus = StaticAnalysisReport["status"] | "failed";
+
+/** Low-cardinality labels shared by static-analysis run metrics. */
+type StaticAnalysisRunLabels = Readonly<{
+  /** Static-analysis execution mode. */
+  readonly mode: StaticAnalysisMode;
+  /** Metric operation bucket. */
+  readonly operation: "run";
+  /** Static-analysis trigger reason. */
+  readonly reason: StaticAnalysisRequest["reason"];
+  /** Final static-analysis run status. */
+  readonly status: StaticAnalysisTelemetryStatus;
+}>;
+
+/** Low-cardinality labels shared by static-analysis per-tool metrics. */
+type StaticAnalysisToolLabels = Readonly<{
+  /** Static-analysis execution mode. */
+  readonly mode: StaticAnalysisMode;
+  /** Metric operation bucket. */
+  readonly operation: "tool";
+  /** Final static-analysis tool status. */
+  readonly status: ToolRunResultSummary["status"];
+  /** Static-analysis tool name. */
+  readonly tool: StaticToolName;
+}>;
 
 /** ESLint JSON formatter message. */
 const EslintJsonMessageSchema = Type.Object(
@@ -597,72 +642,436 @@ export async function runStaticAnalysis(
   input: RunStaticAnalysisInput,
 ): Promise<StaticAnalysisReport> {
   const startedAt = input.request.createdAt;
-  const plan = planStaticAnalysis(input.request);
-  const sandboxContext = sandboxContextForStaticAnalysis(input.request);
-  const toolRuns: ToolRunResultSummary[] = [];
-  const diagnostics: NormalizedToolDiagnostic[] = [];
-  const warnings: StaticAnalysisWarning[] = [...plan.warnings];
+  const runStartedAtMs = Date.now();
 
-  for (const runPlan of plan.toolRuns) {
-    const toolRunId = stableId("str", [input.request.reviewRunId, runPlan.planId]);
-    const maxDiagnosticsPerTool =
-      input.request.budgets?.maxDiagnosticsPerTool ??
-      DEFAULT_STATIC_ANALYSIS_BUDGETS.maxDiagnosticsPerTool;
-    const result = await input.runner.run({
-      command: runPlan.command,
-      maxOutputBytes: runPlan.maxOutputBytes,
-      planId: runPlan.planId,
-      sandboxContext,
+  try {
+    const plan = planStaticAnalysisWithTelemetry(input);
+    const sandboxContext = sandboxContextForStaticAnalysis(input.request);
+    const toolRuns: ToolRunResultSummary[] = [];
+    const diagnostics: NormalizedToolDiagnostic[] = [];
+    const warnings: StaticAnalysisWarning[] = [...plan.warnings];
+
+    for (const runPlan of plan.toolRuns) {
+      const toolRunId = stableId("str", [input.request.reviewRunId, runPlan.planId]);
+      const maxDiagnosticsPerTool =
+        input.request.budgets?.maxDiagnosticsPerTool ??
+        DEFAULT_STATIC_ANALYSIS_BUDGETS.maxDiagnosticsPerTool;
+      const result = await runStaticAnalysisToolWithTelemetry(input, {
+        runPlan,
+        sandboxContext,
+        startedAt,
+      });
+      const parsedOutput = parseToolOutputDiagnosticsWithTelemetry(input, {
+        maxDiagnosticsPerTool,
+        result,
+        runPlan,
+        toolRunId,
+      });
+      warnings.push(...parsedOutput.warnings);
+      const normalized = normalizeStaticAnalysisDiagnosticsWithTelemetry(input, {
+        maxDiagnosticsPerTool,
+        parsedOutput,
+        result,
+        runPlan,
+        toolRunId,
+      });
+
+      warnings.push(...normalized.warnings);
+      diagnostics.push(...normalized.diagnostics);
+      toolRuns.push(normalized.toolRun);
+    }
+
+    const report = staticAnalysisReport({
+      diagnostics: diagnostics.slice(
+        0,
+        input.request.budgets?.maxDiagnosticsTotal ??
+          DEFAULT_STATIC_ANALYSIS_BUDGETS.maxDiagnosticsTotal,
+      ),
+      finishedAt: toolRuns.at(-1)?.finishedAt ?? startedAt,
+      request: input.request,
       startedAt,
-      timeoutMs: runPlan.timeoutMs,
+      toolRuns,
+      warnings,
     });
-    const parsedOutput = parseToolOutputDiagnostics({
-      maxDiagnostics: maxDiagnosticsPerTool,
-      result,
+
+    finishStaticAnalysisRunTelemetry(input, {
+      durationMs: Math.max(0, Date.now() - runStartedAtMs),
+      report,
+    });
+
+    return report;
+  } catch (error) {
+    finishStaticAnalysisRunTelemetry(input, {
+      durationMs: Math.max(0, Date.now() - runStartedAtMs),
+      error,
+    });
+    throw error;
+  }
+}
+
+/** Result from normalizing one tool run's parsed and fixture diagnostics. */
+type NormalizeStaticAnalysisDiagnosticsResult = {
+  /** Diagnostics kept for this tool run after per-tool budget enforcement. */
+  readonly diagnostics: readonly NormalizedToolDiagnostic[];
+  /** Product-safe normalization warnings. */
+  readonly warnings: readonly StaticAnalysisWarning[];
+  /** Tool run summary built from normalized diagnostics and runner result. */
+  readonly toolRun: ToolRunResultSummary;
+};
+
+/** Runs static-analysis planning with a product-safe span. */
+function planStaticAnalysisWithTelemetry(input: RunStaticAnalysisInput): StaticAnalysisPlan {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.staticAnalysisPlan, {
+    attributes: {
+      "app.repo_id": input.request.repoId,
+      "app.review_run_id": input.request.reviewRunId,
+      "static_analysis.changed_file_count": input.request.snapshot.changedFileCount,
+      "static_analysis.disabled_tool_count": input.request.disabledTools?.length ?? 0,
+      "static_analysis.max_tool_runs":
+        input.request.budgets?.maxToolRuns ?? DEFAULT_STATIC_ANALYSIS_BUDGETS.maxToolRuns,
+      "static_analysis.mode": input.request.mode,
+      "static_analysis.reason": input.request.reason,
+      "static_analysis.requested_tool_count": input.request.requestedTools?.length ?? 0,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  try {
+    const plan = planStaticAnalysis(input.request);
+    span?.end({
+      attributes: {
+        "static_analysis.planned_tool_count": plan.toolRuns.length,
+        "static_analysis.warning_count": plan.warnings.length,
+      },
+    });
+
+    return plan;
+  } catch (error) {
+    span?.end({ error });
+    throw error;
+  }
+}
+
+/** Runs one static-analysis tool with product-safe telemetry. */
+async function runStaticAnalysisToolWithTelemetry(
+  input: RunStaticAnalysisInput,
+  context: {
+    /** Static-analysis tool run plan. */
+    readonly runPlan: ToolRunPlan;
+    /** Sandbox metadata passed to the tool runner. */
+    readonly sandboxContext: ToolRunnerSandboxContext;
+    /** Shared analysis start timestamp. */
+    readonly startedAt: string;
+  },
+): Promise<ToolRunnerResult> {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.staticAnalysisRunTool, {
+    attributes: {
+      "app.repo_id": input.request.repoId,
+      "app.review_run_id": input.request.reviewRunId,
+      "static_analysis.expected_output_format": context.runPlan.expectedOutputFormat,
+      "static_analysis.max_output_bytes": context.runPlan.maxOutputBytes,
+      "static_analysis.mode": input.request.mode,
+      "static_analysis.scope_kind": context.runPlan.scope.kind,
+      "static_analysis.scope_path_count": context.runPlan.scope.paths.length,
+      "static_analysis.timeout_ms": context.runPlan.timeoutMs,
+      "static_analysis.tool": context.runPlan.tool,
+      "static_analysis.workspace_trusted": input.request.workspace.isTrusted,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  try {
+    const result = await input.runner.run({
+      command: context.runPlan.command,
+      maxOutputBytes: context.runPlan.maxOutputBytes,
+      planId: context.runPlan.planId,
+      sandboxContext: context.sandboxContext,
+      startedAt: context.startedAt,
+      timeoutMs: context.runPlan.timeoutMs,
+    });
+    const status = toolRunStatus(result);
+    recordStaticAnalysisToolMetrics(input.metrics, input.request, context.runPlan, result, status);
+    span?.end({
+      attributes: {
+        "static_analysis.duration_ms": result.durationMs,
+        "static_analysis.exit_code": result.exitCode ?? undefined,
+        "static_analysis.stderr_bytes": result.stderrBytes,
+        "static_analysis.stdout_bytes": result.stdoutBytes,
+        "static_analysis.timed_out": result.timedOut,
+        "static_analysis.tool_status": status,
+        "static_analysis.truncated": result.truncated,
+      },
+      status: status === "succeeded" ? "ok" : "error",
+    });
+
+    return result;
+  } catch (error) {
+    span?.end({
+      attributes: { "static_analysis.error_class": classifyTelemetryError(error) },
+      error,
+    });
+    throw error;
+  }
+}
+
+/** Parses one static-analysis tool output with product-safe telemetry. */
+function parseToolOutputDiagnosticsWithTelemetry(
+  input: RunStaticAnalysisInput,
+  context: {
+    /** Maximum diagnostics allowed for this tool. */
+    readonly maxDiagnosticsPerTool: number;
+    /** Tool runner result with bounded captured output. */
+    readonly result: ToolRunnerResult;
+    /** Static-analysis tool run plan. */
+    readonly runPlan: ToolRunPlan;
+    /** Stable tool run ID used by normalized diagnostics. */
+    readonly toolRunId: string;
+  },
+): ParseToolOutputDiagnosticsResult {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.staticAnalysisParseOutput, {
+    attributes: {
+      "app.repo_id": input.request.repoId,
+      "app.review_run_id": input.request.reviewRunId,
+      "static_analysis.expected_output_format": context.runPlan.expectedOutputFormat,
+      "static_analysis.max_diagnostics": context.maxDiagnosticsPerTool,
+      "static_analysis.stderr_bytes": context.result.stderrBytes,
+      "static_analysis.stdout_bytes": context.result.stdoutBytes,
+      "static_analysis.tool": context.runPlan.tool,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  try {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: context.maxDiagnosticsPerTool,
+      result: context.result,
       snapshot: input.request.snapshot,
-      tool: runPlan.tool,
-      toolRunId,
+      tool: context.runPlan.tool,
+      toolRunId: context.toolRunId,
       workspacePath: input.request.workspace.path,
     });
-    warnings.push(...parsedOutput.warnings);
-    const fixtureDiagnostics = (input.diagnosticsByTool?.[runPlan.tool] ?? []).map((diagnostic) =>
-      createNormalizedToolDiagnostic({
-        ...diagnostic,
-        toolRunId,
-      }),
+    const parseFailures = parsed.warnings.filter(isStaticAnalysisParseFailureWarning);
+    for (const parseFailure of parseFailures) {
+      input.metrics?.count(OBSERVABILITY_METRIC_NAMES.staticAnalysisParseFailuresTotal, {
+        labels: {
+          mode: input.request.mode,
+          reason: parseFailure.code,
+          tool: context.runPlan.tool,
+        },
+      });
+    }
+    span?.end({
+      attributes: {
+        "static_analysis.diagnostic_count": parsed.diagnostics.length,
+        "static_analysis.parse_failure_count": parseFailures.length,
+        "static_analysis.warning_count": parsed.warnings.length,
+      },
+      status: parseFailures.length > 0 ? "error" : "ok",
+    });
+
+    return parsed;
+  } catch (error) {
+    span?.end({
+      attributes: { "static_analysis.error_class": classifyTelemetryError(error) },
+      error,
+    });
+    throw error;
+  }
+}
+
+/** Normalizes and budgets diagnostics from parsed output and deterministic fixtures. */
+function normalizeStaticAnalysisDiagnosticsWithTelemetry(
+  input: RunStaticAnalysisInput,
+  context: {
+    /** Maximum diagnostics allowed for this tool. */
+    readonly maxDiagnosticsPerTool: number;
+    /** Parsed diagnostics and warnings from tool output. */
+    readonly parsedOutput: ParseToolOutputDiagnosticsResult;
+    /** Tool runner result with bounded captured output. */
+    readonly result: ToolRunnerResult;
+    /** Static-analysis tool run plan. */
+    readonly runPlan: ToolRunPlan;
+    /** Stable tool run ID used by normalized diagnostics. */
+    readonly toolRunId: string;
+  },
+): NormalizeStaticAnalysisDiagnosticsResult {
+  const span = input.traces?.startSpan(
+    OBSERVABILITY_SPAN_NAMES.staticAnalysisNormalizeDiagnostics,
+    {
+      attributes: {
+        "app.repo_id": input.request.repoId,
+        "app.review_run_id": input.request.reviewRunId,
+        "static_analysis.max_diagnostics": context.maxDiagnosticsPerTool,
+        "static_analysis.parsed_diagnostic_count": context.parsedOutput.diagnostics.length,
+        "static_analysis.tool": context.runPlan.tool,
+      },
+      kind: "internal",
+      traceContext: input.traceContext,
+    },
+  );
+
+  try {
+    const fixtureDiagnostics = (input.diagnosticsByTool?.[context.runPlan.tool] ?? []).map(
+      (diagnostic) =>
+        createNormalizedToolDiagnostic({
+          ...diagnostic,
+          toolRunId: context.toolRunId,
+        }),
     );
-    const runDiagnostics = [...parsedOutput.diagnostics, ...fixtureDiagnostics].slice(
+    const diagnostics = [...context.parsedOutput.diagnostics, ...fixtureDiagnostics].slice(
       0,
-      maxDiagnosticsPerTool,
+      context.maxDiagnosticsPerTool,
     );
-    if (parsedOutput.diagnostics.length + fixtureDiagnostics.length > runDiagnostics.length) {
+    const warnings: StaticAnalysisWarning[] = [];
+    const wasTruncated =
+      context.parsedOutput.diagnostics.length + fixtureDiagnostics.length > diagnostics.length;
+    if (wasTruncated) {
       warnings.push(
         warning("tool_diagnostic_budget_truncated", "Static analysis diagnostics were truncated.", {
-          maxDiagnosticsPerTool,
-          tool: runPlan.tool,
-          toolRunId,
+          maxDiagnosticsPerTool: context.maxDiagnosticsPerTool,
+          tool: context.runPlan.tool,
+          toolRunId: context.toolRunId,
         }),
       );
     }
 
-    diagnostics.push(...runDiagnostics);
-    toolRuns.push(
-      toolRunSummary({ diagnostics: runDiagnostics, plan: runPlan, result, toolRunId }),
-    );
-  }
+    input.metrics?.count(OBSERVABILITY_METRIC_NAMES.staticAnalysisDiagnosticsTotal, {
+      labels: {
+        mode: input.request.mode,
+        operation: "tool",
+        status: toolRunStatus(context.result),
+        tool: context.runPlan.tool,
+      },
+      value: diagnostics.length,
+    });
+    span?.end({
+      attributes: {
+        "static_analysis.diagnostic_count": diagnostics.length,
+        "static_analysis.fixture_diagnostic_count": fixtureDiagnostics.length,
+        "static_analysis.truncated": wasTruncated,
+        "static_analysis.warning_count": warnings.length,
+      },
+    });
 
-  return staticAnalysisReport({
-    diagnostics: diagnostics.slice(
-      0,
-      input.request.budgets?.maxDiagnosticsTotal ??
-        DEFAULT_STATIC_ANALYSIS_BUDGETS.maxDiagnosticsTotal,
-    ),
-    finishedAt: toolRuns.at(-1)?.finishedAt ?? startedAt,
-    request: input.request,
-    startedAt,
-    toolRuns,
-    warnings,
+    return {
+      diagnostics,
+      toolRun: toolRunSummary({
+        diagnostics,
+        plan: context.runPlan,
+        result: context.result,
+        toolRunId: context.toolRunId,
+      }),
+      warnings,
+    };
+  } catch (error) {
+    span?.end({
+      attributes: { "static_analysis.error_class": classifyTelemetryError(error) },
+      error,
+    });
+    throw error;
+  }
+}
+
+/** Records aggregate static-analysis run metrics after completion or failure. */
+function finishStaticAnalysisRunTelemetry(
+  input: RunStaticAnalysisInput,
+  context: {
+    /** Wall-clock duration measured by the telemetry wrapper. */
+    readonly durationMs: number;
+    /** Error raised before a report could be built. */
+    readonly error?: unknown;
+    /** Completed static-analysis report. */
+    readonly report?: StaticAnalysisReport;
+  },
+): void {
+  const status = context.report?.status ?? "failed";
+  const labels = staticAnalysisRunLabels(input.request, status);
+  const metricLabels = context.error
+    ? { ...labels, error_class: classifyTelemetryError(context.error) }
+    : labels;
+
+  input.metrics?.count(OBSERVABILITY_METRIC_NAMES.staticAnalysisRunsTotal, {
+    labels: metricLabels,
   });
+  input.metrics?.histogram(
+    OBSERVABILITY_METRIC_NAMES.staticAnalysisDurationMs,
+    context.durationMs,
+    {
+      labels,
+      unit: "ms",
+    },
+  );
+  if (context.report) {
+    input.metrics?.count(OBSERVABILITY_METRIC_NAMES.staticAnalysisDiagnosticsTotal, {
+      labels,
+      value: context.report.summary.diagnosticCount,
+    });
+  }
+}
+
+/** Records per-tool duration, output, and timeout metrics. */
+function recordStaticAnalysisToolMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  request: StaticAnalysisRequest,
+  runPlan: ToolRunPlan,
+  result: ToolRunnerResult,
+  status: ToolRunResultSummary["status"],
+): void {
+  const labels = staticAnalysisToolLabels(request, runPlan.tool, status);
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.staticAnalysisDurationMs, result.durationMs, {
+    labels,
+    unit: "ms",
+  });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.staticAnalysisOutputBytes, result.stdoutBytes, {
+    labels: { ...labels, stream: "stdout" },
+    unit: "bytes",
+  });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.staticAnalysisOutputBytes, result.stderrBytes, {
+    labels: { ...labels, stream: "stderr" },
+    unit: "bytes",
+  });
+  if (result.timedOut || status === "timed_out") {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.staticAnalysisTimeoutsTotal, {
+      labels,
+    });
+  }
+}
+
+/** Creates low-cardinality labels for aggregate static-analysis run metrics. */
+function staticAnalysisRunLabels(
+  request: StaticAnalysisRequest,
+  status: StaticAnalysisTelemetryStatus,
+): StaticAnalysisRunLabels {
+  return {
+    mode: request.mode,
+    operation: "run",
+    reason: request.reason,
+    status,
+  };
+}
+
+/** Creates low-cardinality labels for per-tool static-analysis metrics. */
+function staticAnalysisToolLabels(
+  request: StaticAnalysisRequest,
+  tool: StaticToolName,
+  status: ToolRunResultSummary["status"],
+): StaticAnalysisToolLabels {
+  return {
+    mode: request.mode,
+    operation: "tool",
+    status,
+    tool,
+  };
+}
+
+/** Returns true when a warning represents a tool output parse failure. */
+function isStaticAnalysisParseFailureWarning(warning: StaticAnalysisWarning): boolean {
+  return (
+    warning.code === "tool_output_parse_failed" || warning.code === "tool_output_schema_mismatch"
+  );
 }
 
 /** Creates sandbox metadata for static-analysis tool runner requests. */
