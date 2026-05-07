@@ -8,6 +8,42 @@
 
 Use `pnpm infra:up`, `pnpm infra:down`, and `pnpm infra:reset` from the repo root.
 
+## Local Observability Stack
+
+The optional `observability` Compose profile starts an OpenTelemetry Collector, Prometheus, Tempo,
+and Grafana for local telemetry checks:
+
+- OpenTelemetry gRPC on port `4317`
+- OpenTelemetry HTTP on port `4318`
+- Prometheus on port `9090`
+- Tempo on port `3200`
+- Grafana on port `3001`
+
+Start the full local stack with:
+
+```sh
+pnpm infra:observability:up
+```
+
+Validate the rendered Compose file without starting containers with:
+
+```sh
+pnpm infra:observability:config
+```
+
+Run services against the local collector with these environment variables:
+
+```sh
+OBSERVABILITY_ENABLED=true
+OBSERVABILITY_EXPORTER=otlp
+OBSERVABILITY_OTLP_ENDPOINT=http://localhost:4318
+OBSERVABILITY_ENV=local
+OBSERVABILITY_SERVICE_NAME=code-review-api
+```
+
+Use `code-review-worker` as `OBSERVABILITY_SERVICE_NAME` for worker processes. Grafana provisions
+Prometheus and Tempo datasources automatically.
+
 The local MinIO bootstrap creates the `heimdall-review-artifacts` bucket for review artifact
 payloads. Use these environment variables when running the API or worker against local object
 storage:

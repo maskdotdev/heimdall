@@ -35,6 +35,8 @@
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "infra:reset": "docker compose down -v && docker compose up -d",
+    "infra:observability:up": "docker compose --profile observability up -d",
+    "infra:observability:config": "docker compose --profile observability config",
     "infra:prepare": "pnpm infra:up && pnpm --filter @repo/admin-tools infra:db:prepare",
     "admin": "pnpm --filter @repo/admin-tools admin --",
     "admin:inspect-review": "pnpm --filter @repo/admin-tools admin -- review inspect",

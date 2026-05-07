@@ -61,7 +61,63 @@ services:
         do sleep 1; done;
         mc mb --ignore-existing local/heimdall-review-artifacts
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: review-agent-otel-collector
+    profiles: ["observability"]
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "9464:9464"
+    volumes:
+      - ./infra/observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    depends_on:
+      - tempo
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: review-agent-prometheus
+    profiles: ["observability"]
+    command: ["--config.file=/etc/prometheus/prometheus.yaml"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus_data:/prometheus
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: review-agent-tempo
+    profiles: ["observability"]
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./infra/observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/tmp/tempo
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: review-agent-grafana
+    profiles: ["observability"]
+    ports:
+      - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+
 volumes:
   postgres_data:
   redis_data:
   object_storage_data:
+  prometheus_data:
+  tempo_data:
+  grafana_data:
