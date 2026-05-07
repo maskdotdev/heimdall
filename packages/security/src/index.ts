@@ -194,6 +194,329 @@ export type RetentionDecision = {
   readonly reason: string;
 };
 
+/** Providers that can back a secret reference. */
+export const SECRET_REF_PROVIDERS = [
+  "env",
+  "aws_secrets_manager",
+  "gcp_secret_manager",
+  "vault",
+] as const;
+
+/** Provider that can back a secret reference. */
+export type SecretRefProvider = (typeof SECRET_REF_PROVIDERS)[number];
+
+/** User-facing provider aliases accepted by secret ref parsing. */
+const SECRET_REF_PROVIDER_ALIASES: Readonly<Record<string, SecretRefProvider>> = {
+  aws: "aws_secrets_manager",
+  aws_secrets_manager: "aws_secrets_manager",
+  env: "env",
+  gcp: "gcp_secret_manager",
+  gcp_secret_manager: "gcp_secret_manager",
+  vault: "vault",
+};
+
+/** Stable reference to a secret without embedding the secret value. */
+export type SecretRef = {
+  /** Secret storage provider. */
+  readonly provider: SecretRefProvider;
+  /** Provider-specific secret name or path. */
+  readonly name: string;
+  /** Optional provider-specific version identifier. */
+  readonly version?: string | undefined;
+};
+
+/** Service identity resolving a secret value. */
+export type SecretAccessService = "api" | "worker" | "admin_tools" | "llm_gateway" | "system";
+
+/** Purpose for resolving a secret value. */
+export type SecretAccessPurpose =
+  | "github_app_private_key"
+  | "github_webhook_secret"
+  | "llm_provider_api_key"
+  | "database_url"
+  | "redis_url"
+  | "object_storage_credential"
+  | "session_signing_secret"
+  | "encryption_key"
+  | "customer_byok"
+  | "other";
+
+/** Reasons an operator or automation can rotate a secret. */
+export const SECRET_ROTATION_REASONS = ["scheduled", "incident", "manual"] as const;
+
+/** Reason an operator or automation rotated a secret. */
+export type SecretRotationReason = (typeof SECRET_ROTATION_REASONS)[number];
+
+/** Validation states for a secret rotation attempt. */
+export const SECRET_ROTATION_VALIDATION_STATUSES = ["pending", "passed", "failed"] as const;
+
+/** Validation state for a secret rotation attempt. */
+export type SecretRotationValidationStatus = (typeof SECRET_ROTATION_VALIDATION_STATUSES)[number];
+
+/** Product-safe record that tracks one secret rotation attempt. */
+export type SecretRotationRecord = {
+  /** Stable rotation record ID. */
+  readonly id: string;
+  /** Secret reference that was rotated. */
+  readonly secretRef: SecretRef;
+  /** ISO timestamp when rotation started. */
+  readonly startedAt: string;
+  /** ISO timestamp when rotation completed. */
+  readonly completedAt?: string | undefined;
+  /** Actor or automation identity that initiated rotation. */
+  readonly initiatedBy: string;
+  /** Reason rotation started. */
+  readonly reason: SecretRotationReason;
+  /** Previous provider-specific version when known. */
+  readonly oldVersion?: string | undefined;
+  /** New provider-specific version. */
+  readonly newVersion: string;
+  /** Validation status for the new version. */
+  readonly validationStatus: SecretRotationValidationStatus;
+};
+
+/** Product-safe context attached to one secret resolution. */
+export type SecretAccessContext = {
+  /** Service identity resolving the secret. */
+  readonly service?: SecretAccessService | undefined;
+  /** Purpose for the secret resolution. */
+  readonly purpose?: SecretAccessPurpose | undefined;
+  /** Actor ID that caused the resolution when user initiated. */
+  readonly actorId?: string | undefined;
+  /** Request ID used for audit correlation. */
+  readonly requestId?: string | undefined;
+};
+
+/** Secret value returned by a secrets manager. */
+export type ResolvedSecret = {
+  /** Secret reference that was resolved. */
+  readonly ref: SecretRef;
+  /** Secret value. Do not log this field. */
+  readonly value: string;
+  /** Provider-specific version that was resolved. */
+  readonly version?: string | undefined;
+  /** ISO timestamp when the value was resolved. */
+  readonly resolvedAt: string;
+};
+
+/** Product-safe resolved secret representation for logs and audit metadata. */
+export type RedactedResolvedSecret = Omit<ResolvedSecret, "value"> & {
+  /** Redacted placeholder for the secret value. */
+  readonly value: "[redacted-secret]";
+};
+
+/** Boundary used to resolve secrets from provider-specific storage. */
+export type SecretsManager = {
+  /** Resolves one secret reference for a service context. */
+  readonly resolveSecret: (
+    ref: SecretRef,
+    context?: SecretAccessContext,
+  ) => Promise<ResolvedSecret>;
+};
+
+/** Error codes returned by secret resolution boundaries. */
+export type SecretResolutionErrorCode =
+  | "secret_ref_invalid"
+  | "secret_provider_unsupported"
+  | "secret_not_found";
+
+/** Error raised when a secret cannot be resolved safely. */
+export class SecretResolutionError extends Error {
+  /** Machine-readable failure code. */
+  public readonly code: SecretResolutionErrorCode;
+
+  /** Secret reference involved in the failure when available. */
+  public readonly ref: SecretRef | undefined;
+
+  /** Creates a secret resolution error. */
+  public constructor(
+    code: SecretResolutionErrorCode,
+    message: string,
+    ref?: SecretRef | undefined,
+  ) {
+    super(message);
+    this.name = "SecretResolutionError";
+    this.code = code;
+    this.ref = ref;
+  }
+}
+
+/** Options used to construct a local environment-backed secrets manager. */
+export type LocalEnvSecretsManagerOptions = {
+  /** Environment map used to look up secret names. Defaults to process.env. */
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+};
+
+/** Local development secrets manager that resolves `env:` secret references. */
+export class LocalEnvSecretsManager implements SecretsManager {
+  /** Environment map used to look up secret names. */
+  private readonly env: Readonly<Record<string, string | undefined>>;
+
+  /** Current time provider. */
+  private readonly now: () => Date;
+
+  /** Creates a local environment-backed secrets manager. */
+  public constructor(options: LocalEnvSecretsManagerOptions = {}) {
+    this.env = options.env ?? process.env;
+    this.now = options.now ?? (() => new Date());
+  }
+
+  /** Resolves an `env:` secret reference from the configured environment map. */
+  public async resolveSecret(ref: SecretRef): Promise<ResolvedSecret> {
+    assertValidSecretRef(ref);
+    if (ref.provider !== "env") {
+      throw new SecretResolutionError(
+        "secret_provider_unsupported",
+        `LocalEnvSecretsManager can only resolve env secret refs, not ${ref.provider}.`,
+        ref,
+      );
+    }
+
+    const value = this.env[ref.name];
+    if (!value) {
+      throw new SecretResolutionError(
+        "secret_not_found",
+        `Environment secret ${ref.name} was not set.`,
+        ref,
+      );
+    }
+
+    return {
+      ref,
+      resolvedAt: this.now().toISOString(),
+      value,
+      ...(ref.version ? { version: ref.version } : {}),
+    };
+  }
+}
+
+/** Secrets manager placeholder for production providers that are not wired yet. */
+export class UnsupportedProductionSecretsManager implements SecretsManager {
+  /** Provider represented by this placeholder. */
+  private readonly provider: Exclude<SecretRefProvider, "env">;
+
+  /** Creates an unsupported production provider placeholder. */
+  public constructor(provider: Exclude<SecretRefProvider, "env">) {
+    this.provider = provider;
+  }
+
+  /** Rejects resolution until a concrete production provider is configured. */
+  public async resolveSecret(ref: SecretRef): Promise<ResolvedSecret> {
+    assertValidSecretRef(ref);
+    throw new SecretResolutionError(
+      "secret_provider_unsupported",
+      `Secret provider ${this.provider} is not configured in this runtime.`,
+      ref,
+    );
+  }
+}
+
+/** Creates a local environment-backed secrets manager. */
+export function createLocalEnvSecretsManager(
+  options: LocalEnvSecretsManagerOptions = {},
+): SecretsManager {
+  return new LocalEnvSecretsManager(options);
+}
+
+/** Creates a production provider placeholder that rejects resolution. */
+export function createUnsupportedProductionSecretsManager(
+  provider: Exclude<SecretRefProvider, "env">,
+): SecretsManager {
+  return new UnsupportedProductionSecretsManager(provider);
+}
+
+/** Parses a secret reference string into a structured reference. */
+export function parseSecretRef(input: string): SecretRef {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    throw new SecretResolutionError("secret_ref_invalid", "Secret ref must not be empty.");
+  }
+
+  const separatorIndex = trimmed.indexOf(":");
+  if (separatorIndex === -1) {
+    return assertValidSecretRef({ name: trimmed, provider: "env" });
+  }
+
+  const provider = secretProviderFromString(trimmed.slice(0, separatorIndex));
+  if (!provider) {
+    throw new SecretResolutionError(
+      "secret_ref_invalid",
+      `Secret ref provider ${trimmed.slice(0, separatorIndex)} is not supported.`,
+    );
+  }
+
+  const nameAndVersion = trimmed.slice(separatorIndex + 1);
+  const versionSeparatorIndex = nameAndVersion.lastIndexOf("#");
+  const name =
+    versionSeparatorIndex === -1
+      ? nameAndVersion.trim()
+      : nameAndVersion.slice(0, versionSeparatorIndex).trim();
+  const version =
+    versionSeparatorIndex === -1
+      ? undefined
+      : nameAndVersion.slice(versionSeparatorIndex + 1).trim();
+
+  return assertValidSecretRef({
+    name,
+    provider,
+    ...(version ? { version } : {}),
+  });
+}
+
+/** Formats a structured secret reference using the canonical provider name. */
+export function formatSecretRef(ref: SecretRef): string {
+  const validated = assertValidSecretRef(ref);
+  return `${validated.provider}:${validated.name}${validated.version ? `#${validated.version}` : ""}`;
+}
+
+/** Returns a product-safe label for a secret reference. */
+export function secretRefLabel(ref: SecretRef): string {
+  return formatSecretRef(ref);
+}
+
+/** Replaces a resolved secret value with a product-safe placeholder. */
+export function redactResolvedSecret(secret: ResolvedSecret): RedactedResolvedSecret {
+  return {
+    ref: secret.ref,
+    resolvedAt: secret.resolvedAt,
+    value: "[redacted-secret]",
+    ...(secret.version ? { version: secret.version } : {}),
+  };
+}
+
+/** Validates a structured secret reference. */
+export function assertValidSecretRef(ref: SecretRef): SecretRef {
+  if (!SECRET_REF_PROVIDERS.includes(ref.provider)) {
+    throw new SecretResolutionError(
+      "secret_ref_invalid",
+      `Secret ref provider ${String(ref.provider)} is not supported.`,
+      ref,
+    );
+  }
+  if (ref.name.trim().length === 0) {
+    throw new SecretResolutionError(
+      "secret_ref_invalid",
+      "Secret ref name must not be empty.",
+      ref,
+    );
+  }
+  if (containsControlCharacter(ref.name) || containsControlCharacter(ref.version ?? "")) {
+    throw new SecretResolutionError(
+      "secret_ref_invalid",
+      "Secret ref names and versions must not contain control characters.",
+      ref,
+    );
+  }
+
+  return {
+    name: ref.name.trim(),
+    provider: ref.provider,
+    ...(ref.version?.trim() ? { version: ref.version.trim() } : {}),
+  };
+}
+
 /** Severity levels used for security events and incident triage. */
 export const SECURITY_EVENT_SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
 
@@ -1249,6 +1572,19 @@ function parseIdentityAssertion(encodedAssertion: string): AdminIdentityAssertio
     displayName: record ? stringField(record, "displayName") : undefined,
     email: record ? stringField(record, "email") : undefined,
   };
+}
+
+/** Returns a canonical secret provider for a user-facing provider string. */
+function secretProviderFromString(value: string): SecretRefProvider | undefined {
+  return SECRET_REF_PROVIDER_ALIASES[value.trim().toLowerCase()];
+}
+
+/** Returns whether a value contains ASCII control characters. */
+function containsControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127;
+  });
 }
 
 /** Returns a unique list of valid admin permissions. */

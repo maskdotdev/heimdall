@@ -3,18 +3,23 @@ import {
   actorCanAccessRepo,
   classifyArtifact,
   createAdminSessionManager,
+  createLocalEnvSecretsManager,
   createMemorySecurityEventSink,
   createNoopSecurityEventSink,
   createSecurityEvent,
+  createUnsupportedProductionSecretsManager,
   DEFAULT_RETENTION_POLICY,
   defaultSecurityEventSeverity,
+  formatSecretRef,
   isProductRole,
+  parseSecretRef,
   productActorHasOrgPermission,
   productActorHasRepoPermission,
   productCapabilities,
   productPermissionsForRole,
   productRoleHasPermission,
   recordSecurityEvent,
+  redactResolvedSecret,
   resolveArtifactRetention,
   retentionClassForArtifactType,
   shouldAlertSecurityEvent,
@@ -217,6 +222,68 @@ describe("admin security", () => {
     ).toMatchObject({
       expiresAt: "2026-05-14T00:00:00.000Z",
       storage: "allowed",
+    });
+  });
+
+  it("parses and formats secret references without secret values", () => {
+    expect(parseSecretRef("GITHUB_WEBHOOK_SECRET")).toEqual({
+      name: "GITHUB_WEBHOOK_SECRET",
+      provider: "env",
+    });
+    expect(parseSecretRef("aws:prod/github-app/private-key#v2")).toEqual({
+      name: "prod/github-app/private-key",
+      provider: "aws_secrets_manager",
+      version: "v2",
+    });
+    expect(formatSecretRef(parseSecretRef("gcp:prod/llm/openai"))).toBe(
+      "gcp_secret_manager:prod/llm/openai",
+    );
+    expect(() => parseSecretRef("unknown:prod/key")).toThrow("provider unknown is not supported");
+    expect(() => parseSecretRef("env:")).toThrow("Secret ref name must not be empty");
+  });
+
+  it("resolves local env secrets and redacts resolved values", async () => {
+    const manager = createLocalEnvSecretsManager({
+      env: {
+        GITHUB_WEBHOOK_SECRET: "webhook-secret-value",
+      },
+      now: () => new Date("2026-05-07T12:00:00.000Z"),
+    });
+
+    const resolved = await manager.resolveSecret(parseSecretRef("env:GITHUB_WEBHOOK_SECRET"));
+
+    expect(resolved).toEqual({
+      ref: {
+        name: "GITHUB_WEBHOOK_SECRET",
+        provider: "env",
+      },
+      resolvedAt: "2026-05-07T12:00:00.000Z",
+      value: "webhook-secret-value",
+    });
+    expect(redactResolvedSecret(resolved)).toEqual({
+      ref: resolved.ref,
+      resolvedAt: resolved.resolvedAt,
+      value: "[redacted-secret]",
+    });
+    await expect(manager.resolveSecret(parseSecretRef("env:MISSING_SECRET"))).rejects.toMatchObject(
+      {
+        code: "secret_not_found",
+      },
+    );
+    await expect(
+      manager.resolveSecret(parseSecretRef("aws:prod/github-app/private-key")),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+  });
+
+  it("keeps production secret providers explicit until configured", async () => {
+    const manager = createUnsupportedProductionSecretsManager("aws_secrets_manager");
+
+    await expect(
+      manager.resolveSecret(parseSecretRef("aws:prod/github-app/private-key")),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
     });
   });
 
