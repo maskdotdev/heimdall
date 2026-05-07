@@ -23,10 +23,12 @@ import { eq, inArray } from "drizzle-orm";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
 import {
+  type NormalizedGitHubFeedback,
   type NormalizedGitHubInstallation,
   type NormalizedGitHubPullRequest,
   type NormalizedGitHubRepository,
   normalizeGitHubAccount,
+  normalizeGitHubFeedback,
   normalizeGitHubInstallation,
   normalizeGitHubPullRequest,
   normalizeGitHubRepositories,
@@ -57,9 +59,17 @@ type NormalizedEvent = {
   readonly installation?: NormalizedGitHubInstallation | undefined;
   readonly repositories: readonly NormalizedGitHubRepository[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
+  readonly feedback?: NormalizedGitHubFeedback | undefined;
 };
 
-const supportedEvents = new Set(["installation", "repository", "pull_request"]);
+const supportedEvents = new Set([
+  "installation",
+  "repository",
+  "pull_request",
+  "issue_comment",
+  "pull_request_review_comment",
+  "reaction",
+]);
 
 /** Handles verified GitHub webhook ingestion and durable job persistence. */
 export class GitHubWebhookHandler {
@@ -102,6 +112,7 @@ export class GitHubWebhookHandler {
     const repositories = normalizeGitHubRepositories(payload);
     const pullRequest =
       headers.eventName === "pull_request" ? normalizeGitHubPullRequest(payload) : undefined;
+    const feedback = normalizeGitHubFeedback(payload, headers.eventName);
 
     return {
       headers,
@@ -110,6 +121,7 @@ export class GitHubWebhookHandler {
       installation,
       repositories,
       pullRequest,
+      feedback,
     };
   }
 
@@ -185,6 +197,7 @@ export class GitHubWebhookHandler {
         repositories: await loadRepositoriesForPlanning(tx, normalized.repositories),
         repositorySettings: await loadPersistedRepositorySettings(tx, normalized.repositories),
         pullRequest: normalized.pullRequest,
+        feedback: normalized.feedback,
       });
 
       for (const job of jobs) {

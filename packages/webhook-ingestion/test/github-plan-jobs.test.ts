@@ -2,12 +2,18 @@ import { JOB_TYPES } from "@repo/contracts";
 import { QUEUE_NAMES } from "@repo/queue";
 import { describe, expect, it } from "vitest";
 import {
+  normalizeGitHubFeedback,
   normalizeGitHubInstallation,
   normalizeGitHubPullRequest,
   normalizeGitHubRepositories,
   planGitHubWebhookJobs,
 } from "../src";
-import { installationPayload, pullRequestPayload } from "./fixtures";
+import {
+  installationPayload,
+  issueCommentPayload,
+  pullRequestPayload,
+  reactionPayload,
+} from "./fixtures";
 
 describe("GitHub webhook job planning", () => {
   it("plans installation sync jobs", () => {
@@ -126,5 +132,38 @@ describe("GitHub webhook job planning", () => {
     });
 
     expect(jobs).toEqual([]);
+  });
+
+  it("plans memory update jobs for pull request comments and reactions", () => {
+    const commentJobs = planGitHubWebhookJobs({
+      action: "created",
+      deliveryId: "delivery-7",
+      eventName: "issue_comment",
+      feedback: normalizeGitHubFeedback(issueCommentPayload, "issue_comment"),
+      installation: normalizeGitHubInstallation(issueCommentPayload),
+      repositories: normalizeGitHubRepositories(issueCommentPayload),
+    });
+    const reactionJobs = planGitHubWebhookJobs({
+      action: "created",
+      deliveryId: "delivery-8",
+      eventName: "reaction",
+      feedback: normalizeGitHubFeedback(reactionPayload, "reaction"),
+      installation: normalizeGitHubInstallation(reactionPayload),
+      repositories: normalizeGitHubRepositories(reactionPayload),
+    });
+
+    expect(commentJobs).toHaveLength(1);
+    expect(commentJobs[0]?.queueName).toBe(QUEUE_NAMES.memory);
+    expect(commentJobs[0]?.envelope.jobType).toBe(JOB_TYPES.UpdateMemory);
+    expect(commentJobs[0]?.envelope.payload).toMatchObject({
+      actorLogin: "maintainer",
+      feedbackKind: "comment_reply",
+      reason: "comment_reply",
+    });
+    expect(reactionJobs[0]?.envelope.payload).toMatchObject({
+      externalCommentId: "888",
+      feedbackKind: "negative_reaction",
+      reason: "provider_reaction",
+    });
   });
 });

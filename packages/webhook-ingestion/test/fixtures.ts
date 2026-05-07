@@ -66,3 +66,57 @@ export const pullRequestPayload = {
     },
   },
 } as const;
+
+/** GitHub issue_comment webhook fixture for a PR-level comment. */
+export const issueCommentPayload = {
+  action: "created",
+  installation: installationPayload.installation,
+  repository: installationPayload.repositories[0],
+  issue: {
+    id: 777,
+    number: 7,
+    pull_request: {
+      url: "https://api.github.com/repos/acme/heimdall/pulls/7",
+    },
+  },
+  comment: {
+    id: 888,
+    body: "@heimdall false positive on finding fnd_123",
+    user: {
+      login: "maintainer",
+    },
+  },
+  sender: {
+    login: "maintainer",
+  },
+} as const;
+
+/** GitHub reaction webhook fixture for a reaction on a PR comment. */
+export const reactionPayload = {
+  action: "created",
+  installation: installationPayload.installation,
+  repository: installationPayload.repositories[0],
+  issue: {
+    id: 777,
+    number: 7,
+    pull_request: {
+      url: "https://api.github.com/repos/acme/heimdall/pulls/7",
+    },
+  },
+  comment: {
+    id: 888,
+    user: {
+      login: "heimdall-app",
+    },
+  },
+  reaction: {
+    id: 999,
+    content: "-1",
+    user: {
+      login: "maintainer",
+    },
+  },
+  sender: {
+    login: "maintainer",
+  },
+} as const;

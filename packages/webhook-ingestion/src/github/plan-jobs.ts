@@ -4,6 +4,7 @@ import { buildReviewPolicySnapshot, shouldReviewPr } from "@repo/rules";
 import { newId } from "../ids";
 import type { PlannedJob } from "../types";
 import type {
+  NormalizedGitHubFeedback,
   NormalizedGitHubInstallation,
   NormalizedGitHubPullRequest,
   NormalizedGitHubRepository,
@@ -17,6 +18,7 @@ type PlanOptions = {
   readonly repositories: readonly NormalizedGitHubRepository[];
   readonly repositorySettings?: readonly RepositorySettings[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
+  readonly feedback?: NormalizedGitHubFeedback | undefined;
 };
 
 const createdAt = (): string => new Date().toISOString();
@@ -141,6 +143,44 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           baseSha: snapshot.baseSha,
           headSha: snapshot.headSha,
           trigger: "webhook",
+        },
+      ),
+    });
+  }
+
+  if (options.feedback) {
+    const reason =
+      options.feedback.feedbackKind === "positive_reaction" ||
+      options.feedback.feedbackKind === "negative_reaction"
+        ? "provider_reaction"
+        : "comment_reply";
+    jobs.push({
+      queueName: QUEUE_NAMES.memory,
+      ...(options.installation ? { orgId: options.installation.orgId } : {}),
+      repoId: options.feedback.repoId,
+      envelope: envelope(
+        JOB_TYPES.UpdateMemory,
+        `github:memory:${options.feedback.feedbackEventId}`,
+        {
+          repoId: options.feedback.repoId,
+          reason,
+          provider: "github",
+          feedbackKind: options.feedback.feedbackKind,
+          externalEventId: options.feedback.feedbackEventId,
+          ...(options.feedback.externalCommentId
+            ? { externalCommentId: options.feedback.externalCommentId }
+            : {}),
+          ...(options.feedback.externalParentCommentId
+            ? { externalParentCommentId: options.feedback.externalParentCommentId }
+            : {}),
+          ...(options.feedback.externalReactionId
+            ? { externalReactionId: options.feedback.externalReactionId }
+            : {}),
+          ...(options.feedback.actorLogin ? { actorLogin: options.feedback.actorLogin } : {}),
+          ...(options.feedback.bodyHash ? { bodyHash: options.feedback.bodyHash } : {}),
+          ...(options.feedback.pullRequestNumber
+            ? { pullRequestNumber: options.feedback.pullRequestNumber }
+            : {}),
         },
       ),
     });

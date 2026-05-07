@@ -96,6 +96,7 @@ export type PublishReviewJobPayload = Static<typeof PublishReviewJobPayloadSchem
 export const UpdateMemoryReasonSchema = Type.Union([
   Type.Literal("finding_outcome"),
   Type.Literal("comment_reply"),
+  Type.Literal("provider_reaction"),
   Type.Literal("manual_rule"),
   Type.Literal("scheduled"),
 ]);
@@ -107,6 +108,15 @@ export const UpdateMemoryJobPayloadSchema = Type.Object(
     findingId: Type.Optional(FindingIdSchema),
     outcomeId: Type.Optional(OutcomeIdSchema),
     reason: UpdateMemoryReasonSchema,
+    provider: Type.Optional(GitProviderSchema),
+    feedbackKind: Type.Optional(Type.String({ minLength: 1 })),
+    externalEventId: Type.Optional(Type.String({ minLength: 1 })),
+    externalCommentId: Type.Optional(Type.String({ minLength: 1 })),
+    externalParentCommentId: Type.Optional(Type.String({ minLength: 1 })),
+    externalReactionId: Type.Optional(Type.String({ minLength: 1 })),
+    actorLogin: Type.Optional(Type.String({ minLength: 1 })),
+    bodyHash: Type.Optional(Type.String({ pattern: "^sha256:[a-f0-9]{64}$" })),
+    pullRequestNumber: Type.Optional(Type.Integer({ minimum: 1 })),
   },
   { additionalProperties: false },
 );

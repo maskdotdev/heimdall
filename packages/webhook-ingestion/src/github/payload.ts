@@ -34,6 +34,17 @@ const optionalString = (record: JsonRecord, key: string): string | undefined => 
   return typeof value === "string" && value.length > 0 ? value : undefined;
 };
 
+const optionalProviderId = (record: JsonRecord, key: string): string | undefined => {
+  const value = record[key];
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  return undefined;
+};
+
 const withOptional = <K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> =>
   value === undefined ? {} : ({ [key]: value } as Record<K, V>);
 
@@ -83,6 +94,39 @@ export type NormalizedGitHubRepository = {
 export type NormalizedGitHubPullRequest = {
   readonly pullRequestId: string;
   readonly snapshot: PullRequestSnapshot;
+};
+
+/** Provider feedback event normalized from GitHub PR comments or reactions. */
+export type NormalizedGitHubFeedback = {
+  /** Stable feedback event ID derived from provider-owned identifiers. */
+  readonly feedbackEventId: string;
+  /** Provider event name that delivered the feedback. */
+  readonly eventName: "issue_comment" | "pull_request_review_comment" | "reaction";
+  /** Provider event action. */
+  readonly action: string;
+  /** Repository that owns the comment or reaction. */
+  readonly repoId: string;
+  /** Installation that delivered the event. */
+  readonly installationId: string;
+  /** Pull request number when the feedback belongs to a PR. */
+  readonly pullRequestNumber?: number | undefined;
+  /** Classified feedback signal for downstream memory processing. */
+  readonly feedbackKind:
+    | "comment_reply"
+    | "comment_edited"
+    | "comment_deleted"
+    | "positive_reaction"
+    | "negative_reaction";
+  /** Provider comment ID when the event is tied to a comment. */
+  readonly externalCommentId?: string | undefined;
+  /** Provider parent comment ID for inline replies. */
+  readonly externalParentCommentId?: string | undefined;
+  /** Provider reaction ID when the event is tied to a reaction. */
+  readonly externalReactionId?: string | undefined;
+  /** Login for the actor that produced the signal. */
+  readonly actorLogin?: string | undefined;
+  /** SHA-256 hash of comment text when available. */
+  readonly bodyHash?: `sha256:${string}` | undefined;
 };
 
 /** Extracts a GitHub installation account. */
@@ -252,8 +296,149 @@ export function normalizeGitHubPullRequest(payload: JsonRecord): NormalizedGitHu
   };
 }
 
+/** Extracts a normalized feedback signal from GitHub comment and reaction webhooks. */
+export function normalizeGitHubFeedback(
+  payload: JsonRecord,
+  eventName: string,
+): NormalizedGitHubFeedback | undefined {
+  if (eventName === "issue_comment") {
+    return normalizeIssueCommentFeedback(payload);
+  }
+
+  if (eventName === "pull_request_review_comment") {
+    return normalizeReviewCommentFeedback(payload);
+  }
+
+  if (eventName === "reaction") {
+    return normalizeReactionFeedback(payload);
+  }
+
+  return undefined;
+}
+
 /** Parses a raw JSON webhook body. */
 export function parseGitHubWebhookPayload(rawBody: Uint8Array): JsonRecord {
   const parsed = JSON.parse(new TextDecoder().decode(rawBody)) as unknown;
   return asRecord(parsed, "root");
+}
+
+function normalizeIssueCommentFeedback(payload: JsonRecord): NormalizedGitHubFeedback | undefined {
+  const issue = asRecord(payload.issue, "issue");
+  if (!optionalRecord(issue.pull_request)) {
+    return undefined;
+  }
+
+  const repository = normalizeGitHubRepository(payload).repository;
+  const installation = normalizeGitHubInstallation(payload);
+  const comment = asRecord(payload.comment, "comment");
+  const action = optionalString(payload, "action") ?? "unknown";
+  const externalCommentId = stringValue(comment, "id");
+  const body = optionalString(comment, "body");
+
+  return {
+    action,
+    ...withOptional("actorLogin", actorLogin(payload, comment)),
+    ...withOptional("bodyHash", body ? sha256(body) : undefined),
+    eventName: "issue_comment",
+    externalCommentId,
+    feedbackEventId: stableId("fb", ["github", "issue_comment", action, externalCommentId]),
+    feedbackKind: commentFeedbackKind(action),
+    installationId: installation.installationId,
+    pullRequestNumber: numberValue(issue, "number"),
+    repoId: repository.repoId,
+  };
+}
+
+function normalizeReviewCommentFeedback(payload: JsonRecord): NormalizedGitHubFeedback {
+  const repository = normalizeGitHubRepository(payload).repository;
+  const installation = normalizeGitHubInstallation(payload);
+  const comment = asRecord(payload.comment, "comment");
+  const pullRequest = optionalRecord(payload.pull_request);
+  const action = optionalString(payload, "action") ?? "unknown";
+  const externalCommentId = stringValue(comment, "id");
+  const parentCommentId = optionalProviderId(comment, "in_reply_to_id");
+  const body = optionalString(comment, "body");
+
+  return {
+    action,
+    ...withOptional("actorLogin", actorLogin(payload, comment)),
+    ...withOptional("bodyHash", body ? sha256(body) : undefined),
+    eventName: "pull_request_review_comment",
+    externalCommentId,
+    ...withOptional("externalParentCommentId", parentCommentId),
+    feedbackEventId: stableId("fb", [
+      "github",
+      "pull_request_review_comment",
+      action,
+      externalCommentId,
+    ]),
+    feedbackKind: commentFeedbackKind(action),
+    installationId: installation.installationId,
+    ...withOptional(
+      "pullRequestNumber",
+      pullRequest ? numberValue(pullRequest, "number") : undefined,
+    ),
+    repoId: repository.repoId,
+  };
+}
+
+function normalizeReactionFeedback(payload: JsonRecord): NormalizedGitHubFeedback | undefined {
+  const repository = normalizeGitHubRepository(payload).repository;
+  const installation = normalizeGitHubInstallation(payload);
+  const reaction = asRecord(payload.reaction, "reaction");
+  const feedbackKind = reactionFeedbackKind(stringValue(reaction, "content"));
+  if (!feedbackKind) {
+    return undefined;
+  }
+
+  const action = optionalString(payload, "action") ?? "unknown";
+  const comment = optionalRecord(payload.comment);
+  const issue = optionalRecord(payload.issue);
+  const externalReactionId = stringValue(reaction, "id");
+  const externalCommentId = comment ? stringValue(comment, "id") : undefined;
+  const pullRequestNumber =
+    issue && optionalRecord(issue.pull_request) ? numberValue(issue, "number") : undefined;
+
+  return {
+    action,
+    ...withOptional("actorLogin", actorLogin(payload, reaction)),
+    eventName: "reaction",
+    ...(externalCommentId ? { externalCommentId } : {}),
+    externalReactionId,
+    feedbackEventId: stableId("fb", ["github", "reaction", action, externalReactionId]),
+    feedbackKind,
+    installationId: installation.installationId,
+    ...withOptional("pullRequestNumber", pullRequestNumber),
+    repoId: repository.repoId,
+  };
+}
+
+function actorLogin(payload: JsonRecord, fallbackSource: JsonRecord): string | undefined {
+  const sender = optionalRecord(payload.sender);
+  const user = optionalRecord(fallbackSource.user);
+  return (sender && optionalString(sender, "login")) ?? (user && optionalString(user, "login"));
+}
+
+function commentFeedbackKind(
+  action: string,
+): "comment_reply" | "comment_edited" | "comment_deleted" {
+  if (action === "edited") {
+    return "comment_edited";
+  }
+  if (action === "deleted") {
+    return "comment_deleted";
+  }
+  return "comment_reply";
+}
+
+function reactionFeedbackKind(
+  content: string,
+): "positive_reaction" | "negative_reaction" | undefined {
+  if (["+1", "heart", "hooray", "rocket"].includes(content)) {
+    return "positive_reaction";
+  }
+  if (["-1", "confused"].includes(content)) {
+    return "negative_reaction";
+  }
+  return undefined;
 }
