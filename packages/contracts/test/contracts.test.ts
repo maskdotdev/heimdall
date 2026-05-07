@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
+import {
+  CreateBillingCheckoutSessionRequestSchema,
+  CreateBillingPortalSessionRequestSchema,
+} from "#contracts/api/billing";
 import { ApiErrorResponseSchema } from "#contracts/api/errors";
 import {
   ListRepositoriesResponseSchema,
   UpdateRepositorySettingsRequestSchema,
 } from "#contracts/api/repositories";
 import { GetReviewRunResponseSchema } from "#contracts/api/reviews";
-import { ListRepoRulesResponseSchema } from "#contracts/api/rules";
+import {
+  CreateRepoRuleRequestSchema,
+  ListRepoRulesResponseSchema,
+  UpdateRepoRuleRequestSchema,
+} from "#contracts/api/rules";
 import { JOB_TYPES } from "#contracts/enums/jobs";
 import {
   validCandidateFindingFixture,
@@ -22,6 +30,7 @@ import {
   validIndexRecordsFixture,
 } from "#contracts/fixtures/index-artifact.fixture";
 import {
+  validBillingReconcileJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
   validIndexRepoCommitJobPayloadFixture,
   validPublishReviewJobPayloadFixture,
@@ -35,9 +44,22 @@ import {
   validRepoRuleFixture,
 } from "#contracts/fixtures/memory.fixture";
 import {
+  validBillingAccountFixture,
+  validBillingMeterEventFixture,
+  validBillingPlanFixture,
+  validBillingPlanVersionFixture,
   validCodeIndexVersionFixture,
+  validCreditGrantFixture,
+  validEntitlementDecisionFixture,
+  validEntitlementFixture,
+  validInvoiceFixture,
   validLLMCallFixture,
+  validPlanSnapshotFixture,
   validPromptVersionFixture,
+  validQuotaCounterFixture,
+  validQuotaReservationFixture,
+  validSubscriptionFixture,
+  validSubscriptionItemFixture,
   validUsageEventFixture,
   validWebhookEventFixture,
 } from "#contracts/fixtures/operations.fixture";
@@ -64,6 +86,7 @@ import {
 } from "#contracts/index-artifact/records";
 import { JobEnvelopeSchema } from "#contracts/jobs/envelope";
 import {
+  BillingReconcileJobPayloadSchema,
   EmbeddingBatchJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
   PublishReviewJobPayloadSchema,
@@ -87,6 +110,20 @@ import {
   ValidatedFindingSchema,
 } from "#contracts/review/finding";
 import { ReviewRunSchema } from "#contracts/review/review-run";
+import {
+  BillingAccountSchema,
+  BillingMeterEventSchema,
+  BillingPlanSchema,
+  BillingPlanVersionSchema,
+  CreditGrantSchema,
+  EntitlementDecisionSchema,
+  EntitlementSchema,
+  InvoiceSchema,
+  PlanSnapshotSchema,
+  SubscriptionItemSchema,
+  SubscriptionSchema,
+} from "#contracts/usage/entitlements";
+import { QuotaCounterSchema, QuotaReservationSchema } from "#contracts/usage/quota";
 import { UsageEventSchema } from "#contracts/usage/usage-event";
 import { parseWithSchema, safeParseWithSchema } from "#contracts/validation/parse";
 import { WebhookEventSchema } from "#contracts/webhook/webhook-event";
@@ -97,6 +134,41 @@ describe("contract validation", () => {
     expect(safeParseWithSchema("RepoPath", RepoPathSchema, "/src/index.ts").ok).toBe(false);
     expect(safeParseWithSchema("RepoPath", RepoPathSchema, "../secret.ts").ok).toBe(false);
     expect(safeParseWithSchema("RepoPath", RepoPathSchema, "src\\index.ts").ok).toBe(false);
+  });
+
+  it("validates billing API request contracts", () => {
+    expect(
+      parseWithSchema(
+        "CreateBillingCheckoutSessionRequest",
+        CreateBillingCheckoutSessionRequestSchema,
+        {
+          cancelUrl: "https://app.example.test/billing",
+          orgId: "org_01HXAMPLE",
+          planKey: "team",
+          quantity: 3,
+          successUrl: "https://app.example.test/billing/success",
+        },
+      ),
+    ).toEqual({
+      cancelUrl: "https://app.example.test/billing",
+      orgId: "org_01HXAMPLE",
+      planKey: "team",
+      quantity: 3,
+      successUrl: "https://app.example.test/billing/success",
+    });
+    expect(
+      parseWithSchema(
+        "CreateBillingPortalSessionRequest",
+        CreateBillingPortalSessionRequestSchema,
+        {
+          orgId: "org_01HXAMPLE",
+          returnUrl: "https://app.example.test/billing",
+        },
+      ),
+    ).toEqual({
+      orgId: "org_01HXAMPLE",
+      returnUrl: "https://app.example.test/billing",
+    });
   });
 
   it("validates pull request snapshot fixtures", () => {
@@ -182,6 +254,53 @@ describe("contract validation", () => {
     expect(parseWithSchema("UsageEvent", UsageEventSchema, validUsageEventFixture)).toEqual(
       validUsageEventFixture,
     );
+    expect(parseWithSchema("BillingPlan", BillingPlanSchema, validBillingPlanFixture)).toEqual(
+      validBillingPlanFixture,
+    );
+    expect(
+      parseWithSchema(
+        "BillingPlanVersion",
+        BillingPlanVersionSchema,
+        validBillingPlanVersionFixture,
+      ),
+    ).toEqual(validBillingPlanVersionFixture);
+    expect(
+      parseWithSchema("BillingAccount", BillingAccountSchema, validBillingAccountFixture),
+    ).toEqual(validBillingAccountFixture);
+    expect(parseWithSchema("Subscription", SubscriptionSchema, validSubscriptionFixture)).toEqual(
+      validSubscriptionFixture,
+    );
+    expect(
+      parseWithSchema("SubscriptionItem", SubscriptionItemSchema, validSubscriptionItemFixture),
+    ).toEqual(validSubscriptionItemFixture);
+    expect(parseWithSchema("CreditGrant", CreditGrantSchema, validCreditGrantFixture)).toEqual(
+      validCreditGrantFixture,
+    );
+    expect(parseWithSchema("Invoice", InvoiceSchema, validInvoiceFixture)).toEqual(
+      validInvoiceFixture,
+    );
+    expect(
+      parseWithSchema("BillingMeterEvent", BillingMeterEventSchema, validBillingMeterEventFixture),
+    ).toEqual(validBillingMeterEventFixture);
+    expect(parseWithSchema("Entitlement", EntitlementSchema, validEntitlementFixture)).toEqual(
+      validEntitlementFixture,
+    );
+    expect(parseWithSchema("PlanSnapshot", PlanSnapshotSchema, validPlanSnapshotFixture)).toEqual(
+      validPlanSnapshotFixture,
+    );
+    expect(
+      parseWithSchema(
+        "EntitlementDecision",
+        EntitlementDecisionSchema,
+        validEntitlementDecisionFixture,
+      ),
+    ).toEqual(validEntitlementDecisionFixture);
+    expect(parseWithSchema("QuotaCounter", QuotaCounterSchema, validQuotaCounterFixture)).toEqual(
+      validQuotaCounterFixture,
+    );
+    expect(
+      parseWithSchema("QuotaReservation", QuotaReservationSchema, validQuotaReservationFixture),
+    ).toEqual(validQuotaReservationFixture);
     expect(parseWithSchema("WebhookEvent", WebhookEventSchema, validWebhookEventFixture)).toEqual(
       validWebhookEventFixture,
     );
@@ -230,6 +349,13 @@ describe("contract validation", () => {
         validUpdateMemoryJobPayloadFixture,
       ),
     ).toEqual(validUpdateMemoryJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "BillingReconcileJobPayload",
+        BillingReconcileJobPayloadSchema,
+        validBillingReconcileJobPayloadFixture,
+      ),
+    ).toEqual(validBillingReconcileJobPayloadFixture);
 
     const envelope = {
       jobId: "job_01HXAMPLE",
@@ -294,6 +420,23 @@ describe("contract validation", () => {
         data: {
           rules: [validRepoRuleFixture],
         },
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      safeParseWithSchema("CreateRepoRuleRequest", CreateRepoRuleRequestSchema, {
+        name: "Suppress generated files",
+        effect: "suppress",
+        matcher: { paths: ["**/*.generated.ts"] },
+        instruction: "Do not publish generated-file findings.",
+        priority: 100,
+        enabled: true,
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      safeParseWithSchema("UpdateRepoRuleRequest", UpdateRepoRuleRequestSchema, {
+        enabled: false,
       }).ok,
     ).toBe(true);
   });

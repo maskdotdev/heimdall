@@ -52,6 +52,39 @@ export type LLMCallId = Static<typeof LLMCallIdSchema>;
 export const UsageEventIdSchema = Type.String({ pattern: "^usage_[A-Za-z0-9_-]+$" });
 export type UsageEventId = Static<typeof UsageEventIdSchema>;
 
+export const BillingAccountIdSchema = Type.String({ pattern: "^bill_[A-Za-z0-9_-]+$" });
+export type BillingAccountId = Static<typeof BillingAccountIdSchema>;
+
+export const BillingPlanIdSchema = Type.String({ pattern: "^plan_[A-Za-z0-9_-]+$" });
+export type BillingPlanId = Static<typeof BillingPlanIdSchema>;
+
+export const BillingPlanVersionIdSchema = Type.String({ pattern: "^planv_[A-Za-z0-9_-]+$" });
+export type BillingPlanVersionId = Static<typeof BillingPlanVersionIdSchema>;
+
+export const SubscriptionIdSchema = Type.String({ pattern: "^sub_[A-Za-z0-9_-]+$" });
+export type SubscriptionId = Static<typeof SubscriptionIdSchema>;
+
+export const SubscriptionItemIdSchema = Type.String({ pattern: "^subitem_[A-Za-z0-9_-]+$" });
+export type SubscriptionItemId = Static<typeof SubscriptionItemIdSchema>;
+
+export const CreditGrantIdSchema = Type.String({ pattern: "^cred_[A-Za-z0-9_-]+$" });
+export type CreditGrantId = Static<typeof CreditGrantIdSchema>;
+
+export const InvoiceIdSchema = Type.String({ pattern: "^inv_[A-Za-z0-9_-]+$" });
+export type InvoiceId = Static<typeof InvoiceIdSchema>;
+
+export const BillingMeterEventIdSchema = Type.String({ pattern: "^bmtr_[A-Za-z0-9_-]+$" });
+export type BillingMeterEventId = Static<typeof BillingMeterEventIdSchema>;
+
+export const EntitlementIdSchema = Type.String({ pattern: "^ent_[A-Za-z0-9_-]+$" });
+export type EntitlementId = Static<typeof EntitlementIdSchema>;
+
+export const QuotaCounterIdSchema = Type.String({ pattern: "^qctr_[A-Za-z0-9_-]+$" });
+export type QuotaCounterId = Static<typeof QuotaCounterIdSchema>;
+
+export const QuotaReservationIdSchema = Type.String({ pattern: "^qres_[A-Za-z0-9_-]+$" });
+export type QuotaReservationId = Static<typeof QuotaReservationIdSchema>;
+
 export const WebhookEventIdSchema = Type.String({ pattern: "^webhook_[A-Za-z0-9_-]+$" });
 export type WebhookEventId = Static<typeof WebhookEventIdSchema>;
 

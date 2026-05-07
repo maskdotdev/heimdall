@@ -2,6 +2,7 @@ import { type Static, Type } from "@sinclair/typebox";
 
 export const UsageEventTypeSchema = Type.Union([
   Type.Literal("review.run"),
+  Type.Literal("review.credit"),
   Type.Literal("index.file"),
   Type.Literal("index.chunk"),
   Type.Literal("embedding.token"),

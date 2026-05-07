@@ -18,6 +18,8 @@ export const ReviewArtifactKindSchema = Type.Union([
   Type.Literal("validated_findings"),
   Type.Literal("rejected_findings"),
   Type.Literal("ranking_report"),
+  Type.Literal("policy_snapshot"),
+  Type.Literal("plan_snapshot"),
   Type.Literal("publish_plan"),
   Type.Literal("published_findings"),
   Type.Literal("publisher_trace"),

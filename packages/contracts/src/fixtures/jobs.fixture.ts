@@ -1,4 +1,5 @@
 import type {
+  BillingReconcileJobPayload,
   EmbeddingBatchJobPayload,
   IndexRepoCommitJobPayload,
   PublishReviewJobPayload,
@@ -51,3 +52,11 @@ export const validUpdateMemoryJobPayloadFixture = {
   outcomeId: ids.outcomeId,
   reason: "finding_outcome",
 } satisfies UpdateMemoryJobPayload;
+
+export const validBillingReconcileJobPayloadFixture = {
+  orgId: ids.orgId,
+  periodEnd: "2026-06-01T00:00:00.000Z",
+  periodKey: "2026-05",
+  periodStart: "2026-05-01T00:00:00.000Z",
+  provider: "stripe",
+} satisfies BillingReconcileJobPayload;

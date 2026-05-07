@@ -1,3 +1,4 @@
+export * from "./api/billing";
 export * from "./api/common";
 export * from "./api/errors";
 export * from "./api/repositories";
@@ -41,6 +42,8 @@ export * from "./review/artifacts";
 export * from "./review/context";
 export * from "./review/finding";
 export * from "./review/review-run";
+export * from "./usage/entitlements";
+export * from "./usage/quota";
 export * from "./usage/usage-event";
 export * from "./validation/ajv";
 export * from "./validation/parse";

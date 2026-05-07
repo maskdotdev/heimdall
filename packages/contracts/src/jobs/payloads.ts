@@ -7,11 +7,13 @@ import {
   FindingIdSchema,
   IndexVersionIdSchema,
   InstallationIdSchema,
+  OrgIdSchema,
   OutcomeIdSchema,
   RepoIdSchema,
   ReviewRunIdSchema,
   UserIdSchema,
 } from "../primitives/ids";
+import { IsoDateTimeSchema } from "../primitives/time";
 import { GitCommitShaSchema } from "../pull-request/pull-request";
 
 export const SyncInstallationReasonSchema = Type.Union([
@@ -107,6 +109,20 @@ export const UpdateMemoryJobPayloadSchema = Type.Object(
 );
 export type UpdateMemoryJobPayload = Static<typeof UpdateMemoryJobPayloadSchema>;
 
+/** Payload used by scheduled or operator-triggered billing reconciliation jobs. */
+export const BillingReconcileJobPayloadSchema = Type.Object(
+  {
+    orgId: Type.Optional(OrgIdSchema),
+    provider: Type.Optional(Type.String({ minLength: 1 })),
+    periodKey: Type.Optional(Type.String({ pattern: "^\\d{4}-\\d{2}$" })),
+    periodStart: Type.Optional(IsoDateTimeSchema),
+    periodEnd: Type.Optional(IsoDateTimeSchema),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
+  },
+  { additionalProperties: false },
+);
+export type BillingReconcileJobPayload = Static<typeof BillingReconcileJobPayloadSchema>;
+
 export const JobPayloadSchema = Type.Union([
   SyncInstallationJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
@@ -114,5 +130,6 @@ export const JobPayloadSchema = Type.Union([
   ReviewPullRequestJobPayloadSchema,
   PublishReviewJobPayloadSchema,
   UpdateMemoryJobPayloadSchema,
+  BillingReconcileJobPayloadSchema,
 ]);
 export type JobPayload = Static<typeof JobPayloadSchema>;

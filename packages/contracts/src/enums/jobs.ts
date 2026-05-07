@@ -24,4 +24,5 @@ export const JOB_TYPES = {
   ReviewPullRequest: "pr.review.v1",
   PublishReview: "review.publish.v1",
   UpdateMemory: "memory.update.v1",
+  BillingReconcile: "billing.reconcile.v1",
 } as const;
