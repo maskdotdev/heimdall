@@ -1,8 +1,18 @@
 import { validCandidateFindingFixture } from "@repo/contracts/fixtures/finding.fixture";
-import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
+import {
+  validChangedFileFixture,
+  validPullRequestSnapshotFixture,
+} from "@repo/contracts/fixtures/pull-request.fixture";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
+import { createPolicyFixture } from "@repo/rules";
 import { describe, expect, it } from "vitest";
-import { llmReviewPass, runReviewPasses, validateAndRankCandidateFindings } from "../src/index";
+import {
+  llmReviewPass,
+  runReviewPasses,
+  selectReviewPasses,
+  validateAndRankCandidateFindings,
+  validateCandidateFindings,
+} from "../src/index";
 
 describe("llmReviewPass", () => {
   it("converts structured gateway output into candidate findings", async () => {
@@ -38,6 +48,71 @@ describe("llmReviewPass", () => {
   });
 });
 
+describe("selectReviewPasses", () => {
+  it("selects summary only for documentation-only changes", () => {
+    expect(
+      selectReviewPasses({
+        snapshot: {
+          ...validPullRequestSnapshotFixture,
+          changedFiles: [
+            {
+              ...validChangedFileFixture,
+              path: "README.md",
+              isTest: false,
+            },
+          ],
+        },
+      }),
+    ).toEqual(["pr_summary"]);
+  });
+
+  it("selects correctness and test coverage for source changes", () => {
+    expect(selectReviewPasses({ snapshot: validPullRequestSnapshotFixture })).toEqual([
+      "pr_summary",
+      "behavior_change",
+      "correctness",
+      "test_coverage",
+      "finding_judge",
+    ]);
+  });
+
+  it("selects security for security-sensitive changes", () => {
+    expect(
+      selectReviewPasses({
+        snapshot: {
+          ...validPullRequestSnapshotFixture,
+          changedFiles: [
+            {
+              ...validChangedFileFixture,
+              path: "src/auth/session.ts",
+              patch: "@@ -1,0 +1,1 @@\n+export const token = request.headers.authorization;",
+            },
+          ],
+        },
+      }),
+    ).toContain("security");
+  });
+
+  it("honors review modes and pass budgets", () => {
+    expect(selectReviewPasses({ mode: "off", snapshot: validPullRequestSnapshotFixture })).toEqual(
+      [],
+    );
+    expect(
+      selectReviewPasses({
+        budgets: {
+          maxCandidatesBeforeJudge: 20,
+          maxCandidatesPerPass: 5,
+          maxLlmCalls: 8,
+          maxPasses: 2,
+          maxWallClockMs: 120_000,
+        },
+        mode: "strict",
+        snapshot: validPullRequestSnapshotFixture,
+      }),
+    ).toEqual(["pr_summary", "behavior_change"]);
+  });
+});
+
 describe("validateAndRankCandidateFindings", () => {
   it("rejects unanchored duplicates and publishes ranked findings", () => {
     const duplicate = {
@@ -70,5 +145,64 @@ describe("validateAndRankCandidateFindings", () => {
     expect(duplicateFinding?.validation.reasons).toContain("duplicate_exact");
     expect(offDiffFinding?.decision).toBe("reject");
     expect(offDiffFinding?.validation.reasons).toContain("line_not_in_diff");
+  });
+
+  it("applies immutable policy snapshots during finding validation", () => {
+    const findings = validateAndRankCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [validCandidateFindingFixture],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: {
+        policy: createPolicyFixture({
+          findings: { minimumConfidence: 0.9, severityThreshold: "high" },
+        }),
+      },
+    });
+
+    expect(findings[0]?.decision).toBe("reject");
+    expect(findings[0]?.validation.reasons).toEqual(
+      expect.arrayContaining(["low_confidence", "below_severity_threshold"]),
+    );
+  });
+
+  it("returns an inspectable validation result with stats, duplicate groups, and trace events", () => {
+    const duplicate = {
+      ...validCandidateFindingFixture,
+      findingId: "fnd_DUPLICATE",
+    };
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [validCandidateFindingFixture, duplicate],
+      timestamp: validCandidateFindingFixture.createdAt,
+    });
+
+    expect(result.accepted).toHaveLength(1);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.duplicateGroups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          canonicalCandidateFindingId: validCandidateFindingFixture.findingId,
+          duplicateCandidateFindingIds: ["fnd_DUPLICATE"],
+          groupKind: "exact",
+        }),
+      ]),
+    );
+    expect(result.stats).toMatchObject({
+      acceptedCount: 1,
+      candidateCount: 2,
+      duplicateCount: 1,
+      rejectedCount: 1,
+    });
+    expect(result.stats.rejectionReasonCounts.duplicate_exact).toBe(1);
+    expect(result.trace.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          candidateFindingId: "fnd_DUPLICATE",
+          reasons: expect.arrayContaining(["duplicate_exact"]),
+          stage: "dedupe",
+          status: "rejected",
+        }),
+      ]),
+    );
   });
 });

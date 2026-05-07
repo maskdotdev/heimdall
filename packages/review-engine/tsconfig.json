@@ -10,6 +10,7 @@
   "exclude": ["dist", "node_modules"],
   "references": [
     { "path": "../contracts/tsconfig.build.json" },
-    { "path": "../llm-gateway/tsconfig.build.json" }
+    { "path": "../llm-gateway/tsconfig.build.json" },
+    { "path": "../rules/tsconfig.build.json" }
   ]
 }

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "@repo/db";
@@ -12,7 +12,7 @@ import { runPullRequestReview } from "../src";
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 const testDirectory = fileURLToPath(new URL(".", import.meta.url));
 const bootstrapPath = resolve(testDirectory, "../../db/bootstrap/0000_extensions.sql");
-const migrationPath = resolve(testDirectory, "../../db/migrations/0000_foundation.sql");
+const migrationsDirectory = resolve(testDirectory, "../../db/migrations");
 const now = "2026-04-28T12:00:00.000Z";
 
 describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => {
@@ -29,9 +29,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
-    await sql.unsafe(
-      (await readFile(migrationPath, "utf8")).replaceAll('"public".', `"${schemaName}".`),
-    );
+    await applyMigrations(sql, schemaName);
     await seedRepository(sql);
 
     const result = await runPullRequestReview(
@@ -82,20 +80,45 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM candidate_findings) AS candidate_findings,
         (SELECT count(*)::int FROM validated_findings) AS validated_findings,
         (SELECT count(*)::int FROM review_run_stage_events) AS stage_events,
+        (SELECT count(*)::int FROM llm_calls WHERE status = 'succeeded') AS llm_calls,
+        (SELECT count(*)::int FROM usage_events WHERE event_type = 'llm.token') AS llm_usage_events,
+        (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.run') AS review_usage_events,
+        (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.credit') AS review_credit_events,
+        (SELECT count(*)::int FROM quota_reservations WHERE status = 'consumed') AS consumed_quota_reservations,
         (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs
     `;
 
     expect(counts).toEqual({
       full_snapshots: 1,
       completed_runs: 1,
-      artifacts: 5,
+      artifacts: 7,
       candidate_findings: 1,
+      consumed_quota_reservations: 1,
       validated_findings: 1,
-      stage_events: 3,
+      stage_events: 8,
+      llm_calls: 1,
+      llm_usage_events: 1,
+      review_credit_events: 1,
+      review_usage_events: 1,
       publish_jobs: 1,
     });
   });
 });
+
+async function applyMigrations(sql: postgres.Sql, schemaName: string): Promise<void> {
+  const files = (await readdir(migrationsDirectory))
+    .filter((file) => file.endsWith(".sql"))
+    .sort((left, right) => left.localeCompare(right));
+
+  for (const file of files) {
+    await sql.unsafe(
+      (await readFile(resolve(migrationsDirectory, file), "utf8")).replaceAll(
+        '"public".',
+        `"${schemaName}".`,
+      ),
+    );
+  }
+}
 
 async function seedRepository(sql: postgres.Sql): Promise<void> {
   await sql`

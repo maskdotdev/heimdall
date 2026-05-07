@@ -5,6 +5,53 @@ import type { Static, TSchema } from "@sinclair/typebox";
 /** Task names supported by the gateway MVP. */
 export type LLMTask = "review.findings";
 
+/** Normalized LLM gateway failure codes. */
+export type LLMErrorCode =
+  | "provider_unavailable"
+  | "provider_rate_limited"
+  | "provider_auth_failed"
+  | "model_not_found"
+  | "model_capability_missing"
+  | "input_too_large"
+  | "budget_exceeded"
+  | "timeout"
+  | "schema_validation_failed"
+  | "provider_refusal"
+  | "cache_error"
+  | "unknown";
+
+/** Retry policy used for transient provider failures. */
+export type LLMGatewayRetryPolicy = {
+  /** Maximum number of total attempts, including the first request. */
+  readonly maxAttempts: number;
+  /** Error codes that may be retried when the error is marked retryable. */
+  readonly retryableErrorCodes: readonly LLMErrorCode[];
+};
+
+/** Options used to create a schema-validating gateway. */
+export type CreateLLMGatewayOptions = {
+  /** Optional bounded retry policy for transient provider failures. */
+  readonly retryPolicy?: Partial<LLMGatewayRetryPolicy>;
+};
+
+/** Details used to construct a normalized LLM gateway error. */
+export type LLMGatewayErrorOptions = {
+  /** Stable gateway error code. */
+  readonly code: LLMErrorCode;
+  /** Task that was running when the error occurred, when known. */
+  readonly task?: LLMTask;
+  /** Provider adapter that raised or caused the error. */
+  readonly provider?: string;
+  /** Model that raised or caused the error. */
+  readonly model?: string;
+  /** Whether retrying the same request is expected to be safe. */
+  readonly retryable?: boolean;
+  /** Product-safe diagnostic metadata. */
+  readonly details?: Readonly<Record<string, unknown>>;
+  /** Original error object, never serialized by the gateway. */
+  readonly cause?: unknown;
+};
+
 /** Generic structured-output request passed to an LLM provider adapter. */
 export type GenerateObjectInput<TSchemaValue extends TSchema> = {
   /** Stable task identifier used for routing, caching, and audit logs. */
@@ -23,6 +70,8 @@ export type GenerateObjectInput<TSchemaValue extends TSchema> = {
 
 /** Provider-neutral structured-output adapter. */
 export interface LLMProvider {
+  /** Stable provider adapter identifier used for errors, traces, and tests. */
+  readonly id?: string;
   /** Generates one JSON-compatible object for a schema-first task. */
   generateObject<TSchemaValue extends TSchema>(
     input: GenerateObjectInput<TSchemaValue>,
@@ -47,33 +96,225 @@ export type GenerateReviewFindingsInput = {
   readonly metadata?: Readonly<Record<string, unknown>>;
 };
 
+/** Fake provider configuration for deterministic tests and local execution. */
+export type FakeLLMProviderOptions = {
+  /** Default object returned when no fixture key is present or matched. */
+  readonly defaultObject?: unknown;
+  /** Objects keyed by `metadata.fixtureKey`. */
+  readonly fixtures?: Readonly<Record<string, unknown>>;
+  /** Number of retryable failures to raise before returning a fixture. */
+  readonly failuresBeforeSuccess?: number;
+  /** Error code raised while simulating failures. */
+  readonly failureCode?: LLMErrorCode;
+};
+
+/** Error raised by the gateway after provider, validation, budget, or policy failures. */
+export class LLMGatewayError extends Error {
+  /** Stable gateway error code. */
+  public readonly code: LLMErrorCode;
+  /** Task that was running when the error occurred, when known. */
+  public readonly task?: LLMTask;
+  /** Provider adapter that raised or caused the error. */
+  public readonly provider?: string;
+  /** Model that raised or caused the error. */
+  public readonly model?: string;
+  /** Whether retrying the same request is expected to be safe. */
+  public readonly retryable: boolean;
+  /** Product-safe diagnostic metadata. */
+  public readonly details?: Readonly<Record<string, unknown>>;
+  /** Original error object, never serialized by the gateway. */
+  public override readonly cause?: unknown;
+
+  /** Creates a normalized LLM gateway error. */
+  public constructor(message: string, options: LLMGatewayErrorOptions) {
+    super(message);
+    this.name = "LLMGatewayError";
+    this.code = options.code;
+    this.retryable = options.retryable ?? isRetryableLLMErrorCode(options.code);
+
+    if (options.task) {
+      this.task = options.task;
+    }
+    if (options.provider) {
+      this.provider = options.provider;
+    }
+    if (options.model) {
+      this.model = options.model;
+    }
+    if (options.details) {
+      this.details = options.details;
+    }
+    if (options.cause) {
+      this.cause = options.cause;
+    }
+  }
+}
+
+/** Deterministic provider that returns configured fixtures and can simulate transient failures. */
+export class FakeLLMProvider implements LLMProvider {
+  /** Stable provider adapter identifier used for errors, traces, and tests. */
+  public readonly id = "fake";
+  private remainingFailures: number;
+
+  /** Creates a fake provider with optional fixtures and failure simulation. */
+  public constructor(private readonly options: FakeLLMProviderOptions = {}) {
+    this.remainingFailures = options.failuresBeforeSuccess ?? 0;
+  }
+
+  /** Returns the requested fixture after any configured simulated failures. */
+  public async generateObject<TSchemaValue extends TSchema>(
+    input: GenerateObjectInput<TSchemaValue>,
+  ): Promise<Static<TSchemaValue>> {
+    if (this.remainingFailures > 0) {
+      this.remainingFailures -= 1;
+      throw new LLMGatewayError("Fake LLM provider simulated a retryable failure.", {
+        code: this.options.failureCode ?? "provider_unavailable",
+        provider: this.id,
+        retryable: true,
+        task: input.task,
+      });
+    }
+
+    const fixtureKey =
+      input.metadata && typeof input.metadata.fixtureKey === "string"
+        ? input.metadata.fixtureKey
+        : undefined;
+    const fixture =
+      fixtureKey && this.options.fixtures && fixtureKey in this.options.fixtures
+        ? this.options.fixtures[fixtureKey]
+        : undefined;
+
+    return (fixture ?? this.options.defaultObject ?? { findings: [] }) as Static<TSchemaValue>;
+  }
+}
+
 /** Creates a schema-validating LLM gateway around an injected provider adapter. */
-export function createLLMGateway(provider: LLMProvider): LLMGateway {
+export function createLLMGateway(
+  provider: LLMProvider,
+  options: CreateLLMGatewayOptions = {},
+): LLMGateway {
+  const retryPolicy = normalizeRetryPolicy(options.retryPolicy);
+  const generateObject = async <TSchemaValue extends TSchema>(
+    input: GenerateObjectInput<TSchemaValue>,
+  ): Promise<Static<TSchemaValue>> => {
+    const output = await executeProviderObject(provider, input, retryPolicy);
+    return validateObjectOutput(provider, input, output);
+  };
+
   return {
-    generateObject: async (input) => {
-      const output = await provider.generateObject(input);
-      return parseWithSchema(input.schemaName, input.schema, output);
-    },
+    generateObject,
     generateReviewFindings: async (input) =>
-      parseWithSchema(
-        "LLMFindingOutput",
-        LLMFindingOutputSchema,
-        await provider.generateObject({
-          task: "review.findings",
-          schema: LLMFindingOutputSchema,
-          schemaName: "LLMFindingOutput",
-          system:
-            "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.",
-          prompt: input.prompt,
-          ...(input.metadata ? { metadata: input.metadata } : {}),
-        }),
-      ),
+      generateObject({
+        task: "review.findings",
+        schema: LLMFindingOutputSchema,
+        schemaName: "LLMFindingOutput",
+        system:
+          "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.",
+        prompt: input.prompt,
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      }),
   };
 }
 
 /** Creates a deterministic gateway for tests and local no-provider execution. */
 export function createStaticLLMGateway(output: LLMFindingOutput = { findings: [] }): LLMGateway {
-  return createLLMGateway({
-    generateObject: async <TSchemaValue extends TSchema>() => output as Static<TSchemaValue>,
+  return createLLMGateway(new FakeLLMProvider({ defaultObject: output }));
+}
+
+/** Normalizes unknown provider failures into gateway-owned errors. */
+export function normalizeLLMError(
+  error: unknown,
+  context: {
+    /** Task that was running when the error occurred. */
+    readonly task: LLMTask;
+    /** Provider adapter that raised or caused the error. */
+    readonly provider?: string;
+  },
+): LLMGatewayError {
+  if (error instanceof LLMGatewayError) {
+    return error;
+  }
+
+  return new LLMGatewayError(error instanceof Error ? error.message : "Unknown LLM failure.", {
+    cause: error,
+    code: "unknown",
+    task: context.task,
+    ...(context.provider ? { provider: context.provider } : {}),
   });
+}
+
+const DEFAULT_RETRYABLE_ERROR_CODES: readonly LLMErrorCode[] = [
+  "provider_unavailable",
+  "provider_rate_limited",
+  "timeout",
+  "unknown",
+];
+
+const DEFAULT_RETRY_POLICY: LLMGatewayRetryPolicy = {
+  maxAttempts: 2,
+  retryableErrorCodes: DEFAULT_RETRYABLE_ERROR_CODES,
+};
+
+function normalizeRetryPolicy(
+  retryPolicy: Partial<LLMGatewayRetryPolicy> | undefined,
+): LLMGatewayRetryPolicy {
+  return {
+    maxAttempts: Math.max(1, retryPolicy?.maxAttempts ?? DEFAULT_RETRY_POLICY.maxAttempts),
+    retryableErrorCodes:
+      retryPolicy?.retryableErrorCodes ?? DEFAULT_RETRY_POLICY.retryableErrorCodes,
+  };
+}
+
+async function executeProviderObject<TSchemaValue extends TSchema>(
+  provider: LLMProvider,
+  input: GenerateObjectInput<TSchemaValue>,
+  retryPolicy: LLMGatewayRetryPolicy,
+): Promise<Static<TSchemaValue>> {
+  for (let attempt = 1; attempt <= retryPolicy.maxAttempts; attempt += 1) {
+    try {
+      return await provider.generateObject(input);
+    } catch (error) {
+      const gatewayError = normalizeLLMError(error, {
+        task: input.task,
+        ...(provider.id ? { provider: provider.id } : {}),
+      });
+      const canRetry =
+        attempt < retryPolicy.maxAttempts &&
+        gatewayError.retryable &&
+        retryPolicy.retryableErrorCodes.includes(gatewayError.code);
+
+      if (!canRetry) {
+        throw gatewayError;
+      }
+    }
+  }
+
+  throw new LLMGatewayError("LLM provider retry loop exited without a result.", {
+    code: "unknown",
+    task: input.task,
+    ...(provider.id ? { provider: provider.id } : {}),
+  });
+}
+
+function validateObjectOutput<TSchemaValue extends TSchema>(
+  provider: LLMProvider,
+  input: GenerateObjectInput<TSchemaValue>,
+  output: Static<TSchemaValue>,
+): Static<TSchemaValue> {
+  try {
+    return parseWithSchema(input.schemaName, input.schema, output);
+  } catch (error) {
+    throw new LLMGatewayError(`Provider output failed schema validation for ${input.schemaName}.`, {
+      cause: error,
+      code: "schema_validation_failed",
+      details: { schemaName: input.schemaName },
+      retryable: false,
+      task: input.task,
+      ...(provider.id ? { provider: provider.id } : {}),
+    });
+  }
+}
+
+function isRetryableLLMErrorCode(code: LLMErrorCode): boolean {
+  return DEFAULT_RETRYABLE_ERROR_CODES.includes(code);
 }

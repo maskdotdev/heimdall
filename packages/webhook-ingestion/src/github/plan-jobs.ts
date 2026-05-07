@@ -1,5 +1,6 @@
-import { JOB_TYPES, type JobPayload } from "@repo/contracts";
+import { JOB_TYPES, type JobPayload, type RepositorySettings } from "@repo/contracts";
 import { QUEUE_NAMES } from "@repo/queue";
+import { buildReviewPolicySnapshot, shouldReviewPr } from "@repo/rules";
 import { newId } from "../ids";
 import type { PlannedJob } from "../types";
 import type {
@@ -14,6 +15,7 @@ type PlanOptions = {
   readonly action?: string | undefined;
   readonly installation?: NormalizedGitHubInstallation | undefined;
   readonly repositories: readonly NormalizedGitHubRepository[];
+  readonly repositorySettings?: readonly RepositorySettings[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
 };
 
@@ -37,18 +39,19 @@ const envelope = <TPayload extends JobPayload>(
 /** Plans durable downstream jobs for a normalized GitHub webhook. */
 export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob[] {
   const jobs: PlannedJob[] = [];
+  const action = options.action ?? "";
 
   if (
     options.installation &&
     options.eventName === "installation" &&
-    ["created", "new_permissions_accepted"].includes(options.action ?? "")
+    ["created", "new_permissions_accepted"].includes(action)
   ) {
     jobs.push({
       queueName: QUEUE_NAMES.repoSync,
       orgId: options.installation.orgId,
       envelope: envelope(
         JOB_TYPES.SyncInstallation,
-        `github:installation:${options.installation.installationId}:${options.action}`,
+        `github:installation:${options.installation.installationId}:${action}`,
         {
           installationId: options.installation.installationId,
           provider: "github",
@@ -61,7 +64,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
   if (
     options.installation &&
     options.eventName === "repository" &&
-    ["created", "publicized", "privatized", "renamed"].includes(options.action ?? "")
+    ["created", "publicized", "privatized", "renamed"].includes(action)
   ) {
     jobs.push({
       queueName: QUEUE_NAMES.repoSync,
@@ -80,9 +83,35 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
 
   if (
     options.pullRequest &&
-    ["opened", "reopened", "synchronize", "ready_for_review"].includes(options.action ?? "")
+    ["opened", "reopened", "synchronize", "ready_for_review"].includes(action)
   ) {
     const snapshot = options.pullRequest.snapshot;
+    const normalizedRepository = options.repositories.find(
+      (repository) => repository.repository.repoId === snapshot.repoId,
+    );
+
+    if (!normalizedRepository) {
+      return jobs;
+    }
+
+    const settings =
+      options.repositorySettings?.find((candidate) => candidate.repoId === snapshot.repoId) ??
+      normalizedRepository.settings;
+    const { snapshot: policySnapshot } = buildReviewPolicySnapshot({
+      repository: normalizedRepository.repository,
+      settings,
+    });
+    const triggerDecision = shouldReviewPr({
+      action,
+      authorLogin: snapshot.authorLogin,
+      isDraft: snapshot.isDraft,
+      labels: snapshot.labels,
+      policy: policySnapshot.effectivePolicy,
+    });
+
+    if (!triggerDecision.shouldReview) {
+      return jobs;
+    }
 
     jobs.push({
       queueName: QUEUE_NAMES.indexing,

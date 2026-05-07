@@ -11,6 +11,7 @@ import type {
   ValidatedFinding,
 } from "@repo/contracts/review/finding";
 import type { LLMGateway } from "@repo/llm-gateway";
+import { type EffectiveReviewPolicy, evaluateFindingPolicy } from "@repo/rules";
 
 /** Context provided to every deterministic or model-backed review pass. */
 export type ReviewPassContext = {
@@ -35,6 +36,64 @@ export interface ReviewPass {
   /** Runs the pass and returns structured candidate findings. */
   run(context: ReviewPassContext): Promise<readonly CandidateFinding[]>;
 }
+
+/** Review pass execution modes used to select specialized passes. */
+export type ReviewPassMode =
+  | "off"
+  | "summary_only"
+  | "normal"
+  | "strict"
+  | "security_only"
+  | "tests_only"
+  | "dry_run";
+
+/** Stable identifiers for planned review passes. */
+export type ReviewPassId =
+  | "pr_summary"
+  | "behavior_change"
+  | "correctness"
+  | "security"
+  | "test_coverage"
+  | "performance"
+  | "architecture_pattern"
+  | "api_contract_regression"
+  | "static_tool_synthesis"
+  | "finding_judge";
+
+/** Budget controls used by pass selection and future pass runners. */
+export type ReviewBudgets = {
+  /** Maximum number of passes to select. */
+  readonly maxPasses: number;
+  /** Maximum candidates any single pass may emit. */
+  readonly maxCandidatesPerPass: number;
+  /** Maximum merged candidates before judging. */
+  readonly maxCandidatesBeforeJudge: number;
+  /** Maximum LLM calls allowed for the review. */
+  readonly maxLlmCalls: number;
+  /** Maximum review wall-clock time in milliseconds. */
+  readonly maxWallClockMs: number;
+};
+
+/** Input used to deterministically select review passes for a pull request. */
+export type SelectReviewPassesInput = {
+  /** Pull request snapshot to classify. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Optional retrieved context used for security and architecture signals. */
+  readonly contextBundle?: ContextBundle;
+  /** Review pass mode. Defaults to `normal`. */
+  readonly mode?: ReviewPassMode;
+  /** Optional pass budget. Defaults to `DEFAULT_REVIEW_BUDGETS`. */
+  readonly budgets?: ReviewBudgets;
+};
+
+/** Default conservative budget for the first pass-selection implementation. */
+export const DEFAULT_REVIEW_BUDGETS: ReviewBudgets = {
+  maxPasses: 8,
+  maxCandidatesPerPass: 5,
+  maxCandidatesBeforeJudge: 20,
+  maxLlmCalls: 8,
+  maxWallClockMs: 120_000,
+};
 
 /** Deterministic pass that emits one reviewable-boundary finding for pipeline handoff tests. */
 export const deterministicBoundaryPass: ReviewPass = {
@@ -78,6 +137,49 @@ export async function runReviewPasses(input: {
   return findingSets.flat();
 }
 
+/** Selects review passes from mode, changed files, retrieved context, and pass budgets. */
+export function selectReviewPasses(input: SelectReviewPassesInput): readonly ReviewPassId[] {
+  const mode = input.mode ?? "normal";
+  const budgets = input.budgets ?? DEFAULT_REVIEW_BUDGETS;
+  if (mode === "off") {
+    return [];
+  }
+
+  const passes: ReviewPassId[] = ["pr_summary"];
+  if (mode === "summary_only" || isDocumentationOnlyPullRequest(input.snapshot)) {
+    return applyPassBudget(passes, budgets);
+  }
+
+  passes.push("behavior_change");
+  if (mode === "security_only") {
+    passes.push("security", "finding_judge");
+    return applyPassBudget(passes, budgets);
+  }
+  if (mode === "tests_only") {
+    passes.push("test_coverage", "finding_judge");
+    return applyPassBudget(passes, budgets);
+  }
+
+  const hasSourceChanges = pullRequestHasSourceChanges(input.snapshot);
+  if (hasSourceChanges) {
+    passes.push("correctness", "test_coverage");
+  }
+  if (hasSecuritySensitiveChanges(input.snapshot, input.contextBundle)) {
+    passes.push("security");
+  }
+  if (mode === "strict" && hasSourceChanges) {
+    passes.push("performance", "architecture_pattern");
+    if (hasApiContractChanges(input.snapshot)) {
+      passes.push("api_contract_regression");
+    }
+  }
+  if (passes.some(isCandidateGenerationPass)) {
+    passes.push("finding_judge");
+  }
+
+  return applyPassBudget(passes, budgets);
+}
+
 /** Validation settings for deterministic finding quality gates. */
 export type FindingValidationConfig = {
   /** Minimum severity that may be published. */
@@ -90,6 +192,92 @@ export type FindingValidationConfig = {
   readonly maxPublishableFindings?: number;
   /** Repo rule text used for basic suppression decisions. */
   readonly repoRules?: readonly string[];
+  /** Immutable review policy snapshot used for policy-aware validation. */
+  readonly policy?: EffectiveReviewPolicy;
+};
+
+/** Normalized validation config with defaults and optional compiled policy. */
+type NormalizedFindingValidationConfig = {
+  /** Minimum severity that may be published. */
+  readonly minimumSeverity: FindingSeverity;
+  /** Enabled categories. */
+  readonly enabledCategories: readonly FindingCategory[];
+  /** Whether style-only findings are publishable. */
+  readonly allowStyleFindings: boolean;
+  /** Maximum number of publishable findings after ranking. */
+  readonly maxPublishableFindings: number;
+  /** Repo rule text used for basic suppression decisions. */
+  readonly repoRules: readonly string[];
+  /** Immutable review policy snapshot used for policy-aware validation. */
+  readonly policy?: EffectiveReviewPolicy;
+};
+
+/** Duplicate group emitted by deterministic validation. */
+export type FindingDuplicateGroup = {
+  /** Dedupe strategy that created the group. */
+  readonly groupKind: "exact" | "location";
+  /** Canonical candidate retained for ranking. */
+  readonly canonicalCandidateFindingId: string;
+  /** Duplicate candidates rejected in favor of the canonical candidate. */
+  readonly duplicateCandidateFindingIds: readonly string[];
+  /** Stable grouping key used for debugging. */
+  readonly groupKey: string;
+};
+
+/** Product-safe validation event stage. */
+export type FindingValidationEventStage = "anchor" | "evidence" | "policy" | "dedupe" | "ranking";
+
+/** Product-safe event explaining one validation stage for one candidate. */
+export type FindingValidationEvent = {
+  /** Stable event ID. */
+  readonly eventId: string;
+  /** Candidate finding inspected by this event. */
+  readonly candidateFindingId: string;
+  /** Validation stage that produced the event. */
+  readonly stage: FindingValidationEventStage;
+  /** Whether the candidate passed this stage. */
+  readonly status: "passed" | "rejected";
+  /** Rejection reasons associated with this stage. */
+  readonly reasons: readonly FindingRejectionReason[];
+};
+
+/** Aggregate validation statistics for dashboards and evaluation. */
+export type FindingValidationStats = {
+  /** Total input candidate count. */
+  readonly candidateCount: number;
+  /** Count of findings accepted for publishing after ranking and budget enforcement. */
+  readonly acceptedCount: number;
+  /** Count of findings rejected for any validation reason. */
+  readonly rejectedCount: number;
+  /** Count of rejected duplicate findings. */
+  readonly duplicateCount: number;
+  /** Rejection counts keyed by canonical rejection reason. */
+  readonly rejectionReasonCounts: Partial<Record<FindingRejectionReason, number>>;
+};
+
+/** Full validation result with publishable findings, rejected findings, stats, and trace data. */
+export type FindingValidationResult = {
+  /** Accepted findings in publish rank order. */
+  readonly accepted: readonly ValidatedFinding[];
+  /** Rejected findings with validation reasons. */
+  readonly rejected: readonly ValidatedFinding[];
+  /** All validated findings in deterministic persistence order. */
+  readonly validated: readonly ValidatedFinding[];
+  /** Duplicate groups discovered during validation. */
+  readonly duplicateGroups: readonly FindingDuplicateGroup[];
+  /** Aggregate validation statistics. */
+  readonly stats: FindingValidationStats;
+  /** Product-safe validation trace. */
+  readonly trace: {
+    /** Validator version that generated the trace. */
+    readonly validatorVersion: string;
+    /** Validation start timestamp. */
+    readonly startedAt: string;
+    /** Validation completion timestamp. */
+    readonly completedAt: string;
+    /** Per-candidate stage events. */
+    readonly events: readonly FindingValidationEvent[];
+  };
 };
 
 /** Input for candidate validation, dedupe, suppression, and ranking. */
@@ -108,25 +296,14 @@ export type ValidateAndRankCandidateFindingsInput = {
 export function validateAndRankCandidateFindings(
   input: ValidateAndRankCandidateFindingsInput,
 ): readonly ValidatedFinding[] {
-  const config = {
-    minimumSeverity: input.config?.minimumSeverity ?? "low",
-    enabledCategories:
-      input.config?.enabledCategories ??
-      ([
-        "correctness",
-        "security",
-        "performance",
-        "test_coverage",
-        "maintainability",
-        "architecture",
-        "dependency",
-        "documentation",
-        "other",
-      ] satisfies readonly FindingCategory[]),
-    allowStyleFindings: input.config?.allowStyleFindings ?? false,
-    maxPublishableFindings: input.config?.maxPublishableFindings ?? 10,
-    repoRules: input.config?.repoRules ?? [],
-  };
+  return validateCandidateFindings(input).validated;
+}
+
+/** Validates, suppresses, deduplicates, ranks, and explains candidate findings. */
+export function validateCandidateFindings(
+  input: ValidateAndRankCandidateFindingsInput,
+): FindingValidationResult {
+  const config = normalizeFindingValidationConfig(input.config);
   const state = buildAnchorState(input.snapshot);
   const seenFingerprints = new Set<string>();
   const seenLocations = new Set<string>();
@@ -147,13 +324,167 @@ export function validateAndRankCandidateFindings(
     }
   }
 
-  return [
-    ...rankFindings(accepted).slice(0, config.maxPublishableFindings),
-    ...rankFindings(accepted)
+  const rankedAccepted = rankFindings(accepted);
+  const validated = [
+    ...rankedAccepted.slice(0, config.maxPublishableFindings),
+    ...rankedAccepted
       .slice(config.maxPublishableFindings)
       .map((finding) => rejectForBudget(finding)),
     ...rejected,
   ];
+  const finalAccepted = validated.filter((finding) => finding.decision === "publish");
+  const finalRejected = validated.filter((finding) => finding.decision === "reject");
+
+  return {
+    accepted: finalAccepted,
+    duplicateGroups: buildDuplicateGroups(input.findings),
+    rejected: finalRejected,
+    stats: buildValidationStats(input.findings.length, finalAccepted, finalRejected),
+    trace: buildValidationTrace(input.timestamp, validated),
+    validated,
+  };
+}
+
+function normalizeFindingValidationConfig(
+  config: FindingValidationConfig | undefined,
+): NormalizedFindingValidationConfig {
+  return {
+    minimumSeverity: config?.policy?.findings.severityThreshold ?? config?.minimumSeverity ?? "low",
+    enabledCategories:
+      config?.policy?.findings.enabledCategories ??
+      config?.enabledCategories ??
+      ([
+        "correctness",
+        "security",
+        "performance",
+        "test_coverage",
+        "maintainability",
+        "architecture",
+        "dependency",
+        "documentation",
+        "other",
+      ] satisfies readonly FindingCategory[]),
+    allowStyleFindings:
+      config?.policy?.findings.allowStyleFindings ?? config?.allowStyleFindings ?? false,
+    maxPublishableFindings:
+      config?.policy?.findings.maxCommentsPerReview ?? config?.maxPublishableFindings ?? 10,
+    repoRules: config?.repoRules ?? [],
+    ...(config?.policy ? { policy: config.policy } : {}),
+  };
+}
+
+function buildDuplicateGroups(
+  findings: readonly CandidateFinding[],
+): readonly FindingDuplicateGroup[] {
+  const groups = new Map<string, FindingDuplicateGroup>();
+  const canonicalByFingerprint = new Map<string, string>();
+  const canonicalByLocation = new Map<string, string>();
+
+  for (const finding of findings) {
+    collectDuplicateGroup({
+      canonicalByKey: canonicalByFingerprint,
+      finding,
+      groupKind: "exact",
+      groups,
+      key: finding.fingerprint,
+    });
+    collectDuplicateGroup({
+      canonicalByKey: canonicalByLocation,
+      finding,
+      groupKind: "location",
+      groups,
+      key: locationKey(finding),
+    });
+  }
+
+  return [...groups.values()]
+    .filter((group) => group.duplicateCandidateFindingIds.length > 0)
+    .sort((left, right) => left.groupKey.localeCompare(right.groupKey));
+}
+
+function collectDuplicateGroup(input: {
+  readonly canonicalByKey: Map<string, string>;
+  readonly finding: CandidateFinding;
+  readonly groupKind: FindingDuplicateGroup["groupKind"];
+  readonly groups: Map<string, FindingDuplicateGroup>;
+  readonly key: string;
+}): void {
+  const canonicalCandidateFindingId = input.canonicalByKey.get(input.key);
+  if (!canonicalCandidateFindingId) {
+    input.canonicalByKey.set(input.key, input.finding.findingId);
+    return;
+  }
+
+  const groupKey = `${input.groupKind}:${input.key}`;
+  const existingGroup = input.groups.get(groupKey);
+  input.groups.set(groupKey, {
+    canonicalCandidateFindingId,
+    duplicateCandidateFindingIds: [
+      ...(existingGroup?.duplicateCandidateFindingIds ?? []),
+      input.finding.findingId,
+    ],
+    groupKey,
+    groupKind: input.groupKind,
+  });
+}
+
+function buildValidationStats(
+  candidateCount: number,
+  accepted: readonly ValidatedFinding[],
+  rejected: readonly ValidatedFinding[],
+): FindingValidationStats {
+  const rejectionReasonCounts: Partial<Record<FindingRejectionReason, number>> = {};
+  for (const finding of rejected) {
+    for (const reason of finding.validation.reasons) {
+      rejectionReasonCounts[reason] = (rejectionReasonCounts[reason] ?? 0) + 1;
+    }
+  }
+
+  return {
+    acceptedCount: accepted.length,
+    candidateCount,
+    duplicateCount: rejected.filter((finding) =>
+      finding.validation.reasons.some((reason) => DUPLICATE_REASONS.has(reason)),
+    ).length,
+    rejectedCount: rejected.length,
+    rejectionReasonCounts,
+  };
+}
+
+function buildValidationTrace(
+  timestamp: string,
+  findings: readonly ValidatedFinding[],
+): FindingValidationResult["trace"] {
+  return {
+    completedAt: timestamp,
+    events: findings.flatMap((finding) => validationEventsForFinding(timestamp, finding)),
+    startedAt: timestamp,
+    validatorVersion: "finding-validation.v2",
+  };
+}
+
+function validationEventsForFinding(
+  timestamp: string,
+  finding: ValidatedFinding,
+): readonly FindingValidationEvent[] {
+  return VALIDATION_EVENT_STAGES.map((stage) => {
+    const reasons = finding.validation.reasons.filter((reason) =>
+      reasonsForValidationStage(stage).has(reason),
+    );
+    return {
+      candidateFindingId: finding.candidateFindingId,
+      eventId: stableId("fve", [finding.candidateFindingId, stage, timestamp]),
+      reasons,
+      stage,
+      status: reasons.length > 0 ? "rejected" : "passed",
+    };
+  });
+}
+
+function reasonsForValidationStage(
+  stage: FindingValidationEventStage,
+): ReadonlySet<FindingRejectionReason> {
+  return VALIDATION_REASONS_BY_STAGE[stage];
 }
 
 function createDeterministicBoundaryFindings(
@@ -332,7 +663,7 @@ function buildAnchorState(snapshot: PullRequestSnapshot): AnchorState {
 function rejectionReasons(
   finding: CandidateFinding,
   state: AnchorState,
-  config: Required<FindingValidationConfig>,
+  config: NormalizedFindingValidationConfig,
   seenFingerprints: ReadonlySet<string>,
   seenLocations: ReadonlySet<string>,
 ): readonly FindingRejectionReason[] {
@@ -340,25 +671,68 @@ function rejectionReasons(
   const file = state.files.get(finding.location.path);
   const addedLines = state.addedLinesByPath.get(finding.location.path);
 
-  if (!file) reasons.push("file_not_in_pr");
-  if (file?.status === "deleted") reasons.push("file_deleted");
-  if (file?.isBinary) reasons.push("binary_file");
-  if (file?.isGenerated) reasons.push("generated_file");
-  if (finding.location.side !== "RIGHT") reasons.push("wrong_diff_side");
-  if (!finding.location.line) reasons.push("line_missing");
-  if (!addedLines?.has(finding.location.line)) reasons.push("line_not_in_diff");
-  if (finding.evidence.length === 0) reasons.push("missing_evidence");
-  if (finding.confidence < 0.55) reasons.push("low_confidence");
+  if (!file) pushReason(reasons, "file_not_in_pr");
+  if (file?.status === "deleted") pushReason(reasons, "file_deleted");
+  if (file?.isBinary) pushReason(reasons, "binary_file");
+  if (file?.isGenerated) pushReason(reasons, "generated_file");
+  if (finding.location.side !== "RIGHT") pushReason(reasons, "wrong_diff_side");
+  if (!finding.location.line) pushReason(reasons, "line_missing");
+  if (!addedLines?.has(finding.location.line)) pushReason(reasons, "line_not_in_diff");
+  if (finding.evidence.length === 0) pushReason(reasons, "missing_evidence");
+  if (finding.confidence < 0.55) pushReason(reasons, "low_confidence");
   if (severityRank(finding.severity) < severityRank(config.minimumSeverity)) {
-    reasons.push("below_severity_threshold");
+    pushReason(reasons, "below_severity_threshold");
   }
-  if (!config.enabledCategories.includes(finding.category)) reasons.push("category_disabled");
-  if (finding.category === "style" && !config.allowStyleFindings) reasons.push("style_only");
-  if (seenFingerprints.has(finding.fingerprint)) reasons.push("duplicate_exact");
-  if (seenLocations.has(locationKey(finding))) reasons.push("duplicate_location");
-  if (isSuppressedByRepoRule(finding, config.repoRules)) reasons.push("suppressed_by_repo_rule");
+  if (!config.enabledCategories.includes(finding.category))
+    pushReason(reasons, "category_disabled");
+  if (finding.category === "style" && !config.allowStyleFindings) pushReason(reasons, "style_only");
+  if (seenFingerprints.has(finding.fingerprint)) pushReason(reasons, "duplicate_exact");
+  if (seenLocations.has(locationKey(finding))) pushReason(reasons, "duplicate_location");
+  if (isSuppressedByRepoRule(finding, config.repoRules)) {
+    pushReason(reasons, "suppressed_by_repo_rule");
+  }
+  if (config.policy) {
+    const policyDecision = evaluateFindingPolicy({ policy: config.policy, finding });
+    const policyReason = policyReasonToRejectionReason(policyDecision.reasonCode);
+    if (!policyDecision.shouldPublish && policyReason) {
+      pushReason(reasons, policyReason);
+    }
+  }
 
   return reasons;
+}
+
+/** Adds a rejection reason once while preserving decision order. */
+function pushReason(reasons: FindingRejectionReason[], reason: FindingRejectionReason): void {
+  if (!reasons.includes(reason)) {
+    reasons.push(reason);
+  }
+}
+
+/** Maps policy reason codes to finding rejection reasons. */
+function policyReasonToRejectionReason(reasonCode: string): FindingRejectionReason | undefined {
+  switch (reasonCode) {
+    case "review_disabled":
+      return "publisher_unsupported";
+    case "path_ignored":
+      return "ignored_path";
+    case "generated_file":
+      return "generated_file";
+    case "missing_evidence":
+      return "missing_evidence";
+    case "confidence_below_threshold":
+      return "low_confidence";
+    case "severity_below_threshold":
+      return "below_severity_threshold";
+    case "category_disabled":
+      return "category_disabled";
+    case "style_disabled":
+      return "style_only";
+    case "suppressed_by_repo_rule":
+      return "suppressed_by_repo_rule";
+    default:
+      return undefined;
+  }
 }
 
 function toValidatedFinding(
@@ -465,9 +839,168 @@ function isSuppressedByRepoRule(finding: CandidateFinding, repoRules: readonly s
   });
 }
 
+function applyPassBudget(
+  passes: readonly ReviewPassId[],
+  budgets: ReviewBudgets,
+): readonly ReviewPassId[] {
+  return passes.slice(0, Math.max(0, budgets.maxPasses));
+}
+
+function isCandidateGenerationPass(passId: ReviewPassId): boolean {
+  return passId !== "pr_summary" && passId !== "behavior_change" && passId !== "finding_judge";
+}
+
+function isDocumentationOnlyPullRequest(snapshot: PullRequestSnapshot): boolean {
+  const reviewableFiles = snapshot.changedFiles.filter(
+    (file) => isReviewableFile(file) && !file.isGenerated,
+  );
+  return reviewableFiles.length > 0 && reviewableFiles.every(isDocumentationFile);
+}
+
+function pullRequestHasSourceChanges(snapshot: PullRequestSnapshot): boolean {
+  return snapshot.changedFiles.some(
+    (file) =>
+      isReviewableFile(file) && !file.isGenerated && !file.isTest && !isDocumentationFile(file),
+  );
+}
+
+function hasSecuritySensitiveChanges(
+  snapshot: PullRequestSnapshot,
+  contextBundle?: ContextBundle,
+): boolean {
+  const snapshotText = snapshot.changedFiles.map(fileSearchText).join("\n").toLowerCase();
+  const contextText =
+    contextBundle?.items
+      .map((item) => [item.title, item.summary, item.text].filter(Boolean).join("\n"))
+      .join("\n")
+      .toLowerCase() ?? "";
+  const haystack = `${snapshotText}\n${contextText}`;
+  return SECURITY_SENSITIVE_TERMS.some((term) => haystack.includes(term));
+}
+
+function hasApiContractChanges(snapshot: PullRequestSnapshot): boolean {
+  return snapshot.changedFiles.some((file) => {
+    const path = file.path.toLowerCase();
+    return API_CONTRACT_PATH_TERMS.some((term) => path.includes(term));
+  });
+}
+
+function isDocumentationFile(file: ChangedFile): boolean {
+  const path = file.path.toLowerCase();
+  return (
+    path.startsWith("docs/") ||
+    path.endsWith(".md") ||
+    path.endsWith(".mdx") ||
+    path.endsWith(".txt") ||
+    path.endsWith(".adoc") ||
+    path.endsWith(".rst")
+  );
+}
+
+function fileSearchText(file: ChangedFile): string {
+  return [
+    file.path,
+    file.language,
+    file.patch,
+    ...file.hunks.flatMap((hunk) => hunk.lines.map((line) => line.content)),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function isReviewableFile(file: ChangedFile): boolean {
   return !file.isBinary && file.status !== "deleted" && file.additions > 0;
 }
+
+const SECURITY_SENSITIVE_TERMS = [
+  "auth",
+  "authorization",
+  "credential",
+  "csrf",
+  "jwt",
+  "oauth",
+  "password",
+  "permission",
+  "secret",
+  "session",
+  "token",
+] as const;
+
+const API_CONTRACT_PATH_TERMS = [
+  "api/",
+  "contract",
+  "migration",
+  "openapi",
+  "schema",
+  "types",
+] as const;
+
+const VALIDATION_EVENT_STAGES = [
+  "anchor",
+  "evidence",
+  "policy",
+  "dedupe",
+  "ranking",
+] as const satisfies readonly FindingValidationEventStage[];
+
+const ANCHOR_REASONS = new Set<FindingRejectionReason>([
+  "binary_file",
+  "file_deleted",
+  "file_not_in_pr",
+  "generated_file",
+  "invalid_file_path",
+  "line_anchor_unavailable",
+  "line_missing",
+  "line_not_in_diff",
+  "missing_file_path",
+  "stale_snapshot",
+  "wrong_diff_side",
+]);
+
+const EVIDENCE_REASONS = new Set<FindingRejectionReason>([
+  "contradicted_by_context",
+  "contains_secret",
+  "invalid_context_reference",
+  "missing_evidence",
+  "not_actionable",
+  "too_verbose",
+  "unsafe_suggested_fix",
+  "weak_evidence",
+]);
+
+const POLICY_REASONS = new Set<FindingRejectionReason>([
+  "below_severity_threshold",
+  "category_disabled",
+  "ignored_path",
+  "internal_error",
+  "invalid_schema",
+  "low_confidence",
+  "publisher_unsupported",
+  "style_only",
+  "suppressed_by_memory",
+  "suppressed_by_repo_rule",
+  "unsupported_schema_version",
+]);
+
+const DUPLICATE_REASONS = new Set<FindingRejectionReason>([
+  "duplicate_exact",
+  "duplicate_location",
+  "duplicate_previous_comment",
+  "duplicate_semantic",
+]);
+
+const RANKING_REASONS = new Set<FindingRejectionReason>(["budget_exceeded"]);
+
+const VALIDATION_REASONS_BY_STAGE: Record<
+  FindingValidationEventStage,
+  ReadonlySet<FindingRejectionReason>
+> = {
+  anchor: ANCHOR_REASONS,
+  dedupe: DUPLICATE_REASONS,
+  evidence: EVIDENCE_REASONS,
+  policy: POLICY_REASONS,
+  ranking: RANKING_REASONS,
+};
 
 function firstAddedLine(file: ChangedFile): number | undefined {
   for (const hunk of file.hunks) {

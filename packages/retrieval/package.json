@@ -22,6 +22,7 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
+    "@repo/memory": "workspace:*",
     "drizzle-orm": "catalog:"
   },
   "devDependencies": {

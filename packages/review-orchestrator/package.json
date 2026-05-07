@@ -20,6 +20,7 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
+    "@repo/artifacts": "workspace:*",
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
     "@repo/github": "workspace:*",
@@ -27,6 +28,8 @@
     "@repo/retrieval": "workspace:*",
     "@repo/review-engine": "workspace:*",
     "@repo/repo-sync": "workspace:*",
+    "@repo/rules": "workspace:*",
+    "@repo/usage": "workspace:*",
     "drizzle-orm": "catalog:",
     "postgres": "catalog:"
   },

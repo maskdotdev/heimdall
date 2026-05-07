@@ -12,6 +12,254 @@ export const ADMIN_PERMISSIONS = [
 /** One granular admin control-plane permission. */
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];
 
+/** Product organization roles used by customer-facing authorization. */
+export const PRODUCT_ROLES = ["owner", "admin", "member", "viewer"] as const;
+
+/** One product organization role. */
+export type ProductRole = (typeof PRODUCT_ROLES)[number];
+
+/** Product permissions enforced by customer-facing API routes. */
+export const PRODUCT_PERMISSIONS = [
+  "org:view",
+  "org:manage",
+  "org:members:read",
+  "org:members:write",
+  "installation:read",
+  "installation:sync",
+  "repo:read",
+  "repo:settings:write",
+  "repo:enable",
+  "repo:disable",
+  "repo:reindex",
+  "review:read",
+  "review:debug:read",
+  "review:rerun",
+  "finding:read",
+  "finding:write",
+  "rule:read",
+  "rule:write",
+  "memory:read",
+  "memory:write",
+  "usage:read",
+  "audit:read",
+  "billing:manage",
+  "security:manage",
+] as const;
+
+/** One product permission. */
+export type ProductPermission = (typeof PRODUCT_PERMISSIONS)[number];
+
+/** Product organization membership attached to an authenticated user. */
+export type ProductMembership = {
+  /** Organization that granted the role. */
+  readonly orgId: string;
+  /** Role granted in the organization. */
+  readonly role: ProductRole;
+};
+
+/** Authenticated product actor used by customer-facing API authorization. */
+export type ProductActor = {
+  /** Stable product user ID. */
+  readonly userId: string;
+  /** Organization memberships loaded from the database. */
+  readonly memberships: readonly ProductMembership[];
+  /** Optional dashboard convenience selection. */
+  readonly selectedOrgId?: string | undefined;
+};
+
+/** Data classes used for artifacts, logs, audit events, and retention policy. */
+export const DATA_CLASSIFICATIONS = [
+  "public",
+  "internal",
+  "customer_confidential",
+  "customer_code",
+  "secret",
+  "regulated_personal_data",
+] as const;
+
+/** Data class used for artifacts, logs, audit events, and retention policy. */
+export type DataClassification = (typeof DATA_CLASSIFICATIONS)[number];
+
+/** Retention classes used by security and artifact lifecycle policy. */
+export const RETENTION_CLASSES = [
+  "operational_short",
+  "review_artifact",
+  "index_lifetime",
+  "audit",
+  "billing",
+  "security",
+  "customer_configurable",
+] as const;
+
+/** Retention class used by security and artifact lifecycle policy. */
+export type RetentionClass = (typeof RETENTION_CLASSES)[number];
+
+/** Value tagged with a security data classification. */
+export type ClassifiedValue<TValue> = {
+  /** Classified value. */
+  readonly value: TValue;
+  /** Classification assigned to the value. */
+  readonly classification: DataClassification;
+  /** Product-safe reason for the classification. */
+  readonly reason: string;
+};
+
+/** Input used to classify an artifact or artifact-like payload. */
+export type ClassifyArtifactInput = {
+  /** Artifact kind, such as raw_diff, context_bundle, or prompt_artifact. */
+  readonly artifactType: string;
+  /** Whether the artifact includes source code, diffs, snippets, or embeddings. */
+  readonly containsCode?: boolean | undefined;
+  /** Whether the artifact includes prompt text or prompt-derived content. */
+  readonly containsPrompt?: boolean | undefined;
+  /** Whether the artifact includes known or suspected credentials. */
+  readonly containsToken?: boolean | undefined;
+  /** Whether the artifact includes personal data such as names, emails, or profile data. */
+  readonly containsPersonalData?: boolean | undefined;
+};
+
+/** Security metadata required for stored artifacts. */
+export type ArtifactSecurityMetadata = {
+  /** Stable artifact ID. */
+  readonly artifactId: string;
+  /** Organization that owns the artifact. */
+  readonly orgId: string;
+  /** Optional repository that owns the artifact. */
+  readonly repoId?: string | undefined;
+  /** Optional review run that created the artifact. */
+  readonly reviewRunId?: string | undefined;
+  /** Data classification assigned to the artifact. */
+  readonly classification: DataClassification;
+  /** Whether the artifact contains source code, diffs, snippets, prompts, or embeddings. */
+  readonly containsCode: boolean;
+  /** Whether the artifact contains known or suspected credentials. */
+  readonly containsSecrets: boolean;
+  /** Retention class applied to the artifact. */
+  readonly retentionClass: RetentionClass;
+  /** ISO timestamp for artifact creation. */
+  readonly createdAt: string;
+  /** Optional ISO timestamp when the artifact expires. */
+  readonly expiresAt?: string | undefined;
+  /** SHA-256 hash of the stored payload. */
+  readonly sha256: string;
+  /** Stored payload size in bytes. */
+  readonly sizeBytes: number;
+};
+
+/** Organization retention policy controls. */
+export type RetentionPolicy = {
+  /** Organization that owns the policy. */
+  readonly orgId: string;
+  /** Retention window for raw diff artifacts. */
+  readonly rawDiffDays: number;
+  /** Retention window for retrieved context bundles. */
+  readonly contextBundleDays: number;
+  /** Retention window for prompt artifacts, or disabled to block storage. */
+  readonly promptArtifactDays: number | "disabled";
+  /** Retention window for generic review artifacts. */
+  readonly reviewArtifactDays: number;
+  /** Retention window for sandbox/static-analysis artifacts. */
+  readonly sandboxArtifactDays: number;
+  /** Retention behavior for index-derived artifacts. */
+  readonly indexRetention: "while_enabled" | "fixed_days";
+  /** Retention window for fixed-day index artifacts. */
+  readonly indexArtifactDays: number;
+  /** Retention window for operational short-lived records. */
+  readonly operationalShortDays: number;
+  /** Retention window for audit logs. */
+  readonly auditLogDays: number;
+  /** Retention window for billing/accounting records. */
+  readonly billingUsageDays: number;
+  /** Retention window for security events. */
+  readonly securityEventDays: number;
+  /** Whether repo disable should delete sensitive repo artifacts. */
+  readonly deleteOnRepoDisable: boolean;
+  /** Whether uninstall deletes immediately or after a grace period. */
+  readonly deleteOnUninstall: "immediate" | "after_grace_period";
+};
+
+/** Retention decision for a stored artifact. */
+export type RetentionDecision = {
+  /** Retention class selected for the artifact. */
+  readonly retentionClass: RetentionClass;
+  /** Whether the artifact should be stored. */
+  readonly storage: "allowed" | "disabled";
+  /** Optional ISO expiration timestamp. */
+  readonly expiresAt?: string | undefined;
+  /** Whether repo disable should delete this artifact under the policy. */
+  readonly deleteOnRepoDisable: boolean;
+  /** Whether uninstall deletes this artifact immediately or after a grace period. */
+  readonly deleteOnUninstall: "immediate" | "after_grace_period";
+  /** Product-safe decision reason. */
+  readonly reason: string;
+};
+
+/** Conservative default retention policy for MVP deployments. */
+export const DEFAULT_RETENTION_POLICY = {
+  auditLogDays: 365,
+  billingUsageDays: 2555,
+  contextBundleDays: 90,
+  deleteOnRepoDisable: false,
+  deleteOnUninstall: "after_grace_period",
+  indexArtifactDays: 30,
+  indexRetention: "while_enabled",
+  operationalShortDays: 30,
+  orgId: "default",
+  promptArtifactDays: "disabled",
+  rawDiffDays: 90,
+  reviewArtifactDays: 90,
+  sandboxArtifactDays: 30,
+  securityEventDays: 365,
+} as const satisfies RetentionPolicy;
+
+/** Product permissions granted to each organization role. */
+const PRODUCT_PERMISSIONS_BY_ROLE = {
+  owner: PRODUCT_PERMISSIONS,
+  admin: PRODUCT_PERMISSIONS.filter(
+    (permission) => permission !== "billing:manage" && permission !== "security:manage",
+  ),
+  member: [
+    "org:view",
+    "installation:read",
+    "repo:read",
+    "review:read",
+    "finding:read",
+    "rule:read",
+    "memory:read",
+    "usage:read",
+  ],
+  viewer: [
+    "org:view",
+    "installation:read",
+    "repo:read",
+    "review:read",
+    "finding:read",
+    "rule:read",
+    "memory:read",
+    "usage:read",
+  ],
+} satisfies Record<ProductRole, readonly ProductPermission[]>;
+
+/** Artifact types that are known to contain code or code-derived content. */
+const codeArtifactTypes = new Set([
+  "context_bundle",
+  "embedding_index",
+  "index_artifact",
+  "llm_response_artifact",
+  "prompt_artifact",
+  "raw_diff",
+  "source_chunk",
+]);
+
+/** Artifact types that are known to contain personal data. */
+const personalDataArtifactTypes = new Set(["user_profile", "org_membership"]);
+
+/** Artifact types that are internal-only operational data. */
+const internalArtifactTypes = new Set(["audit_log", "security_event", "system_metric"]);
+
+/** Artifact types that are public by design. */
+const publicArtifactTypes = new Set(["marketing_content", "public_documentation"]);
+
 /** Identity provider families that can back admin actors. */
 export type AdminIdentityProvider = "oidc" | "saml" | "github_org";
 
@@ -309,6 +557,184 @@ export function adminCapabilities(actor: AdminActor): Record<string, boolean> {
   };
 }
 
+/** Returns whether a string is a supported product role. */
+export function isProductRole(value: string): value is ProductRole {
+  return PRODUCT_ROLES.includes(value as ProductRole);
+}
+
+/** Returns whether a product role grants one product permission. */
+export function productRoleHasPermission(
+  role: ProductRole,
+  permission: ProductPermission,
+): boolean {
+  const permissions: readonly ProductPermission[] = PRODUCT_PERMISSIONS_BY_ROLE[role];
+  return permissions.includes(permission);
+}
+
+/** Returns the product permissions granted to one role. */
+export function productPermissionsForRole(role: ProductRole): readonly ProductPermission[] {
+  return PRODUCT_PERMISSIONS_BY_ROLE[role];
+}
+
+/** Returns the actor membership for one organization when present. */
+export function productMembershipForOrg(
+  actor: ProductActor,
+  orgId: string,
+): ProductMembership | undefined {
+  return actor.memberships.find((membership) => membership.orgId === orgId);
+}
+
+/** Returns whether a product actor has one permission in an organization. */
+export function productActorHasOrgPermission(
+  actor: ProductActor,
+  orgId: string,
+  permission: ProductPermission,
+): boolean {
+  const membership = productMembershipForOrg(actor, orgId);
+  return membership ? productRoleHasPermission(membership.role, permission) : false;
+}
+
+/** Returns whether a product actor can access a repository in one organization. */
+export function productActorHasRepoPermission(
+  actor: ProductActor,
+  repoOrgId: string,
+  permission: ProductPermission,
+): boolean {
+  return productActorHasOrgPermission(actor, repoOrgId, permission);
+}
+
+/** Returns dashboard capability flags derived from a product role. */
+export function productCapabilities(role: ProductRole): Record<string, boolean> {
+  return {
+    canManageBilling: productRoleHasPermission(role, "billing:manage"),
+    canManageMembers: productRoleHasPermission(role, "org:members:write"),
+    canManageRepositorySettings: productRoleHasPermission(role, "repo:settings:write"),
+    canReadAuditHistory: productRoleHasPermission(role, "audit:read"),
+    canReadUsage: productRoleHasPermission(role, "usage:read"),
+    canRerunReviews: productRoleHasPermission(role, "review:rerun"),
+  };
+}
+
+/** Returns whether a string is a supported data classification. */
+export function isDataClassification(value: string): value is DataClassification {
+  return DATA_CLASSIFICATIONS.includes(value as DataClassification);
+}
+
+/** Returns whether a string is a supported retention class. */
+export function isRetentionClass(value: string): value is RetentionClass {
+  return RETENTION_CLASSES.includes(value as RetentionClass);
+}
+
+/** Tags a value with a security data classification and reason. */
+export function classifyValue<TValue>(
+  value: TValue,
+  classification: DataClassification,
+  reason: string,
+): ClassifiedValue<TValue> {
+  return { classification, reason, value };
+}
+
+/** Classifies an artifact or artifact-like payload using conservative defaults. */
+export function classifyArtifact(input: ClassifyArtifactInput): DataClassification {
+  if (input.containsToken) {
+    return "secret";
+  }
+  if (input.containsCode || input.containsPrompt || codeArtifactTypes.has(input.artifactType)) {
+    return "customer_code";
+  }
+  if (input.containsPersonalData || personalDataArtifactTypes.has(input.artifactType)) {
+    return "regulated_personal_data";
+  }
+  if (internalArtifactTypes.has(input.artifactType)) {
+    return "internal";
+  }
+  if (publicArtifactTypes.has(input.artifactType)) {
+    return "public";
+  }
+
+  return "customer_confidential";
+}
+
+/** Returns the default retention class for an artifact type. */
+export function retentionClassForArtifactType(artifactType: string): RetentionClass {
+  if (artifactType === "audit_log") {
+    return "audit";
+  }
+  if (artifactType === "billing_usage") {
+    return "billing";
+  }
+  if (artifactType === "security_event") {
+    return "security";
+  }
+  if (artifactType === "index_artifact" || artifactType === "embedding_index") {
+    return "index_lifetime";
+  }
+  if (
+    artifactType === "sandbox_output" ||
+    artifactType === "static_analysis_output" ||
+    artifactType === "webhook_payload"
+  ) {
+    return "operational_short";
+  }
+  if (
+    artifactType === "raw_diff" ||
+    artifactType === "context_bundle" ||
+    artifactType === "prompt_artifact" ||
+    artifactType === "llm_response_artifact" ||
+    artifactType === "static_report" ||
+    artifactType === "review_summary"
+  ) {
+    return "review_artifact";
+  }
+
+  return "customer_configurable";
+}
+
+/** Resolves the retention decision for one artifact. */
+export function resolveArtifactRetention(input: {
+  /** Artifact type to evaluate. */
+  readonly artifactType: string;
+  /** Creation timestamp for expiration calculation. */
+  readonly createdAt: string;
+  /** Retention policy to apply. */
+  readonly policy?: RetentionPolicy | undefined;
+  /** Optional explicit retention class override. */
+  readonly retentionClass?: RetentionClass | undefined;
+}): RetentionDecision {
+  const policy = input.policy ?? DEFAULT_RETENTION_POLICY;
+  const retentionClass = input.retentionClass ?? retentionClassForArtifactType(input.artifactType);
+  const days = retentionDaysForArtifact(input.artifactType, retentionClass, policy);
+
+  if (days === "disabled") {
+    return {
+      deleteOnRepoDisable: policy.deleteOnRepoDisable,
+      deleteOnUninstall: policy.deleteOnUninstall,
+      reason: `${input.artifactType} storage is disabled by retention policy.`,
+      retentionClass,
+      storage: "disabled",
+    };
+  }
+
+  if (days === "while_enabled") {
+    return {
+      deleteOnRepoDisable: policy.deleteOnRepoDisable,
+      deleteOnUninstall: policy.deleteOnUninstall,
+      reason: `${input.artifactType} is retained while the repository remains enabled.`,
+      retentionClass,
+      storage: "allowed",
+    };
+  }
+
+  return {
+    deleteOnRepoDisable: policy.deleteOnRepoDisable,
+    deleteOnUninstall: policy.deleteOnUninstall,
+    expiresAt: addDays(input.createdAt, days),
+    reason: `${input.artifactType} expires after ${days} day(s).`,
+    retentionClass,
+    storage: "allowed",
+  };
+}
+
 /** Returns whether an HTTP method is safe from CSRF mutation checks. */
 export function isCsrfSafeMethod(method: string): boolean {
   return method === "GET" || method === "HEAD" || method === "OPTIONS";
@@ -317,6 +743,57 @@ export function isCsrfSafeMethod(method: string): boolean {
 /** Verifies a request CSRF header against the session-bound token. */
 export function verifyCsrfToken(session: AdminSession, providedToken: string | null): boolean {
   return Boolean(providedToken) && constantTimeEqual(providedToken ?? "", session.csrfToken);
+}
+
+/** Returns retention duration for one artifact and class. */
+function retentionDaysForArtifact(
+  artifactType: string,
+  retentionClass: RetentionClass,
+  policy: RetentionPolicy,
+): number | "disabled" | "while_enabled" {
+  if (artifactType === "prompt_artifact") {
+    return policy.promptArtifactDays;
+  }
+  if (artifactType === "raw_diff") {
+    return policy.rawDiffDays;
+  }
+  if (artifactType === "context_bundle") {
+    return policy.contextBundleDays;
+  }
+  if (artifactType === "sandbox_output" || artifactType === "static_analysis_output") {
+    return policy.sandboxArtifactDays;
+  }
+  if (retentionClass === "index_lifetime") {
+    return policy.indexRetention === "while_enabled" ? "while_enabled" : policy.indexArtifactDays;
+  }
+  if (retentionClass === "audit") {
+    return policy.auditLogDays;
+  }
+  if (retentionClass === "billing") {
+    return policy.billingUsageDays;
+  }
+  if (retentionClass === "security") {
+    return policy.securityEventDays;
+  }
+  if (retentionClass === "operational_short") {
+    return policy.operationalShortDays;
+  }
+
+  return policy.reviewArtifactDays;
+}
+
+/** Adds whole days to an ISO timestamp. */
+function addDays(timestamp: string, days: number): string {
+  const parsed = Date.parse(timestamp);
+  if (Number.isNaN(parsed)) {
+    throw new AdminSecurityError(
+      "security.invalid_retention_timestamp",
+      "Retention timestamp must be parseable.",
+      400,
+    );
+  }
+
+  return new Date(parsed + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 /** Returns a signed session token string for a JSON-serializable payload. */

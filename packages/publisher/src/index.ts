@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   PublishedFindingStatus,
   PublishReviewJobPayload,
+  ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
 import {
@@ -17,7 +18,16 @@ import {
   repositories,
 } from "@repo/db";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
+import type { EffectivePublishingPolicy } from "@repo/rules";
 import { and, eq } from "drizzle-orm";
+
+/** Legacy publisher behavior for review runs created before policy snapshots existed. */
+const LEGACY_PUBLISHING_POLICY = {
+  maxCommentsPerReview: 10,
+  publishCheckRun: true,
+  publishInlineComments: true,
+  publishSummaryComment: false,
+} as const satisfies EffectivePublishingPolicy;
 
 /** Dependencies required to publish one completed review run. */
 export type ReviewPublisherDependencies = {
@@ -37,7 +47,7 @@ export type PublishReviewResult = {
   readonly providerCheckRunId: string;
   /** Provider review ID returned by GitHub, when inline comments were published. */
   readonly providerReviewId?: string;
-  /** Provider summary comment ID returned by GitHub, when fallback summary was published. */
+  /** Provider summary comment ID returned by GitHub, when a summary was published. */
   readonly providerSummaryCommentId?: string;
   /** Number of validated findings included as check-run annotations. */
   readonly annotationCount: number;
@@ -46,6 +56,100 @@ export type PublishReviewResult = {
   /** Whether publishing was skipped because the PR moved to a new head SHA. */
   readonly staleHead: boolean;
 };
+
+/** External publish operation types the publisher can plan and execute. */
+export type PublishOperationType =
+  | "check_run.upsert"
+  | "review.inline_comments"
+  | "summary_comment.configured";
+
+/** Dry-run-friendly description of one publish operation. */
+export type PlannedPublishOperation = {
+  /** Operation type matching persisted publish operation names where possible. */
+  readonly operationType: PublishOperationType;
+  /** Number of findings included in the operation payload. */
+  readonly findingCount: number;
+  /** Whether the publisher expects to perform an external write for this operation. */
+  readonly status: "planned" | "skipped";
+  /** Product-safe reason when the operation is skipped. */
+  readonly reason?: string;
+};
+
+/** Policy-derived publish plan for one completed review run. */
+export type PublishPlan = {
+  /** Effective publishing policy used by the publisher. */
+  readonly policy: EffectivePublishingPolicy;
+  /** Publishable findings after applying the policy comment budget. */
+  readonly findings: readonly ValidatedFinding[];
+  /** Findings to include in check-run annotations. */
+  readonly checkRunFindings: readonly ValidatedFinding[];
+  /** Findings to publish as inline review comments. */
+  readonly inlineFindings: readonly ValidatedFinding[];
+  /** Findings to include in a configured summary comment. */
+  readonly configuredSummaryFindings: readonly ValidatedFinding[];
+  /** Dry-run-friendly planned external operations. */
+  readonly plannedOperations: readonly PlannedPublishOperation[];
+};
+
+/** Creates a policy-derived publish plan from a review run and validated findings. */
+export function createPublishPlan(input: {
+  /** Review run that owns the publish handoff. */
+  readonly reviewRun: Pick<ReviewRun, "metadata">;
+  /** Validated publishable findings for the review run. */
+  readonly findings: readonly ValidatedFinding[];
+}): PublishPlan {
+  const policy = publishingPolicyFromReviewRun(input.reviewRun);
+  const maxFindings = Math.max(0, Math.floor(policy.maxCommentsPerReview));
+  const findings = input.findings.slice(0, maxFindings);
+  const plan = {
+    policy,
+    findings,
+    checkRunFindings: policy.publishCheckRun ? findings : [],
+    inlineFindings: policy.publishInlineComments
+      ? findings.filter((finding) => finding.location.isInDiff !== false)
+      : [],
+    configuredSummaryFindings: policy.publishSummaryComment ? findings : [],
+  };
+
+  return {
+    ...plan,
+    plannedOperations: planPublishOperations(plan),
+  };
+}
+
+/** Creates a dry-run-friendly operation list for a publish plan. */
+export function planPublishOperations(
+  plan: Pick<
+    PublishPlan,
+    "policy" | "checkRunFindings" | "inlineFindings" | "configuredSummaryFindings"
+  >,
+): readonly PlannedPublishOperation[] {
+  const operations: PlannedPublishOperation[] = [];
+  if (plan.policy.publishCheckRun) {
+    operations.push({
+      findingCount: plan.checkRunFindings.length,
+      operationType: "check_run.upsert",
+      status: "planned",
+    });
+  }
+  if (plan.policy.publishInlineComments) {
+    operations.push({
+      findingCount: plan.inlineFindings.length,
+      operationType: "review.inline_comments",
+      status: plan.inlineFindings.length > 0 ? "planned" : "skipped",
+      ...(plan.inlineFindings.length === 0 ? { reason: "no_inline_findings" } : {}),
+    });
+  }
+  if (plan.policy.publishSummaryComment) {
+    operations.push({
+      findingCount: plan.configuredSummaryFindings.length,
+      operationType: "summary_comment.configured",
+      status: "planned",
+    });
+  }
+
+  return operations;
+}
 
 /** Creates or updates live PR output and persists durable publish state. */
 export async function publishReviewRun(
@@ -136,80 +240,69 @@ export async function publishReviewRun(
     const findings = (await reviewRepository.listValidatedFindings(payload.reviewRunId)).filter(
       (finding) => finding.decision === "publish",
     );
-    const inlineComments = findings.filter((finding) => finding.location.isInDiff !== false);
-    const checkRunInput = {
-      ...repository,
-      reviewRunId: payload.reviewRunId,
-      name: "Heimdall Review",
-      headSha: reviewRun.headSha,
-      status: "completed" as const,
-      conclusion: findings.length === 0 ? ("success" as const) : ("neutral" as const),
-      title: findings.length === 0 ? "No findings" : `${findings.length} review finding(s)`,
-      summary: renderSummary(findings),
-      annotations: findings.map(toCheckRunAnnotation),
-    };
-    await insertPublishOperation(dependencies.db, publishRunId, "check_run.upsert", {
-      status: "running",
-      requestHash: hashJson(checkRunInput),
+    const publishPlan = createPublishPlan({ reviewRun, findings });
+    const checkRun = publishPlan.policy.publishCheckRun
+      ? await publishCheckRun({
+          db: dependencies.db,
+          gitProvider: dependencies.gitProvider,
+          repository,
+          publishRunId,
+          reviewRunId: payload.reviewRunId,
+          headSha: reviewRun.headSha,
+          findings: publishPlan.checkRunFindings,
+        })
+      : undefined;
+    const review = publishPlan.policy.publishInlineComments
+      ? await publishInlineComments({
+          db: dependencies.db,
+          gitProvider: dependencies.gitProvider,
+          repository,
+          publishRunId,
+          reviewRunId: payload.reviewRunId,
+          pullRequestNumber: payload.pullRequestNumber,
+          headSha: reviewRun.headSha,
+          findings: publishPlan.inlineFindings,
+          publishedAt: now(),
+        })
+      : undefined;
+    const summaryFindingsToMark = summaryPublishedFindingsForPlan({
+      plan: publishPlan,
+      commentIdsByFindingId: review?.commentIdsByFindingId ?? {},
     });
-    const checkRun = await dependencies.gitProvider.createOrUpdateCheckRun(checkRunInput);
-
-    await dependencies.db
-      .insert(publishedCheckRuns)
-      .values({
-        publishedCheckRunId: stableId("pcr", [publishRunId, checkRun.providerCheckRunId]),
-        publishRunId,
-        reviewRunId: payload.reviewRunId,
-        provider: "github",
-        providerCheckRunId: checkRun.providerCheckRunId,
-        status: "published",
-        conclusion: checkRunInput.conclusion,
-        metadata: { htmlUrl: checkRun.htmlUrl, annotationCount: checkRunInput.annotations.length },
-      })
-      .onConflictDoUpdate({
-        target: publishedCheckRuns.publishedCheckRunId,
-        set: {
-          status: "published",
-          conclusion: checkRunInput.conclusion,
-          metadata: {
-            htmlUrl: checkRun.htmlUrl,
-            annotationCount: checkRunInput.annotations.length,
-          },
-        },
-      });
-    await insertPublishOperation(dependencies.db, publishRunId, "check_run.upsert", {
-      status: "completed",
-      responseHash: hashJson(checkRun),
+    const configuredSummary = publishPlan.policy.publishSummaryComment
+      ? await publishSummaryComment({
+          db: dependencies.db,
+          gitProvider: dependencies.gitProvider,
+          repository,
+          publishRunId,
+          reviewRunId: payload.reviewRunId,
+          pullRequestNumber: payload.pullRequestNumber,
+          findings: publishPlan.configuredSummaryFindings,
+          findingsToMark: summaryFindingsToMark,
+          publishedAt: now(),
+          purpose: "configured",
+        })
+      : undefined;
+    const fallbackSummaryFindings = fallbackSummaryFindingsForPlan({
+      plan: publishPlan,
+      commentIdsByFindingId: review?.commentIdsByFindingId ?? {},
     });
-
-    const review = await publishInlineComments({
-      db: dependencies.db,
-      gitProvider: dependencies.gitProvider,
-      repository,
-      publishRunId,
-      reviewRunId: payload.reviewRunId,
-      pullRequestNumber: payload.pullRequestNumber,
-      headSha: reviewRun.headSha,
-      findings: inlineComments,
-      publishedAt: now(),
-    });
-    const findingsNeedingSummary = findings.filter(
-      (finding) =>
-        finding.location.isInDiff === false || !review.commentIdsByFindingId[finding.findingId],
-    );
     const fallbackSummary =
-      findingsNeedingSummary.length === 0
+      fallbackSummaryFindings.length === 0
         ? undefined
-        : await publishSummaryFallback({
+        : await publishSummaryComment({
             db: dependencies.db,
             gitProvider: dependencies.gitProvider,
             repository,
             publishRunId,
             reviewRunId: payload.reviewRunId,
             pullRequestNumber: payload.pullRequestNumber,
-            findings: findingsNeedingSummary,
+            findings: fallbackSummaryFindings,
+            findingsToMark: fallbackSummaryFindings,
             publishedAt: now(),
+            purpose: "fallback",
           });
+    const summaryComment = configuredSummary ?? fallbackSummary;
 
     const completedAt = now();
     await dependencies.db
@@ -218,23 +311,25 @@ export async function publishReviewRun(
         status: "completed",
         completedAt,
         error: null,
-        metadata: {
-          providerCheckRunId: checkRun.providerCheckRunId,
-          providerReviewId: review.providerReviewId,
-          providerSummaryCommentId: fallbackSummary?.providerCommentId,
-          inlineCommentCount: review.commentIds.length,
+        metadata: withoutUndefinedValues({
+          providerCheckRunId: checkRun?.providerCheckRunId,
+          providerReviewId: review?.providerReviewId,
+          providerSummaryCommentId: summaryComment?.providerCommentId,
+          inlineCommentCount: review?.commentIds.length ?? 0,
+          plannedOperations: publishPlan.plannedOperations,
+          publishingPolicy: publishPlan.policy,
           summaryFallback: fallbackSummary !== undefined,
-        },
+        }),
       })
       .where(eq(publishRuns.idempotencyKey, idempotencyKey));
 
     return {
       publishRunId,
-      providerCheckRunId: checkRun.providerCheckRunId,
-      providerReviewId: review.providerReviewId,
-      ...(fallbackSummary ? { providerSummaryCommentId: fallbackSummary.providerCommentId } : {}),
-      annotationCount: checkRunInput.annotations.length,
-      inlineCommentCount: review.commentIds.length,
+      providerCheckRunId: checkRun?.providerCheckRunId ?? "",
+      ...(review ? { providerReviewId: review.providerReviewId } : {}),
+      ...(summaryComment ? { providerSummaryCommentId: summaryComment.providerCommentId } : {}),
+      annotationCount: publishPlan.checkRunFindings.length,
+      inlineCommentCount: review?.commentIds.length ?? 0,
       staleHead: false,
     };
   } catch (error) {
@@ -265,6 +360,68 @@ type PublishInlineCommentsInput = {
 type PublishedReviewWithFindingMap = Awaited<ReturnType<GitProvider["publishReview"]>> & {
   readonly commentIdsByFindingId?: Readonly<Record<string, string>>;
 };
+
+type PublishedCheckRun = Awaited<ReturnType<GitProvider["createOrUpdateCheckRun"]>>;
+
+type SummaryCommentPurpose = "configured" | "fallback";
+
+async function publishCheckRun(input: {
+  readonly db: HeimdallDatabase;
+  readonly gitProvider: GitProvider;
+  readonly repository: GitHubRepositoryRef;
+  readonly publishRunId: string;
+  readonly reviewRunId: string;
+  readonly headSha: string;
+  readonly findings: readonly ValidatedFinding[];
+}): Promise<PublishedCheckRun> {
+  const checkRunInput = {
+    ...input.repository,
+    reviewRunId: input.reviewRunId,
+    name: "Heimdall Review",
+    headSha: input.headSha,
+    status: "completed" as const,
+    conclusion: input.findings.length === 0 ? ("success" as const) : ("neutral" as const),
+    title:
+      input.findings.length === 0 ? "No findings" : `${input.findings.length} review finding(s)`,
+    summary: renderSummary(input.findings),
+    annotations: input.findings.map(toCheckRunAnnotation),
+  };
+  await insertPublishOperation(input.db, input.publishRunId, "check_run.upsert", {
+    status: "running",
+    requestHash: hashJson(checkRunInput),
+  });
+  const checkRun = await input.gitProvider.createOrUpdateCheckRun(checkRunInput);
+
+  await input.db
+    .insert(publishedCheckRuns)
+    .values({
+      publishedCheckRunId: stableId("pcr", [input.publishRunId, checkRun.providerCheckRunId]),
+      publishRunId: input.publishRunId,
+      reviewRunId: input.reviewRunId,
+      provider: "github",
+      providerCheckRunId: checkRun.providerCheckRunId,
+      status: "published",
+      conclusion: checkRunInput.conclusion,
+      metadata: { htmlUrl: checkRun.htmlUrl, annotationCount: checkRunInput.annotations.length },
+    })
+    .onConflictDoUpdate({
+      target: publishedCheckRuns.publishedCheckRunId,
+      set: {
+        status: "published",
+        conclusion: checkRunInput.conclusion,
+        metadata: {
+          htmlUrl: checkRun.htmlUrl,
+          annotationCount: checkRunInput.annotations.length,
+        },
+      },
+    });
+  await insertPublishOperation(input.db, input.publishRunId, "check_run.upsert", {
+    status: "completed",
+    responseHash: hashJson(checkRun),
+  });
+
+  return checkRun;
+}
 
 async function publishInlineComments(input: PublishInlineCommentsInput): Promise<{
   readonly providerReviewId: string;
@@ -354,7 +511,7 @@ async function publishInlineComments(input: PublishInlineCommentsInput): Promise
   }
 }
 
-async function publishSummaryFallback(input: {
+async function publishSummaryComment(input: {
   readonly db: HeimdallDatabase;
   readonly gitProvider: GitProvider;
   readonly repository: GitHubRepositoryRef;
@@ -362,16 +519,23 @@ async function publishSummaryFallback(input: {
   readonly reviewRunId: string;
   readonly pullRequestNumber: number;
   readonly findings: readonly ValidatedFinding[];
+  readonly findingsToMark: readonly ValidatedFinding[];
   readonly publishedAt: Date;
+  readonly purpose: SummaryCommentPurpose;
 }): Promise<{ readonly providerCommentId: string }> {
-  const body = renderFallbackSummary(input.findings);
+  const body =
+    input.purpose === "fallback"
+      ? renderFallbackSummary(input.findings)
+      : renderSummary(input.findings);
   const summaryInput = {
     ...input.repository,
     pullRequestNumber: input.pullRequestNumber,
     reviewRunId: input.reviewRunId,
     body,
   };
-  await insertPublishOperation(input.db, input.publishRunId, "summary_comment.fallback", {
+  const operationType =
+    input.purpose === "fallback" ? "summary_comment.fallback" : "summary_comment.configured";
+  await insertPublishOperation(input.db, input.publishRunId, operationType, {
     status: "running",
     requestHash: hashJson(summaryInput),
   });
@@ -386,28 +550,30 @@ async function publishSummaryFallback(input: {
       providerCommentId: comment.providerCommentId,
       bodyHash: hashJson(body),
       status: "published",
-      metadata: { htmlUrl: comment.htmlUrl },
+      metadata: { htmlUrl: comment.htmlUrl, purpose: input.purpose },
     })
     .onConflictDoUpdate({
       target: publishedSummaryComments.publishedSummaryCommentId,
       set: {
         bodyHash: hashJson(body),
         status: "published",
-        metadata: { htmlUrl: comment.htmlUrl },
+        metadata: { htmlUrl: comment.htmlUrl, purpose: input.purpose },
       },
     });
-  await Promise.all(
-    input.findings.map((finding) =>
-      upsertPublishedFinding(input.db, {
-        finding,
-        publishRunId: input.publishRunId,
-        providerCommentId: comment.providerCommentId,
-        publishedAt: input.publishedAt,
-        status: "published",
-      }),
-    ),
-  );
-  await insertPublishOperation(input.db, input.publishRunId, "summary_comment.fallback", {
+  if (input.findingsToMark.length > 0) {
+    await Promise.all(
+      input.findingsToMark.map((finding) =>
+        upsertPublishedFinding(input.db, {
+          finding,
+          publishRunId: input.publishRunId,
+          providerCommentId: comment.providerCommentId,
+          publishedAt: input.publishedAt,
+          status: "published",
+        }),
+      ),
+    );
+  }
+  await insertPublishOperation(input.db, input.publishRunId, operationType, {
     status: "completed",
     responseHash: hashJson(comment),
   });
@@ -503,6 +669,81 @@ function mapCommentIdsByFindingId(
       const providerCommentId = review.commentIds[index];
       return providerCommentId ? [[finding.findingId, providerCommentId]] : [];
     }),
+  );
+}
+
+function fallbackSummaryFindingsForPlan(input: {
+  readonly plan: PublishPlan;
+  readonly commentIdsByFindingId: Readonly<Record<string, string>>;
+}): readonly ValidatedFinding[] {
+  if (
+    input.plan.policy.publishSummaryComment ||
+    !input.plan.policy.publishInlineComments ||
+    input.plan.findings.length === 0
+  ) {
+    return [];
+  }
+
+  return input.plan.findings.filter(
+    (finding) =>
+      finding.location.isInDiff === false || !input.commentIdsByFindingId[finding.findingId],
+  );
+}
+
+function summaryPublishedFindingsForPlan(input: {
+  readonly plan: PublishPlan;
+  readonly commentIdsByFindingId: Readonly<Record<string, string>>;
+}): readonly ValidatedFinding[] {
+  if (!input.plan.policy.publishSummaryComment) {
+    return [];
+  }
+  if (!input.plan.policy.publishInlineComments) {
+    return input.plan.findings;
+  }
+
+  return input.plan.findings.filter(
+    (finding) =>
+      finding.location.isInDiff === false || !input.commentIdsByFindingId[finding.findingId],
+  );
+}
+
+function publishingPolicyFromReviewRun(
+  reviewRun: Pick<ReviewRun, "metadata">,
+): EffectivePublishingPolicy {
+  const metadata = asRecord(reviewRun.metadata);
+  const policySnapshot = asRecord(metadata?.policySnapshot);
+  const publishing = asRecord(policySnapshot?.publishing);
+
+  if (isPublishingPolicy(publishing)) {
+    return publishing;
+  }
+
+  return LEGACY_PUBLISHING_POLICY;
+}
+
+function isPublishingPolicy(value: unknown): value is EffectivePublishingPolicy {
+  const record = asRecord(value);
+  const maxCommentsPerReview = record?.maxCommentsPerReview;
+
+  return (
+    typeof record?.publishCheckRun === "boolean" &&
+    typeof record.publishInlineComments === "boolean" &&
+    typeof record.publishSummaryComment === "boolean" &&
+    typeof maxCommentsPerReview === "number" &&
+    Number.isInteger(maxCommentsPerReview) &&
+    maxCommentsPerReview >= 0
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function withoutUndefinedValues(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined),
   );
 }
 

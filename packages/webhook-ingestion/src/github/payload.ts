@@ -1,4 +1,4 @@
-import type { PullRequestSnapshot, Repository } from "@repo/contracts";
+import type { PullRequestSnapshot, Repository, RepositorySettings } from "@repo/contracts";
 import { DEFAULT_REPOSITORY_SETTINGS } from "@repo/contracts";
 import { sha256, stableId } from "../ids";
 import { WebhookPayloadError } from "../types";
@@ -76,7 +76,7 @@ export type NormalizedGitHubInstallation = {
 /** Repository plus default settings derived from GitHub payloads. */
 export type NormalizedGitHubRepository = {
   readonly repository: Repository;
-  readonly settings: ReturnType<typeof buildRepositorySettings>;
+  readonly settings: RepositorySettings;
 };
 
 /** Pull request state and snapshot derived from a GitHub pull_request webhook. */
@@ -122,10 +122,17 @@ export function normalizeGitHubInstallation(payload: JsonRecord): NormalizedGitH
 }
 
 /** Builds default settings for a repository. */
-export function buildRepositorySettings(repoId: string, timestamp = nowIso()) {
+export function buildRepositorySettings(repoId: string, timestamp = nowIso()): RepositorySettings {
   return {
     repoId,
-    ...DEFAULT_REPOSITORY_SETTINGS,
+    reviewPolicy: DEFAULT_REPOSITORY_SETTINGS.reviewPolicy,
+    severityThreshold: DEFAULT_REPOSITORY_SETTINGS.severityThreshold,
+    maxCommentsPerReview: DEFAULT_REPOSITORY_SETTINGS.maxCommentsPerReview,
+    ignoredPaths: [...DEFAULT_REPOSITORY_SETTINGS.ignoredPaths],
+    ignoredAuthors: [...DEFAULT_REPOSITORY_SETTINGS.ignoredAuthors],
+    ignoredLabels: [...DEFAULT_REPOSITORY_SETTINGS.ignoredLabels],
+    skipGeneratedFiles: DEFAULT_REPOSITORY_SETTINGS.skipGeneratedFiles,
+    skipDraftPullRequests: DEFAULT_REPOSITORY_SETTINGS.skipDraftPullRequests,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

@@ -4,6 +4,7 @@ import {
   assertSnapshotMatchesJob,
   ReviewInputSnapshotMismatchError,
   type ReviewPullRequestInput,
+  reviewRunStatusForStage,
 } from "../src";
 
 const reviewInput = {
@@ -53,5 +54,15 @@ describe("assertSnapshotMatchesJob", () => {
         headSha: "3333333",
       }),
     ).toThrow(ReviewInputSnapshotMismatchError);
+  });
+});
+
+describe("reviewRunStatusForStage", () => {
+  it("maps orchestration stages to durable review run statuses", () => {
+    expect(reviewRunStatusForStage("index")).toBe("waiting_for_index");
+    expect(reviewRunStatusForStage("retrieval")).toBe("retrieving_context");
+    expect(reviewRunStatusForStage("review")).toBe("reviewing");
+    expect(reviewRunStatusForStage("validation")).toBe("validating_findings");
+    expect(reviewRunStatusForStage("publish")).toBe("publish_queued");
   });
 });

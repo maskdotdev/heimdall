@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { ContextBundleSchema, type FindingCategory, parseWithSchema } from "@repo/contracts";
 import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import type { CodeSnippet, ContextBundle, ContextItem } from "@repo/contracts/review/context";
@@ -10,6 +11,12 @@ import {
   indexedFiles,
   symbols,
 } from "@repo/db";
+import {
+  formatMemoryFactForContext,
+  type MemoryFact,
+  type RelevantMemoryRetriever,
+  type RelevantMemoryTraceEntry,
+} from "@repo/memory";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 
 /** Indexed chunk shape consumed by retrieval. */
@@ -87,8 +94,52 @@ export type RetrieveContextInput = {
   readonly index?: RetrievalIndex;
   /** Maximum estimated tokens allowed in the returned context bundle. */
   readonly maxTokens?: number;
+  /** Optional relevant-memory retrieval for team facts and preferences. */
+  readonly memory?: RetrieveMemoryContextOptions | undefined;
   /** Timestamp used for deterministic tests. */
   readonly timestamp?: string;
+};
+
+/** Optional memory retrieval configuration for a context bundle. */
+export type RetrieveMemoryContextOptions = {
+  /** Organization ID for memory scoping. */
+  readonly orgId: string;
+  /** Relevant memory retriever implementation. */
+  readonly retriever: RelevantMemoryRetriever;
+  /** Maximum memory facts to add to the context bundle. */
+  readonly maxFacts?: number | undefined;
+  /** Maximum estimated tokens for memory facts. */
+  readonly maxTokens?: number | undefined;
+  /** Optional expected finding categories used to rank relevant memory. */
+  readonly findingCategories?: readonly FindingCategory[] | undefined;
+};
+
+/** Non-fatal retrieval issue recorded on the context bundle metadata. */
+export type RetrievalWarning = {
+  /** Retriever that failed or degraded. */
+  readonly retriever: string;
+  /** Stable warning code for dashboards and tests. */
+  readonly code: string;
+  /** Product-safe warning message. */
+  readonly message: string;
+};
+
+/** Items and warnings produced by index-backed retrieval. */
+type IndexedRetrievalResult = {
+  /** Context items produced by successful indexed retrievers. */
+  readonly items: readonly ContextItem[];
+  /** Non-fatal warnings from optional indexed retrievers. */
+  readonly warnings: readonly RetrievalWarning[];
+};
+
+/** Items and trace produced by relevant memory retrieval. */
+type MemoryRetrievalResult = {
+  /** Context items produced from relevant memory facts. */
+  readonly items: readonly ContextItem[];
+  /** Memory fact IDs included before final bundle packing. */
+  readonly factIds: readonly string[];
+  /** Product-safe memory relevance trace. */
+  readonly trace: readonly RelevantMemoryTraceEntry[];
 };
 
 /** Retrieves a compact context bundle, falling back to diff context when indexes are missing. */
@@ -96,22 +147,26 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
   const maxTokens = input.maxTokens ?? 8000;
   const timestamp = input.timestamp ?? new Date().toISOString();
   const diffItems = input.snapshot.changedFiles.flatMap((file) => contextItemsForFile(file));
-  const indexedItems = input.index
+  const indexedResult = input.index
     ? await retrieveIndexedItems({ ...input, index: input.index }, diffItems)
-    : [];
+    : { items: [], warnings: [] };
+  const memoryResult = input.memory
+    ? await retrieveMemoryItems({ ...input, memory: input.memory }, timestamp)
+    : { factIds: [], items: [], trace: [] };
   const items = packItems(
     input.indexAvailable === false || !input.index
-      ? withFallbackRule(diffItems)
-      : [...indexedItems, ...diffItems],
+      ? [...memoryResult.items, ...withFallbackRule(diffItems)]
+      : [...memoryResult.items, ...indexedResult.items, ...diffItems],
     maxTokens,
   );
 
-  return {
+  return parseWithSchema("ContextBundle", ContextBundleSchema, {
     schemaVersion: "context_bundle.v1",
     contextBundleId: stableId("ctx", [
       input.reviewRunId,
       input.snapshot.snapshotId,
       input.indexAvailable === false ? "diff-fallback" : "indexed",
+      memoryResult.factIds.join(","),
     ]),
     reviewRunId: input.reviewRunId,
     repoId: input.snapshot.repoId,
@@ -130,8 +185,17 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
       retrievalMode: input.index ? "indexed_context" : "diff_fallback",
       indexAvailable: Boolean(input.index),
       ...(input.index ? { indexVersionId: input.index.indexVersionId } : {}),
+      ...(memoryResult.trace.length > 0
+        ? {
+            memory: {
+              includedFactIds: memoryResult.factIds,
+              trace: memoryResult.trace,
+            },
+          }
+        : {}),
+      ...(indexedResult.warnings.length > 0 ? { warnings: indexedResult.warnings } : {}),
     },
-  };
+  });
 }
 
 /** Creates a Drizzle-backed retrieval index over imported chunk, symbol, and edge tables. */
@@ -280,34 +344,130 @@ export function createDatabaseRetrievalIndex(options: {
 async function retrieveIndexedItems(
   input: RetrieveContextInput & { readonly index: RetrievalIndex },
   diffItems: readonly ContextItem[],
-): Promise<readonly ContextItem[]> {
+): Promise<IndexedRetrievalResult> {
   const paths = input.snapshot.changedFiles.map((file) => file.path);
   const query = diffItems.flatMap((item) => item.snippet?.text ?? []).join("\n");
-  const [sameFile, symbolsForFiles, relatedTests, similar] = await Promise.all([
+  const [sameFile, symbolsForFiles] = await Promise.all([
     input.index.getSameFileChunks(paths),
     input.index.getSymbolsForFiles(paths),
-    input.index.getRelatedTestChunks(paths),
-    input.index.searchSimilarChunks(query, 8),
   ]);
-  const related = await input.index.getRelatedChunks(
-    symbolsForFiles.map((symbol) => symbol.symbolId),
-  );
+  const symbolIds = symbolsForFiles.map((symbol) => symbol.symbolId);
+  const [relatedResult, relatedTestsResult, similarResult] = await Promise.all([
+    retrieveOptionalIndexItems("symbol-graph", "graph_retrieval_failed", () =>
+      input.index.getRelatedChunks(symbolIds),
+    ),
+    retrieveOptionalIndexItems("related-tests", "test_retrieval_failed", () =>
+      input.index.getRelatedTestChunks(paths),
+    ),
+    retrieveOptionalIndexItems("semantic-search", "semantic_retrieval_failed", () =>
+      input.index.searchSimilarChunks(query, 8),
+    ),
+  ]);
 
-  return dedupeContextItems([
-    ...sameFile.map((chunk) => chunkItem(chunk, "same_file_context", "Same file indexed context.")),
-    ...symbolsForFiles.map(symbolItem),
-    ...related.map((chunk) =>
-      chunkItem(
-        chunk,
-        chunk.relationKind ?? "callee",
-        `${chunk.relationKind === "caller" ? "Caller" : "Callee"} indexed context.`,
+  return {
+    items: dedupeContextItems([
+      ...sameFile.map((chunk) =>
+        chunkItem(chunk, "same_file_context", "Same file indexed context."),
       ),
-    ),
-    ...relatedTests.map((chunk) => chunkItem(chunk, "related_test", "Related test context.")),
-    ...similar.map((chunk) =>
-      chunkItem(chunk, "similar_pattern", "Vector or lexical search related context."),
-    ),
-  ]);
+      ...symbolsForFiles.map(symbolItem),
+      ...relatedResult.items.map((chunk) =>
+        chunkItem(
+          chunk,
+          chunk.relationKind ?? "callee",
+          `${chunk.relationKind === "caller" ? "Caller" : "Callee"} indexed context.`,
+        ),
+      ),
+      ...relatedTestsResult.items.map((chunk) =>
+        chunkItem(chunk, "related_test", "Related test context."),
+      ),
+      ...similarResult.items.map((chunk) =>
+        chunkItem(chunk, "similar_pattern", "Vector or lexical search related context."),
+      ),
+    ]),
+    warnings: [
+      ...relatedResult.warnings,
+      ...relatedTestsResult.warnings,
+      ...similarResult.warnings,
+    ],
+  };
+}
+
+async function retrieveMemoryItems(
+  input: RetrieveContextInput & { readonly memory: RetrieveMemoryContextOptions },
+  timestamp: string,
+): Promise<MemoryRetrievalResult> {
+  const result = await input.memory.retriever.retrieveRelevantMemory({
+    orgId: input.memory.orgId,
+    repoId: input.snapshot.repoId,
+    changedFiles: input.snapshot.changedFiles.map((file) => ({
+      path: file.path,
+      language: file.language,
+    })),
+    changedSymbols: [],
+    ...(input.memory.findingCategories
+      ? { findingCategories: input.memory.findingCategories }
+      : {}),
+    ...(input.memory.maxFacts === undefined ? {} : { maxFacts: input.memory.maxFacts }),
+    ...(input.memory.maxTokens === undefined ? {} : { maxTokens: input.memory.maxTokens }),
+    now: timestamp,
+  });
+  const traceByFactId = new Map(result.trace.map((entry) => [entry.memoryFactId, entry]));
+
+  return {
+    factIds: result.facts.map((fact) => fact.id),
+    items: result.facts.map((fact) => memoryFactItem(fact, traceByFactId.get(fact.id))),
+    trace: result.trace,
+  };
+}
+
+/** Runs an optional indexed retriever and records a warning instead of failing retrieval. */
+async function retrieveOptionalIndexItems<TItem>(
+  retriever: string,
+  code: string,
+  run: () => Promise<readonly TItem[]>,
+): Promise<{ readonly items: readonly TItem[]; readonly warnings: readonly RetrievalWarning[] }> {
+  try {
+    return { items: await run(), warnings: [] };
+  } catch (error) {
+    return {
+      items: [],
+      warnings: [
+        {
+          code,
+          message: error instanceof Error ? error.message : "Optional retrieval failed.",
+          retriever,
+        },
+      ],
+    };
+  }
+}
+
+function memoryFactItem(
+  fact: MemoryFact,
+  trace: RelevantMemoryTraceEntry | undefined,
+): ContextItem {
+  const text = formatMemoryFactForContext(fact);
+
+  return {
+    contextItemId: stableId("ctxitem", ["memory-fact", fact.id]),
+    kind: "memory_fact",
+    source: "memory",
+    title: `${memoryKindLabel(fact.kind)} memory`,
+    text,
+    ...(trace ? { score: trace.score } : {}),
+    priority: memoryFactPriority(fact),
+    tokenEstimate: estimateTokens(text),
+    provenance: {
+      retriever: "relevant-memory",
+      reason: trace?.reason ?? "Selected active memory fact.",
+    },
+    metadata: {
+      memoryFactId: fact.id,
+      memoryKind: fact.kind,
+      memoryScope: fact.scope.level,
+      ...(trace ? { matchedDimensions: trace.matchedDimensions } : {}),
+    },
+  };
 }
 
 function contextItemsForFile(file: ChangedFile): readonly ContextItem[] {
@@ -349,6 +509,14 @@ function contextItemsForFile(file: ChangedFile): readonly ContextItem[] {
       },
     };
   });
+}
+
+function memoryFactPriority(fact: MemoryFact): number {
+  return Math.max(55, Math.min(95, Math.round(60 + fact.priority / 30 + fact.confidence * 10)));
+}
+
+function memoryKindLabel(kind: MemoryFact["kind"]): string {
+  return kind.replaceAll("_", " ");
 }
 
 function withFallbackRule(items: readonly ContextItem[]): readonly ContextItem[] {

@@ -12,12 +12,15 @@
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"],
   "references": [
+    { "path": "../artifacts/tsconfig.build.json" },
     { "path": "../contracts/tsconfig.build.json" },
     { "path": "../db/tsconfig.build.json" },
     { "path": "../github/tsconfig.build.json" },
     { "path": "../llm-gateway/tsconfig.build.json" },
     { "path": "../retrieval/tsconfig.build.json" },
     { "path": "../review-engine/tsconfig.build.json" },
-    { "path": "../repo-sync/tsconfig.build.json" }
+    { "path": "../repo-sync/tsconfig.build.json" },
+    { "path": "../rules/tsconfig.build.json" },
+    { "path": "../usage/tsconfig.build.json" }
   ]
 }

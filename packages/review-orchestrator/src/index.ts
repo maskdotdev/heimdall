@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
+import {
+  InlineReviewArtifactPayloadStore,
+  type ReviewArtifactPayloadStore,
+  reviewArtifactPayloadDescriptor,
+} from "@repo/artifacts";
 import type {
   JobEnvelope,
+  PlanSnapshot,
   PullRequestSnapshot,
   ReviewArtifactKind,
   ReviewArtifactRef,
@@ -12,8 +18,11 @@ import {
   backgroundJobs,
   codeIndexVersions,
   type HeimdallDatabase,
+  llmCalls,
   PullRequestRepository,
   providerInstallations,
+  RepoRuleRepository,
+  RepositoryRepository,
   ReviewRepository,
   repositories,
 } from "@repo/db";
@@ -26,6 +35,23 @@ import {
   runReviewPasses,
   validateAndRankCandidateFindings,
 } from "@repo/review-engine";
+import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
+import {
+  DefaultEntitlementService,
+  DefaultQuotaService,
+  type EntitlementService,
+  estimateLlmTokenUsage,
+  type LlmTokenRateCard,
+  MONTHLY_REVIEW_CREDITS_QUOTA_KEY,
+  monthlyQuotaPeriod,
+  PostgresEntitlementStore,
+  PostgresQuotaStore,
+  PostgresUsageLedgerStore,
+  type QuotaService,
+  type ReserveQuotaResult,
+  UsageLedger,
+  ZERO_COST_LLM_RATE_CARD,
+} from "@repo/usage";
 import { and, desc, eq } from "drizzle-orm";
 
 /** Default bounded wait for the index job planned alongside a review job. */
@@ -62,6 +88,16 @@ export type ReviewOrchestratorDependencies = {
   readonly syncWorkspace?: SyncWorkspace;
   /** Optional model gateway for LLM-backed review passes. */
   readonly llmGateway?: LLMGateway;
+  /** Optional rate card used to estimate LLM token cost. */
+  readonly llmUsageRateCard?: LlmTokenRateCard;
+  /** Optional usage ledger for recording completed review and model usage. */
+  readonly usageLedger?: UsageLedger;
+  /** Optional artifact payload store used for durable review artifact payloads. */
+  readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
+  /** Optional entitlement service for provider-free plan snapshots. */
+  readonly entitlementService?: EntitlementService;
+  /** Optional quota service for monthly review credit reservations. */
+  readonly quotaService?: QuotaService;
   /** Whether indexed retrieval is available for this run. */
   readonly indexAvailable?: boolean;
   /** Maximum time to wait for a newly queued index to become ready before diff fallback. */
@@ -90,9 +126,12 @@ export type ReviewOrchestrationResult = {
   readonly candidateFindingCount: number;
   /** Number of findings accepted for publishing after validation and ranking. */
   readonly validatedFindingCount: number;
-  /** Publish job key persisted for worker handoff. */
-  readonly publishJobKey: string;
+  /** Publish job key persisted for worker handoff when review work completed. */
+  readonly publishJobKey?: string | undefined;
 };
+
+/** Durable review orchestration stages that map to review run statuses. */
+export type ReviewOrchestrationStage = "index" | "retrieval" | "review" | "validation" | "publish";
 
 /** Error raised when a fetched PR snapshot does not match the queued review job. */
 export class ReviewInputSnapshotMismatchError extends Error {
@@ -115,6 +154,20 @@ export async function runPullRequestReview(
   const now = dependencies.now ?? (() => new Date());
   const reviewRepository = new ReviewRepository(dependencies.db);
   const pullRequestRepository = new PullRequestRepository(dependencies.db);
+  const repositoryRepository = new RepositoryRepository(dependencies.db);
+  const usageLedger =
+    dependencies.usageLedger ?? new UsageLedger(new PostgresUsageLedgerStore(dependencies.db));
+  const entitlementService =
+    dependencies.entitlementService ??
+    new DefaultEntitlementService(new PostgresEntitlementStore(dependencies.db));
+  const quotaService =
+    dependencies.quotaService ?? new DefaultQuotaService(new PostgresQuotaStore(dependencies.db));
+  const artifactPayloadStore =
+    dependencies.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore();
+  const repositoryRecord = await repositoryRepository.getRepository(input.repoId);
+  if (!repositoryRecord) {
+    throw new Error(`Repository ${input.repoId} was not found.`);
+  }
   const repository = await loadGitHubRepositoryRef(dependencies.db, input);
   const pullRequestRef = { ...repository, pullRequestNumber: input.pullRequestNumber };
 
@@ -128,17 +181,92 @@ export async function runPullRequestReview(
   ]);
   await pullRequestRepository.insertSnapshot(snapshot);
   const startedAt = now().toISOString();
+  const repositorySettings = await repositoryRepository.getSettings(input.repoId);
+  const activeRules = await new RepoRuleRepository(dependencies.db).listEffectiveRules({
+    orgId: repositoryRecord.orgId,
+    repoId: input.repoId,
+  });
+  const policyResult = buildReviewPolicySnapshot({
+    activeRules,
+    repository: repositoryRecord,
+    ...(repositorySettings ? { settings: repositorySettings } : {}),
+    timestamp: startedAt,
+    reviewRunId,
+  });
+  const planSnapshot = await entitlementService.compilePlanSnapshot({
+    now: startedAt,
+    orgId: repositoryRecord.orgId,
+  });
   let reviewRun = await reviewRepository.upsertReviewRun(
     createReviewRun({
       input,
+      planSnapshot,
+      policySnapshot: policyResult.snapshot,
       snapshot,
       reviewRunId,
       status: "snapshotting",
       timestamp: startedAt,
     }),
   );
+  let quotaReservation: ReserveQuotaResult | undefined;
+  let currentStage = "snapshot";
 
   try {
+    currentStage = "quota";
+    quotaReservation = await reserveReviewCreditQuota({
+      now: startedAt,
+      orgId: repositoryRecord.orgId,
+      planSnapshot,
+      quotaService,
+      reviewRunId,
+    });
+    if (!quotaReservation.decision.allowed || !quotaReservation.reservation) {
+      const skippedAt = now().toISOString();
+      reviewRun = await reviewRepository.upsertReviewRun({
+        ...reviewRun,
+        completedAt: skippedAt,
+        status: "skipped",
+        summary: "Review skipped because the monthly review credit quota is exhausted.",
+        updatedAt: skippedAt,
+        error: {
+          code: "review_orchestrator.quota_exceeded",
+          message: "Monthly review credit quota is exhausted.",
+          retryable: false,
+        },
+        metadata: {
+          ...reviewRun.metadata,
+          planSnapshot: planSnapshotMetadata(planSnapshot),
+          quota: {
+            decision: quotaReservation.decision,
+            quotaKey: MONTHLY_REVIEW_CREDITS_QUOTA_KEY,
+          },
+        },
+      });
+      await reviewRepository.insertStageEvent({
+        reviewRunId,
+        stage: "quota",
+        status: "skipped",
+        metadata: { decision: quotaReservation.decision },
+      });
+
+      return {
+        reviewRunId: reviewRun.reviewRunId,
+        snapshotId: snapshot.snapshotId,
+        candidateFindingCount: 0,
+        validatedFindingCount: 0,
+      };
+    }
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "quota",
+      status: quotaReservation.decision.status,
+      metadata: {
+        counter: quotaReservation.counter,
+        decision: quotaReservation.decision,
+        reservationId: quotaReservation.reservation.quotaReservationId,
+      },
+    });
+    currentStage = "snapshot";
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "snapshot",
@@ -150,6 +278,7 @@ export async function runPullRequestReview(
       dependencies.syncWorkspace ??
       ((workspaceInput: GitHubRepositoryRef & { readonly commitSha: string }) =>
         syncRepositoryWorkspace(workspaceInput, { gitProvider: dependencies.gitProvider }));
+    currentStage = "workspace";
     const workspace = await syncWorkspace(
       withOptionalWorkspaceRoot(
         {
@@ -171,7 +300,7 @@ export async function runPullRequestReview(
     });
 
     const artifacts = [
-      await persistArtifact(reviewRepository, {
+      await persistArtifact(reviewRepository, artifactPayloadStore, {
         reviewRunId,
         repoId: snapshot.repoId,
         kind: "pull_request_snapshot",
@@ -179,7 +308,23 @@ export async function runPullRequestReview(
         payload: snapshot,
         createdAt: now().toISOString(),
       }),
-      await persistArtifact(reviewRepository, {
+      await persistArtifact(reviewRepository, artifactPayloadStore, {
+        reviewRunId,
+        repoId: snapshot.repoId,
+        kind: "policy_snapshot",
+        name: "policy-snapshot.json",
+        payload: policyResult,
+        createdAt: now().toISOString(),
+      }),
+      await persistArtifact(reviewRepository, artifactPayloadStore, {
+        reviewRunId,
+        repoId: snapshot.repoId,
+        kind: "plan_snapshot",
+        name: "plan-snapshot.json",
+        payload: planSnapshot,
+        createdAt: now().toISOString(),
+      }),
+      await persistArtifact(reviewRepository, artifactPayloadStore, {
         reviewRunId,
         repoId: snapshot.repoId,
         kind: "orchestrator_trace",
@@ -192,17 +337,35 @@ export async function runPullRequestReview(
             checkedOutSha: workspace.checkedOutSha,
             cleanedUp: workspace.cleanedUp,
           },
+          policy: policySnapshotMetadata(policyResult.snapshot),
+          plan: planSnapshotMetadata(planSnapshot),
           generatedAt: now().toISOString(),
         },
         createdAt: now().toISOString(),
       }),
     ];
 
+    reviewRun = await transitionReviewRunStage(
+      reviewRepository,
+      reviewRun,
+      "index",
+      now().toISOString(),
+    );
+    currentStage = "index";
     const indexVersionId = await waitForReadyIndexVersionId(dependencies.db, {
       repoId: snapshot.repoId,
       commitSha: snapshot.headSha,
       timeoutMs: dependencies.indexWaitTimeoutMs ?? DEFAULT_INDEX_WAIT_TIMEOUT_MS,
       pollIntervalMs: dependencies.indexPollIntervalMs ?? DEFAULT_INDEX_POLL_INTERVAL_MS,
+    });
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "index",
+      status: indexVersionId ? "completed" : "degraded",
+      metadata: {
+        commitSha: snapshot.headSha,
+        ...(indexVersionId ? { indexVersionId } : {}),
+      },
     });
     const retrievalIndex = indexVersionId
       ? createDatabaseRetrievalIndex({
@@ -210,6 +373,13 @@ export async function runPullRequestReview(
           indexVersionId,
         })
       : undefined;
+    reviewRun = await transitionReviewRunStage(
+      reviewRepository,
+      reviewRun,
+      "retrieval",
+      now().toISOString(),
+    );
+    currentStage = "retrieval";
     const contextBundle = await retrieveContext({
       reviewRunId,
       snapshot,
@@ -217,7 +387,7 @@ export async function runPullRequestReview(
       ...(retrievalIndex ? { index: retrievalIndex } : {}),
       timestamp: now().toISOString(),
     });
-    const contextArtifact = await persistArtifact(reviewRepository, {
+    const contextArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
       repoId: snapshot.repoId,
       kind: "context_bundle",
@@ -225,31 +395,81 @@ export async function runPullRequestReview(
       payload: contextBundle,
       createdAt: now().toISOString(),
     });
+    const retrievalMode =
+      contextBundle.metadata && typeof contextBundle.metadata.retrievalMode === "string"
+        ? contextBundle.metadata.retrievalMode
+        : undefined;
+    const retrievalWarningCount = Array.isArray(contextBundle.metadata?.warnings)
+      ? contextBundle.metadata.warnings.length
+      : 0;
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "retrieval",
+      status: "completed",
+      metadata: {
+        contextBundleId: contextBundle.contextBundleId,
+        estimatedTokens: contextBundle.tokenBudget.estimatedTokens,
+        itemCount: contextBundle.items.length,
+        ...(indexVersionId ? { indexVersionId } : {}),
+        ...(retrievalMode ? { retrievalMode } : {}),
+        ...(retrievalWarningCount > 0 ? { warningCount: retrievalWarningCount } : {}),
+      },
+    });
 
+    reviewRun = await transitionReviewRunStage(
+      reviewRepository,
+      reviewRun,
+      "review",
+      now().toISOString(),
+    );
+    currentStage = "review";
     const candidateFindings = await runReviewPasses({
       passes: [llmReviewPass],
       context: {
         reviewRunId,
         snapshot,
         contextBundle,
-        llmGateway: dependencies.llmGateway ?? createStaticLLMGateway(),
+        llmGateway: createUsageRecordingLlmGateway({
+          db: dependencies.db,
+          gateway: dependencies.llmGateway ?? createStaticLLMGateway(),
+          now,
+          orgId: repositoryRecord.orgId,
+          rateCard: dependencies.llmUsageRateCard ?? ZERO_COST_LLM_RATE_CARD,
+          repoId: snapshot.repoId,
+          reviewRunId,
+          usageLedger,
+        }),
         timestamp: now().toISOString(),
       },
     });
     for (const finding of candidateFindings) {
       await reviewRepository.insertCandidateFinding(finding);
     }
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "review",
+      status: "completed",
+      metadata: { candidateFindingCount: candidateFindings.length },
+    });
 
+    reviewRun = await transitionReviewRunStage(
+      reviewRepository,
+      reviewRun,
+      "validation",
+      now().toISOString(),
+    );
+    currentStage = "validation";
     const validatedFindings = validateAndRankCandidateFindings({
       snapshot,
       findings: candidateFindings,
       timestamp: now().toISOString(),
+      config: { policy: policyResult.snapshot.effectivePolicy },
     });
     for (const finding of validatedFindings) {
       await reviewRepository.insertValidatedFinding(finding);
     }
 
-    const candidateArtifact = await persistArtifact(reviewRepository, {
+    const candidateArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
       repoId: snapshot.repoId,
       kind: "candidate_findings",
@@ -257,7 +477,7 @@ export async function runPullRequestReview(
       payload: { schemaVersion: "candidate_findings.v1", findings: candidateFindings },
       createdAt: now().toISOString(),
     });
-    const validatedArtifact = await persistArtifact(reviewRepository, {
+    const validatedArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
       repoId: snapshot.repoId,
       kind: "validated_findings",
@@ -265,8 +485,82 @@ export async function runPullRequestReview(
       payload: { schemaVersion: "validated_findings.v1", findings: validatedFindings },
       createdAt: now().toISOString(),
     });
+    const publishedFindingCount = validatedFindings.filter(
+      (finding) => finding.decision === "publish",
+    ).length;
+    const rejectedFindingCount = validatedFindings.filter(
+      (finding) => finding.decision === "reject",
+    ).length;
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "validation",
+      status: "completed",
+      metadata: {
+        publishedFindingCount,
+        rejectedFindingCount,
+        validatedFindingCount: validatedFindings.length,
+      },
+    });
     const publishJobKey = createPublishJobKey(reviewRunId);
+    reviewRun = await transitionReviewRunStage(
+      reviewRepository,
+      reviewRun,
+      "publish",
+      now().toISOString(),
+    );
+    currentStage = "publish";
+    await enqueuePublishJob(dependencies.db, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      pullRequestNumber: snapshot.pullRequestNumber,
+      timestamp: now().toISOString(),
+    });
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "publish",
+      status: "queued",
+      metadata: { publishJobKey },
+    });
     const completedAt = now().toISOString();
+    await quotaService.consumeReservation({
+      now: completedAt,
+      quotaReservationId: quotaReservation.reservation.quotaReservationId,
+    });
+    await usageLedger.recordMany([
+      {
+        idempotencyKey: `review.run.completed:${reviewRunId}`,
+        orgId: repositoryRecord.orgId,
+        repoId: snapshot.repoId,
+        reviewRunId,
+        eventType: "review.run",
+        quantity: 1,
+        unit: "review",
+        occurredAt: completedAt,
+        metadata: {
+          candidateFindingCount: candidateFindings.length,
+          headSha: snapshot.headSha,
+          pullRequestNumber: snapshot.pullRequestNumber,
+          rejectedFindingCount,
+          trigger: input.trigger,
+          validatedFindingCount: publishedFindingCount,
+        },
+      },
+      {
+        idempotencyKey: `review.credit:${reviewRunId}`,
+        orgId: repositoryRecord.orgId,
+        repoId: snapshot.repoId,
+        reviewRunId,
+        eventType: "review.credit",
+        quantity: 1,
+        unit: "credit",
+        occurredAt: completedAt,
+        metadata: {
+          planKey: planSnapshot.planKey,
+          planVersionId: planSnapshot.planVersionId,
+          quotaReservationId: quotaReservation.reservation.quotaReservationId,
+        },
+      },
+    ]);
     reviewRun = await reviewRepository.upsertReviewRun({
       ...reviewRun,
       status: "completed",
@@ -279,44 +573,42 @@ export async function runPullRequestReview(
       artifactRefs: [...artifacts, contextArtifact, candidateArtifact, validatedArtifact],
       counts: {
         candidateFindings: candidateFindings.length,
-        validatedFindings: validatedFindings.filter((finding) => finding.decision === "publish")
-          .length,
+        validatedFindings: publishedFindingCount,
         publishedFindings: 0,
-        rejectedFindings: validatedFindings.filter((finding) => finding.decision === "reject")
-          .length,
+        rejectedFindings: rejectedFindingCount,
       },
       metadata: {
         ...reviewRun.metadata,
+        planSnapshot: planSnapshotMetadata(planSnapshot),
+        policySnapshot: policySnapshotMetadata(policyResult.snapshot),
+        quota: {
+          decision: quotaReservation.decision,
+          reservationId: quotaReservation.reservation.quotaReservationId,
+        },
         workspace: {
           checkedOutSha: workspace.checkedOutSha,
           cleanedUp: workspace.cleanedUp,
         },
+        currentStage: "completed",
         publishJobKey,
       },
-    });
-    await enqueuePublishJob(dependencies.db, {
-      reviewRunId,
-      repoId: snapshot.repoId,
-      pullRequestNumber: snapshot.pullRequestNumber,
-      timestamp: now().toISOString(),
-    });
-    await reviewRepository.insertStageEvent({
-      reviewRunId,
-      stage: "review",
-      status: "completed",
-      metadata: { candidateFindingCount: candidateFindings.length },
     });
 
     return {
       reviewRunId: reviewRun.reviewRunId,
       snapshotId: snapshot.snapshotId,
       candidateFindingCount: candidateFindings.length,
-      validatedFindingCount: validatedFindings.filter((finding) => finding.decision === "publish")
-        .length,
+      validatedFindingCount: publishedFindingCount,
       publishJobKey,
     };
   } catch (error) {
     const failedAt = now().toISOString();
+    if (quotaReservation?.reservation?.status === "reserved") {
+      await quotaService.releaseReservation({
+        now: failedAt,
+        quotaReservationId: quotaReservation.reservation.quotaReservationId,
+      });
+    }
     await reviewRepository.upsertReviewRun({
       ...reviewRun,
       status: "failed",
@@ -327,10 +619,21 @@ export async function runPullRequestReview(
         message: error instanceof Error ? error.message : String(error),
         retryable: true,
       },
+      metadata: {
+        ...reviewRun.metadata,
+        ...(quotaReservation?.reservation
+          ? {
+              quota: {
+                decision: quotaReservation.decision,
+                releasedReservationId: quotaReservation.reservation.quotaReservationId,
+              },
+            }
+          : {}),
+      },
     });
     await reviewRepository.insertStageEvent({
       reviewRunId,
-      stage: "review",
+      stage: currentStage,
       status: "failed",
       message: error instanceof Error ? error.message : String(error),
     });
@@ -470,8 +773,44 @@ export function assertSnapshotMatchesJob(
   });
 }
 
+/** Maps an orchestration stage to the persisted review run status for that stage. */
+export function reviewRunStatusForStage(stage: ReviewOrchestrationStage): ReviewRun["status"] {
+  switch (stage) {
+    case "index":
+      return "waiting_for_index";
+    case "retrieval":
+      return "retrieving_context";
+    case "review":
+      return "reviewing";
+    case "validation":
+      return "validating_findings";
+    case "publish":
+      return "publish_queued";
+  }
+}
+
+/** Persists the status and current-stage metadata for a durable orchestration stage. */
+async function transitionReviewRunStage(
+  repository: ReviewRepository,
+  reviewRun: ReviewRun,
+  stage: ReviewOrchestrationStage,
+  timestamp: string,
+): Promise<ReviewRun> {
+  return repository.upsertReviewRun({
+    ...reviewRun,
+    status: reviewRunStatusForStage(stage),
+    updatedAt: timestamp,
+    metadata: {
+      ...reviewRun.metadata,
+      currentStage: stage,
+    },
+  });
+}
+
 function createReviewRun(input: {
   readonly input: ReviewPullRequestInput;
+  readonly planSnapshot: PlanSnapshot;
+  readonly policySnapshot: ReviewPolicySnapshot;
   readonly snapshot: PullRequestSnapshot;
   readonly reviewRunId: string;
   readonly status: ReviewRun["status"];
@@ -500,12 +839,73 @@ function createReviewRun(input: {
     metadata: {
       jobBaseSha: input.input.baseSha,
       jobHeadSha: input.input.headSha,
+      planSnapshot: planSnapshotMetadata(input.planSnapshot),
+      policySnapshot: policySnapshotMetadata(input.policySnapshot),
     },
   };
 }
 
+/** Returns compact policy metadata safe to store on review runs and traces. */
+function policySnapshotMetadata(snapshot: ReviewPolicySnapshot): Record<string, unknown> {
+  return {
+    policyHash: snapshot.policyHash,
+    policySnapshotId: snapshot.policySnapshotId,
+    publishing: snapshot.effectivePolicy.publishing,
+    reviewPolicy: snapshot.effectivePolicy.reviewPolicy,
+  };
+}
+
+/** Returns compact plan metadata safe to store on review runs and traces. */
+function planSnapshotMetadata(snapshot: PlanSnapshot): Record<string, unknown> {
+  return {
+    billingAccountId: snapshot.billingAccountId,
+    paymentStatus: snapshot.paymentStatus,
+    planKey: snapshot.planKey,
+    planVersionId: snapshot.planVersionId,
+    subscriptionStatus: snapshot.subscriptionStatus,
+  };
+}
+
+/** Reserves one monthly review credit for a review run. */
+async function reserveReviewCreditQuota(input: {
+  /** Entitlement-derived plan snapshot. */
+  readonly planSnapshot: PlanSnapshot;
+  /** Quota service used for the reservation. */
+  readonly quotaService: QuotaService;
+  /** Organization that owns the review. */
+  readonly orgId: string;
+  /** Review run that owns the reservation. */
+  readonly reviewRunId: string;
+  /** Reservation timestamp. */
+  readonly now: string;
+}): Promise<ReserveQuotaResult> {
+  const period = monthlyQuotaPeriod(input.now);
+  return input.quotaService.reserve({
+    ...period,
+    limit: reviewCreditLimitFromPlan(input.planSnapshot),
+    now: input.now,
+    orgId: input.orgId,
+    quotaKey: MONTHLY_REVIEW_CREDITS_QUOTA_KEY,
+    requested: 1,
+    source: `plan:${input.planSnapshot.planKey}`,
+    sourceId: input.reviewRunId,
+    sourceType: "review_run",
+  });
+}
+
+/** Returns the monthly review credit hard limit from a plan snapshot. */
+function reviewCreditLimitFromPlan(snapshot: PlanSnapshot): number {
+  const value = snapshot.limits["reviews.max_monthly_review_credits"];
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return value;
+  }
+
+  return 0;
+}
+
 async function persistArtifact(
   repository: ReviewRepository,
+  artifactPayloadStore: ReviewArtifactPayloadStore,
   input: {
     readonly reviewRunId: string;
     readonly repoId: string;
@@ -515,15 +915,20 @@ async function persistArtifact(
     readonly createdAt: string;
   },
 ): Promise<ReviewArtifactRef> {
-  const bytes = new TextEncoder().encode(JSON.stringify(input.payload));
-  const hash = sha256(bytes);
-  const artifact: ReviewArtifactRef = {
-    artifactId: stableId("art", [input.reviewRunId, input.kind, input.name, hash]),
+  const payloadRecord = await artifactPayloadStore.putJson({
+    reviewRunId: input.reviewRunId,
     kind: input.kind,
-    uri: `db://review_artifacts/${input.reviewRunId}/${input.kind}/${input.name}`,
-    contentHash: hash,
+    name: input.name,
+    payload: input.payload,
+  });
+  const payloadDescriptor = reviewArtifactPayloadDescriptor(payloadRecord);
+  const artifact: ReviewArtifactRef = {
+    artifactId: stableId("art", [input.reviewRunId, input.kind, input.name, payloadRecord.hash]),
+    kind: input.kind,
+    uri: payloadRecord.uri,
+    contentHash: payloadRecord.hash,
     createdAt: input.createdAt,
-    metadata: { name: input.name },
+    metadata: { name: input.name, payloadStorage: payloadDescriptor },
   };
 
   await repository.insertReviewArtifact({
@@ -531,8 +936,8 @@ async function persistArtifact(
     repoId: input.repoId,
     artifact,
     name: input.name,
-    sizeBytes: bytes.byteLength,
-    metadata: { payload: input.payload },
+    sizeBytes: payloadRecord.sizeBytes,
+    metadata: payloadRecord.metadata,
   });
 
   return artifact;
@@ -587,6 +992,169 @@ async function enqueuePublishJob(
 
 function createPublishJobKey(reviewRunId: string): string {
   return `review.publish.v1:${reviewRunId}`;
+}
+
+/** Creates an LLM gateway wrapper that records call rows and token usage events. */
+function createUsageRecordingLlmGateway(input: {
+  /** Database used to persist LLM call rows. */
+  readonly db: HeimdallDatabase;
+  /** Gateway that performs the actual model work. */
+  readonly gateway: LLMGateway;
+  /** Clock used for deterministic timestamps. */
+  readonly now: () => Date;
+  /** Organization that owns the review. */
+  readonly orgId: string;
+  /** Repository that owns the review. */
+  readonly repoId: string;
+  /** Review run that caused the model call. */
+  readonly reviewRunId: string;
+  /** Usage ledger used for durable token events. */
+  readonly usageLedger: UsageLedger;
+  /** Rate card used to estimate internal model cost. */
+  readonly rateCard: LlmTokenRateCard;
+}): LLMGateway {
+  let sequence = 0;
+  const nextSequence = () => {
+    sequence += 1;
+    return sequence;
+  };
+
+  return {
+    generateObject: async (request) => {
+      const callSequence = nextSequence();
+      const startedAt = input.now().toISOString();
+      const output = await input.gateway.generateObject(request);
+      const completedAt = input.now().toISOString();
+      await recordLlmUsage({
+        ...input,
+        completedAt,
+        ...(request.metadata ? { metadata: request.metadata } : {}),
+        output,
+        prompt: request.prompt,
+        sequence: callSequence,
+        startedAt,
+        system: request.system,
+        task: request.task,
+      });
+      return output;
+    },
+    generateReviewFindings: async (request) => {
+      const callSequence = nextSequence();
+      const startedAt = input.now().toISOString();
+      const output = await input.gateway.generateReviewFindings(request);
+      const completedAt = input.now().toISOString();
+      await recordLlmUsage({
+        ...input,
+        completedAt,
+        ...(request.metadata ? { metadata: request.metadata } : {}),
+        output,
+        prompt: request.prompt,
+        sequence: callSequence,
+        startedAt,
+        system:
+          "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.",
+        task: "review.findings",
+      });
+      return output;
+    },
+  };
+}
+
+/** Persists one successful model-call row and one matching token usage event. */
+async function recordLlmUsage(input: {
+  /** Database used to persist LLM call rows. */
+  readonly db: HeimdallDatabase;
+  /** Organization that owns the review. */
+  readonly orgId: string;
+  /** Repository that owns the review. */
+  readonly repoId: string;
+  /** Review run that caused the model call. */
+  readonly reviewRunId: string;
+  /** Usage ledger used for durable token events. */
+  readonly usageLedger: UsageLedger;
+  /** Rate card used to estimate internal model cost. */
+  readonly rateCard: LlmTokenRateCard;
+  /** One-based call sequence within the review run. */
+  readonly sequence: number;
+  /** LLM task label. */
+  readonly task: string;
+  /** System prompt sent to the gateway. */
+  readonly system: string;
+  /** User prompt sent to the gateway. */
+  readonly prompt: string;
+  /** Structured model output. */
+  readonly output: unknown;
+  /** Optional caller metadata. */
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Call start timestamp. */
+  readonly startedAt: string;
+  /** Call completion timestamp. */
+  readonly completedAt: string;
+}): Promise<void> {
+  const promptHash = sha256(`${input.system}\n\n${input.prompt}`);
+  const responseHash = sha256(JSON.stringify(input.output) ?? "");
+  const estimate = estimateLlmTokenUsage({
+    system: input.system,
+    prompt: input.prompt,
+    output: input.output,
+    rateCard: input.rateCard,
+  });
+  const llmCallId = stableId("llm", [input.reviewRunId, input.sequence, input.task, promptHash]);
+  const elapsedMs = Date.parse(input.completedAt) - Date.parse(input.startedAt);
+  const latencyMs = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0;
+
+  await input.db
+    .insert(llmCalls)
+    .values({
+      llmCallId,
+      orgId: input.orgId,
+      repoId: input.repoId,
+      reviewRunId: input.reviewRunId,
+      provider: estimate.provider,
+      model: estimate.model,
+      purpose: input.task,
+      status: "succeeded",
+      promptHash,
+      responseHash,
+      inputTokens: estimate.inputTokens,
+      outputTokens: estimate.outputTokens,
+      costMicros: estimate.costMicros,
+      startedAt: new Date(input.startedAt),
+      completedAt: new Date(input.completedAt),
+      metadata: {
+        cachedInputTokens: estimate.cachedInputTokens,
+        latencyMs,
+        rateCardId: estimate.rateCardId,
+        sequence: input.sequence,
+        task: input.task,
+        ...(input.metadata ? { requestMetadata: input.metadata } : {}),
+      },
+    })
+    .onConflictDoNothing();
+
+  await input.usageLedger.record({
+    idempotencyKey: `llm.token:${llmCallId}`,
+    orgId: input.orgId,
+    repoId: input.repoId,
+    reviewRunId: input.reviewRunId,
+    eventType: "llm.token",
+    quantity: estimate.totalTokens,
+    unit: "token",
+    costMicros: estimate.costMicros,
+    occurredAt: input.completedAt,
+    metadata: {
+      cachedInputTokens: estimate.cachedInputTokens,
+      inputTokens: estimate.inputTokens,
+      llmCallId,
+      model: estimate.model,
+      outputTokens: estimate.outputTokens,
+      provider: estimate.provider,
+      promptHash,
+      rateCardId: estimate.rateCardId,
+      responseHash,
+      task: input.task,
+    },
+  });
 }
 
 function withOptionalWorkspaceRoot<T extends GitHubRepositoryRef & { readonly commitSha: string }>(

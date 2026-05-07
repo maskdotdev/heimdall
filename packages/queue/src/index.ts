@@ -21,6 +21,7 @@ export const QUEUE_NAMES = {
   review: "review",
   memory: "memory",
   publishing: "publishing",
+  billing: "billing",
 } as const;
 
 /** Known queue name. */

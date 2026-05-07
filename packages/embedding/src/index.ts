@@ -13,6 +13,22 @@ export const packageName = "@repo/embedding" as const;
 /** Dimension required by the current pgvector storage schema. */
 export const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
+/** Default embedding profile version for code chunk inputs. */
+export const DEFAULT_CODE_EMBEDDING_PROFILE_VERSION = "code_embedding_profile.v1";
+
+/** Maximum tokens allowed for one code chunk embedding input. */
+export const DEFAULT_MAX_EMBEDDING_INPUT_TOKENS = 8192;
+
+/** Default provider request limits for MVP embedding batches. */
+export const DEFAULT_EMBEDDING_BATCH_POLICY = {
+  maxCharsPerRequest: 1_500_000,
+  maxInputsPerRequest: 128,
+  maxTokensPerRequest: 200_000,
+} as const satisfies EmbeddingBatchPolicy;
+
+/** Default local provider identifier used when no embedding provider is configured. */
+export const DEFAULT_EMBEDDING_PROVIDER = "hash";
+
 /** Provider boundary for chunk embeddings. */
 export type EmbeddingProvider = {
   /** Embedding model name. */
@@ -23,6 +39,67 @@ export type EmbeddingProvider = {
   readonly embedTexts: (texts: readonly string[]) => Promise<readonly (readonly number[])[]>;
 };
 
+/** Environment values used to select an embedding provider. */
+export type EmbeddingProviderEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Options for creating an embedding provider from environment values. */
+export type CreateEmbeddingProviderFromEnvironmentOptions = {
+  /** Model requested by the queued embedding job. */
+  readonly model?: string;
+};
+
+/** Source data used to build a provider input for one code chunk. */
+export type CodeChunkEmbeddingInputSource = {
+  /** Stable chunk ID used to correlate provider responses. */
+  readonly chunkId: string;
+  /** Repository-relative path for retrieval context. */
+  readonly path: string;
+  /** Optional language hint from importer metadata. */
+  readonly language?: string;
+  /** Optional chunk kind hint from importer metadata. */
+  readonly kind?: string;
+  /** Optional symbol ID associated with the chunk. */
+  readonly symbolId?: string;
+  /** First line covered by the chunk. */
+  readonly startLine: number;
+  /** Last line covered by the chunk. */
+  readonly endLine: number;
+  /** Raw immutable chunk text from importer metadata. */
+  readonly text: string;
+};
+
+/** Options for code chunk embedding input construction. */
+export type CodeChunkEmbeddingInputOptions = {
+  /** Maximum estimated tokens allowed in the final provider input. */
+  readonly maxInputTokens?: number;
+};
+
+/** Provider-ready embedding input and metadata. */
+export type BuiltEmbeddingInput = {
+  /** Stable input ID used to match a vector back to a chunk. */
+  readonly inputId: string;
+  /** Kind of source represented by the input. */
+  readonly inputKind: "code_chunk";
+  /** Provider input text after normalization and truncation. */
+  readonly text: string;
+  /** SHA-256 hash of the final provider input text. */
+  readonly inputHash: `sha256:${string}`;
+  /** Conservative token estimate for the final provider input text. */
+  readonly tokenEstimate: number;
+  /** Whether the raw source text was truncated to fit the input policy. */
+  readonly wasTruncated: boolean;
+};
+
+/** Request batching limits for provider calls. */
+export type EmbeddingBatchPolicy = {
+  /** Maximum number of inputs per provider request. */
+  readonly maxInputsPerRequest: number;
+  /** Maximum estimated tokens per provider request. */
+  readonly maxTokensPerRequest: number;
+  /** Maximum characters per provider request. */
+  readonly maxCharsPerRequest: number;
+};
+
 /** Result produced after embedding one chunk batch. */
 export type EmbedChunkBatchResult = {
   /** Number of chunks newly embedded and stored. */
@@ -31,10 +108,22 @@ export type EmbedChunkBatchResult = {
   readonly skippedChunkIds: readonly string[];
 };
 
+/** Options for embedding one queued chunk batch. */
+export type EmbedChunkBatchOptions = {
+  /** Database used to read chunks and persist vectors. */
+  readonly db: HeimdallDatabase;
+  /** Embedding provider used for uncached chunk inputs. */
+  readonly provider: EmbeddingProvider;
+  /** Optional input construction policy. */
+  readonly inputOptions?: CodeChunkEmbeddingInputOptions;
+  /** Optional provider request batching policy. */
+  readonly batchPolicy?: EmbeddingBatchPolicy;
+};
+
 /** Embeds queued chunks and stores vectors idempotently for retrieval. */
 export async function embedChunkBatch(
   payload: EmbeddingBatchJobPayload,
-  options: { readonly db: HeimdallDatabase; readonly provider: EmbeddingProvider },
+  options: EmbedChunkBatchOptions,
 ): Promise<EmbedChunkBatchResult> {
   const rows = await options.db
     .select()
@@ -45,29 +134,69 @@ export async function embedChunkBatch(
         inArray(codeChunks.chunkId, payload.chunkIds),
       ),
     );
-  const chunkTexts = rows
-    .map((row) => ({ row, text: textFromMetadata(row.metadata) }))
-    .filter((entry): entry is { row: (typeof rows)[number]; text: string } => Boolean(entry.text));
-  const vectors = validateEmbeddingVectors(
-    await options.provider.embedTexts(chunkTexts.map((entry) => entry.text)),
-    chunkTexts.length,
-    options.provider.dimensions,
-  );
+  const chunkInputs = rows
+    .map((row) => {
+      const text = textFromMetadata(row.metadata);
+      if (!text) {
+        return undefined;
+      }
+
+      return {
+        input: buildCodeChunkEmbeddingInput(
+          {
+            chunkId: row.chunkId,
+            endLine: row.endLine,
+            path: row.path,
+            startLine: row.startLine,
+            text,
+            ...optionalStringProperty("kind", stringFromMetadata(row.metadata, "kind")),
+            ...optionalStringProperty("language", stringFromMetadata(row.metadata, "language")),
+            ...optionalStringProperty("symbolId", row.symbolId ?? undefined),
+          },
+          options.inputOptions,
+        ),
+        row,
+      };
+    })
+    .filter(
+      (
+        entry,
+      ): entry is {
+        readonly input: BuiltEmbeddingInput;
+        readonly row: (typeof rows)[number];
+      } => Boolean(entry),
+    );
+  const vectorsByInputId = new Map<string, readonly number[]>();
+
+  for (const inputBatch of buildEmbeddingInputBatches(
+    chunkInputs.map((entry) => entry.input),
+    options.batchPolicy,
+  )) {
+    const vectors = validateEmbeddingVectors(
+      await options.provider.embedTexts(inputBatch.map((input) => input.text)),
+      inputBatch.length,
+      options.provider.dimensions,
+    );
+    for (const [index, input] of inputBatch.entries()) {
+      vectorsByInputId.set(input.inputId, vectors[index] ?? []);
+    }
+  }
+
   let insertedChunkCount = 0;
 
-  if (chunkTexts.length > 0) {
+  if (chunkInputs.length > 0) {
     await options.db.transaction(async (tx) => {
       const insertedRows = await tx
         .insert(codeChunkEmbeddings)
         .values(
-          chunkTexts.map((entry, index) => ({
+          chunkInputs.map((entry) => ({
             chunkEmbeddingId: stableId("emb", [entry.row.chunkId, payload.embeddingModel]),
             chunkId: entry.row.chunkId,
             repoId: payload.repoId,
             indexVersionId: payload.indexVersionId,
             embeddingModel: payload.embeddingModel,
             embeddingDimension: options.provider.dimensions,
-            embedding: [...(vectors[index] ?? [])],
+            embedding: [...requiredVectorForInput(vectorsByInputId, entry.input.inputId)],
             contentHash: entry.row.contentHash,
           })),
         )
@@ -81,7 +210,7 @@ export async function embedChunkBatch(
         .where(
           inArray(
             codeChunks.chunkId,
-            chunkTexts.map((entry) => entry.row.chunkId),
+            chunkInputs.map((entry) => entry.row.chunkId),
           ),
         );
 
@@ -107,9 +236,86 @@ export async function embedChunkBatch(
   return {
     embeddedChunkCount: insertedChunkCount,
     skippedChunkIds: payload.chunkIds.filter(
-      (chunkId) => !chunkTexts.some((entry) => entry.row.chunkId === chunkId),
+      (chunkId) => !chunkInputs.some((entry) => entry.row.chunkId === chunkId),
     ),
   };
+}
+
+/** Builds a stable provider input for one code chunk. */
+export function buildCodeChunkEmbeddingInput(
+  source: CodeChunkEmbeddingInputSource,
+  options: CodeChunkEmbeddingInputOptions = {},
+): BuiltEmbeddingInput {
+  const trimmedText = source.text.trim();
+  if (trimmedText.length === 0) {
+    throw new Error("Embedding input text cannot be empty.");
+  }
+
+  const header = [
+    source.language ? `language: ${source.language}` : undefined,
+    `path: ${source.path}`,
+    source.symbolId ? `symbol_id: ${source.symbolId}` : undefined,
+    source.kind ? `chunk_kind: ${source.kind}` : undefined,
+    `lines: ${source.startLine}-${source.endLine}`,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+  const maxInputTokens = options.maxInputTokens ?? DEFAULT_MAX_EMBEDDING_INPUT_TOKENS;
+  const maxInputChars = Math.max(1, maxInputTokens * 3);
+  const rawInput = `${header}\n\n${trimmedText}`;
+  const finalInput =
+    roughTokenEstimate(rawInput) > maxInputTokens
+      ? `${header}\n\n${truncateEmbeddingBody(trimmedText, Math.max(1, maxInputChars - header.length - 2))}`
+      : rawInput;
+
+  return {
+    inputHash: sha256(finalInput),
+    inputId: source.chunkId,
+    inputKind: "code_chunk",
+    text: finalInput,
+    tokenEstimate: roughTokenEstimate(finalInput),
+    wasTruncated: finalInput !== rawInput,
+  };
+}
+
+/** Builds provider request batches without exceeding count, token, or character limits. */
+export function buildEmbeddingInputBatches(
+  inputs: readonly BuiltEmbeddingInput[],
+  policy: EmbeddingBatchPolicy = DEFAULT_EMBEDDING_BATCH_POLICY,
+): readonly (readonly BuiltEmbeddingInput[])[] {
+  const batches: BuiltEmbeddingInput[][] = [];
+  let currentBatch: BuiltEmbeddingInput[] = [];
+  let currentTokens = 0;
+  let currentChars = 0;
+
+  for (const input of inputs) {
+    const wouldExceed =
+      currentBatch.length >= policy.maxInputsPerRequest ||
+      currentTokens + input.tokenEstimate > policy.maxTokensPerRequest ||
+      currentChars + input.text.length > policy.maxCharsPerRequest;
+
+    if (wouldExceed && currentBatch.length > 0) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentTokens = 0;
+      currentChars = 0;
+    }
+
+    currentBatch.push(input);
+    currentTokens += input.tokenEstimate;
+    currentChars += input.text.length;
+  }
+
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch);
+  }
+
+  return batches;
+}
+
+/** Estimates tokens conservatively for code-heavy embedding inputs. */
+export function roughTokenEstimate(text: string): number {
+  return Math.ceil(text.length / 3);
 }
 
 /** Deterministic local embedding provider for tests and offline retrieval smoke checks. */
@@ -122,6 +328,36 @@ export function createHashEmbeddingProvider(
     dimensions,
     embedTexts: async (texts) => texts.map((text) => hashVector(text, dimensions)),
   };
+}
+
+/** Creates the configured embedding provider for worker and local runs. */
+export function createEmbeddingProviderFromEnvironment(
+  env: EmbeddingProviderEnvironment,
+  options: CreateEmbeddingProviderFromEnvironmentOptions = {},
+): EmbeddingProvider {
+  const providerName = (
+    env.HEIMDALL_EMBEDDING_PROVIDER ??
+    env.EMBEDDING_PROVIDER ??
+    DEFAULT_EMBEDDING_PROVIDER
+  ).toLowerCase();
+  const model =
+    options.model ??
+    env.HEIMDALL_EMBEDDING_MODEL ??
+    env.EMBEDDING_MODEL ??
+    "text-embedding-3-small";
+  const dimensions =
+    optionalPositiveInteger(env.HEIMDALL_EMBEDDING_DIMENSIONS) ??
+    optionalPositiveInteger(env.EMBEDDING_DIMENSIONS) ??
+    DEFAULT_EMBEDDING_DIMENSIONS;
+
+  if (providerName === "hash" || providerName === "fake" || providerName === "local") {
+    return createHashEmbeddingProvider(model, dimensions);
+  }
+  if (providerName === "openai") {
+    throw new Error("OpenAI embedding provider is not implemented yet.");
+  }
+
+  throw new Error(`Unsupported embedding provider: ${providerName}`);
 }
 
 /** Validates that provider output matches the storage contract before writing rows. */
@@ -154,16 +390,80 @@ function validateEmbeddingVectors(
 function textFromMetadata(metadata: unknown): string | undefined {
   if (metadata && typeof metadata === "object" && "text" in metadata) {
     const text = (metadata as { readonly text?: unknown }).text;
-    return typeof text === "string" ? text : undefined;
+    return typeof text === "string" && text.trim().length > 0 ? text : undefined;
   }
 
   return undefined;
+}
+
+/** Extracts a string field from importer-owned chunk metadata. */
+function stringFromMetadata(metadata: unknown, fieldName: string): string | undefined {
+  if (metadata && typeof metadata === "object" && fieldName in metadata) {
+    const value = (metadata as Readonly<Record<string, unknown>>)[fieldName];
+    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  }
+
+  return undefined;
+}
+
+/** Creates an exact-optional string property only when a value exists. */
+function optionalStringProperty<PropertyName extends string>(
+  propertyName: PropertyName,
+  value: string | undefined,
+): Partial<Record<PropertyName, string>> {
+  return value === undefined ? {} : ({ [propertyName]: value } as Record<PropertyName, string>);
+}
+
+/** Returns a provider vector or fails when response correlation is broken. */
+function requiredVectorForInput(
+  vectorsByInputId: ReadonlyMap<string, readonly number[]>,
+  inputId: string,
+): readonly number[] {
+  const vector = vectorsByInputId.get(inputId);
+  if (!vector) {
+    throw new Error(`Embedding provider did not return a vector for input ${inputId}.`);
+  }
+
+  return vector;
+}
+
+/** Parses a positive integer environment value. */
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Truncates a chunk body while preserving the start and end of the source text. */
+function truncateEmbeddingBody(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  const marker = "\n\n[...truncated...]\n\n";
+  if (maxChars <= marker.length + 2) {
+    return text.slice(0, maxChars);
+  }
+
+  const availableChars = maxChars - marker.length;
+  const headChars = Math.ceil(availableChars * 0.7);
+  const tailChars = availableChars - headChars;
+
+  return `${text.slice(0, headChars)}${marker}${text.slice(-tailChars)}`;
 }
 
 /** Builds a deterministic vector from input text for local and test runs. */
 function hashVector(text: string, dimensions: number): readonly number[] {
   const hash = createHash("sha256").update(text).digest();
   return Array.from({ length: dimensions }, (_, index) => (hash[index % hash.length] ?? 0) / 255);
+}
+
+/** Hashes provider input text for cache keys and diagnostics. */
+function sha256(text: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(text).digest("hex")}`;
 }
 
 /** Builds a compact deterministic identifier from stable input parts. */
