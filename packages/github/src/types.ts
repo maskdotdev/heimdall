@@ -304,6 +304,8 @@ export interface GitProvider {
   }>;
   /** Fetches existing bot issue comments for dedupe. */
   fetchExistingBotComments(input: GitHubPullRequestRef): Promise<readonly ExistingBotComment[]>;
+  /** Fetches existing bot inline review comments for dedupe and reconciliation. */
+  fetchExistingReviewComments(input: GitHubPullRequestRef): Promise<readonly ExistingBotComment[]>;
   /** Publishes a PR review with inline comments. */
   publishReview(input: PublishReviewInput): Promise<PublishedReview>;
   /** Publishes or creates a check run. */

@@ -22,6 +22,7 @@ import {
   llmCalls,
   memoryFacts,
   PullRequestRepository,
+  providerInstallations,
   publishedCheckRuns,
   publishedFindings,
   publishedReviews,
@@ -51,6 +52,13 @@ import {
   type EvalFindingLocation,
   parseEvalCase,
 } from "@repo/evaluation";
+import {
+  type ExistingBotComment,
+  type GitHubCommentMarker,
+  type GitHubRepositoryRef,
+  type GitProvider,
+  parseGitHubCommentMarkers,
+} from "@repo/github";
 import { parseJobEnvelope, QUEUE_NAMES, type QueueName } from "@repo/queue";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { validateAndRankCandidateFindings } from "@repo/review-engine";
@@ -2250,6 +2258,10 @@ export type PublisherDryRunPlan = {
 export type PublisherReconciliationIssue = {
   /** Machine-readable issue code. */
   readonly code:
+    | "provider_comment_missing"
+    | "provider_inline_comment_untracked"
+    | "provider_reconciliation_failed"
+    | "provider_summary_comment_untracked"
     | "publish_run_missing"
     | "check_run_missing"
     | "published_finding_missing"
@@ -2259,6 +2271,42 @@ export type PublisherReconciliationIssue = {
   readonly message: string;
   /** Related database row ID when available. */
   readonly rowId?: string;
+};
+
+/** Provider-visible publisher artifacts discovered during read-only reconciliation. */
+export type ProviderPublisherArtifactSnapshot = {
+  /** Inline review comment IDs keyed by validated finding ID parsed from hidden markers. */
+  readonly inlineCommentIdsByFindingId: Readonly<Record<string, string>>;
+  /** Provider IDs for summary issue comments with Heimdall summary markers. */
+  readonly summaryCommentIds: readonly string[];
+};
+
+/** Minimal published-finding row used by provider reconciliation. */
+export type ProviderPublishedFindingReconciliationRow = {
+  /** Validated finding ID linked to the published row. */
+  readonly validatedFindingId: string;
+  /** Provider comment ID stored for the published finding, when available. */
+  readonly providerCommentId?: string | null;
+};
+
+/** Minimal summary-comment row used by provider reconciliation. */
+export type ProviderSummaryCommentReconciliationRow = {
+  /** Provider summary comment ID stored for the durable row. */
+  readonly providerCommentId: string;
+};
+
+/** Input used to compare provider-visible comments with durable publisher rows. */
+export type ProviderPublisherReconciliationInput = {
+  /** Review run being reconciled. */
+  readonly reviewRunId: string;
+  /** Publishable findings that should have provider rows after publish. */
+  readonly findings: readonly Pick<ValidatedFinding, "findingId">[];
+  /** Durable published-finding rows for the review run. */
+  readonly publishedFindings: readonly ProviderPublishedFindingReconciliationRow[];
+  /** Durable summary comment rows for the publish run. */
+  readonly summaryComments: readonly ProviderSummaryCommentReconciliationRow[];
+  /** Provider-visible comments discovered by hidden marker parsing. */
+  readonly providerArtifacts: ProviderPublisherArtifactSnapshot;
 };
 
 /** Reconciliation summary for one review run's publish state. */
@@ -2279,6 +2327,10 @@ export type PublisherReconciliationReport = {
   readonly summaryCommentCount: number;
   /** Number of persisted finding rows for the run. */
   readonly publishedFindingCount: number;
+  /** Number of provider-visible inline comments found by hidden marker parsing. */
+  readonly providerInlineCommentCount?: number;
+  /** Number of provider-visible summary comments found by hidden marker parsing. */
+  readonly providerSummaryCommentCount?: number;
   /** Issues that require operator attention. */
   readonly issues: readonly PublisherReconciliationIssue[];
 };
@@ -2309,6 +2361,8 @@ export type PublisherReplayPlan = {
 export type PublisherOperationsDependencies = {
   /** Database used to read review output and publisher state. */
   readonly db: HeimdallDatabase;
+  /** Optional Git provider used for read-only provider-side reconciliation. */
+  readonly gitProvider?: GitProvider;
 };
 
 /** Renders the publisher output plan without writing to GitHub or publisher tables. */
@@ -2350,6 +2404,81 @@ export async function renderPublisherDryRun(
   };
 }
 
+/** Compares provider-visible publisher markers with durable publisher rows. */
+export function reconcileProviderPublisherArtifacts(
+  input: ProviderPublisherReconciliationInput,
+): readonly PublisherReconciliationIssue[] {
+  const issues: PublisherReconciliationIssue[] = [];
+  const findingIds = new Set(input.findings.map((finding) => finding.findingId));
+  const providerCommentIds = new Set([
+    ...Object.values(input.providerArtifacts.inlineCommentIdsByFindingId),
+    ...input.providerArtifacts.summaryCommentIds,
+  ]);
+  const publishedCommentIds = new Set(
+    input.publishedFindings
+      .map((finding) => finding.providerCommentId)
+      .filter((providerCommentId): providerCommentId is string => Boolean(providerCommentId)),
+  );
+  const summaryCommentIds = new Set(
+    input.summaryComments.map((summaryComment) => summaryComment.providerCommentId),
+  );
+
+  for (const [findingId, providerCommentId] of Object.entries(
+    input.providerArtifacts.inlineCommentIdsByFindingId,
+  )) {
+    if (!findingIds.has(findingId)) {
+      issues.push({
+        code: "provider_inline_comment_untracked",
+        message: `Provider inline comment ${providerCommentId} references unknown finding ${findingId}.`,
+        rowId: providerCommentId,
+      });
+      continue;
+    }
+    if (!publishedCommentIds.has(providerCommentId)) {
+      issues.push({
+        code: "provider_inline_comment_untracked",
+        message: `Provider inline comment ${providerCommentId} for finding ${findingId} is missing a durable published finding row.`,
+        rowId: providerCommentId,
+      });
+    }
+  }
+
+  for (const providerCommentId of input.providerArtifacts.summaryCommentIds) {
+    if (!summaryCommentIds.has(providerCommentId)) {
+      issues.push({
+        code: "provider_summary_comment_untracked",
+        message: `Provider summary comment ${providerCommentId} is missing a durable summary comment row.`,
+        rowId: providerCommentId,
+      });
+    }
+  }
+
+  for (const publishedFinding of input.publishedFindings) {
+    if (
+      publishedFinding.providerCommentId &&
+      !providerCommentIds.has(publishedFinding.providerCommentId)
+    ) {
+      issues.push({
+        code: "provider_comment_missing",
+        message: `Durable published finding row references missing provider comment ${publishedFinding.providerCommentId}.`,
+        rowId: publishedFinding.providerCommentId,
+      });
+    }
+  }
+
+  for (const summaryComment of input.summaryComments) {
+    if (!providerCommentIds.has(summaryComment.providerCommentId)) {
+      issues.push({
+        code: "provider_comment_missing",
+        message: `Durable summary comment row references missing provider comment ${summaryComment.providerCommentId}.`,
+        rowId: summaryComment.providerCommentId,
+      });
+    }
+  }
+
+  return issues;
+}
+
 /** Reconciles durable publisher rows for a review run without mutating external state. */
 export async function reconcilePublisherRun(
   reviewRunId: string,
@@ -2362,6 +2491,10 @@ export async function reconcilePublisherRun(
   }
   const findings = (await reviewRepository.listValidatedFindings(reviewRunId)).filter(
     (finding) => finding.decision === "publish",
+  );
+  const providerReconciliation = await loadProviderPublisherArtifactSnapshot(
+    reviewRun,
+    dependencies,
   );
   const [publishRun] = await dependencies.db
     .select()
@@ -2377,11 +2510,19 @@ export async function reconcilePublisherRun(
       reviewCount: 0,
       summaryCommentCount: 0,
       publishedFindingCount: 0,
+      ...providerReconciliationCounts(providerReconciliation),
       issues: [
         {
           code: "publish_run_missing",
           message: `Review run ${reviewRunId} has no durable publish run.`,
         },
+        ...providerReconciliationIssues({
+          findings,
+          providerReconciliation,
+          publishedFindingRows: [],
+          reviewRunId,
+          summaryComments: [],
+        }),
       ],
     };
   }
@@ -2447,6 +2588,15 @@ export async function reconcilePublisherRun(
       });
     }
   }
+  issues.push(
+    ...providerReconciliationIssues({
+      findings,
+      providerReconciliation,
+      publishedFindingRows,
+      reviewRunId,
+      summaryComments,
+    }),
+  );
 
   return {
     reviewRunId,
@@ -2457,8 +2607,151 @@ export async function reconcilePublisherRun(
     reviewCount: reviews.length,
     summaryCommentCount: summaryComments.length,
     publishedFindingCount: publishedFindingRows.length,
+    ...providerReconciliationCounts(providerReconciliation),
     issues,
   };
+}
+
+async function loadProviderPublisherArtifactSnapshot(
+  reviewRun: ReviewRun,
+  dependencies: PublisherOperationsDependencies,
+): Promise<
+  | {
+      readonly snapshot?: ProviderPublisherArtifactSnapshot;
+      readonly error?: unknown;
+    }
+  | undefined
+> {
+  if (!dependencies.gitProvider) {
+    return undefined;
+  }
+
+  try {
+    const repository = await loadGitHubRepositoryRef(dependencies.db, reviewRun.repoId);
+    const pullRequest = {
+      ...repository,
+      pullRequestNumber: reviewRun.pullRequestNumber,
+    };
+    const [summaryComments, reviewComments] = await Promise.all([
+      dependencies.gitProvider.fetchExistingBotComments(pullRequest),
+      dependencies.gitProvider.fetchExistingReviewComments(pullRequest),
+    ]);
+
+    return {
+      snapshot: {
+        inlineCommentIdsByFindingId: inlineCommentIdsByFindingIdFromProviderComments(
+          reviewComments,
+          reviewRun.reviewRunId,
+        ),
+        summaryCommentIds: summaryCommentIdsFromProviderComments(summaryComments, reviewRun),
+      },
+    };
+  } catch (error) {
+    return { error };
+  }
+}
+
+function providerReconciliationCounts(
+  reconciliation:
+    | {
+        readonly snapshot?: ProviderPublisherArtifactSnapshot;
+        readonly error?: unknown;
+      }
+    | undefined,
+): Pick<
+  PublisherReconciliationReport,
+  "providerInlineCommentCount" | "providerSummaryCommentCount"
+> {
+  if (!reconciliation?.snapshot) {
+    return {};
+  }
+
+  return {
+    providerInlineCommentCount: Object.keys(reconciliation.snapshot.inlineCommentIdsByFindingId)
+      .length,
+    providerSummaryCommentCount: reconciliation.snapshot.summaryCommentIds.length,
+  };
+}
+
+function providerReconciliationIssues(input: {
+  readonly findings: readonly ValidatedFinding[];
+  readonly providerReconciliation:
+    | {
+        readonly snapshot?: ProviderPublisherArtifactSnapshot;
+        readonly error?: unknown;
+      }
+    | undefined;
+  readonly publishedFindingRows: readonly PublishedFindingRow[];
+  readonly reviewRunId: string;
+  readonly summaryComments: readonly ProviderSummaryCommentReconciliationRow[];
+}): readonly PublisherReconciliationIssue[] {
+  if (!input.providerReconciliation) {
+    return [];
+  }
+  if (input.providerReconciliation.error) {
+    return [
+      {
+        code: "provider_reconciliation_failed",
+        message: `Provider reconciliation failed: ${errorMessage(input.providerReconciliation.error)}.`,
+      },
+    ];
+  }
+  if (!input.providerReconciliation.snapshot) {
+    return [];
+  }
+
+  return reconcileProviderPublisherArtifacts({
+    findings: input.findings,
+    providerArtifacts: input.providerReconciliation.snapshot,
+    publishedFindings: input.publishedFindingRows,
+    reviewRunId: input.reviewRunId,
+    summaryComments: input.summaryComments,
+  });
+}
+
+function inlineCommentIdsByFindingIdFromProviderComments(
+  comments: readonly ExistingBotComment[],
+  reviewRunId: string,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    comments.flatMap((comment) =>
+      parseGitHubCommentMarkers(comment.body)
+        .filter(
+          (marker): marker is Extract<GitHubCommentMarker, { readonly kind: "finding" }> =>
+            marker.kind === "finding" && marker.reviewRunId === reviewRunId,
+        )
+        .map((marker) => [marker.findingId, comment.providerCommentId]),
+    ),
+  );
+}
+
+function summaryCommentIdsFromProviderComments(
+  comments: readonly ExistingBotComment[],
+  reviewRun: ReviewRun,
+): readonly string[] {
+  return [
+    ...new Set(
+      comments.flatMap((comment) =>
+        parseGitHubCommentMarkers(comment.body).some((marker) =>
+          summaryMarkerMatchesReviewRun(marker, reviewRun),
+        )
+          ? [comment.providerCommentId]
+          : [],
+      ),
+    ),
+  ];
+}
+
+function summaryMarkerMatchesReviewRun(marker: GitHubCommentMarker, reviewRun: ReviewRun): boolean {
+  return (
+    marker.kind === "summary" &&
+    ((marker.scope === "review_run" && marker.reviewRunId === reviewRun.reviewRunId) ||
+      (marker.scope === "pull_request" && marker.pullRequestNumber === reviewRun.pullRequestNumber))
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Creates an explicit replay plan for re-dispatching publisher output. */
@@ -4696,6 +4989,42 @@ async function getRepositoryOrgId(
     .where(eq(repositories.repoId, repoId))
     .limit(1);
   return rows[0]?.orgId;
+}
+
+/** Loads the GitHub repository reference needed for provider-side publisher reconciliation. */
+async function loadGitHubRepositoryRef(
+  db: HeimdallDatabase,
+  repoId: string,
+): Promise<GitHubRepositoryRef> {
+  const [repository] = await db
+    .select({
+      installationId: repositories.installationId,
+      owner: repositories.owner,
+      provider: repositories.provider,
+      providerInstallationId: providerInstallations.providerInstallationId,
+      providerRepoId: repositories.providerRepoId,
+      repo: repositories.name,
+    })
+    .from(repositories)
+    .innerJoin(
+      providerInstallations,
+      eq(providerInstallations.installationId, repositories.installationId),
+    )
+    .where(and(eq(repositories.repoId, repoId), eq(repositories.provider, "github")))
+    .limit(1);
+
+  if (!repository) {
+    throw new Error(`GitHub repository ${repoId} was not found.`);
+  }
+
+  return {
+    provider: "github",
+    installationId: repository.installationId,
+    providerInstallationId: repository.providerInstallationId,
+    owner: repository.owner,
+    repo: repository.repo,
+    providerRepoId: repository.providerRepoId,
+  };
 }
 
 /** Converts a debug-bundle actor into a compact serializable summary. */

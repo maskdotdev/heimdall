@@ -968,7 +968,8 @@ export class GitHubAppProvider implements GitProvider {
     return commentIdsByFindingId;
   }
 
-  private async fetchExistingReviewComments(
+  /** Fetches existing bot inline review comments for dedupe and reconciliation. */
+  public async fetchExistingReviewComments(
     input: GitHubPullRequestRef,
   ): Promise<readonly ExistingBotComment[]> {
     const comments = await this.paginateInstallation<JsonRecord>(

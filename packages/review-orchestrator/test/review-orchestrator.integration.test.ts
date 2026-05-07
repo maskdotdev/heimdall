@@ -353,6 +353,7 @@ const fakeGitProvider: GitProvider = {
   fetchChangedFiles: async () => [],
   fetchBranchCommit: async () => ({ ref: "main", sha: "1111111", metadata: {} }),
   fetchExistingBotComments: async () => [],
+  fetchExistingReviewComments: async () => [],
   publishReview: async () => ({ providerReviewId: "review_1", commentIds: [] }),
   createOrUpdateCheckRun: async () => ({ providerCheckRunId: "check_1" }),
   publishSummaryComment: async () => ({ providerCommentId: "comment_1" }),

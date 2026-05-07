@@ -352,6 +352,7 @@ function createPublisherFakeProvider(options: {
     fetchChangedFiles: async () => [],
     fetchBranchCommit: async () => ({ ref: "feature", sha: "2222222", metadata: {} }),
     fetchExistingBotComments: async () => [],
+    fetchExistingReviewComments: async () => [],
     publishReview: async () => {
       if (options.failReviewPublishing) {
         throw new Error("Review comments disabled.");

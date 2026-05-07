@@ -32,6 +32,8 @@ export type FakeGitProviderOptions = {
   readonly pullRequestSnapshots?: readonly PullRequestSnapshot[];
   /** Existing bot issue comments keyed by owner/repo/number. */
   readonly existingBotComments?: readonly ExistingBotComment[];
+  /** Existing bot inline review comments keyed by owner/repo/number. */
+  readonly existingReviewComments?: readonly ExistingBotComment[];
   /** Whether inline review publishing should fail. */
   readonly failReviewPublishing?: boolean;
 };
@@ -53,6 +55,7 @@ export class FakeGitProvider implements GitProvider {
   private readonly repositories: readonly Repository[];
   private readonly pullRequestSnapshots: Map<string, PullRequestSnapshot>;
   private readonly botComments: ExistingBotComment[];
+  private readonly reviewComments: ExistingBotComment[];
   private readonly failReviewPublishing: boolean;
 
   /** Creates a seeded fake provider. */
@@ -63,6 +66,7 @@ export class FakeGitProvider implements GitProvider {
       this.pullRequestSnapshots.set(snapshotKey(snapshot), snapshot);
     }
     this.botComments = [...(options.existingBotComments ?? [])];
+    this.reviewComments = [...(options.existingReviewComments ?? [])];
     this.failReviewPublishing = options.failReviewPublishing ?? false;
   }
 
@@ -155,6 +159,11 @@ export class FakeGitProvider implements GitProvider {
     return this.botComments;
   }
 
+  /** Fetches seeded inline review comments. */
+  public async fetchExistingReviewComments(): Promise<readonly ExistingBotComment[]> {
+    return this.reviewComments;
+  }
+
   /** Publishes a fake review and records the input. */
   public async publishReview(input: PublishReviewInput): Promise<PublishedReview> {
     if (this.failReviewPublishing) {
@@ -162,20 +171,39 @@ export class FakeGitProvider implements GitProvider {
     }
 
     this.publishedReviews.push(input);
+    const commentIds = input.comments.map((comment) =>
+      stableId("comment", [input.reviewRunId, comment.findingId ?? comment.body]),
+    );
     const commentIdsByFindingId = Object.fromEntries(
-      input.comments
-        .filter((comment) => comment.findingId)
-        .map((comment) => [
-          comment.findingId ?? "",
-          stableId("comment", [input.reviewRunId, comment.findingId ?? comment.body]),
-        ]),
+      input.comments.flatMap((comment, index) =>
+        comment.findingId
+          ? [
+              [
+                comment.findingId,
+                commentIds[index] ?? stableId("comment", [input.reviewRunId, comment.body]),
+              ],
+            ]
+          : [],
+      ),
+    );
+    this.reviewComments.push(
+      ...input.comments.map((comment, index) => {
+        const marker = buildGitHubReviewCommentMarker({
+          body: comment.body,
+          ...(comment.findingId ? { findingId: comment.findingId } : {}),
+          reviewRunId: input.reviewRunId,
+        });
+        return {
+          providerCommentId: commentIds[index] ?? stableId("comment", [input.reviewRunId, index]),
+          body: `${comment.body}\n\n${marker}`,
+          authorLogin: "heimdall[bot]",
+        };
+      }),
     );
 
     return {
       providerReviewId: stableId("review", [input.owner, input.repo, input.reviewRunId]),
-      commentIds: input.comments.map((comment) =>
-        stableId("comment", [input.reviewRunId, comment.findingId ?? comment.body]),
-      ),
+      commentIds,
       commentIdsByFindingId,
     };
   }
