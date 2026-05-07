@@ -89,7 +89,13 @@ import {
 } from "@repo/queue";
 import { syncRepositoryWorkspace } from "@repo/repo-sync";
 import { runPullRequestReview } from "@repo/review-orchestrator";
-import { createFakeSandboxRunner, createLocalProcessSandboxRunner } from "@repo/sandbox";
+import {
+  createDockerContainerSandboxRunner,
+  createFakeSandboxRunner,
+  createGVisorSandboxRunner,
+  createLocalProcessSandboxRunner,
+  type DockerContainerSandboxRunnerOptions,
+} from "@repo/sandbox";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
 import { Worker } from "bullmq";
@@ -611,11 +617,56 @@ export function createWorkerStaticAnalysisRunnerFromEnvironment(
     });
   }
 
-  if (runnerName === "docker" || runnerName === "gvisor") {
-    throw new Error(`SANDBOX_RUNNER=${runnerName} is not executable by this worker yet.`);
+  if (runnerName === "docker") {
+    return createSandboxToolRunner({
+      runner: createDockerContainerSandboxRunner(createWorkerDockerRunnerOptions(env)),
+    });
+  }
+
+  if (runnerName === "gvisor") {
+    return createSandboxToolRunner({
+      runner: createGVisorSandboxRunner(createWorkerDockerRunnerOptions(env)),
+    });
   }
 
   throw new Error(`Unsupported SANDBOX_RUNNER: ${runnerName}`);
+}
+
+/** Creates Docker sandbox runner options from non-secret worker environment values. */
+function createWorkerDockerRunnerOptions(
+  env: WorkerStaticAnalysisRunnerEnvironment,
+): DockerContainerSandboxRunnerOptions {
+  return {
+    ...(nonEmptyEnv(env.SANDBOX_ARTIFACT_ROOT)
+      ? { artifactRoot: nonEmptyEnv(env.SANDBOX_ARTIFACT_ROOT) }
+      : {}),
+    ...(nonEmptyEnv(env.SANDBOX_DOCKER_EXECUTABLE)
+      ? { dockerExecutable: nonEmptyEnv(env.SANDBOX_DOCKER_EXECUTABLE) }
+      : {}),
+    ...(nonEmptyEnv(env.SANDBOX_DOCKER_RUNTIME)
+      ? { runtime: nonEmptyEnv(env.SANDBOX_DOCKER_RUNTIME) }
+      : {}),
+    ...(nonEmptyEnv(env.SANDBOX_TEMP_ROOT)
+      ? { temporaryRoot: nonEmptyEnv(env.SANDBOX_TEMP_ROOT) }
+      : {}),
+    dockerProcessEnv: dockerProcessEnvironmentFromWorkerEnv(env),
+  };
+}
+
+/** Returns Docker CLI process environment values safe to pass from the worker host. */
+function dockerProcessEnvironmentFromWorkerEnv(
+  env: WorkerStaticAnalysisRunnerEnvironment,
+): Readonly<Record<string, string>> {
+  const path = nonEmptyEnv(env.PATH);
+
+  return path ? { PATH: path } : {};
+}
+
+/** Returns a trimmed non-empty environment value. */
+function nonEmptyEnv(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** Creates the optional worker indexer driver selected by environment configuration. */

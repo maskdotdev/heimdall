@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { isAbsolute, posix, relative, resolve } from "node:path";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -497,6 +500,59 @@ export type DockerSandboxCommand = {
   readonly displayCommand: string;
 };
 
+/** Input passed to an injectable Docker process executor. */
+export type DockerSandboxProcessExecutorInput = {
+  /** Shell-free Docker command data to execute. */
+  readonly command: DockerSandboxCommand;
+  /** Sandbox request after runner-managed mount materialization. */
+  readonly request: SandboxRunRequest;
+  /** Timeout in milliseconds for the Docker process. */
+  readonly timeoutMs: number;
+};
+
+/** Result returned by an injectable Docker process executor. */
+export type DockerSandboxProcessResult = {
+  /** Process exit code when available. */
+  readonly exitCode: number | null;
+  /** Process signal when available. */
+  readonly signal?: string | null | undefined;
+  /** Raw stdout emitted by the Docker process. */
+  readonly stdout?: string | undefined;
+  /** Raw stderr emitted by the Docker process. */
+  readonly stderr?: string | undefined;
+  /** Whether stdout capture was truncated before result normalization. */
+  readonly stdoutTruncated?: boolean | undefined;
+  /** Whether stderr capture was truncated before result normalization. */
+  readonly stderrTruncated?: boolean | undefined;
+  /** Execution duration in milliseconds, when known by the executor. */
+  readonly durationMs?: number | undefined;
+  /** Whether timeout handling ended execution. */
+  readonly timedOut?: boolean | undefined;
+  /** Runner-owned failure details when Docker could not execute. */
+  readonly error?: SandboxRunError | undefined;
+};
+
+/** Injectable process executor used by Docker sandbox runner tests. */
+export type DockerSandboxProcessExecutor = (
+  input: DockerSandboxProcessExecutorInput,
+) => Promise<DockerSandboxProcessResult>;
+
+/** Options for the Docker container sandbox runner. */
+export type DockerContainerSandboxRunnerOptions = DockerSandboxCommandBuilderOptions & {
+  /** Root used for transient Docker output mounts before cleanup. */
+  readonly temporaryRoot?: string | undefined;
+  /** Root used to retain collected sandbox artifacts as file URIs. */
+  readonly artifactRoot?: string | undefined;
+  /** Explicit non-secret environment added to the Docker CLI process. */
+  readonly dockerProcessEnv?: Readonly<Record<string, string>> | undefined;
+  /** Optional executor override for deterministic tests. */
+  readonly executor?: DockerSandboxProcessExecutor | undefined;
+  /** Signal used when the Docker process exceeds its timeout. */
+  readonly timeoutSignal?: NodeJS.Signals | undefined;
+  /** Grace period before escalating timeout termination to SIGKILL. */
+  readonly timeoutKillGraceMs?: number | undefined;
+};
+
 /** Sandbox run result boundary schema. */
 export const SandboxRunResultSchema = Type.Object(
   {
@@ -699,6 +755,39 @@ export class LocalProcessSandboxRunner implements SandboxRunner {
   }
 }
 
+/** Docker-backed sandbox runner for hardened container execution. */
+export class DockerContainerSandboxRunner implements SandboxRunner {
+  private readonly options: DockerContainerSandboxRunnerOptions;
+
+  /** Creates a Docker-backed sandbox runner. */
+  public constructor(options: DockerContainerSandboxRunnerOptions = {}) {
+    this.options = options;
+  }
+
+  /** Runs one sandbox request in a Docker container with bounded output and artifacts. */
+  public async run(request: SandboxRunRequest): Promise<SandboxRunResult> {
+    return runDockerContainerSandbox(request, this.options, dockerRunnerInfo());
+  }
+}
+
+/** gVisor-backed sandbox runner using Docker runtime selection. */
+export class GVisorSandboxRunner implements SandboxRunner {
+  private readonly options: DockerContainerSandboxRunnerOptions;
+
+  /** Creates a gVisor-backed sandbox runner with Docker runtime defaults. */
+  public constructor(options: DockerContainerSandboxRunnerOptions = {}) {
+    this.options = {
+      ...options,
+      runtime: options.runtime ?? "runsc",
+    };
+  }
+
+  /** Runs one sandbox request in a Docker container through the gVisor runtime. */
+  public async run(request: SandboxRunRequest): Promise<SandboxRunResult> {
+    return runDockerContainerSandbox(request, this.options, gVisorRunnerInfo());
+  }
+}
+
 /** Error thrown when a Docker command cannot be built safely. */
 export class DockerSandboxCommandPolicyError extends Error {
   /** Product-safe policy decisions explaining why command building failed. */
@@ -724,6 +813,20 @@ export function createLocalProcessSandboxRunner(
   options: LocalProcessSandboxRunnerOptions = {},
 ): SandboxRunner {
   return new LocalProcessSandboxRunner(options);
+}
+
+/** Creates a Docker-backed sandbox runner for containerized tool execution. */
+export function createDockerContainerSandboxRunner(
+  options: DockerContainerSandboxRunnerOptions = {},
+): SandboxRunner {
+  return new DockerContainerSandboxRunner(options);
+}
+
+/** Creates a gVisor-backed sandbox runner through Docker runtime selection. */
+export function createGVisorSandboxRunner(
+  options: DockerContainerSandboxRunnerOptions = {},
+): SandboxRunner {
+  return new GVisorSandboxRunner(options);
 }
 
 /** Parses unknown data into a sandbox run request. */
@@ -1124,6 +1227,574 @@ function localProcessRunnerInfo(): SandboxRunnerInfo {
   };
 }
 
+/** Executes one sandbox request through Docker with materialized output mounts. */
+async function runDockerContainerSandbox(
+  request: SandboxRunRequest,
+  options: DockerContainerSandboxRunnerOptions,
+  runner: SandboxRunnerInfo,
+): Promise<SandboxRunResult> {
+  const parsedRequest = parseSandboxRunRequest(request);
+  const startedTimeMs = Date.now();
+  let materializedRun: DockerMaterializedRun | undefined;
+
+  try {
+    materializedRun = await materializeDockerRun(parsedRequest, options);
+    const policyDecisions = dockerSandboxCommandPolicyDecisions(materializedRun.request);
+    const deniedDecision = policyDecisions.find((decision) => decision.status === "denied");
+    if (deniedDecision) {
+      return dockerNonExecutionResult(parsedRequest, runner, policyDecisions, {
+        code: deniedDecision.code,
+        message: deniedDecision.message,
+        retryable: false,
+      });
+    }
+
+    const command = withDockerProcessEnvironment(
+      buildDockerSandboxCommand(materializedRun.request, options),
+      options,
+    );
+    const executor =
+      options.executor ??
+      ((input: DockerSandboxProcessExecutorInput) => executeDockerSandboxProcess(input, options));
+    const processResult = await executor({
+      command,
+      request: materializedRun.request,
+      timeoutMs: materializedRun.request.limits.timeoutMs,
+    });
+    const artifactCollection = await collectDockerSandboxArtifacts(materializedRun.request, {
+      artifactDirectory: materializedRun.artifactDirectory,
+      outputDirectory: materializedRun.outputDirectory,
+    });
+    const durationMs = processResult.durationMs ?? Math.max(0, Date.now() - startedTimeMs);
+
+    return {
+      artifacts: [...artifactCollection.artifacts],
+      durationMs,
+      exitCode: processResult.exitCode,
+      finishedAt: finishedAtFromDuration(parsedRequest.createdAt, durationMs),
+      policyDecisions,
+      requestId: parsedRequest.requestId,
+      runId: stableSandboxId("srun", parsedRequest.requestId),
+      runner,
+      schemaVersion: "sandbox_run_result.v1",
+      startedAt: parsedRequest.createdAt,
+      status: dockerStatusFromProcessResult(materializedRun.request, processResult),
+      stderr: dockerProcessCapturedOutput(materializedRun.request, processResult, "stderr"),
+      stdout: dockerProcessCapturedOutput(materializedRun.request, processResult, "stdout"),
+      warnings: [...artifactCollection.warnings],
+      ...(processResult.error ? { error: processResult.error } : {}),
+      ...(processResult.signal ? { signal: processResult.signal } : {}),
+    };
+  } catch (error) {
+    if (error instanceof DockerSandboxCommandPolicyError) {
+      const deniedDecision = error.decisions.find((decision) => decision.status === "denied");
+
+      return dockerNonExecutionResult(parsedRequest, runner, error.decisions, {
+        code: deniedDecision?.code ?? "docker_policy_denied",
+        message: deniedDecision?.message ?? "Docker sandbox request failed policy validation.",
+        retryable: false,
+      });
+    }
+
+    const durationMs = Math.max(0, Date.now() - startedTimeMs);
+
+    return {
+      artifacts: [],
+      durationMs,
+      error: {
+        code: "docker_runner_error",
+        message: "Docker sandbox runner failed before returning a process result.",
+        retryable: true,
+      },
+      exitCode: null,
+      finishedAt: finishedAtFromDuration(parsedRequest.createdAt, durationMs),
+      policyDecisions: evaluateSandboxRequestSafety(parsedRequest),
+      requestId: parsedRequest.requestId,
+      runId: stableSandboxId("srun", parsedRequest.requestId),
+      runner,
+      schemaVersion: "sandbox_run_result.v1",
+      startedAt: parsedRequest.createdAt,
+      status: "runner_error",
+      stderr: createSandboxCapturedOutput({
+        maxBytes: Math.min(
+          parsedRequest.output.maxStderrBytes,
+          parsedRequest.limits.maxStderrBytes,
+        ),
+        normalizeAnsi: parsedRequest.output.normalizeAnsi,
+        redactSecrets: parsedRequest.output.redactSecrets,
+        redactionValues: redactionValuesForRequest(parsedRequest),
+        text: error instanceof Error ? error.message : "Unknown Docker sandbox runner error.",
+        truncateStrategy: parsedRequest.output.truncateStrategy,
+      }),
+      stdout: emptyCapturedOutput(),
+      warnings: [],
+    };
+  } finally {
+    if (materializedRun) {
+      await removeTemporaryDirectory(materializedRun.temporaryDirectory);
+    }
+  }
+}
+
+/** Materialized filesystem paths for one Docker sandbox run. */
+type DockerMaterializedRun = {
+  /** Sandbox request with the output directory mounted from a host path. */
+  readonly request: SandboxRunRequest;
+  /** Transient run directory removed after execution. */
+  readonly temporaryDirectory: string;
+  /** Host directory mounted as the sandbox output directory. */
+  readonly outputDirectory: string;
+  /** Durable local directory that retains collected artifacts. */
+  readonly artifactDirectory: string;
+};
+
+/** Creates host directories and rewrites the output mount for one Docker run. */
+async function materializeDockerRun(
+  request: SandboxRunRequest,
+  options: DockerContainerSandboxRunnerOptions,
+): Promise<DockerMaterializedRun> {
+  const temporaryParent = options.temporaryRoot ?? tmpdir();
+  const artifactRoot = options.artifactRoot ?? join(tmpdir(), "heimdall-sandbox-artifacts");
+  const runId = stableSandboxId("srun", request.requestId);
+  await mkdir(temporaryParent, { recursive: true });
+  await mkdir(artifactRoot, { recursive: true });
+  const temporaryDirectory = await mkdtemp(join(temporaryParent, "heimdall-sandbox-"));
+  const outputDirectory = join(temporaryDirectory, "out");
+  const artifactDirectory = join(artifactRoot, runId);
+  await mkdir(outputDirectory, { recursive: true });
+  await mkdir(artifactDirectory, { recursive: true });
+
+  return {
+    artifactDirectory,
+    outputDirectory,
+    request: requestWithOutputBindMount(request, outputDirectory),
+    temporaryDirectory,
+  };
+}
+
+/** Returns a sandbox request whose output directory is backed by a host bind mount. */
+function requestWithOutputBindMount(
+  request: SandboxRunRequest,
+  outputDirectory: string,
+): SandboxRunRequest {
+  const normalizedOutputDirectory = posix.resolve("/", request.artifacts.outputDirectory);
+  let replacedOutputMount = false;
+  const mounts = request.mounts.map((mount) => {
+    const normalizedTarget = posix.resolve("/", mount.target);
+    if (mount.purpose !== "output" && normalizedTarget !== normalizedOutputDirectory) {
+      return mount;
+    }
+
+    replacedOutputMount = true;
+
+    return {
+      ...mount,
+      purpose: "output" as const,
+      readOnly: false,
+      source: outputDirectory,
+      target: request.artifacts.outputDirectory,
+      type: "bind" as const,
+    };
+  });
+
+  if (!replacedOutputMount) {
+    mounts.push({
+      purpose: "output",
+      readOnly: false,
+      sizeBytes: request.artifacts.maxTotalBytes,
+      source: outputDirectory,
+      target: request.artifacts.outputDirectory,
+      type: "bind",
+    });
+  }
+
+  return { ...request, mounts };
+}
+
+/** Adds explicit Docker CLI process environment values to a built command. */
+function withDockerProcessEnvironment(
+  command: DockerSandboxCommand,
+  options: DockerContainerSandboxRunnerOptions,
+): DockerSandboxCommand {
+  return {
+    ...command,
+    env: {
+      ...defaultDockerProcessEnvironment(),
+      ...options.dockerProcessEnv,
+      ...command.env,
+    },
+  };
+}
+
+/** Returns safe default environment keys for invoking the Docker CLI. */
+function defaultDockerProcessEnvironment(): Readonly<Record<string, string>> {
+  const path = process.env.PATH;
+
+  return path ? { PATH: path } : {};
+}
+
+/** Executes the Docker CLI process with timeout and bounded output capture. */
+function executeDockerSandboxProcess(
+  input: DockerSandboxProcessExecutorInput,
+  options: DockerContainerSandboxRunnerOptions,
+): Promise<DockerSandboxProcessResult> {
+  const startedTimeMs = Date.now();
+  const output = createLocalProcessOutputCapture({
+    stderrMaxBytes: Math.min(
+      input.request.output.maxStderrBytes,
+      input.request.limits.maxStderrBytes,
+    ),
+    stdoutMaxBytes: Math.min(
+      input.request.output.maxStdoutBytes,
+      input.request.limits.maxStdoutBytes,
+    ),
+  });
+  let timedOut = false;
+
+  return new Promise((resolveResult) => {
+    const child = spawn(input.command.executable, [...input.command.args], {
+      env: input.command.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill(options.timeoutSignal ?? "SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (!settled) {
+          child.kill("SIGKILL");
+        }
+      }, options.timeoutKillGraceMs ?? input.request.limits.gracefulShutdownMs);
+    }, input.timeoutMs);
+
+    const finish = (
+      result: Omit<DockerSandboxProcessResult, "durationMs" | "stderr" | "stdout">,
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+
+      resolveResult({
+        ...result,
+        durationMs: Math.max(0, Date.now() - startedTimeMs),
+        stderr: output.stderr(),
+        stderrTruncated: output.stderrTruncated(),
+        stdout: output.stdout(),
+        stdoutTruncated: output.stdoutTruncated(),
+        timedOut: result.timedOut ?? timedOut,
+      });
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      output.append("stdout", chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      output.append("stderr", chunk);
+    });
+    child.once("error", (error) => {
+      output.append("stderr", `Failed to start Docker sandbox command: ${error.message}`);
+      finish({
+        error: {
+          code: "docker_spawn_failed",
+          message: "Docker sandbox runner could not start the Docker command.",
+          retryable: true,
+        },
+        exitCode: null,
+      });
+    });
+    child.once("close", (exitCode, signal) => {
+      finish({
+        exitCode,
+        signal,
+        timedOut,
+      });
+    });
+  });
+}
+
+/** File collection result for Docker sandbox artifacts. */
+type DockerArtifactCollection = {
+  /** Collected artifact descriptors. */
+  readonly artifacts: readonly SandboxRunArtifact[];
+  /** Product-safe artifact collection warnings. */
+  readonly warnings: readonly SandboxRunWarning[];
+};
+
+/** Host directories used while collecting Docker sandbox artifacts. */
+type DockerArtifactCollectionDirectories = {
+  /** Durable local directory that retains copied artifacts. */
+  readonly artifactDirectory: string;
+  /** Host output directory mounted into the sandbox. */
+  readonly outputDirectory: string;
+};
+
+/** Collects declared sandbox artifacts from the host output directory. */
+async function collectDockerSandboxArtifacts(
+  request: SandboxRunRequest,
+  directories: DockerArtifactCollectionDirectories,
+): Promise<DockerArtifactCollection> {
+  const artifacts: SandboxRunArtifact[] = [];
+  const warnings: SandboxRunWarning[] = [];
+  let totalBytes = 0;
+
+  for (const artifactGlob of request.artifacts.collectFiles) {
+    if (artifacts.length >= request.artifacts.maxFiles) {
+      warnings.push({
+        code: "sandbox_artifact_file_limit_reached",
+        message: "Sandbox artifact collection reached the configured file limit.",
+      });
+      break;
+    }
+
+    const relativeArtifactPath = safeRelativeArtifactPath(artifactGlob.pattern);
+    if (!relativeArtifactPath) {
+      warnings.push({
+        code: "sandbox_artifact_path_denied",
+        message: "Sandbox artifact collection skipped an unsafe artifact path.",
+      });
+      continue;
+    }
+
+    const sourcePath = resolve(directories.outputDirectory, relativeArtifactPath);
+    if (!isPathInside(sourcePath, directories.outputDirectory)) {
+      warnings.push({
+        code: "sandbox_artifact_path_denied",
+        message: "Sandbox artifact collection skipped an artifact outside the output directory.",
+      });
+      continue;
+    }
+
+    const sourceStat = await statOptional(sourcePath);
+    if (!sourceStat) {
+      if (artifactGlob.required) {
+        warnings.push({
+          code: "sandbox_artifact_required_missing",
+          message: "Sandbox artifact collection did not find a required artifact.",
+        });
+      }
+      continue;
+    }
+
+    if (!sourceStat.isFile()) {
+      warnings.push({
+        code: "sandbox_artifact_not_file",
+        message: "Sandbox artifact collection skipped a non-file artifact.",
+      });
+      continue;
+    }
+
+    const sourceSize = Number(sourceStat.size);
+    if (
+      sourceSize > request.artifacts.maxBytesPerFile ||
+      totalBytes + sourceSize > request.artifacts.maxTotalBytes
+    ) {
+      warnings.push({
+        code: "sandbox_artifact_size_limit_exceeded",
+        message: "Sandbox artifact collection skipped an artifact that exceeded size limits.",
+      });
+      continue;
+    }
+
+    const artifactName = artifactNameFromPattern(relativeArtifactPath);
+    const artifactPath = resolve(directories.artifactDirectory, artifactName);
+    if (!isPathInside(artifactPath, directories.artifactDirectory)) {
+      warnings.push({
+        code: "sandbox_artifact_path_denied",
+        message: "Sandbox artifact collection skipped an unsafe artifact destination.",
+      });
+      continue;
+    }
+
+    await copyFile(sourcePath, artifactPath);
+    const content = await readFile(artifactPath);
+    totalBytes += sourceSize;
+    artifacts.push({
+      contentType: contentTypeForArtifact(artifactName),
+      name: artifactName,
+      sha256: sha256Bytes(content),
+      sizeBytes: sourceSize,
+      truncated: false,
+      uri: pathToFileURL(artifactPath).href,
+    });
+  }
+
+  return { artifacts, warnings };
+}
+
+/** Returns a safe relative artifact path, or undefined when the pattern is unsafe. */
+function safeRelativeArtifactPath(pattern: string): string | undefined {
+  const normalizedPattern = pattern.replaceAll("\\", "/");
+  if (
+    normalizedPattern.includes("*") ||
+    normalizedPattern.includes("\0") ||
+    posix.isAbsolute(normalizedPattern)
+  ) {
+    return undefined;
+  }
+
+  const normalizedPath = posix.normalize(normalizedPattern);
+  if (normalizedPath === "." || normalizedPath.split("/").includes("..")) {
+    return undefined;
+  }
+
+  return normalizedPath;
+}
+
+/** Returns a stable artifact name for a collected artifact pattern. */
+function artifactNameFromPattern(pattern: string): string {
+  const normalizedPattern = pattern.replaceAll("\\", "/");
+  const fileName = basename(normalizedPattern);
+  if (fileName === normalizedPattern) return fileName;
+
+  return normalizedPattern.replaceAll("/", "_");
+}
+
+/** Returns a simple content type for known artifact file names. */
+function contentTypeForArtifact(name: string): string {
+  const extension = extname(name).toLowerCase();
+  if (extension === ".json") return "application/json";
+  if (extension === ".sarif") return "application/sarif+json";
+
+  return "text/plain";
+}
+
+/** Reads file status and returns undefined when the path does not exist. */
+async function statOptional(path: string): Promise<Awaited<ReturnType<typeof stat>> | undefined> {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+/** Narrows Node-style filesystem errors by code. */
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+/** Converts a Docker process result to a sandbox run status. */
+function dockerStatusFromProcessResult(
+  request: SandboxRunRequest,
+  result: DockerSandboxProcessResult,
+): SandboxRunStatus {
+  if (result.error) return "runner_error";
+  if (result.timedOut) return "timed_out";
+  if (result.exitCode !== null && request.command.expectedExitCodes.includes(result.exitCode)) {
+    return "succeeded";
+  }
+  if (result.exitCode === null && result.signal) return "killed";
+
+  return "failed";
+}
+
+/** Converts Docker process output to the sandbox output contract. */
+function dockerProcessCapturedOutput(
+  request: SandboxRunRequest,
+  result: DockerSandboxProcessResult,
+  stream: LocalProcessOutputStreamName,
+): SandboxCapturedOutput {
+  const policy =
+    stream === "stdout"
+      ? {
+          capture: request.output.captureStdout,
+          maxBytes: Math.min(request.output.maxStdoutBytes, request.limits.maxStdoutBytes),
+          text: result.stdout ?? "",
+          truncated: result.stdoutTruncated ?? false,
+        }
+      : {
+          capture: request.output.captureStderr,
+          maxBytes: Math.min(request.output.maxStderrBytes, request.limits.maxStderrBytes),
+          text: result.stderr ?? "",
+          truncated: result.stderrTruncated ?? false,
+        };
+
+  if (!policy.capture) {
+    return emptyCapturedOutput();
+  }
+
+  const captured = createSandboxCapturedOutput({
+    maxBytes: policy.maxBytes,
+    normalizeAnsi: request.output.normalizeAnsi,
+    redactSecrets: request.output.redactSecrets,
+    redactionValues: redactionValuesForRequest(request),
+    text: policy.text,
+    truncateStrategy: request.output.truncateStrategy,
+  });
+
+  return {
+    ...captured,
+    truncated: captured.truncated || policy.truncated,
+  };
+}
+
+/** Creates a policy-denied Docker result without executing a command. */
+function dockerNonExecutionResult(
+  request: SandboxRunRequest,
+  runner: SandboxRunnerInfo,
+  policyDecisions: readonly SandboxPolicyDecision[],
+  error: SandboxRunError,
+): SandboxRunResult {
+  return {
+    artifacts: [],
+    durationMs: 0,
+    error,
+    exitCode: null,
+    finishedAt: request.createdAt,
+    policyDecisions: [...policyDecisions],
+    requestId: request.requestId,
+    runId: stableSandboxId("srun", request.requestId),
+    runner,
+    schemaVersion: "sandbox_run_result.v1",
+    startedAt: request.createdAt,
+    status: "policy_denied",
+    stderr: emptyCapturedOutput(),
+    stdout: emptyCapturedOutput(),
+    warnings: [],
+  };
+}
+
+/** Returns Docker runner metadata for sandbox results. */
+function dockerRunnerInfo(): SandboxRunnerInfo {
+  return {
+    isolation: "container",
+    kind: "docker",
+    name: "DockerContainerSandboxRunner",
+    version: "sandbox.docker.v1",
+  };
+}
+
+/** Returns gVisor runner metadata for sandbox results. */
+function gVisorRunnerInfo(): SandboxRunnerInfo {
+  return {
+    isolation: "gvisor",
+    kind: "gvisor",
+    name: "GVisorSandboxRunner",
+    version: "sandbox.gvisor.v1",
+  };
+}
+
+/** Returns an ISO timestamp offset from a start timestamp by a duration. */
+function finishedAtFromDuration(startedAt: string, durationMs: number): string {
+  return new Date(Date.parse(startedAt) + durationMs).toISOString();
+}
+
+/** Removes a transient sandbox directory without failing the completed run. */
+async function removeTemporaryDirectory(path: string): Promise<void> {
+  try {
+    await rm(path, { force: true, recursive: true });
+  } catch {
+    // Cleanup failures should not hide the sandbox command result.
+  }
+}
+
 /** Removes ANSI escapes and unsafe control characters from sandbox output. */
 export function normalizeSandboxOutputText(value: string): string {
   let normalized = "";
@@ -1269,6 +1940,7 @@ export function buildDockerSandboxCommand(
     "--rm",
     "--name",
     containerName,
+    ...(options.runtime ? ["--runtime", options.runtime] : []),
     "--network",
     "none",
     "--user",
@@ -1812,6 +2484,11 @@ function takeHeadAndTailBytes(value: string, maxBytes: number): string {
 /** Returns a stable sandbox identifier. */
 function stableSandboxId(prefix: string, value: string): string {
   return `${prefix}_${sha256Hex(value).slice(0, 24)}`;
+}
+
+/** Returns a SHA-256 hex digest for binary data. */
+function sha256Bytes(value: Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 /** Returns a SHA-256 hex digest for text. */

@@ -1,8 +1,14 @@
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildDockerSandboxCommand,
   createDefaultSandboxEnvironment,
+  createDockerContainerSandboxRunner,
   createFakeSandboxRunner,
+  createGVisorSandboxRunner,
   createLocalProcessSandboxRunner,
   DEFAULT_SANDBOX_ARTIFACT_POLICY,
   DEFAULT_SANDBOX_NETWORK_POLICY,
@@ -10,6 +16,7 @@ import {
   DEFAULT_SANDBOX_RESOURCE_LIMITS,
   DEFAULT_SANDBOX_SECURITY_POLICY,
   DockerSandboxCommandPolicyError,
+  type DockerSandboxProcessExecutorInput,
   evaluateSandboxRequestSafety,
   evaluateToolSandboxPolicy,
   parseSandboxRunRequest,
@@ -294,6 +301,118 @@ describe("buildDockerSandboxCommand", () => {
         status: "denied",
       });
     }
+  });
+});
+
+describe("DockerContainerSandboxRunner", () => {
+  it("runs through an injected executor and collects declared artifacts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "heimdall-docker-runner-test-"));
+    const artifactRoot = join(root, "artifacts");
+    const temporaryRoot = join(root, "tmp");
+    let observedInput: DockerSandboxProcessExecutorInput | undefined;
+    let outputSource: string | undefined;
+
+    try {
+      const runner = createDockerContainerSandboxRunner({
+        artifactRoot,
+        dockerProcessEnv: { PATH: "/usr/bin" },
+        executor: async (input) => {
+          observedInput = input;
+          const outputMount = input.request.mounts.find((mount) => mount.purpose === "output");
+          if (!outputMount) {
+            throw new Error("Expected Docker runner to materialize an output mount.");
+          }
+          outputSource = outputMount.source;
+          await mkdir(outputMount.source, { recursive: true });
+          await writeFile(join(outputMount.source, "report.json"), '{"ok":true}');
+
+          return {
+            durationMs: 17,
+            exitCode: 0,
+            stderr: "debug",
+            stdout: "done",
+          };
+        },
+        temporaryRoot,
+      });
+      const result = await runner.run(
+        createRequest({
+          mounts: [
+            {
+              purpose: "workspace",
+              readOnly: true,
+              source: "/tmp/workspace",
+              target: "/workspace",
+              type: "bind",
+            },
+            {
+              purpose: "output",
+              readOnly: false,
+              source: "tmpfs",
+              target: "/out",
+              type: "tmpfs",
+            },
+          ],
+        }),
+      );
+
+      expect(result.status).toBe("succeeded");
+      expect(result.runner.kind).toBe("docker");
+      expect(result.stdout.text).toBe("done");
+      expect(result.stderr.text).toBe("debug");
+      expect(result.artifacts).toHaveLength(1);
+      expect(result.artifacts[0]?.name).toBe("report.json");
+      expect(await readFile(fileURLToPath(result.artifacts[0]?.uri ?? ""), "utf8")).toBe(
+        '{"ok":true}',
+      );
+      expect(observedInput?.command.env.PATH).toBe("/usr/bin");
+      expect(observedInput?.command.args).toContain(`type=bind,src=${outputSource},dst=/out`);
+      if (!outputSource) {
+        throw new Error("Expected Docker runner executor to observe an output source.");
+      }
+      await expect(stat(dirname(outputSource))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("returns policy denied before invoking Docker for unsupported network requests", async () => {
+    let called = false;
+    const runner = createDockerContainerSandboxRunner({
+      executor: async () => {
+        called = true;
+        return { exitCode: 0 };
+      },
+    });
+    const result = await runner.run(
+      createRequest({
+        network: {
+          ...DEFAULT_SANDBOX_NETWORK_POLICY,
+          allowedHosts: ["example.com"],
+          allowedPorts: [443],
+          mode: "allowlist",
+        },
+      }),
+    );
+
+    expect(called).toBe(false);
+    expect(result.status).toBe("policy_denied");
+    expect(result.error?.code).toBe("docker_network_policy_unsupported");
+  });
+
+  it("uses the gVisor Docker runtime when creating a gVisor runner", async () => {
+    const runner = createGVisorSandboxRunner({
+      executor: async (input) => {
+        expect(input.command.args).toEqual(expect.arrayContaining(["--runtime", "runsc"]));
+
+        return { exitCode: 0 };
+      },
+    });
+
+    const result = await runner.run(createRequest());
+
+    expect(result.status).toBe("succeeded");
+    expect(result.runner.kind).toBe("gvisor");
   });
 });
 

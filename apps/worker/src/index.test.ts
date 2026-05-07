@@ -481,10 +481,22 @@ describe("createWorkerStaticAnalysisRunnerFromEnvironment", () => {
     ).toThrow("local_process sandbox runner is forbidden in production.");
   });
 
-  it("rejects docker and gvisor before execution runners exist", () => {
-    expect(() =>
-      createWorkerStaticAnalysisRunnerFromEnvironment({ SANDBOX_RUNNER: "docker" }),
-    ).toThrow("SANDBOX_RUNNER=docker is not executable by this worker yet.");
+  it("creates Docker and gVisor sandbox-backed static-analysis runners when configured", () => {
+    expect(
+      createWorkerStaticAnalysisRunnerFromEnvironment({
+        PATH: "/usr/bin",
+        SANDBOX_ARTIFACT_ROOT: "/tmp/sandbox-artifacts",
+        SANDBOX_RUNNER: "docker",
+        SANDBOX_TEMP_ROOT: "/tmp/sandbox-tmp",
+      }),
+    ).toBeDefined();
+    expect(
+      createWorkerStaticAnalysisRunnerFromEnvironment({
+        PATH: "/usr/bin",
+        SANDBOX_DOCKER_RUNTIME: "runsc",
+        SANDBOX_RUNNER: "gvisor",
+      }),
+    ).toBeDefined();
   });
 });
 
