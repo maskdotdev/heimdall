@@ -670,6 +670,36 @@ export const findingValidationEvents = pgTable(
   ],
 );
 
+/** Duplicate groups discovered during validation and ranking. */
+export const findingDuplicateGroups = pgTable(
+  "finding_duplicate_groups",
+  {
+    findingDuplicateGroupId: text("finding_duplicate_group_id").primaryKey(),
+    reviewRunId: text("review_run_id")
+      .notNull()
+      .references(() => reviewRuns.reviewRunId),
+    canonicalFindingId: text("canonical_finding_id").references(() => validatedFindings.findingId),
+    canonicalCandidateFindingId: text("canonical_candidate_finding_id")
+      .notNull()
+      .references(() => candidateFindings.findingId),
+    groupKind: text("group_kind").notNull(),
+    confidence: real("confidence"),
+    reason: text("reason"),
+    groupKey: text("group_key").notNull(),
+    duplicateFindingIds: jsonb("duplicate_finding_ids").notNull().default(sql`'[]'::jsonb`),
+    duplicateCandidateFindingIds: jsonb("duplicate_candidate_finding_ids")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("finding_duplicate_groups_review_key_unique").on(table.reviewRunId, table.groupKey),
+    index("finding_duplicate_groups_review_run_idx").on(table.reviewRunId),
+    index("finding_duplicate_groups_canonical_candidate_idx").on(table.canonicalCandidateFindingId),
+  ],
+);
+
 /** Provider publication state for validated findings. */
 export const publishedFindings = pgTable("published_findings", {
   findingId: text("finding_id").primaryKey(),

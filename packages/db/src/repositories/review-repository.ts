@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
+  findingDuplicateGroups,
   findingValidationEvents,
   reviewArtifacts,
   reviewRunStageEvents,
@@ -48,6 +49,34 @@ export type FindingValidationEventInsert = {
   /** Optional product-safe event metadata. */
   readonly metadata?: Record<string, unknown>;
   /** Event creation time. */
+  readonly createdAt?: Date | string;
+};
+
+/** Duplicate group row to persist for review replay and debugging. */
+export type FindingDuplicateGroupInsert = {
+  /** Stable duplicate group ID. */
+  readonly findingDuplicateGroupId: string;
+  /** Review run that owns the duplicate group. */
+  readonly reviewRunId: string;
+  /** Canonical validated finding retained for publishing. */
+  readonly canonicalFindingId?: string | null;
+  /** Canonical candidate finding retained by dedupe. */
+  readonly canonicalCandidateFindingId: string;
+  /** Duplicate grouping strategy. */
+  readonly groupKind: string;
+  /** Optional duplicate confidence score. */
+  readonly confidence?: number | null;
+  /** Product-safe duplicate reason. */
+  readonly reason?: string | null;
+  /** Stable group key emitted by the validator. */
+  readonly groupKey: string;
+  /** Duplicate validated finding IDs rejected by dedupe. */
+  readonly duplicateFindingIds: readonly string[];
+  /** Duplicate candidate finding IDs rejected by dedupe. */
+  readonly duplicateCandidateFindingIds: readonly string[];
+  /** Optional product-safe duplicate metadata. */
+  readonly metadata?: Record<string, unknown>;
+  /** Group creation time. */
   readonly createdAt?: Date | string;
 };
 
@@ -164,6 +193,35 @@ export class ReviewRepository {
           reviewRunId: event.reviewRunId,
           stage: event.stage,
           status: event.status,
+        })),
+      )
+      .onConflictDoNothing();
+  }
+
+  /** Inserts duplicate groups and preserves existing group IDs. */
+  public async insertFindingDuplicateGroups(
+    groups: readonly FindingDuplicateGroupInsert[],
+  ): Promise<void> {
+    if (groups.length === 0) {
+      return;
+    }
+
+    await this.db
+      .insert(findingDuplicateGroups)
+      .values(
+        groups.map((group) => ({
+          canonicalCandidateFindingId: group.canonicalCandidateFindingId,
+          canonicalFindingId: group.canonicalFindingId ?? undefined,
+          confidence: group.confidence ?? undefined,
+          createdAt: group.createdAt ? new Date(group.createdAt) : undefined,
+          duplicateCandidateFindingIds: [...group.duplicateCandidateFindingIds],
+          duplicateFindingIds: [...group.duplicateFindingIds],
+          findingDuplicateGroupId: group.findingDuplicateGroupId,
+          groupKey: group.groupKey,
+          groupKind: group.groupKind,
+          metadata: group.metadata,
+          reason: group.reason ?? undefined,
+          reviewRunId: group.reviewRunId,
         })),
       )
       .onConflictDoNothing();

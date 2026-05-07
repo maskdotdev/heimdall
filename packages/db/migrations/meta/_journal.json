@@ -78,6 +78,13 @@
       "when": 1778154029912,
       "tag": "0010_easy_tusk",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1778154617147,
+      "tag": "0011_rich_wind_dancer",
+      "breakpoints": true
     }
   ]
 }

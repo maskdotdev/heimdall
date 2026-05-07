@@ -15,6 +15,7 @@ import {
   codeIndexVersions,
   creditGrants,
   debugExports,
+  findingDuplicateGroups,
   findingValidationEvents,
   indexedFiles,
   invoices,
@@ -50,6 +51,10 @@ const adminToolingMigrationPath = resolve(
 const adminReplayMigrationPath = resolve(testDirectory, "../migrations/0008_minor_thunderball.sql");
 const productAuthMigrationPath = resolve(testDirectory, "../migrations/0009_high_sphinx.sql");
 const validationEventsMigrationPath = resolve(testDirectory, "../migrations/0010_easy_tusk.sql");
+const duplicateGroupsMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0011_rich_wind_dancer.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -72,6 +77,7 @@ describe("database schema foundation", () => {
     expect(findingValidationEvents.findingValidationEventId.name).toBe(
       "finding_validation_event_id",
     );
+    expect(findingDuplicateGroups.findingDuplicateGroupId.name).toBe("finding_duplicate_group_id");
     expect(publishedReviews.publishedReviewId.name).toBe("published_review_id");
     expect(publishedSummaryComments.publishedSummaryCommentId.name).toBe(
       "published_summary_comment_id",
@@ -108,6 +114,7 @@ describe("database schema foundation", () => {
     const adminReplayMigration = await readFile(adminReplayMigrationPath, "utf8");
     const productAuthMigration = await readFile(productAuthMigrationPath, "utf8");
     const validationEventsMigration = await readFile(validationEventsMigrationPath, "utf8");
+    const duplicateGroupsMigration = await readFile(duplicateGroupsMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -143,6 +150,7 @@ describe("database schema foundation", () => {
     expect(productAuthMigration).toContain('CREATE TABLE "user_sessions"');
     expect(productAuthMigration).toContain('CREATE TABLE "oauth_states"');
     expect(validationEventsMigration).toContain('CREATE TABLE "finding_validation_events"');
+    expect(duplicateGroupsMigration).toContain('CREATE TABLE "finding_duplicate_groups"');
   });
 });
 
@@ -290,6 +298,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT count(*)::int FROM code_index_versions) AS index_versions,
         (SELECT count(*)::int FROM code_chunk_embeddings) AS embeddings,
         (SELECT to_regclass('admin_actions')::text) AS admin_actions_table,
+        (SELECT to_regclass('finding_duplicate_groups')::text) AS finding_duplicate_groups_table,
         (SELECT to_regclass('finding_validation_events')::text) AS finding_validation_events_table,
         (SELECT to_regclass('replay_runs')::text) AS replay_runs_table,
         (SELECT to_regclass('users')::text) AS users_table,
@@ -301,6 +310,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       webhook_events: 1,
       index_versions: 1,
       embeddings: 1,
+      finding_duplicate_groups_table: "finding_duplicate_groups",
       finding_validation_events_table: "finding_validation_events",
       oauth_states_table: "oauth_states",
       replay_runs_table: "replay_runs",

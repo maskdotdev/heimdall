@@ -644,6 +644,34 @@ export async function runPullRequestReview(
         status: event.status,
       })),
     );
+    await reviewRepository.insertFindingDuplicateGroups(
+      validationResult.duplicateGroups.map((group) => {
+        const duplicateFindingIds = group.duplicateCandidateFindingIds.flatMap(
+          (candidateFindingId) => {
+            const findingId = findingIdByCandidateFindingId.get(candidateFindingId);
+            return findingId ? [findingId] : [];
+          },
+        );
+
+        return {
+          canonicalCandidateFindingId: group.canonicalCandidateFindingId,
+          canonicalFindingId:
+            findingIdByCandidateFindingId.get(group.canonicalCandidateFindingId) ?? null,
+          createdAt: validationResult.trace.completedAt,
+          duplicateCandidateFindingIds: group.duplicateCandidateFindingIds,
+          duplicateFindingIds,
+          findingDuplicateGroupId: stableId("fdg", [reviewRunId, group.groupKind, group.groupKey]),
+          groupKey: group.groupKey,
+          groupKind: group.groupKind,
+          metadata: {
+            duplicateCandidateCount: group.duplicateCandidateFindingIds.length,
+            duplicateFindingCount: duplicateFindingIds.length,
+          },
+          reason: duplicateGroupReason(group.groupKind),
+          reviewRunId,
+        };
+      }),
+    );
 
     const candidateArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
@@ -720,6 +748,7 @@ export async function runPullRequestReview(
         rejectedFindingCount,
         validatedFindingCount: validatedFindings.length,
         memoryFactCount: reviewMemoryFacts.length,
+        duplicateGroupCount: validationResult.duplicateGroups.length,
         publishPlanArtifactId: publishPlanArtifact.artifactId,
         publishPlanMode: publishPlanMode(publishPlan),
         validationEventCount: validationResult.trace.events.length,
@@ -1488,6 +1517,20 @@ function publishPlanMode(plan: PublishPlan): string {
       return "summary";
     default:
       return "mixed";
+  }
+}
+
+/** Maps duplicate group kinds to canonical product-safe rejection reasons. */
+function duplicateGroupReason(groupKind: string): string {
+  switch (groupKind) {
+    case "exact":
+      return "duplicate_exact";
+    case "location":
+      return "duplicate_location";
+    case "semantic":
+      return "duplicate_semantic";
+    default:
+      return "duplicate";
   }
 }
 

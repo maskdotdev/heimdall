@@ -66,6 +66,16 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
               evidence: ["The added line exports a literal value."],
               confidence: 0.82,
             },
+            {
+              path: "src/index.ts",
+              line: 1,
+              severity: "medium",
+              category: "correctness",
+              title: "Validate exported value",
+              body: "The exported value is still hard-coded and should be validated.",
+              evidence: ["The added line exports the same literal value."],
+              confidence: 0.81,
+            },
           ],
         }),
         syncWorkspace: async () => ({
@@ -77,7 +87,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       },
     );
 
-    expect(result.candidateFindingCount).toBe(1);
+    expect(result.candidateFindingCount).toBe(2);
     expect(result.validatedFindingCount).toBe(1);
     expect(result.publishJobKey).toBe(`review.publish.v1:${result.reviewRunId}`);
 
@@ -95,6 +105,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM candidate_findings) AS candidate_findings,
         (SELECT count(*)::int FROM validated_findings) AS validated_findings,
         (SELECT count(*)::int FROM finding_validation_events) AS validation_events,
+        (SELECT count(*)::int FROM finding_duplicate_groups) AS duplicate_groups,
         (SELECT count(*)::int FROM review_run_stage_events) AS stage_events,
         (SELECT count(*)::int FROM llm_calls WHERE status = 'succeeded') AS llm_calls,
         (SELECT count(*)::int FROM usage_events WHERE event_type = 'llm.token') AS llm_usage_events,
@@ -109,16 +120,17 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       full_snapshots: 1,
       completed_runs: 1,
       artifacts: 13,
-      candidate_findings: 1,
+      candidate_findings: 2,
       change_set_artifacts: 1,
       consumed_quota_reservations: 1,
+      duplicate_groups: 1,
       line_anchor_artifacts: 1,
       raw_diff_artifacts: 1,
       ranking_artifacts: 1,
       rejected_artifacts: 1,
       publish_plan_artifacts: 1,
-      validation_events: 6,
-      validated_findings: 1,
+      validation_events: 12,
+      validated_findings: 2,
       stage_events: 9,
       llm_calls: 1,
       llm_usage_events: 1,
