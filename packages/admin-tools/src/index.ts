@@ -1,19 +1,27 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
+  ContextBundle,
+  ContextItem,
   JobEnvelope,
   JobPayload,
   PublishReviewJobPayload,
+  RepoRule,
   ReviewPullRequestJobPayload,
   ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
-import { JOB_TYPES } from "@repo/contracts";
+import { ContextBundleSchema, JOB_TYPES, parseWithSchema } from "@repo/contracts";
 import {
+  adminActions,
   auditLogs,
   backgroundJobs,
   candidateFindings,
+  codeIndexVersions,
+  debugExports,
   type HeimdallDatabase,
   llmCalls,
+  memoryFacts,
+  PullRequestRepository,
   publishedCheckRuns,
   publishedFindings,
   publishedReviews,
@@ -21,18 +29,40 @@ import {
   publishOperations,
   publishRuns,
   pullRequestSnapshots,
+  quotaCounters,
+  quotaReservations,
+  RepoRuleRepository,
   ReviewRepository,
+  replayRuns,
+  replayStageRuns,
+  repositories,
   reviewArtifacts,
   reviewRunDependencies,
   reviewRunStageEvents,
+  usageEvents,
   validatedFindings,
   webhookEvents,
 } from "@repo/db";
+import {
+  type EvalActualFinding,
+  type EvalCase,
+  type EvalChangedFile,
+  type EvalExpectedFinding,
+  type EvalFindingLocation,
+  parseEvalCase,
+} from "@repo/evaluation";
 import { parseJobEnvelope, QUEUE_NAMES, type QueueName } from "@repo/queue";
-import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
+import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
+import { validateAndRankCandidateFindings } from "@repo/review-engine";
+import { type EffectiveReviewPolicy, parseReviewPolicySnapshot } from "@repo/rules";
+import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 
 /** Resource type that an admin debug lookup can target. */
-export type AdminDebugResourceType = "webhook_event" | "review_run";
+export type AdminDebugResourceType =
+  | "webhook_event"
+  | "background_job"
+  | "review_run"
+  | "repository";
 
 /** Error raised when an admin debug resource does not exist. */
 export class AdminDebugNotFoundError extends Error {
@@ -175,8 +205,21 @@ export type AdminWebhookDebugDetails = {
   readonly failures: readonly AdminFailureDetail[];
 };
 
+/** Debug detail for one durable background job. */
+export type AdminBackgroundJobDebugDetails = {
+  /** Durable job summary. */
+  readonly job: AdminBackgroundJobDebugSummary;
+  /** Replay decisions already audited for this background job. */
+  readonly replayAudits: readonly AdminReplayAuditSummary[];
+  /** Structured failures collected from the job. */
+  readonly failures: readonly AdminFailureDetail[];
+};
+
 /** Replay action that requeues jobs originally planned from a webhook. */
 export type WebhookReplayAction = "webhook.requeue_jobs";
+
+/** Replay action that requeues one failed durable background job. */
+export type BackgroundJobReplayAction = "job.requeue";
 
 /** Source state used to construct one replay job. */
 export type AdminReplayJobSource = "existing_job" | "missing_job" | "operator_replay";
@@ -205,10 +248,40 @@ export type AdminReplayJobPlan = {
   readonly reviewRunId?: string;
 };
 
+/** Gated replay plan for one durable background job. */
+export type BackgroundJobReplayPlan = {
+  /** Action that an operator can dispatch after confirmation. */
+  readonly action: BackgroundJobReplayAction;
+  /** Durable background job being replayed. */
+  readonly backgroundJobId: string;
+  /** Current durable job status. */
+  readonly currentStatus: string;
+  /** Queue that should receive the replay job. */
+  readonly queueName: QueueName;
+  /** Handler type carried by the replay envelope. */
+  readonly jobType: string;
+  /** Replay job that can be inserted after confirmation. */
+  readonly job: AdminReplayJobPlan;
+  /** Current failure details that motivated or constrain replay. */
+  readonly failures: readonly AdminFailureDetail[];
+  /** Confirmation token derived from the current plan state. */
+  readonly confirmationToken: string;
+  /** Whether dispatching this plan can mutate operational state. */
+  readonly requiresExplicitConfirmation: true;
+};
+
 /** Result returned after inserting confirmed replay jobs into the durable outbox. */
 export type AdminReplayExecutionResult = {
   /** Replay action that was confirmed. */
-  readonly action: WebhookReplayAction | ReviewReplayAction | PublisherReplayAction;
+  readonly action:
+    | WebhookReplayAction
+    | BackgroundJobReplayAction
+    | ReviewReplayAction
+    | PublisherReplayAction;
+  /** Durable admin action row ID written for this replay dispatch. */
+  readonly adminActionId: string;
+  /** Durable replay run row ID written for this replay dispatch. */
+  readonly replayRunId: string;
   /** Confirmation token that matched the current replay plan. */
   readonly confirmationToken: string;
   /** Audit log row ID written for the replay decision. */
@@ -233,6 +306,8 @@ export type AdminReplayAuditActor = {
   readonly requestId?: string;
   /** Session ID that authorized this replay decision. */
   readonly sessionId?: string;
+  /** Support-session ID that authorized privileged raw artifact handling. */
+  readonly supportSessionId?: string;
   /** Identity provider that authenticated the actor when available. */
   readonly provider?: string;
   /** Granular permissions granted to the actor when available. */
@@ -470,6 +545,116 @@ export type AdminLlmCallDebugSummary = {
   readonly failure?: AdminFailureDetail;
 };
 
+/** Debug summary for one append-only usage ledger event. */
+export type AdminUsageEventDebugSummary = {
+  /** Durable usage event ID. */
+  readonly usageEventId: string;
+  /** Organization that owns the usage. */
+  readonly orgId: string;
+  /** Repository that caused the usage when available. */
+  readonly repoId?: string;
+  /** Review run that caused the usage when available. */
+  readonly reviewRunId?: string;
+  /** Product usage event type. */
+  readonly eventType: string;
+  /** Signed usage quantity. */
+  readonly quantity: number;
+  /** Usage unit. */
+  readonly unit: string;
+  /** Estimated internal cost in micro-USD. */
+  readonly costMicros: number;
+  /** Usage occurrence timestamp. */
+  readonly occurredAt: string;
+  /** Sorted metadata keys available on the event. */
+  readonly metadataKeys: readonly string[];
+  /** Stable metadata hash when metadata is present. */
+  readonly metadataHash?: `sha256:${string}`;
+};
+
+/** Rollup row for review-run usage and cost inspection. */
+export type AdminUsageRollupDebugSummary = {
+  /** Usage event type summarized by this row. */
+  readonly eventType: string;
+  /** Usage unit summarized by this row. */
+  readonly unit: string;
+  /** Signed usage quantity total. */
+  readonly quantity: number;
+  /** Number of usage events summarized. */
+  readonly eventCount: number;
+  /** Estimated internal cost total in micro-USD. */
+  readonly costMicros: number;
+};
+
+/** Quota reservation or counter state linked to a review run. */
+export type AdminQuotaDecisionDebugSummary = {
+  /** Durable quota reservation row ID. */
+  readonly quotaReservationId: string;
+  /** Quota key that was reserved. */
+  readonly quotaKey: string;
+  /** Quota period key, such as 2026-05. */
+  readonly periodKey: string;
+  /** Source type that created the reservation. */
+  readonly sourceType: string;
+  /** Source ID that created the reservation. */
+  readonly sourceId: string;
+  /** Reserved quantity. */
+  readonly quantity: number;
+  /** Reservation lifecycle status. */
+  readonly status: string;
+  /** Counter used quantity at inspection time. */
+  readonly usedQuantity: number;
+  /** Counter reserved quantity at inspection time. */
+  readonly reservedQuantity: number;
+  /** Counter limit quantity when configured. */
+  readonly limitQuantity?: number;
+  /** Reservation creation timestamp. */
+  readonly createdAt: string;
+  /** Reservation expiry timestamp. */
+  readonly expiresAt: string;
+  /** Reservation consumption timestamp when consumed. */
+  readonly consumedAt?: string;
+  /** Reservation release timestamp when released. */
+  readonly releasedAt?: string;
+};
+
+/** Review-run usage and cost inspector output for admin/debug workflows. */
+export type AdminUsageCostInspection = {
+  /** Organization that owns the inspected usage. */
+  readonly orgId: string;
+  /** Repository that owns the inspected usage when known. */
+  readonly repoId?: string;
+  /** Review run being inspected when scoped to a review. */
+  readonly reviewRunId?: string;
+  /** Append-only usage events included in the inspection. */
+  readonly usageEvents: readonly AdminUsageEventDebugSummary[];
+  /** Usage rollups grouped by event type and unit. */
+  readonly rollups: readonly AdminUsageRollupDebugSummary[];
+  /** Estimated internal cost in micro-USD. */
+  readonly estimatedCostMicros: number;
+  /** Estimated internal cost formatted as a fixed USD string. */
+  readonly estimatedCostUsd: string;
+  /** Customer-understandable billable units derived from usage events. */
+  readonly billableUnits: Readonly<Record<string, number>>;
+  /** Quota reservation state associated with the review run. */
+  readonly quotaDecisions: readonly AdminQuotaDecisionDebugSummary[];
+  /** Human-review warnings for missing or suspicious usage state. */
+  readonly warnings: readonly string[];
+};
+
+/** Input used to build a review-run usage and cost inspection. */
+export type BuildUsageCostInspectionInput = {
+  /** Organization that owns the inspected usage. */
+  readonly orgId: string;
+  /** Repository that owns the inspected usage when known. */
+  readonly repoId?: string;
+  /** Review run being inspected when scoped to a review. */
+  readonly reviewRunId?: string;
+  /** Usage events to inspect. */
+  readonly usageEvents: readonly AdminUsageEventDebugSummary[];
+  /** Quota reservations to inspect. */
+  readonly quotaDecisions?: readonly AdminQuotaDecisionDebugSummary[];
+};
+
 /** Review run inspector output for admin/debug workflows. */
 export type AdminReviewDebugDetails = {
   /** Review run contract row. */
@@ -494,6 +679,274 @@ export type AdminReviewDebugDetails = {
   readonly replayAudits: readonly AdminReplayAuditSummary[];
   /** Structured failures collected from review state and related jobs. */
   readonly failures: readonly AdminFailureDetail[];
+};
+
+/** Actor details recorded on redacted debug bundle exports. */
+export type AdminDebugBundleActorSummary = {
+  /** Actor category stored in audit records. */
+  readonly actorType: AdminReplayAuditActor["actorType"];
+  /** Stable user or token principal ID stored in audit records. */
+  readonly actorUserId: string;
+  /** Access role granted to the actor. */
+  readonly role: AdminReplayAuditActor["role"];
+  /** Request ID that authorized the export. */
+  readonly requestId?: string;
+  /** Session ID that authorized the export. */
+  readonly sessionId?: string;
+  /** Support-session ID that authorized privileged raw artifact handling. */
+  readonly supportSessionId?: string;
+  /** Identity provider that authenticated the actor when available. */
+  readonly provider?: string;
+  /** Display name shown in operator views when available. */
+  readonly displayName?: string;
+  /** Primary email shown in operator views when available. */
+  readonly email?: string;
+};
+
+/** Placeholder value used when a debug bundle field is intentionally redacted. */
+export type AdminDebugBundleRedactedValue = {
+  /** Whether the original value was replaced. */
+  readonly redacted: true;
+  /** Field key that triggered redaction. */
+  readonly key: string;
+  /** Reason the original value is omitted. */
+  readonly reason: "sensitive_field";
+  /** Runtime type of the original value. */
+  readonly valueType: string;
+  /** SHA-256 hash of the original serialized value for correlation. */
+  readonly sha256: `sha256:${string}`;
+  /** Serialized byte size of the original value. */
+  readonly sizeBytes: number;
+};
+
+/** Redacted review-run debug bundle safe for support and engineering handoff. */
+export type AdminReviewRunDebugBundle = {
+  /** Bundle contract version. */
+  readonly schemaVersion: "admin_debug_bundle.v1";
+  /** Generated debug bundle ID. */
+  readonly bundleId: string;
+  /** Durable debug export row ID for operator history. */
+  readonly debugExportId: string;
+  /** Durable admin action row ID for this export. */
+  readonly adminActionId: string;
+  /** Review run exported into the bundle. */
+  readonly reviewRunId: string;
+  /** Repository that owns the review run. */
+  readonly repoId: string;
+  /** Redaction policy applied to the payload. */
+  readonly redactionLevel: "metadata";
+  /** ISO timestamp when the bundle was generated. */
+  readonly generatedAt: string;
+  /** ISO timestamp when the debug bundle should no longer be used. */
+  readonly expiresAt: string;
+  /** Actor that requested the export. */
+  readonly generatedBy: AdminDebugBundleActorSummary;
+  /** Hash of the redacted payload returned to the operator. */
+  readonly payloadHash: `sha256:${string}`;
+  /** Audit log row written for the export. */
+  readonly auditLogId: string;
+  /** Redacted review, publisher, and replay metadata. */
+  readonly payload: unknown;
+};
+
+/** Artifact groups that can be proposed by a review-run eval import. */
+export type EvalImportArtifactSelection = {
+  /** Include pull request snapshot metadata. */
+  readonly pullRequestSnapshot: boolean;
+  /** Include a raw diff patch when permitted. */
+  readonly rawDiff: boolean;
+  /** Include retrieval context bundle metadata when available. */
+  readonly contextBundle: boolean;
+  /** Include review output metadata. */
+  readonly reviewOutputs: boolean;
+  /** Include validation output metadata. */
+  readonly validationOutputs: boolean;
+};
+
+/** Request to create a review-run eval fixture draft. */
+export type ImportReviewRunToEvalRequest = {
+  /** Review run that should seed the eval case. */
+  readonly reviewRunId: string;
+  /** Eval suite ID that would receive the approved case. */
+  readonly suiteId: string;
+  /** Human-readable case name. */
+  readonly caseName: string;
+  /** Reason the operator wants the case in eval coverage. */
+  readonly reason: string;
+  /** Artifact groups to include in the generated draft files. */
+  readonly includeArtifacts: EvalImportArtifactSelection;
+  /** Redaction level for the generated draft. */
+  readonly redactionLevel: "redacted" | "synthetic" | "raw_allowed";
+  /** Optional labels to add as eval case tags. */
+  readonly labels?: readonly string[];
+};
+
+/** One proposed file emitted by a review-run eval import draft. */
+export type AdminEvalImportDraftFile = {
+  /** Path where the draft file would live if accepted. */
+  readonly path: string;
+  /** Stable draft file kind. */
+  readonly kind:
+    | "eval_case"
+    | "pull_request_snapshot"
+    | "expected_findings"
+    | "actual_findings"
+    | "notes";
+  /** Redacted JSON or Markdown content. */
+  readonly content: unknown;
+};
+
+/** Draft eval import generated from a review run without mutating committed fixtures. */
+export type AdminReviewRunEvalImportDraft = {
+  /** Draft contract version. */
+  readonly schemaVersion: "admin_eval_import_draft.v1";
+  /** Generated eval import draft ID. */
+  readonly importDraftId: string;
+  /** Durable admin action row ID written for this draft creation. */
+  readonly adminActionId: string;
+  /** Review run used as the source. */
+  readonly reviewRunId: string;
+  /** Repository that owns the review run. */
+  readonly repoId: string;
+  /** Target suite ID. */
+  readonly suiteId: string;
+  /** Eval case generated from review state. */
+  readonly evalCase: EvalCase;
+  /** Proposed files for a later human-reviewed fixture commit. */
+  readonly files: readonly AdminEvalImportDraftFile[];
+  /** Redaction level used for generated files. */
+  readonly redactionLevel: ImportReviewRunToEvalRequest["redactionLevel"];
+  /** Warnings that require human review before fixture approval. */
+  readonly warnings: readonly string[];
+  /** Audit log row written for the draft creation. */
+  readonly auditLogId: string;
+  /** ISO timestamp when the draft was generated. */
+  readonly generatedAt: string;
+  /** Actor that requested the draft. */
+  readonly generatedBy: AdminDebugBundleActorSummary;
+};
+
+/** Repository summary used by the memory and rules debug inspector. */
+export type AdminMemoryRulesRepositorySummary = {
+  /** Repository ID being inspected. */
+  readonly repoId: string;
+  /** Organization that owns the repository. */
+  readonly orgId: string;
+  /** Source code hosting provider. */
+  readonly provider: string;
+  /** Provider owner and repository name. */
+  readonly fullName: string;
+  /** Default branch when the provider supplied one. */
+  readonly defaultBranch?: string;
+  /** Provider visibility label. */
+  readonly visibility: string;
+  /** Whether Heimdall reviews are enabled for the repository. */
+  readonly enabled: boolean;
+  /** Whether the provider marks the repository as archived. */
+  readonly isArchived: boolean;
+  /** Whether the provider marks the repository as a fork. */
+  readonly isFork: boolean;
+};
+
+/** Debug summary for one stored repository or organization memory fact. */
+export type AdminMemoryFactDebugSummary = {
+  /** Durable memory fact row ID. */
+  readonly memoryFactId: string;
+  /** Organization that owns the fact. */
+  readonly orgId: string;
+  /** Repository that owns the fact when repository-scoped. */
+  readonly repoId?: string;
+  /** Whether this fact applies through repository or organization scope. */
+  readonly scope: "repository" | "organization";
+  /** Machine-readable fact type. */
+  readonly factType: string;
+  /** Stored fact body used by review context assembly. */
+  readonly body: string;
+  /** Current fact lifecycle status. */
+  readonly status: string;
+  /** Confidence score assigned to the fact. */
+  readonly confidence: number;
+  /** Expiration timestamp when the fact is temporary. */
+  readonly expiresAt?: string;
+  /** Sorted metadata keys available on the row. */
+  readonly metadataKeys: readonly string[];
+  /** Hash of the metadata payload when metadata exists. */
+  readonly metadataHash?: `sha256:${string}`;
+  /** Fact creation timestamp. */
+  readonly createdAt: string;
+  /** Fact update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Debug summary for one effective repository or organization rule. */
+export type AdminRepoRuleDebugSummary = {
+  /** Rule ID used by typed policy snapshots. */
+  readonly ruleId: string;
+  /** Organization that owns the rule. */
+  readonly orgId: string;
+  /** Repository that owns the rule when repository-scoped. */
+  readonly repoId?: string;
+  /** Whether this rule applies through repository or organization scope. */
+  readonly scope: "repository" | "organization";
+  /** Human-readable rule name. */
+  readonly name: string;
+  /** Human-readable description when configured. */
+  readonly description?: string;
+  /** Rule effect consumed by the policy engine. */
+  readonly effect: RepoRule["effect"];
+  /** Matcher consumed by the policy engine. */
+  readonly matcher: RepoRule["matcher"];
+  /** Instruction consumed by policy and review context assembly. */
+  readonly instruction: string;
+  /** Lower values run first. */
+  readonly priority: number;
+  /** Whether the rule is enabled. */
+  readonly enabled: boolean;
+  /** User that created the rule when available. */
+  readonly createdByUserId?: string;
+  /** Sorted metadata keys available on the typed rule. */
+  readonly metadataKeys: readonly string[];
+  /** Rule creation timestamp. */
+  readonly createdAt: string;
+  /** Rule update timestamp. */
+  readonly updatedAt: string;
+};
+
+/** Tool entry surfaced by the memory and rules inspector. */
+export type AdminMemoryRulesDebugTool = {
+  /** Stable tool identifier. */
+  readonly toolId: string;
+  /** Human-readable tool label. */
+  readonly label: string;
+  /** Whether this tool can run in the current implementation. */
+  readonly status: "available" | "unavailable";
+  /** Admin API route for available tools. */
+  readonly route?: string;
+  /** Explanation for unavailable tools. */
+  readonly reason?: string;
+};
+
+/** Memory and rules inspector output for one repository. */
+export type AdminMemoryRulesDebugDetails = {
+  /** Repository being inspected. */
+  readonly repository: AdminMemoryRulesRepositorySummary;
+  /** Stored memory facts that can apply to the repository. */
+  readonly memoryFacts: readonly AdminMemoryFactDebugSummary[];
+  /** Effective organization and repository rules that can apply to the repository. */
+  readonly rules: readonly AdminRepoRuleDebugSummary[];
+  /** Candidate moderation capability shown by the inspector. */
+  readonly candidateActions: {
+    /** Whether an operator can approve memory candidates from this inspector. */
+    readonly canApprove: false;
+    /** Whether an operator can reject memory candidates from this inspector. */
+    readonly canReject: false;
+    /** Why candidate actions are unavailable. */
+    readonly reason: string;
+  };
+  /** Policy and finding evaluation tools available from this repository context. */
+  readonly evaluationTools: readonly AdminMemoryRulesDebugTool[];
+  /** Warnings that need operator attention. */
+  readonly warnings: readonly string[];
 };
 
 /** Replay action that requeues a review job from persisted review state. */
@@ -523,6 +976,120 @@ export type ReviewReplayPlan = {
   readonly confirmationToken: string;
   /** Whether dispatching this plan can mutate operational state. */
   readonly requiresExplicitConfirmation: true;
+};
+
+/** Summary of one context bundle used by retrieval replay comparison. */
+export type RetrievalReplayBundleSummary = {
+  /** Context bundle ID when a bundle exists. */
+  readonly contextBundleId?: string;
+  /** Retrieval mode recorded in bundle metadata. */
+  readonly retrievalMode?: string;
+  /** Index version used by indexed retrieval when available. */
+  readonly indexVersionId?: string;
+  /** Number of context items. */
+  readonly itemCount: number;
+  /** Estimated tokens included in the bundle. */
+  readonly estimatedTokens: number;
+  /** Maximum token budget for the bundle. */
+  readonly maxTokens: number;
+};
+
+/** One context item comparison emitted by retrieval dry-run replay. */
+export type RetrievalReplayItemComparison = {
+  /** Stable comparison key. */
+  readonly key: string;
+  /** Whether the item stayed the same, changed, was added, or was removed. */
+  readonly status: "unchanged" | "changed" | "added" | "removed";
+  /** Original context item kind when present. */
+  readonly originalKind?: string;
+  /** Replayed context item kind when present. */
+  readonly replayedKind?: string;
+  /** Original context title when present. */
+  readonly originalTitle?: string;
+  /** Replayed context title when present. */
+  readonly replayedTitle?: string;
+  /** Original item priority when present. */
+  readonly originalPriority?: number;
+  /** Replayed item priority when present. */
+  readonly replayedPriority?: number;
+};
+
+/** Non-mutating dry-run result for deterministic retrieval replay. */
+export type RetrievalReplayDryRun = {
+  /** Dry-run contract version. */
+  readonly schemaVersion: "admin_retrieval_replay_dry_run.v1";
+  /** Review run that was replayed. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot used by retrieval. */
+  readonly pullRequestSnapshotId: string;
+  /** ISO timestamp when the replay was generated. */
+  readonly generatedAt: string;
+  /** Whether the dry-run mutated review state. */
+  readonly mutatesProductionState: false;
+  /** Persisted original context bundle summary when available. */
+  readonly original?: RetrievalReplayBundleSummary;
+  /** Replayed context bundle summary. */
+  readonly replayed: RetrievalReplayBundleSummary;
+  /** Item-level comparison rows. */
+  readonly comparisons: readonly RetrievalReplayItemComparison[];
+  /** Warnings that explain weak comparison fidelity. */
+  readonly warnings: readonly string[];
+};
+
+/** Summary count block for validation replay findings. */
+export type ValidationReplayDecisionCounts = {
+  /** Number of publish decisions. */
+  readonly publish: number;
+  /** Number of reject decisions. */
+  readonly reject: number;
+};
+
+/** One finding comparison emitted by validation dry-run replay. */
+export type ValidationReplayFindingComparison = {
+  /** Stable comparison key. */
+  readonly key: string;
+  /** Candidate finding ID when known. */
+  readonly candidateFindingId?: string;
+  /** Original validated finding ID when present. */
+  readonly originalFindingId?: string;
+  /** Replayed validated finding ID when present. */
+  readonly replayedFindingId?: string;
+  /** Original validation decision when present. */
+  readonly originalDecision?: string;
+  /** Replayed validation decision when present. */
+  readonly replayedDecision?: string;
+  /** Original rejection reasons. */
+  readonly originalReasons: readonly string[];
+  /** Replayed rejection reasons. */
+  readonly replayedReasons: readonly string[];
+  /** Whether rank, decision, or reasons changed. */
+  readonly status: "unchanged" | "changed" | "added" | "removed";
+  /** Finding title for operator context. */
+  readonly title: string;
+};
+
+/** Non-mutating dry-run result for deterministic validation replay. */
+export type ValidationReplayDryRun = {
+  /** Dry-run contract version. */
+  readonly schemaVersion: "admin_validation_replay_dry_run.v1";
+  /** Review run that was replayed. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot used by validation. */
+  readonly pullRequestSnapshotId: string;
+  /** ISO timestamp when the replay was generated. */
+  readonly generatedAt: string;
+  /** Whether the dry-run mutated review state. */
+  readonly mutatesProductionState: false;
+  /** Number of candidate findings used as replay input. */
+  readonly candidateFindingCount: number;
+  /** Counts for persisted original validation decisions. */
+  readonly original: ValidationReplayDecisionCounts;
+  /** Counts for replayed validation decisions. */
+  readonly replayed: ValidationReplayDecisionCounts;
+  /** Finding-level comparison rows. */
+  readonly comparisons: readonly ValidationReplayFindingComparison[];
+  /** Warnings that explain weak comparison fidelity. */
+  readonly warnings: readonly string[];
 };
 
 /** Debug summary for one publish run row. */
@@ -621,16 +1188,48 @@ export type AdminDebugService = {
     confirmationToken: string,
     actor: AdminReplayAuditActor,
   ) => Promise<AdminReplayExecutionResult>;
+  /** Gets durable background job debug details. */
+  readonly getBackgroundJobDebugDetails: (
+    backgroundJobId: string,
+  ) => Promise<AdminBackgroundJobDebugDetails>;
+  /** Creates a gated replay plan for one failed durable background job. */
+  readonly createBackgroundJobReplayPlan: (
+    backgroundJobId: string,
+  ) => Promise<BackgroundJobReplayPlan>;
+  /** Executes a confirmed background job replay plan. */
+  readonly executeBackgroundJobReplay: (
+    backgroundJobId: string,
+    confirmationToken: string,
+    actor: AdminReplayAuditActor,
+  ) => Promise<AdminReplayExecutionResult>;
   /** Gets review run debug details. */
   readonly getReviewDebugDetails: (reviewRunId: string) => Promise<AdminReviewDebugDetails>;
   /** Creates a gated review replay plan. */
   readonly createReviewReplayPlan: (reviewRunId: string) => Promise<ReviewReplayPlan>;
+  /** Replays retrieval in dry-run mode without mutating review state. */
+  readonly replayRetrievalDryRun: (reviewRunId: string) => Promise<RetrievalReplayDryRun>;
+  /** Replays finding validation in dry-run mode without mutating review state. */
+  readonly replayValidationDryRun: (reviewRunId: string) => Promise<ValidationReplayDryRun>;
   /** Executes a confirmed review replay plan. */
   readonly executeReviewReplay: (
     reviewRunId: string,
     confirmationToken: string,
     actor: AdminReplayAuditActor,
   ) => Promise<AdminReplayExecutionResult>;
+  /** Exports a redacted debug bundle for one review run. */
+  readonly exportReviewRunDebugBundle: (
+    reviewRunId: string,
+    actor: AdminReplayAuditActor,
+  ) => Promise<AdminReviewRunDebugBundle>;
+  /** Creates an audited eval import draft from one review run. */
+  readonly createReviewRunEvalImportDraft: (
+    request: ImportReviewRunToEvalRequest,
+    actor: AdminReplayAuditActor,
+  ) => Promise<AdminReviewRunEvalImportDraft>;
+  /** Gets memory and rules debug details for a repository. */
+  readonly getMemoryRulesDebugDetails: (repoId: string) => Promise<AdminMemoryRulesDebugDetails>;
+  /** Gets usage ledger, billable unit, cost, and quota state for a review run. */
+  readonly getUsageCostInspection: (reviewRunId: string) => Promise<AdminUsageCostInspection>;
   /** Gets publisher debug details. */
   readonly getPublisherDebugDetails: (reviewRunId: string) => Promise<AdminPublisherDebugDetails>;
   /** Creates a gated publisher replay plan. */
@@ -654,15 +1253,60 @@ export function createAdminDebugService(
       createWebhookReplayPlan(webhookEventId, dependencies),
     executeWebhookReplay: (webhookEventId, confirmationToken, actor) =>
       executeWebhookReplay(webhookEventId, confirmationToken, dependencies, actor),
+    getBackgroundJobDebugDetails: (backgroundJobId) =>
+      getBackgroundJobDebugDetails(backgroundJobId, dependencies),
+    createBackgroundJobReplayPlan: (backgroundJobId) =>
+      createBackgroundJobReplayPlan(backgroundJobId, dependencies),
+    executeBackgroundJobReplay: (backgroundJobId, confirmationToken, actor) =>
+      executeBackgroundJobReplay(backgroundJobId, confirmationToken, dependencies, actor),
     getReviewDebugDetails: (reviewRunId) => getReviewDebugDetails(reviewRunId, dependencies),
     createReviewReplayPlan: (reviewRunId) => createReviewReplayPlan(reviewRunId, dependencies),
+    replayRetrievalDryRun: (reviewRunId) => replayRetrievalDryRun(reviewRunId, dependencies),
+    replayValidationDryRun: (reviewRunId) => replayValidationDryRun(reviewRunId, dependencies),
     executeReviewReplay: (reviewRunId, confirmationToken, actor) =>
       executeReviewReplay(reviewRunId, confirmationToken, dependencies, actor),
+    exportReviewRunDebugBundle: (reviewRunId, actor) =>
+      exportReviewRunDebugBundle(reviewRunId, dependencies, actor),
+    createReviewRunEvalImportDraft: (request, actor) =>
+      createReviewRunEvalImportDraft(request, dependencies, actor),
+    getMemoryRulesDebugDetails: (repoId) => getMemoryRulesDebugDetails(repoId, dependencies),
+    getUsageCostInspection: (reviewRunId) => getUsageCostInspection(reviewRunId, dependencies),
     getPublisherDebugDetails: (reviewRunId) => getPublisherDebugDetails(reviewRunId, dependencies),
     createPublisherReplayPlan: (reviewRunId) =>
       createPublisherReplayPlan(reviewRunId, dependencies),
     executePublisherReplay: (reviewRunId, confirmationToken, actor) =>
       executePublisherReplay(reviewRunId, confirmationToken, dependencies, actor),
+  };
+}
+
+/** Builds a review-run usage and cost inspection from already scoped usage rows. */
+export function buildUsageCostInspection(
+  input: BuildUsageCostInspectionInput,
+): AdminUsageCostInspection {
+  const usageRows = input.usageEvents
+    .filter((event) => usageEventBelongsToInspection(event, input))
+    .sort(compareAdminUsageEvents);
+  const quotaDecisions = [...(input.quotaDecisions ?? [])].sort(compareAdminQuotaDecisions);
+  const rollups = summarizeAdminUsageRollups(usageRows);
+  const estimatedCostMicros = usageRows.reduce((sum, event) => sum + event.costMicros, 0);
+  const billableUnits = summarizeBillableUnits(usageRows);
+  const warnings = usageCostInspectionWarnings({
+    quotaDecisions,
+    ...(input.reviewRunId ? { reviewRunId: input.reviewRunId } : {}),
+    usageEvents: usageRows,
+  });
+
+  return {
+    billableUnits,
+    estimatedCostMicros,
+    estimatedCostUsd: microsToUsdString(estimatedCostMicros),
+    orgId: input.orgId,
+    ...(input.repoId ? { repoId: input.repoId } : {}),
+    ...(input.reviewRunId ? { reviewRunId: input.reviewRunId } : {}),
+    quotaDecisions,
+    rollups,
+    usageEvents: usageRows,
+    warnings,
   };
 }
 
@@ -774,6 +1418,84 @@ export async function executeWebhookReplay(
   });
 }
 
+/** Gets durable background job state and replay audit history. */
+export async function getBackgroundJobDebugDetails(
+  backgroundJobId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<AdminBackgroundJobDebugDetails> {
+  const row = await getBackgroundJobRow(backgroundJobId, dependencies.db);
+  const [replayAudits] = await Promise.all([
+    listReplayAuditLogs(dependencies.db, {
+      actions: ["job.requeue"],
+      resourceType: "background_job",
+      resourceId: backgroundJobId,
+    }),
+  ]);
+  const job = toBackgroundJobDebugSummary(row);
+
+  return {
+    job,
+    replayAudits,
+    failures: collectFailures([job.failure]),
+  };
+}
+
+/** Creates a replay plan for one failed or dead-lettered durable background job. */
+export async function createBackgroundJobReplayPlan(
+  backgroundJobId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<BackgroundJobReplayPlan> {
+  const details = await getBackgroundJobDebugDetails(backgroundJobId, dependencies);
+  if (!isReplayableBackgroundJobStatus(details.job.status)) {
+    throw new AdminDebugNotFoundError("background_job", backgroundJobId);
+  }
+
+  const job = replayJobFromExistingJob(details.job, backgroundJobId, "job");
+  const confirmationPayload = {
+    action: "job.requeue",
+    backgroundJobId,
+    currentStatus: details.job.status,
+    replayJob: toReplayConfirmationJob(job),
+    failureCodes: details.failures.map((failure) => failure.code),
+  };
+
+  return {
+    action: "job.requeue",
+    backgroundJobId,
+    currentStatus: details.job.status,
+    queueName: job.queueName,
+    jobType: job.jobType,
+    job,
+    failures: details.failures,
+    confirmationToken: hashJson(confirmationPayload),
+    requiresExplicitConfirmation: true,
+  };
+}
+
+/** Executes a confirmed durable background job replay plan. */
+export async function executeBackgroundJobReplay(
+  backgroundJobId: string,
+  confirmationToken: string,
+  dependencies: AdminDebugServiceDependencies,
+  actor: AdminReplayAuditActor,
+): Promise<AdminReplayExecutionResult> {
+  const plan = await createBackgroundJobReplayPlan(backgroundJobId, dependencies);
+  assertConfirmationToken(confirmationToken, plan.confirmationToken);
+  return insertReplayJobs({
+    db: dependencies.db,
+    action: plan.action,
+    confirmationToken,
+    jobs: [plan.job],
+    audit: {
+      actor,
+      resourceType: "background_job",
+      resourceId: backgroundJobId,
+      orgId: plan.job.orgId,
+      plan: auditPlanFromBackgroundJobReplayPlan(plan),
+    },
+  });
+}
+
 /** Gets review state, stage timeline, findings, related jobs, and normalized failures. */
 export async function getReviewDebugDetails(
   reviewRunId: string,
@@ -874,12 +1596,347 @@ export async function getReviewDebugDetails(
   };
 }
 
+/** Gets usage ledger events, billable units, costs, and quota state for one review run. */
+export async function getUsageCostInspection(
+  reviewRunId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<AdminUsageCostInspection> {
+  const reviewRepository = new ReviewRepository(dependencies.db);
+  const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
+  if (!reviewRun) {
+    throw new AdminDebugNotFoundError("review_run", reviewRunId);
+  }
+
+  const [repoRow] = await dependencies.db
+    .select()
+    .from(repositories)
+    .where(eq(repositories.repoId, reviewRun.repoId))
+    .limit(1);
+  if (!repoRow) {
+    throw new AdminDebugNotFoundError("repository", reviewRun.repoId);
+  }
+
+  const [usageRows, quotaRows] = await Promise.all([
+    dependencies.db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.reviewRunId, reviewRunId))
+      .orderBy(asc(usageEvents.occurredAt), asc(usageEvents.usageEventId)),
+    dependencies.db
+      .select({ counter: quotaCounters, reservation: quotaReservations })
+      .from(quotaReservations)
+      .innerJoin(quotaCounters, eq(quotaReservations.quotaCounterId, quotaCounters.quotaCounterId))
+      .where(
+        and(
+          eq(quotaReservations.sourceType, "review_run"),
+          eq(quotaReservations.sourceId, reviewRunId),
+        ),
+      )
+      .orderBy(asc(quotaReservations.createdAt), asc(quotaReservations.quotaReservationId)),
+  ]);
+
+  return buildUsageCostInspection({
+    orgId: repoRow.orgId,
+    repoId: reviewRun.repoId,
+    reviewRunId,
+    quotaDecisions: quotaRows.map((row) =>
+      toAdminQuotaDecisionDebugSummary(row.reservation, row.counter),
+    ),
+    usageEvents: usageRows.map(toAdminUsageEventDebugSummary),
+  });
+}
+
+/** Exports a redacted debug bundle for one review run and records an audit log first. */
+export async function exportReviewRunDebugBundle(
+  reviewRunId: string,
+  dependencies: AdminDebugServiceDependencies,
+  actor: AdminReplayAuditActor,
+): Promise<AdminReviewRunDebugBundle> {
+  const [reviewDetails, publisherDetails] = await Promise.all([
+    getReviewDebugDetails(reviewRunId, dependencies),
+    getPublisherDebugDetails(reviewRunId, dependencies),
+  ]);
+  const generatedAt = new Date();
+  const generatedAtIso = toIso(generatedAt);
+  const expiresAt = new Date(generatedAt.getTime() + 24 * 60 * 60 * 1000);
+  const expiresAtIso = toIso(expiresAt);
+  const repoOrgId = await getRepositoryOrgId(dependencies.db, reviewDetails.reviewRun.repoId);
+  if (!repoOrgId) {
+    throw new AdminDebugNotFoundError("repository", reviewDetails.reviewRun.repoId);
+  }
+  const payload = redactDebugBundleValue({
+    publisher: publisherDetails,
+    review: reviewDetails,
+  });
+  const payloadHash = hashJson(payload);
+  const bundleId = newId("dbg");
+  const adminActionId = newId("admact");
+  const auditLogId = newId("audit");
+  const debugExportId = newId("dbgexp");
+  const actorSummary = debugBundleActorSummary(actor);
+
+  await dependencies.db.transaction(async (tx) => {
+    await tx.insert(adminActions).values({
+      adminActionId,
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      completedAt: generatedAt,
+      kind: "debug_bundle.export",
+      orgId: repoOrgId,
+      reason: "Redacted debug bundle export from admin review inspector.",
+      repoId: reviewDetails.reviewRun.repoId,
+      request: {
+        redactionLevel: "metadata",
+        reviewRunId,
+      },
+      result: {
+        bundleId,
+        debugExportId,
+        payloadHash,
+      },
+      reviewRunId,
+      startedAt: generatedAt,
+      status: "completed",
+      ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
+    });
+    await tx.insert(debugExports).values({
+      adminActionId,
+      artifactHash: payloadHash,
+      completedAt: generatedAt,
+      createdByActorType: actor.actorType,
+      createdByActorUserId: actor.actorUserId,
+      debugExportId,
+      expiresAt,
+      exportKind: "review_run_debug_bundle",
+      orgId: repoOrgId,
+      redactionLevel: "metadata",
+      repoId: reviewDetails.reviewRun.repoId,
+      reviewRunId,
+      status: "completed",
+    });
+    await tx.insert(auditLogs).values({
+      auditLogId,
+      orgId: repoOrgId,
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      action: "debug_bundle.export",
+      resourceType: "review_run",
+      resourceId: reviewRunId,
+      occurredAt: generatedAt,
+      metadata: {
+        actor: actorSummary,
+        adminActionId,
+        bundleId,
+        debugExportId,
+        expiresAt: expiresAtIso,
+        generatedAt: generatedAtIso,
+        payloadHash,
+        redactionLevel: "metadata",
+        repoId: reviewDetails.reviewRun.repoId,
+      },
+    });
+  });
+
+  return {
+    schemaVersion: "admin_debug_bundle.v1",
+    adminActionId,
+    auditLogId,
+    bundleId,
+    debugExportId,
+    expiresAt: expiresAtIso,
+    generatedAt: generatedAtIso,
+    generatedBy: actorSummary,
+    payload,
+    payloadHash,
+    redactionLevel: "metadata",
+    repoId: reviewDetails.reviewRun.repoId,
+    reviewRunId,
+  };
+}
+
+/** Recursively redacts sensitive values from a debug bundle payload. */
+export function redactDebugBundleValue(value: unknown): unknown {
+  return redactDebugBundleValueAtKey(value, "");
+}
+
+/** Creates an audited eval import draft from one review run. */
+export async function createReviewRunEvalImportDraft(
+  request: ImportReviewRunToEvalRequest,
+  dependencies: AdminDebugServiceDependencies,
+  actor: AdminReplayAuditActor,
+): Promise<AdminReviewRunEvalImportDraft> {
+  const reviewDetails = await getReviewDebugDetails(request.reviewRunId, dependencies);
+  const repoOrgId = await getRepositoryOrgId(dependencies.db, reviewDetails.reviewRun.repoId);
+  const generatedAt = new Date();
+  const generatedAtIso = toIso(generatedAt);
+  const importDraftId = newId("evaldraft");
+  const adminActionId = newId("admact");
+  const auditLogId = newId("audit");
+  const warnings = evalImportWarnings(reviewDetails, request);
+  const evalCase = buildReviewRunEvalCase(reviewDetails, request, warnings);
+  const files = evalImportDraftFiles(evalCase, reviewDetails, request, warnings);
+
+  await dependencies.db.transaction(async (tx) => {
+    await tx.insert(adminActions).values({
+      adminActionId,
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      completedAt: generatedAt,
+      kind: "eval_import.draft_create",
+      orgId: repoOrgId,
+      reason: request.reason,
+      repoId: reviewDetails.reviewRun.repoId,
+      request: {
+        caseName: request.caseName,
+        includeArtifacts: request.includeArtifacts,
+        labels: request.labels ?? [],
+        redactionLevel: request.redactionLevel,
+        reviewRunId: request.reviewRunId,
+        suiteId: request.suiteId,
+      },
+      result: {
+        caseId: evalCase.caseId,
+        filePaths: files.map((file) => file.path),
+        importDraftId,
+        warningCount: warnings.length,
+      },
+      reviewRunId: request.reviewRunId,
+      startedAt: generatedAt,
+      status: "completed",
+      ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
+    });
+    await tx.insert(auditLogs).values({
+      auditLogId,
+      orgId: repoOrgId,
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      action: "eval_import.draft_created",
+      resourceType: "review_run",
+      resourceId: request.reviewRunId,
+      occurredAt: generatedAt,
+      metadata: {
+        actor: debugBundleActorSummary(actor),
+        adminActionId,
+        caseId: evalCase.caseId,
+        importDraftId,
+        redactionLevel: request.redactionLevel,
+        repoId: reviewDetails.reviewRun.repoId,
+        suiteId: request.suiteId,
+        warningCount: warnings.length,
+      },
+    });
+  });
+
+  return {
+    schemaVersion: "admin_eval_import_draft.v1",
+    adminActionId,
+    auditLogId,
+    evalCase,
+    files,
+    generatedAt: generatedAtIso,
+    generatedBy: debugBundleActorSummary(actor),
+    importDraftId,
+    redactionLevel: request.redactionLevel,
+    repoId: reviewDetails.reviewRun.repoId,
+    reviewRunId: request.reviewRunId,
+    suiteId: request.suiteId,
+    warnings,
+  };
+}
+
+/** Builds a schema-validated eval case from review inspector details. */
+export function buildReviewRunEvalCase(
+  details: AdminReviewDebugDetails,
+  request: ImportReviewRunToEvalRequest,
+  warnings: readonly string[] = evalImportWarnings(details, request),
+): EvalCase {
+  const actualFindings = details.validatedFindings.flatMap(toEvalActualFinding);
+  const expectedFindings = details.validatedFindings
+    .filter((finding) => finding.decision === "publish")
+    .flatMap(toEvalExpectedFinding);
+  const changedFiles = evalChangedFiles(details, [...actualFindings, ...expectedFindings]);
+  const latencyMs = reviewLatencyMs(details);
+  const costUsd = details.llmCalls.reduce((sum, call) => sum + call.costMicros / 1_000_000, 0);
+
+  return parseEvalCase({
+    caseId: evalCaseId(request.suiteId, request.caseName, request.reviewRunId),
+    title: request.caseName,
+    description: `Imported from review run ${request.reviewRunId}. Reason: ${request.reason}`,
+    tags: evalCaseTags(request, warnings),
+    changedFiles,
+    expectedContexts: [],
+    retrievedContexts: [],
+    expectedFindings,
+    actualFindings,
+    latencyMs,
+    costUsd,
+  });
+}
+
+/** Gets memory facts and effective repository rules for a repository inspector. */
+export async function getMemoryRulesDebugDetails(
+  repoId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<AdminMemoryRulesDebugDetails> {
+  const repository = await getRepositoryRow(repoId, dependencies.db);
+  const [facts, rules] = await Promise.all([
+    listMemoryFactsForRepository(dependencies.db, {
+      orgId: repository.orgId,
+      repoId,
+    }),
+    new RepoRuleRepository(dependencies.db).listEffectiveRules({
+      orgId: repository.orgId,
+      repoId,
+    }),
+  ]);
+
+  const memoryFactsSummary = facts.map(toMemoryFactDebugSummary);
+  const rulesSummary = [...rules]
+    .sort(compareRepoRulesForDebug)
+    .map((rule) => toRepoRuleDebugSummary(rule, repoId));
+
+  return {
+    repository: toMemoryRulesRepositorySummary(repository),
+    memoryFacts: memoryFactsSummary,
+    rules: rulesSummary,
+    candidateActions: {
+      canApprove: false,
+      canReject: false,
+      reason:
+        "Memory candidate approval and rejection require durable memory-candidate persistence.",
+    },
+    evaluationTools: [
+      {
+        toolId: "repository.policy_preview",
+        label: "Policy preview",
+        route: `/admin/repos/${repoId}/policy-preview`,
+        status: "available",
+      },
+      {
+        toolId: "repository.rules_crud",
+        label: "Repository rules",
+        route: `/admin/repos/${repoId}/rules`,
+        status: "available",
+      },
+      {
+        toolId: "finding.policy_evaluation",
+        label: "Finding policy evaluation",
+        reason:
+          "Dedicated finding-evaluation inputs are not persisted yet; use review inspector validated findings with policy preview.",
+        status: "unavailable",
+      },
+    ],
+    warnings: memoryRulesWarnings(memoryFactsSummary, rulesSummary),
+  };
+}
+
 /** Creates a replay plan for rerunning a persisted review input through the review worker. */
 export async function createReviewReplayPlan(
   reviewRunId: string,
   dependencies: AdminDebugServiceDependencies,
 ): Promise<ReviewReplayPlan> {
   const details = await getReviewDebugDetails(reviewRunId, dependencies);
+  const repoOrgId = await getRepositoryOrgId(dependencies.db, details.reviewRun.repoId);
   const payload: ReviewPullRequestJobPayload = {
     repoId: details.reviewRun.repoId,
     installationId: snapshotInstallationId(details.snapshot),
@@ -903,6 +1960,7 @@ export async function createReviewReplayPlan(
     jobType: JOB_TYPES.ReviewPullRequest,
     replayJobKey: jobKey,
     payload,
+    ...(repoOrgId ? { orgId: repoOrgId } : {}),
     reviewRunId,
     repoId: payload.repoId,
     createdAt: details.reviewRun.createdAt,
@@ -920,6 +1978,120 @@ export async function createReviewReplayPlan(
     failures: details.failures,
     confirmationToken,
     requiresExplicitConfirmation: true,
+  };
+}
+
+/** Replays deterministic retrieval without mutating production review state. */
+export async function replayRetrievalDryRun(
+  reviewRunId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<RetrievalReplayDryRun> {
+  const reviewRepository = new ReviewRepository(dependencies.db);
+  const pullRequestRepository = new PullRequestRepository(dependencies.db);
+  const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
+  if (!reviewRun) {
+    throw new AdminDebugNotFoundError("review_run", reviewRunId);
+  }
+
+  const warnings: string[] = [];
+  const [snapshot, originalBundle] = await Promise.all([
+    pullRequestRepository.getSnapshot(reviewRun.pullRequestSnapshotId),
+    loadOriginalContextBundle(dependencies.db, reviewRunId, warnings),
+  ]);
+  if (!snapshot) {
+    throw new AdminDebugNotFoundError("review_run", reviewRunId);
+  }
+
+  if (!originalBundle) {
+    warnings.push("Review run has no persisted context bundle artifact to compare.");
+  }
+
+  const generatedAt = new Date().toISOString();
+  const preferredIndexVersionId =
+    stringField(asRecord(originalBundle?.metadata), "indexVersionId") ??
+    (await findReadyIndexVersionId(dependencies.db, snapshot.repoId, snapshot.headSha));
+  const retrievalIndex = preferredIndexVersionId
+    ? createDatabaseRetrievalIndex({
+        db: dependencies.db,
+        indexVersionId: preferredIndexVersionId,
+      })
+    : undefined;
+  if (!retrievalIndex) {
+    warnings.push("Retrieval replay used diff fallback because no ready index version was found.");
+  }
+
+  const replayedBundle = await retrieveContext({
+    reviewRunId,
+    snapshot,
+    indexAvailable: Boolean(retrievalIndex),
+    ...(retrievalIndex ? { index: retrievalIndex } : {}),
+    timestamp: generatedAt,
+  });
+
+  return {
+    schemaVersion: "admin_retrieval_replay_dry_run.v1",
+    comparisons: compareRetrievalReplayItems(originalBundle?.items ?? [], replayedBundle.items),
+    generatedAt,
+    mutatesProductionState: false,
+    ...(originalBundle ? { original: retrievalReplayBundleSummary(originalBundle) } : {}),
+    pullRequestSnapshotId: snapshot.snapshotId,
+    replayed: retrievalReplayBundleSummary(replayedBundle),
+    reviewRunId,
+    warnings,
+  };
+}
+
+/** Replays deterministic finding validation without mutating production review state. */
+export async function replayValidationDryRun(
+  reviewRunId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<ValidationReplayDryRun> {
+  const reviewRepository = new ReviewRepository(dependencies.db);
+  const pullRequestRepository = new PullRequestRepository(dependencies.db);
+  const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
+  if (!reviewRun) {
+    throw new AdminDebugNotFoundError("review_run", reviewRunId);
+  }
+
+  const [snapshot, candidates, originalValidated] = await Promise.all([
+    pullRequestRepository.getSnapshot(reviewRun.pullRequestSnapshotId),
+    reviewRepository.listCandidateFindings(reviewRunId),
+    reviewRepository.listValidatedFindings(reviewRunId),
+  ]);
+  if (!snapshot) {
+    throw new AdminDebugNotFoundError("review_run", reviewRunId);
+  }
+
+  const warnings: string[] = [];
+  const policy = await loadValidationReplayPolicy(dependencies.db, reviewRunId, warnings);
+  const generatedAt = new Date().toISOString();
+  const replayedValidated = validateAndRankCandidateFindings({
+    findings: candidates,
+    ...(policy ? { config: { policy } } : {}),
+    snapshot,
+    timestamp: generatedAt,
+  });
+
+  if (candidates.length === 0) {
+    warnings.push("Review run has no candidate findings to validate.");
+  }
+  if (!policy) {
+    warnings.push(
+      "Validation replay used default validation policy because no policy snapshot was available.",
+    );
+  }
+
+  return {
+    schemaVersion: "admin_validation_replay_dry_run.v1",
+    candidateFindingCount: candidates.length,
+    comparisons: compareValidationReplayFindings(originalValidated, replayedValidated),
+    generatedAt,
+    mutatesProductionState: false,
+    original: validationDecisionCounts(originalValidated),
+    pullRequestSnapshotId: snapshot.snapshotId,
+    replayed: validationDecisionCounts(replayedValidated),
+    reviewRunId,
+    warnings,
   };
 }
 
@@ -1301,6 +2473,7 @@ export async function createPublisherReplayPlan(
   if (!reviewRun) {
     throw new Error(`Review run ${reviewRunId} was not found.`);
   }
+  const repoOrgId = await getRepositoryOrgId(dependencies.db, reviewRun.repoId);
   const payload = {
     reviewRunId,
     repoId: dryRun.repoId,
@@ -1320,6 +2493,7 @@ export async function createPublisherReplayPlan(
     jobType: JOB_TYPES.PublishReview,
     replayJobKey: jobKey,
     payload,
+    ...(repoOrgId ? { orgId: repoOrgId } : {}),
     reviewRunId,
     repoId: payload.repoId,
     createdAt: reviewRun.createdAt,
@@ -1372,14 +2546,31 @@ type ReviewArtifactRow = typeof reviewArtifacts.$inferSelect;
 type CandidateFindingRow = typeof candidateFindings.$inferSelect;
 type ValidatedFindingRow = typeof validatedFindings.$inferSelect;
 type LlmCallRow = typeof llmCalls.$inferSelect;
+type UsageEventRow = typeof usageEvents.$inferSelect;
+type QuotaReservationRow = typeof quotaReservations.$inferSelect;
+type QuotaCounterRow = typeof quotaCounters.$inferSelect;
 type PublishRunRow = typeof publishRuns.$inferSelect;
 type PublishOperationRow = typeof publishOperations.$inferSelect;
 type PublishedCheckRunRow = typeof publishedCheckRuns.$inferSelect;
 type PublishedReviewRow = typeof publishedReviews.$inferSelect;
 type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
+type RepositoryRow = typeof repositories.$inferSelect;
+type MemoryFactRow = typeof memoryFacts.$inferSelect;
 type HeimdallTransaction = Parameters<Parameters<HeimdallDatabase["transaction"]>[0]>[0];
 type HeimdallDbExecutor = HeimdallDatabase | HeimdallTransaction;
+
+type MutableAdminUsageRollupDebugSummary = Omit<
+  AdminUsageRollupDebugSummary,
+  "costMicros" | "eventCount" | "quantity"
+> & {
+  /** Mutable usage quantity total. */
+  quantity: number;
+  /** Mutable usage event count. */
+  eventCount: number;
+  /** Mutable cost total in micro-USD. */
+  costMicros: number;
+};
 
 type DerivedWebhookReplayJob = {
   /** Queue that owned the original planned webhook job. */
@@ -1428,6 +2619,61 @@ async function getWebhookEventRow(
   return row;
 }
 
+/** Gets one durable background job row or raises an admin debug not-found error. */
+async function getBackgroundJobRow(
+  backgroundJobId: string,
+  db: HeimdallDatabase,
+): Promise<BackgroundJobRow> {
+  const [row] = await db
+    .select()
+    .from(backgroundJobs)
+    .where(eq(backgroundJobs.backgroundJobId, backgroundJobId))
+    .limit(1);
+
+  if (!row) {
+    throw new AdminDebugNotFoundError("background_job", backgroundJobId);
+  }
+
+  return row;
+}
+
+/** Gets one repository row or raises an admin debug not-found error. */
+async function getRepositoryRow(repoId: string, db: HeimdallDatabase): Promise<RepositoryRow> {
+  const [row] = await db
+    .select()
+    .from(repositories)
+    .where(eq(repositories.repoId, repoId))
+    .limit(1);
+
+  if (!row) {
+    throw new AdminDebugNotFoundError("repository", repoId);
+  }
+
+  return row;
+}
+
+/** Lists memory facts that can apply to a repository. */
+async function listMemoryFactsForRepository(
+  db: HeimdallDatabase,
+  input: {
+    /** Organization that owns the inspected repository. */
+    readonly orgId: string;
+    /** Repository ID being inspected. */
+    readonly repoId: string;
+  },
+): Promise<readonly MemoryFactRow[]> {
+  return db
+    .select()
+    .from(memoryFacts)
+    .where(
+      or(
+        eq(memoryFacts.repoId, input.repoId),
+        and(eq(memoryFacts.orgId, input.orgId), isNull(memoryFacts.repoId)),
+      ),
+    )
+    .orderBy(asc(memoryFacts.status), desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId));
+}
+
 async function listJobsByKeys(
   db: HeimdallDbExecutor,
   jobKeys: readonly string[],
@@ -1448,7 +2694,12 @@ async function listJobsByKeys(
 async function listReplayAuditLogs(
   db: HeimdallDatabase,
   input: {
-    readonly actions: readonly (WebhookReplayAction | ReviewReplayAction | PublisherReplayAction)[];
+    readonly actions: readonly (
+      | WebhookReplayAction
+      | BackgroundJobReplayAction
+      | ReviewReplayAction
+      | PublisherReplayAction
+    )[];
     readonly resourceType: AdminDebugResourceType;
     readonly resourceId: string;
   },
@@ -1585,6 +2836,93 @@ function toWebhookDebugSummary(row: WebhookEventRow): AdminWebhookEventDebugSumm
     ...(row.processedAt ? { processedAt: toIso(row.processedAt) } : {}),
     ...(row.status === "failed" ? { failure } : {}),
   };
+}
+
+/** Converts a repository row to a memory and rules inspector summary. */
+function toMemoryRulesRepositorySummary(row: RepositoryRow): AdminMemoryRulesRepositorySummary {
+  return {
+    repoId: row.repoId,
+    orgId: row.orgId,
+    provider: row.provider,
+    fullName: row.fullName,
+    ...(row.defaultBranch ? { defaultBranch: row.defaultBranch } : {}),
+    visibility: row.visibility,
+    enabled: row.enabled,
+    isArchived: row.isArchived,
+    isFork: row.isFork,
+  };
+}
+
+/** Converts a memory fact row to an operator-facing debug summary. */
+function toMemoryFactDebugSummary(row: MemoryFactRow): AdminMemoryFactDebugSummary {
+  const metadata = asRecord(row.metadata);
+  const metadataKeys = sortedRecordKeys(metadata);
+
+  return {
+    memoryFactId: row.memoryFactId,
+    orgId: row.orgId,
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    scope: row.repoId ? "repository" : "organization",
+    factType: row.factType,
+    body: row.body,
+    status: row.status,
+    confidence: row.confidence,
+    ...(row.expiresAt ? { expiresAt: toIso(row.expiresAt) } : {}),
+    metadataKeys,
+    ...(metadataKeys.length > 0 && metadata ? { metadataHash: hashJson(metadata) } : {}),
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  };
+}
+
+/** Converts a typed repository rule to an operator-facing debug summary. */
+function toRepoRuleDebugSummary(rule: RepoRule, repoId: string): AdminRepoRuleDebugSummary {
+  const metadataKeys = sortedRecordKeys(rule.metadata);
+
+  return {
+    ruleId: rule.ruleId,
+    orgId: rule.orgId,
+    ...(rule.repoId ? { repoId: rule.repoId } : {}),
+    scope: rule.repoId === repoId ? "repository" : "organization",
+    name: rule.name,
+    ...(rule.description ? { description: rule.description } : {}),
+    effect: rule.effect,
+    matcher: rule.matcher,
+    instruction: rule.instruction,
+    priority: rule.priority,
+    enabled: rule.enabled,
+    ...(rule.createdByUserId ? { createdByUserId: rule.createdByUserId } : {}),
+    metadataKeys,
+    createdAt: rule.createdAt,
+    updatedAt: rule.updatedAt,
+  };
+}
+
+/** Sorts effective rules in policy evaluation order with disabled rules last. */
+function compareRepoRulesForDebug(left: RepoRule, right: RepoRule): number {
+  if (left.enabled !== right.enabled) {
+    return left.enabled ? -1 : 1;
+  }
+
+  return left.priority - right.priority || left.ruleId.localeCompare(right.ruleId);
+}
+
+/** Builds warnings for the memory and rules inspector response. */
+function memoryRulesWarnings(
+  facts: readonly AdminMemoryFactDebugSummary[],
+  rules: readonly AdminRepoRuleDebugSummary[],
+): readonly string[] {
+  const warnings = [
+    "Memory candidate approval and rejection are unavailable until memory candidates are persisted.",
+  ];
+  if (facts.length === 0) {
+    warnings.push("No memory facts currently apply to this repository.");
+  }
+  if (!rules.some((rule) => rule.enabled)) {
+    warnings.push("No enabled repository or organization rules currently apply.");
+  }
+
+  return warnings;
 }
 
 function toBackgroundJobDebugSummary(row: BackgroundJobRow): AdminBackgroundJobDebugSummary {
@@ -1773,6 +3111,47 @@ function toLlmCallDebugSummary(row: LlmCallRow): AdminLlmCallDebugSummary {
   };
 }
 
+function toAdminUsageEventDebugSummary(row: UsageEventRow): AdminUsageEventDebugSummary {
+  const metadata = asRecord(row.metadata);
+  const metadataKeys = sortedRecordKeys(metadata);
+
+  return {
+    costMicros: row.costMicros,
+    eventType: row.eventType,
+    ...(metadata && metadataKeys.length > 0 ? { metadataHash: hashJson(metadata) } : {}),
+    metadataKeys,
+    occurredAt: toIso(row.occurredAt),
+    orgId: row.orgId,
+    quantity: row.quantity,
+    ...(row.repoId ? { repoId: row.repoId } : {}),
+    ...(row.reviewRunId ? { reviewRunId: row.reviewRunId } : {}),
+    unit: row.unit,
+    usageEventId: row.usageEventId,
+  };
+}
+
+function toAdminQuotaDecisionDebugSummary(
+  reservation: QuotaReservationRow,
+  counter: QuotaCounterRow,
+): AdminQuotaDecisionDebugSummary {
+  return {
+    ...(counter.limitQuantity === null ? {} : { limitQuantity: counter.limitQuantity }),
+    createdAt: toIso(reservation.createdAt),
+    expiresAt: toIso(reservation.expiresAt),
+    periodKey: counter.periodKey,
+    quantity: reservation.quantity,
+    quotaKey: counter.quotaKey,
+    quotaReservationId: reservation.quotaReservationId,
+    ...(reservation.consumedAt ? { consumedAt: toIso(reservation.consumedAt) } : {}),
+    ...(reservation.releasedAt ? { releasedAt: toIso(reservation.releasedAt) } : {}),
+    reservedQuantity: counter.reservedQuantity,
+    sourceId: reservation.sourceId,
+    sourceType: reservation.sourceType,
+    status: reservation.status,
+    usedQuantity: counter.usedQuantity,
+  };
+}
+
 function toPublishRunDebugSummary(row: PublishRunRow): AdminPublishRunDebugSummary {
   const failure = failureFromUnknown({
     source: "publish_run",
@@ -1952,6 +3331,268 @@ function collectFailures(
   return values.filter((value): value is AdminFailureDetail => value !== undefined);
 }
 
+/** Compares persisted retrieval output with dry-run retrieval output. */
+export function compareRetrievalReplayItems(
+  original: readonly ContextItem[],
+  replayed: readonly ContextItem[],
+): readonly RetrievalReplayItemComparison[] {
+  const originalByKey = new Map(original.map((item) => [retrievalReplayItemKey(item), item]));
+  const replayedByKey = new Map(replayed.map((item) => [retrievalReplayItemKey(item), item]));
+  const keys = [...new Set([...originalByKey.keys(), ...replayedByKey.keys()])].sort(
+    (left, right) => left.localeCompare(right),
+  );
+
+  return keys.map((key) =>
+    retrievalReplayComparison(key, originalByKey.get(key), replayedByKey.get(key)),
+  );
+}
+
+/** Loads the original context bundle payload for a review run when present. */
+async function loadOriginalContextBundle(
+  db: HeimdallDatabase,
+  reviewRunId: string,
+  warnings: string[],
+): Promise<ContextBundle | undefined> {
+  const [row] = await db
+    .select()
+    .from(reviewArtifacts)
+    .where(
+      and(eq(reviewArtifacts.reviewRunId, reviewRunId), eq(reviewArtifacts.kind, "context_bundle")),
+    )
+    .orderBy(desc(reviewArtifacts.createdAt))
+    .limit(1);
+  const payload = asRecord(row?.metadata)?.payload;
+  if (!payload) {
+    return undefined;
+  }
+
+  try {
+    return parseWithSchema("ContextBundle", ContextBundleSchema, payload);
+  } catch (error) {
+    warnings.push(
+      `Stored context bundle could not be parsed for retrieval replay: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/** Returns the newest ready index version for a repository commit. */
+async function findReadyIndexVersionId(
+  db: HeimdallDatabase,
+  repoId: string,
+  commitSha: string,
+): Promise<string | undefined> {
+  const [row] = await db
+    .select({ indexVersionId: codeIndexVersions.indexVersionId })
+    .from(codeIndexVersions)
+    .where(
+      and(
+        eq(codeIndexVersions.repoId, repoId),
+        eq(codeIndexVersions.commitSha, commitSha),
+        eq(codeIndexVersions.status, "ready"),
+      ),
+    )
+    .orderBy(desc(codeIndexVersions.completedAt))
+    .limit(1);
+
+  return row?.indexVersionId;
+}
+
+/** Summarizes a context bundle for operator-facing retrieval replay output. */
+function retrievalReplayBundleSummary(bundle: ContextBundle): RetrievalReplayBundleSummary {
+  const metadata = asRecord(bundle.metadata);
+  const indexVersionId = stringField(metadata, "indexVersionId");
+  const retrievalMode = stringField(metadata, "retrievalMode");
+  return {
+    contextBundleId: bundle.contextBundleId,
+    estimatedTokens: bundle.tokenBudget.estimatedTokens,
+    itemCount: bundle.items.length,
+    maxTokens: bundle.tokenBudget.maxTokens,
+    ...(indexVersionId ? { indexVersionId } : {}),
+    ...(retrievalMode ? { retrievalMode } : {}),
+  };
+}
+
+/** Builds one comparison row for a retrieval dry-run context item. */
+function retrievalReplayComparison(
+  key: string,
+  original: ContextItem | undefined,
+  replayed: ContextItem | undefined,
+): RetrievalReplayItemComparison {
+  return {
+    key,
+    ...(original ? { originalKind: original.kind, originalPriority: original.priority } : {}),
+    ...(original?.title ? { originalTitle: original.title } : {}),
+    ...(replayed ? { replayedKind: replayed.kind, replayedPriority: replayed.priority } : {}),
+    ...(replayed?.title ? { replayedTitle: replayed.title } : {}),
+    status: retrievalReplayStatus(original, replayed),
+  };
+}
+
+/** Classifies one retrieval comparison row. */
+function retrievalReplayStatus(
+  original: ContextItem | undefined,
+  replayed: ContextItem | undefined,
+): RetrievalReplayItemComparison["status"] {
+  if (!original) {
+    return "added";
+  }
+  if (!replayed) {
+    return "removed";
+  }
+  if (retrievalReplayItemSignature(original) === retrievalReplayItemSignature(replayed)) {
+    return "unchanged";
+  }
+
+  return "changed";
+}
+
+/** Builds a comparable item signature without relying on the comparison key. */
+function retrievalReplayItemSignature(item: ContextItem): string {
+  return JSON.stringify({
+    kind: item.kind,
+    metadata: item.metadata,
+    priority: item.priority,
+    provenance: item.provenance,
+    score: item.score,
+    snippet: item.snippet,
+    source: item.source,
+    summary: item.summary,
+    text: item.text,
+    title: item.title,
+    tokenEstimate: item.tokenEstimate,
+  });
+}
+
+/** Builds a stable comparison key for original and replayed context items. */
+function retrievalReplayItemKey(item: ContextItem): string {
+  return item.snippet?.chunkId ?? item.provenance.relatedSymbolId ?? item.contextItemId;
+}
+
+/** Compares persisted validation output with dry-run validation output. */
+export function compareValidationReplayFindings(
+  original: readonly ValidatedFinding[],
+  replayed: readonly ValidatedFinding[],
+): readonly ValidationReplayFindingComparison[] {
+  const originalByKey = new Map(original.map((finding) => [validationReplayKey(finding), finding]));
+  const replayedByKey = new Map(replayed.map((finding) => [validationReplayKey(finding), finding]));
+  const keys = [...new Set([...originalByKey.keys(), ...replayedByKey.keys()])].sort(
+    (left, right) => left.localeCompare(right),
+  );
+
+  return keys.map((key) => {
+    const originalFinding = originalByKey.get(key);
+    const replayedFinding = replayedByKey.get(key);
+    return validationReplayComparison(key, originalFinding, replayedFinding);
+  });
+}
+
+/** Loads the effective policy snapshot used for validation replay when it is available. */
+async function loadValidationReplayPolicy(
+  db: HeimdallDatabase,
+  reviewRunId: string,
+  warnings: string[],
+): Promise<EffectiveReviewPolicy | undefined> {
+  const [row] = await db
+    .select()
+    .from(reviewArtifacts)
+    .where(
+      and(
+        eq(reviewArtifacts.reviewRunId, reviewRunId),
+        eq(reviewArtifacts.kind, "policy_snapshot"),
+      ),
+    )
+    .orderBy(desc(reviewArtifacts.createdAt))
+    .limit(1);
+
+  const payload = asRecord(asRecord(row?.metadata)?.payload);
+  const snapshotPayload = payload?.snapshot;
+  if (!snapshotPayload) {
+    return undefined;
+  }
+
+  try {
+    return parseReviewPolicySnapshot(snapshotPayload).effectivePolicy;
+  } catch (error) {
+    warnings.push(
+      `Stored policy snapshot could not be parsed for validation replay: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/** Counts validation decisions for an operator-facing replay summary. */
+function validationDecisionCounts(
+  findings: readonly ValidatedFinding[],
+): ValidationReplayDecisionCounts {
+  return {
+    publish: findings.filter((finding) => finding.decision === "publish").length,
+    reject: findings.filter((finding) => finding.decision === "reject").length,
+  };
+}
+
+/** Builds one comparison row for a validation dry-run finding. */
+function validationReplayComparison(
+  key: string,
+  original: ValidatedFinding | undefined,
+  replayed: ValidatedFinding | undefined,
+): ValidationReplayFindingComparison {
+  const originalReasons = original?.validation.reasons ?? [];
+  const replayedReasons = replayed?.validation.reasons ?? [];
+  const candidateFindingId = original?.candidateFindingId ?? replayed?.candidateFindingId;
+  const status = validationReplayStatus(original, replayed);
+  return {
+    key,
+    ...(candidateFindingId ? { candidateFindingId } : {}),
+    ...(original
+      ? { originalDecision: original.decision, originalFindingId: original.findingId }
+      : {}),
+    originalReasons,
+    ...(replayed
+      ? { replayedDecision: replayed.decision, replayedFindingId: replayed.findingId }
+      : {}),
+    replayedReasons,
+    status,
+    title: original?.title ?? replayed?.title ?? key,
+  };
+}
+
+/** Classifies one validation comparison row. */
+function validationReplayStatus(
+  original: ValidatedFinding | undefined,
+  replayed: ValidatedFinding | undefined,
+): ValidationReplayFindingComparison["status"] {
+  if (!original) {
+    return "added";
+  }
+  if (!replayed) {
+    return "removed";
+  }
+  if (
+    original.decision === replayed.decision &&
+    original.rank === replayed.rank &&
+    sameStringArray(original.validation.reasons, replayed.validation.reasons)
+  ) {
+    return "unchanged";
+  }
+
+  return "changed";
+}
+
+/** Builds a stable comparison key for original and replayed validation rows. */
+function validationReplayKey(finding: ValidatedFinding): string {
+  return finding.candidateFindingId || finding.fingerprint || finding.findingId;
+}
+
+/** Returns whether two string arrays contain the same values in the same order. */
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 function firstDefined<T>(values: readonly (T | undefined)[]): T | undefined {
   return values.find((value): value is T => value !== undefined);
 }
@@ -2090,9 +3731,10 @@ function deriveWebhookReplayJobs(row: WebhookEventRow): readonly DerivedWebhookR
 function replayJobFromExistingJob(
   job: AdminBackgroundJobDebugSummary,
   replayScopeId: string,
+  replayScope: "webhook" | "job" = "webhook",
 ): AdminReplayJobPlan {
   const envelope = parseJobEnvelope(job.payload);
-  const replayJobKey = `admin:webhook:${replayScopeId}:${job.backgroundJobId}:${hashJson({
+  const replayJobKey = `admin:${replayScope}:${replayScopeId}:${job.backgroundJobId}:${hashJson({
     jobType: job.jobType,
     jobKey: job.jobKey,
   }).slice("sha256:".length, 18)}`;
@@ -2114,6 +3756,11 @@ function replayJobFromExistingJob(
     ...(job.repoId ? { repoId: job.repoId } : {}),
     ...(job.reviewRunId ? { reviewRunId: job.reviewRunId } : {}),
   };
+}
+
+/** Returns whether a durable background job can be replayed through the generic job inspector. */
+function isReplayableBackgroundJobStatus(status: string): boolean {
+  return status === "failed" || status === "dead_lettered";
 }
 
 /** Creates a replay job plan for a webhook job that is missing from durable state. */
@@ -2231,7 +3878,11 @@ async function insertReplayJobs(input: {
   /** Database used to persist replay rows. */
   readonly db: HeimdallDatabase;
   /** Replay action that was confirmed. */
-  readonly action: WebhookReplayAction | ReviewReplayAction | PublisherReplayAction;
+  readonly action:
+    | WebhookReplayAction
+    | BackgroundJobReplayAction
+    | ReviewReplayAction
+    | PublisherReplayAction;
   /** Confirmation token that authorized the replay. */
   readonly confirmationToken: string;
   /** Replay jobs to insert. */
@@ -2240,6 +3891,9 @@ async function insertReplayJobs(input: {
   readonly audit: ReplayAuditInput;
 }): Promise<AdminReplayExecutionResult> {
   return input.db.transaction(async (tx) => {
+    const completedAt = new Date();
+    const adminActionId = newId("admact");
+    const replayRunId = newId("rply");
     const insertedJobIds: string[] = [];
     for (const job of input.jobs) {
       const [inserted] = await tx
@@ -2282,17 +3936,106 @@ async function insertReplayJobs(input: {
     const existingJobIds = replayJobs
       .map((job) => job.backgroundJobId)
       .filter((jobId) => !insertedSet.has(jobId));
+    const result = {
+      existingJobIds,
+      insertedJobIds,
+      replayJobIds: replayJobs.map((job) => job.backgroundJobId),
+      replayJobKeys: replayJobs.map((job) => job.jobKey),
+      replayRunId,
+    };
+    const adminActionReason = adminActionReasonForReplayAction(input.action);
+    const orgId = input.audit.orgId ?? firstDefined(input.jobs.map((job) => job.orgId));
+    const repoId = firstDefined(input.jobs.map((job) => job.repoId));
+    const reviewRunId =
+      firstDefined(input.jobs.map((job) => job.reviewRunId)) ??
+      (input.audit.resourceType === "review_run" ? input.audit.resourceId : undefined);
+    const replayStageSummaries = input.jobs.map((job, index) => ({
+      jobType: job.jobType,
+      queueName: job.queueName,
+      replayJobKey: job.replayJobKey,
+      source: job.source,
+      stage: replayStageNameForJob(input.action, job, index),
+    }));
+    await tx.insert(adminActions).values({
+      adminActionId,
+      actorType: input.audit.actor.actorType,
+      actorUserId: input.audit.actor.actorUserId,
+      completedAt,
+      kind: adminActionKindForReplayAction(input.action),
+      orgId,
+      reason: adminActionReason,
+      repoId,
+      request: {
+        action: input.action,
+        confirmationToken: input.confirmationToken,
+        plan: input.audit.plan,
+        resourceId: input.audit.resourceId,
+        resourceType: input.audit.resourceType,
+      },
+      result,
+      reviewRunId,
+      startedAt: completedAt,
+      status: "completed",
+      ...(input.audit.actor.supportSessionId
+        ? { supportSessionId: input.audit.actor.supportSessionId }
+        : {}),
+    });
+    await tx.insert(replayRuns).values({
+      replayRunId,
+      adminActionId,
+      completedAt,
+      configOverrides: {},
+      createdByActorType: input.audit.actor.actorType,
+      createdByActorUserId: input.audit.actor.actorUserId,
+      mode: "operator_dispatch",
+      orgId,
+      reason: adminActionReason,
+      repoId,
+      result,
+      sourceReviewRunId: reviewRunId,
+      stages: replayStageSummaries,
+      startedAt: completedAt,
+      status: "completed",
+      ...(input.audit.actor.supportSessionId
+        ? { supportSessionId: input.audit.actor.supportSessionId }
+        : {}),
+    });
+    if (replayStageSummaries.length > 0) {
+      await tx.insert(replayStageRuns).values(
+        replayStageSummaries.map((stageSummary) => ({
+          replayStageRunId: newId("rplystg"),
+          replayRunId,
+          completedAt,
+          inputArtifactRef: {
+            replayJobKey: stageSummary.replayJobKey,
+          },
+          metrics: {
+            replayJobCount: 1,
+          },
+          outputArtifactRef: {
+            replayJobKey: stageSummary.replayJobKey,
+          },
+          stage: stageSummary.stage,
+          startedAt: completedAt,
+          status: "completed",
+        })),
+      );
+    }
     const auditLogId = await insertReplayAuditLog(tx, {
       ...input.audit,
       action: input.action,
+      adminActionId,
       confirmationToken: input.confirmationToken,
       insertedJobIds,
       existingJobIds,
+      replayRunId,
       replayJobs,
     });
 
     return {
       action: input.action,
+      adminActionId,
+      replayRunId,
       confirmationToken: input.confirmationToken,
       auditLogId,
       insertedJobIds,
@@ -2305,10 +4048,16 @@ async function insertReplayJobs(input: {
 async function insertReplayAuditLog(
   db: HeimdallDbExecutor,
   input: ReplayAuditInput & {
-    readonly action: WebhookReplayAction | ReviewReplayAction | PublisherReplayAction;
+    readonly action:
+      | WebhookReplayAction
+      | BackgroundJobReplayAction
+      | ReviewReplayAction
+      | PublisherReplayAction;
+    readonly adminActionId: string;
     readonly confirmationToken: string;
     readonly insertedJobIds: readonly string[];
     readonly existingJobIds: readonly string[];
+    readonly replayRunId: string;
     readonly replayJobs: readonly AdminBackgroundJobDebugSummary[];
   },
 ): Promise<string> {
@@ -2327,17 +4076,22 @@ async function insertReplayAuditLog(
         role: input.actor.role,
         ...(input.actor.requestId ? { requestId: input.actor.requestId } : {}),
         ...(input.actor.sessionId ? { sessionId: input.actor.sessionId } : {}),
+        ...(input.actor.supportSessionId ? { supportSessionId: input.actor.supportSessionId } : {}),
         ...(input.actor.provider ? { provider: input.actor.provider } : {}),
         ...(input.actor.permissions ? { permissions: input.actor.permissions } : {}),
         ...(input.actor.displayName ? { displayName: input.actor.displayName } : {}),
         ...(input.actor.email ? { email: input.actor.email } : {}),
       },
+      adminActionId: input.adminActionId,
       ...(input.actor.requestId ? { requestId: input.actor.requestId } : {}),
+      ...(input.actor.supportSessionId ? { supportSessionId: input.actor.supportSessionId } : {}),
       confirmationToken: input.confirmationToken,
       plan: input.plan,
+      replayRunId: input.replayRunId,
       result: {
         insertedJobIds: input.insertedJobIds,
         existingJobIds: input.existingJobIds,
+        replayRunId: input.replayRunId,
         replayJobIds: input.replayJobs.map((job) => job.backgroundJobId),
         replayJobKeys: input.replayJobs.map((job) => job.jobKey),
       },
@@ -2345,6 +4099,61 @@ async function insertReplayAuditLog(
   });
 
   return auditLogId;
+}
+
+/** Returns the durable admin action kind used for a replay dispatch. */
+function adminActionKindForReplayAction(
+  _action:
+    | WebhookReplayAction
+    | BackgroundJobReplayAction
+    | ReviewReplayAction
+    | PublisherReplayAction,
+): "replay.dispatch" {
+  return "replay.dispatch";
+}
+
+/** Returns the replay stage label stored for a dispatched durable job. */
+function replayStageNameForJob(
+  action:
+    | WebhookReplayAction
+    | BackgroundJobReplayAction
+    | ReviewReplayAction
+    | PublisherReplayAction,
+  job: AdminReplayJobPlan,
+  index: number,
+): string {
+  switch (action) {
+    case "job.requeue":
+      return "job_dispatch";
+    case "publish.review":
+      return "publisher_dispatch";
+    case "review.requeue":
+      return "review_dispatch";
+    case "webhook.requeue_jobs":
+      return `${job.source === "missing_job" ? "webhook_missing_job" : "webhook_existing_job"}_${
+        index + 1
+      }`;
+  }
+}
+
+/** Returns a concise operator reason for a replay dispatch action record. */
+function adminActionReasonForReplayAction(
+  action:
+    | WebhookReplayAction
+    | BackgroundJobReplayAction
+    | ReviewReplayAction
+    | PublisherReplayAction,
+): string {
+  switch (action) {
+    case "job.requeue":
+      return "Operator-confirmed background job replay dispatch.";
+    case "publish.review":
+      return "Operator-confirmed publisher replay dispatch.";
+    case "review.requeue":
+      return "Operator-confirmed review replay dispatch.";
+    case "webhook.requeue_jobs":
+      return "Operator-confirmed webhook replay dispatch.";
+  }
 }
 
 function auditPlanFromWebhookReplayPlan(plan: WebhookReplayPlan): Record<string, unknown> {
@@ -2356,6 +4165,18 @@ function auditPlanFromWebhookReplayPlan(plan: WebhookReplayPlan): Record<string,
     blockedJobIds: plan.blockedJobIds,
     missingJobKeys: plan.missingJobKeys,
     replayJobs: plan.jobs.map(toReplayConfirmationJob),
+    failureCodes: plan.failures.map((failure) => failure.code),
+  };
+}
+
+function auditPlanFromBackgroundJobReplayPlan(
+  plan: BackgroundJobReplayPlan,
+): Record<string, unknown> {
+  return {
+    action: plan.action,
+    backgroundJobId: plan.backgroundJobId,
+    currentStatus: plan.currentStatus,
+    replayJob: toReplayConfirmationJob(plan.job),
     failureCodes: plan.failures.map((failure) => failure.code),
   };
 }
@@ -2430,6 +4251,552 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** Returns sorted object keys for metadata summaries. */
+function sortedRecordKeys(value: Readonly<Record<string, unknown>> | undefined): readonly string[] {
+  return value ? Object.keys(value).sort((left, right) => left.localeCompare(right)) : [];
+}
+
+/** Returns true when a usage event belongs in the requested usage/cost inspection. */
+function usageEventBelongsToInspection(
+  event: AdminUsageEventDebugSummary,
+  input: Pick<BuildUsageCostInspectionInput, "orgId" | "repoId" | "reviewRunId">,
+): boolean {
+  return (
+    event.orgId === input.orgId &&
+    (!input.repoId || !event.repoId || event.repoId === input.repoId) &&
+    (!input.reviewRunId || event.reviewRunId === input.reviewRunId)
+  );
+}
+
+/** Groups usage events by event type and unit for review-run inspection. */
+function summarizeAdminUsageRollups(
+  usageRows: readonly AdminUsageEventDebugSummary[],
+): readonly AdminUsageRollupDebugSummary[] {
+  const rowsByKey = new Map<string, MutableAdminUsageRollupDebugSummary>();
+
+  for (const event of usageRows) {
+    const key = `${event.eventType}:${event.unit}`;
+    const row =
+      rowsByKey.get(key) ??
+      ({
+        costMicros: 0,
+        eventCount: 0,
+        eventType: event.eventType,
+        quantity: 0,
+        unit: event.unit,
+      } satisfies MutableAdminUsageRollupDebugSummary);
+    row.costMicros += event.costMicros;
+    row.eventCount += 1;
+    row.quantity += event.quantity;
+    rowsByKey.set(key, row);
+  }
+
+  return [...rowsByKey.values()].sort(compareAdminUsageRollups);
+}
+
+/** Builds customer-understandable billable unit totals from usage events. */
+function summarizeBillableUnits(
+  usageRows: readonly AdminUsageEventDebugSummary[],
+): Readonly<Record<string, number>> {
+  const units: Record<string, number> = {};
+
+  for (const event of usageRows) {
+    const key = billableUnitKey(event);
+    if (!key) {
+      continue;
+    }
+    units[key] = (units[key] ?? 0) + event.quantity;
+  }
+
+  return Object.fromEntries(
+    Object.entries(units).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey)),
+  );
+}
+
+/** Returns the customer-facing billable unit key for a usage event when one exists. */
+function billableUnitKey(event: AdminUsageEventDebugSummary): string | undefined {
+  if (event.eventType === "review.credit" && event.unit === "credit") {
+    return "review_credits";
+  }
+  if (event.eventType === "review.run" && event.unit === "count") {
+    return "review_runs";
+  }
+
+  return undefined;
+}
+
+/** Builds warnings for weak or missing usage/cost inspection data. */
+function usageCostInspectionWarnings(input: {
+  /** Review run being inspected when available. */
+  readonly reviewRunId?: string;
+  /** Usage events included in the inspection. */
+  readonly usageEvents: readonly AdminUsageEventDebugSummary[];
+  /** Quota decisions included in the inspection. */
+  readonly quotaDecisions: readonly AdminQuotaDecisionDebugSummary[];
+}): readonly string[] {
+  const warnings: string[] = [];
+  if (input.usageEvents.length === 0) {
+    warnings.push("No usage events are linked to this review run.");
+  }
+  if (input.reviewRunId && input.quotaDecisions.length === 0) {
+    warnings.push("No quota reservation is linked to this review run.");
+  }
+  if (
+    input.usageEvents.some(
+      (event) =>
+        event.eventType === "review.credit" && event.unit === "credit" && event.quantity < 0,
+    )
+  ) {
+    warnings.push("Review credit usage includes a correction event.");
+  }
+
+  return warnings;
+}
+
+/** Formats micro-USD as a fixed USD decimal string. */
+function microsToUsdString(micros: number): string {
+  return (micros / 1_000_000).toFixed(6);
+}
+
+/** Sorts usage events in stable ledger display order. */
+function compareAdminUsageEvents(
+  left: AdminUsageEventDebugSummary,
+  right: AdminUsageEventDebugSummary,
+): number {
+  return (
+    left.occurredAt.localeCompare(right.occurredAt) ||
+    left.usageEventId.localeCompare(right.usageEventId)
+  );
+}
+
+/** Sorts usage rollups by event type and unit. */
+function compareAdminUsageRollups(
+  left: AdminUsageRollupDebugSummary,
+  right: AdminUsageRollupDebugSummary,
+): number {
+  return left.eventType.localeCompare(right.eventType) || left.unit.localeCompare(right.unit);
+}
+
+/** Sorts quota decisions by period, quota key, and reservation ID. */
+function compareAdminQuotaDecisions(
+  left: AdminQuotaDecisionDebugSummary,
+  right: AdminQuotaDecisionDebugSummary,
+): number {
+  return (
+    left.periodKey.localeCompare(right.periodKey) ||
+    left.quotaKey.localeCompare(right.quotaKey) ||
+    left.quotaReservationId.localeCompare(right.quotaReservationId)
+  );
+}
+
+/** Builds human-review warnings for an eval import draft. */
+function evalImportWarnings(
+  details: AdminReviewDebugDetails,
+  request: ImportReviewRunToEvalRequest,
+): readonly string[] {
+  const warnings: string[] = [];
+  if (request.redactionLevel === "raw_allowed") {
+    warnings.push("Raw eval imports require a separate support-session approval before commit.");
+  }
+  if (request.includeArtifacts.rawDiff) {
+    warnings.push("Raw diff content is not included in metadata-only admin import drafts.");
+  }
+  if (request.includeArtifacts.contextBundle) {
+    warnings.push("Context bundle content is not included until artifact storage reads are gated.");
+  }
+  if (!details.snapshot) {
+    warnings.push("Review run has no pull request snapshot summary.");
+  }
+  if (details.validatedFindings.length === 0) {
+    warnings.push("Review run has no validated findings; this draft starts as a no-finding case.");
+  }
+
+  const skippedFindings = details.validatedFindings.filter(
+    (finding) => !evalFindingLocation(finding.location),
+  );
+  if (skippedFindings.length > 0) {
+    warnings.push(
+      `${skippedFindings.length} finding(s) were skipped because their anchor is missing.`,
+    );
+  }
+
+  return warnings;
+}
+
+/** Builds proposed files for a later human-approved eval fixture commit. */
+function evalImportDraftFiles(
+  evalCase: EvalCase,
+  details: AdminReviewDebugDetails,
+  request: ImportReviewRunToEvalRequest,
+  warnings: readonly string[],
+): readonly AdminEvalImportDraftFile[] {
+  const basePath = `packages/evaluation/fixtures/${request.suiteId}/${evalCase.caseId}`;
+  const files: AdminEvalImportDraftFile[] = [
+    {
+      content: evalCase,
+      kind: "eval_case",
+      path: `${basePath}/eval-case.json`,
+    },
+    {
+      content: evalCase.expectedFindings,
+      kind: "expected_findings",
+      path: `${basePath}/expected-findings.json`,
+    },
+    {
+      content: evalCase.actualFindings,
+      kind: "actual_findings",
+      path: `${basePath}/actual-findings.json`,
+    },
+    {
+      content: evalImportNotesMarkdown(evalCase, request, warnings),
+      kind: "notes",
+      path: `${basePath}/notes.md`,
+    },
+  ];
+
+  if (request.includeArtifacts.pullRequestSnapshot && details.snapshot) {
+    files.push({
+      content: details.snapshot,
+      kind: "pull_request_snapshot",
+      path: `${basePath}/pr-snapshot.json`,
+    });
+  }
+
+  return files;
+}
+
+/** Renders review notes for a generated eval import draft. */
+function evalImportNotesMarkdown(
+  evalCase: EvalCase,
+  request: ImportReviewRunToEvalRequest,
+  warnings: readonly string[],
+): string {
+  return [
+    `# ${request.caseName}`,
+    "",
+    `Source review run: \`${request.reviewRunId}\``,
+    `Target suite: \`${request.suiteId}\``,
+    `Redaction level: \`${request.redactionLevel}\``,
+    "",
+    `Reason: ${request.reason}`,
+    "",
+    `Expected findings: ${evalCase.expectedFindings.length}`,
+    `Actual findings: ${evalCase.actualFindings.length}`,
+    "",
+    "## Warnings",
+    warnings.length === 0 ? "- None" : warnings.map((warning) => `- ${warning}`).join("\n"),
+  ].join("\n");
+}
+
+/** Builds stable tags for an imported eval case. */
+function evalCaseTags(
+  request: ImportReviewRunToEvalRequest,
+  warnings: readonly string[],
+): readonly string[] {
+  const labels = request.labels?.map(slugPart).filter((label) => label.length > 0) ?? [];
+  return [
+    "production-import",
+    request.redactionLevel,
+    ...labels,
+    ...(warnings.length > 0 ? ["needs-review"] : []),
+  ];
+}
+
+/** Builds a deterministic eval case ID for a draft. */
+function evalCaseId(suiteId: string, caseName: string, reviewRunId: string): string {
+  const slug = slugPart(caseName) || "review-run";
+  const hash = createHash("sha256")
+    .update(`${suiteId}:${caseName}:${reviewRunId}`)
+    .digest("hex")
+    .slice(0, 10);
+  return `case_${slug}_${hash}`;
+}
+
+/** Converts a validated finding summary into an eval actual finding when it has a valid anchor. */
+function toEvalActualFinding(
+  finding: AdminValidatedFindingDebugSummary,
+): readonly EvalActualFinding[] {
+  const location = evalFindingLocation(finding.location);
+  if (!location) {
+    return [];
+  }
+
+  return [
+    {
+      findingId: finding.findingId,
+      title: finding.title,
+      body: `Imported metadata-only finding ${finding.findingId}. Review the source run before approving this fixture.`,
+      category: evalFindingCategory(finding.category),
+      severity: evalFindingSeverity(finding.severity),
+      location,
+    },
+  ];
+}
+
+/** Converts a publishable finding summary into an expected eval finding label. */
+function toEvalExpectedFinding(
+  finding: AdminValidatedFindingDebugSummary,
+): readonly EvalExpectedFinding[] {
+  const location = evalFindingLocation(finding.location);
+  if (!location) {
+    return [];
+  }
+
+  return [
+    {
+      expectedFindingId: `expected_${slugPart(finding.findingId)}`,
+      title: finding.title,
+      category: evalFindingCategory(finding.category),
+      severity: evalFindingSeverity(finding.severity),
+      location,
+      bodyKeywords: bodyKeywords(finding.title),
+      maxLineDistance: 0,
+    },
+  ];
+}
+
+/** Converts an unknown finding location payload into the eval location shape. */
+function evalFindingLocation(value: unknown): EvalFindingLocation | undefined {
+  const record = asRecord(value);
+  const path = stringField(record, "path");
+  const line = numberField(record, "line");
+  if (!path || line === undefined || !Number.isInteger(line) || line < 1) {
+    return undefined;
+  }
+
+  return { path, line };
+}
+
+/** Converts a review category into an eval-supported category. */
+function evalFindingCategory(category: string): EvalActualFinding["category"] {
+  const categories: readonly EvalActualFinding["category"][] = [
+    "correctness",
+    "security",
+    "performance",
+    "test_coverage",
+    "maintainability",
+    "architecture",
+    "dependency",
+    "documentation",
+    "style",
+    "other",
+  ];
+  return categories.includes(category as EvalActualFinding["category"])
+    ? (category as EvalActualFinding["category"])
+    : "other";
+}
+
+/** Converts a review severity into an eval-supported severity. */
+function evalFindingSeverity(severity: string): EvalActualFinding["severity"] {
+  const severities: readonly EvalActualFinding["severity"][] = [
+    "info",
+    "low",
+    "medium",
+    "high",
+    "critical",
+  ];
+  return severities.includes(severity as EvalActualFinding["severity"])
+    ? (severity as EvalActualFinding["severity"])
+    : "medium";
+}
+
+/** Builds lightweight expected-body keywords from a finding title. */
+function bodyKeywords(title: string): string[] {
+  const keywords = title
+    .split(/[^A-Za-z0-9_]+/u)
+    .map((word) => word.trim().toLowerCase())
+    .filter((word) => word.length >= 4)
+    .slice(0, 4);
+  return keywords.length > 0 ? keywords : ["review"];
+}
+
+/** Builds eval changed-file metadata from snapshot data plus finding anchors. */
+function evalChangedFiles(
+  details: AdminReviewDebugDetails,
+  findings: readonly (EvalActualFinding | EvalExpectedFinding)[],
+): readonly EvalChangedFile[] {
+  const linesByPath = new Map<string, Set<number>>();
+  for (const finding of findings) {
+    const lines = linesByPath.get(finding.location.path) ?? new Set<number>();
+    lines.add(finding.location.line);
+    linesByPath.set(finding.location.path, lines);
+  }
+
+  const changedFiles = new Map<string, EvalChangedFile>();
+  for (const file of details.snapshot?.changedFiles ?? []) {
+    changedFiles.set(file.path, {
+      path: file.path,
+      changeType: evalChangeType(file.status),
+      reviewableLines: [...(linesByPath.get(file.path) ?? new Set<number>())].sort(
+        (left, right) => left - right,
+      ),
+    });
+  }
+
+  for (const [path, lines] of linesByPath) {
+    if (!changedFiles.has(path)) {
+      changedFiles.set(path, {
+        path,
+        changeType: "modified",
+        reviewableLines: [...lines].sort((left, right) => left - right),
+      });
+    }
+  }
+
+  return [...changedFiles.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+/** Converts provider change status text into eval change types. */
+function evalChangeType(status: string | undefined): EvalChangedFile["changeType"] {
+  switch (status) {
+    case "added":
+      return "added";
+    case "deleted":
+    case "removed":
+      return "deleted";
+    case "renamed":
+      return "renamed";
+    case "generated":
+      return "generated";
+    default:
+      return "modified";
+  }
+}
+
+/** Computes review latency in milliseconds when start and completion timestamps are available. */
+function reviewLatencyMs(details: AdminReviewDebugDetails): number {
+  const startedAt = details.reviewRun.startedAt ? Date.parse(details.reviewRun.startedAt) : NaN;
+  const completedAt = details.reviewRun.completedAt
+    ? Date.parse(details.reviewRun.completedAt)
+    : NaN;
+  return Number.isFinite(startedAt) && Number.isFinite(completedAt)
+    ? Math.max(0, completedAt - startedAt)
+    : 0;
+}
+
+/** Converts arbitrary operator-facing text into a compact lowercase identifier fragment. */
+function slugPart(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 48);
+}
+
+/** Looks up the organization that owns a repository for audit scoping. */
+async function getRepositoryOrgId(
+  db: HeimdallDatabase,
+  repoId: string,
+): Promise<string | undefined> {
+  const rows = await db
+    .select({ orgId: repositories.orgId })
+    .from(repositories)
+    .where(eq(repositories.repoId, repoId))
+    .limit(1);
+  return rows[0]?.orgId;
+}
+
+/** Converts a debug-bundle actor into a compact serializable summary. */
+function debugBundleActorSummary(actor: AdminReplayAuditActor): AdminDebugBundleActorSummary {
+  return {
+    actorType: actor.actorType,
+    actorUserId: actor.actorUserId,
+    role: actor.role,
+    ...(actor.requestId ? { requestId: actor.requestId } : {}),
+    ...(actor.sessionId ? { sessionId: actor.sessionId } : {}),
+    ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
+    ...(actor.provider ? { provider: actor.provider } : {}),
+    ...(actor.displayName ? { displayName: actor.displayName } : {}),
+    ...(actor.email ? { email: actor.email } : {}),
+  };
+}
+
+/** Recursively redacts values for fields that can contain source, prompt, or provider payloads. */
+function redactDebugBundleValueAtKey(value: unknown, key: string): unknown {
+  if (key && isSensitiveDebugBundleKey(key)) {
+    return redactedDebugBundleValue(key, value);
+  }
+
+  if (value instanceof Date) {
+    return toIso(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactDebugBundleValueAtKey(item, ""));
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+
+  const redacted: Record<string, unknown> = {};
+  for (const [fieldKey, fieldValue] of Object.entries(record)) {
+    redacted[fieldKey] = redactDebugBundleValueAtKey(fieldValue, fieldKey);
+  }
+  return redacted;
+}
+
+/** Returns whether a debug bundle field name should be replaced with a hash placeholder. */
+function isSensitiveDebugBundleKey(key: string): boolean {
+  const normalizedKey = key.toLowerCase();
+  if (normalizedKey.endsWith("hash")) {
+    return false;
+  }
+
+  return (
+    normalizedKey.includes("payload") ||
+    normalizedKey.includes("prompt") ||
+    normalizedKey.includes("response") ||
+    normalizedKey.includes("body") ||
+    normalizedKey.includes("diff") ||
+    normalizedKey.includes("patch") ||
+    normalizedKey.includes("content") ||
+    normalizedKey.includes("snippet") ||
+    normalizedKey.includes("evidence") ||
+    normalizedKey.includes("code") ||
+    normalizedKey.includes("secret") ||
+    normalizedKey.includes("token") ||
+    normalizedKey.includes("signature") ||
+    normalizedKey.includes("authorization") ||
+    normalizedKey.includes("cookie")
+  );
+}
+
+/** Builds a redacted value placeholder that preserves correlation without leaking content. */
+function redactedDebugBundleValue(key: string, value: unknown): AdminDebugBundleRedactedValue {
+  const serialized = serializedDebugBundleValue(value);
+  return {
+    redacted: true,
+    key,
+    reason: "sensitive_field",
+    sha256: `sha256:${createHash("sha256").update(serialized).digest("hex")}`,
+    sizeBytes: Buffer.byteLength(serialized),
+    valueType: debugBundleValueType(value),
+  };
+}
+
+/** Serializes an unknown debug bundle value for hashing and byte-size accounting. */
+function serializedDebugBundleValue(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? String(value) : serialized;
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+/** Returns a stable runtime type label for a debug bundle value. */
+function debugBundleValueType(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  return typeof value;
 }
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {

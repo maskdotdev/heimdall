@@ -12,6 +12,7 @@
     }
   },
   "scripts": {
+    "admin": "bun run src/cli.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
@@ -25,9 +26,13 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
+    "@repo/evaluation": "workspace:*",
     "@repo/github": "workspace:*",
     "@repo/queue": "workspace:*",
     "@repo/publisher": "workspace:*",
+    "@repo/retrieval": "workspace:*",
+    "@repo/review-engine": "workspace:*",
+    "@repo/rules": "workspace:*",
     "drizzle-orm": "catalog:"
   },
   "devDependencies": {
