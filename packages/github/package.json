@@ -22,7 +22,8 @@
   "dependencies": {
     "@repo/config": "workspace:*",
     "@repo/contracts": "workspace:*",
-    "@repo/observability": "workspace:*"
+    "@repo/observability": "workspace:*",
+    "@repo/pr-snapshot": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

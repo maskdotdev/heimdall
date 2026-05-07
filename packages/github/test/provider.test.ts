@@ -259,7 +259,19 @@ describe("GitHubAppProvider", () => {
           url.endsWith("/repos/acme/api/pulls/7") &&
           (init?.headers as Record<string, string> | undefined)?.accept ===
             "application/vnd.github.v3.diff",
-        response: textResponse("diff --git a/src/index.ts b/src/index.ts\n"),
+        response: textResponse(
+          [
+            "diff --git a/src/index.ts b/src/index.ts",
+            "--- a/src/index.ts",
+            "+++ b/src/index.ts",
+            "@@ -1,2 +1,4 @@",
+            " export const oldValue = 1;",
+            "-export const removed = true;",
+            "+export const value = 2;",
+            "+export const smoke = true;",
+            "",
+          ].join("\n"),
+        ),
       },
     ]);
     const provider = createProvider(fetcher);
@@ -302,7 +314,7 @@ describe("GitHubAppProvider", () => {
           ],
         },
       ],
-      diffHash: "sha256:1bf4fcc26d8874b8c276b08749bf22799ae398f9f1681bb02d3dd828cef8df3e",
+      diffHash: "sha256:c1fb5e6c0fa1b437573372d5d629e605aacf62da27796f0516134135f699a70a",
     });
   });
 

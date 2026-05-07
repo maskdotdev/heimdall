@@ -1,12 +1,6 @@
 import { createHash, createSign } from "node:crypto";
-import type {
-  ChangedFile,
-  CodeLanguage,
-  DiffHunk,
-  DiffLine,
-  PullRequestSnapshot,
-  Repository,
-} from "@repo/contracts";
+import type { ChangedFile, CodeLanguage, PullRequestSnapshot, Repository } from "@repo/contracts";
+import { hashRawDiff, parseUnifiedDiff } from "@repo/pr-snapshot";
 import {
   GitHubInstallationSuspendedError,
   GitHubNotFoundError,
@@ -299,7 +293,7 @@ export class GitHubAppProvider implements GitProvider {
 
   /** Fetches a snapshot with changed files and diff metadata. */
   public async fetchPullRequestSnapshot(input: GitHubPullRequestRef): Promise<PullRequestSnapshot> {
-    const [pullRequest, changedFiles, rawDiff] = await Promise.all([
+    const [pullRequest, apiChangedFiles, rawDiff] = await Promise.all([
       this.requestInstallation<JsonRecord>(
         input,
         `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
@@ -330,6 +324,7 @@ export class GitHubAppProvider implements GitProvider {
     const state =
       rawState === "open" || rawState === "closed" || rawState === "merged" ? rawState : "unknown";
     const providerPullRequestId = asString(pullRequest, "id");
+    const changedFiles = reconcileChangedFiles(apiChangedFiles, parseUnifiedDiff(rawDiff));
 
     return {
       snapshotId: stableId("prs", ["github", providerRepoId, input.pullRequestNumber, headSha]),
@@ -353,7 +348,7 @@ export class GitHubAppProvider implements GitProvider {
       headSha,
       ...withOptional("mergeBaseSha", optionalString(pullRequest, "merge_commit_sha")),
       changedFiles: changedFiles.slice(0, this.config.maxPrFiles),
-      diffHash: sha256(rawDiff),
+      diffHash: hashRawDiff(rawDiff),
       additions: asNumber(pullRequest, "additions"),
       deletions: asNumber(pullRequest, "deletions"),
       changedFileCount: asNumber(pullRequest, "changed_files"),
@@ -850,11 +845,13 @@ export class GitHubAppProvider implements GitProvider {
   private normalizeChangedFile(file: JsonRecord): ChangedFile {
     const path = asString(file, "filename");
     const patch = optionalString(file, "patch");
+    const oldPath = optionalString(file, "previous_filename");
+    const status = normalizeFileStatus(asString(file, "status"));
 
     return {
       path,
-      ...withOptional("oldPath", optionalString(file, "previous_filename")),
-      status: normalizeFileStatus(asString(file, "status")),
+      ...withOptional("oldPath", oldPath),
+      status,
       language: languageForPath(path),
       additions: asNumber(file, "additions"),
       deletions: asNumber(file, "deletions"),
@@ -863,7 +860,14 @@ export class GitHubAppProvider implements GitProvider {
       isGenerated: isGeneratedPath(path),
       isTest: isTestPath(path),
       ...withOptional("patch", patch),
-      hunks: patch ? parsePatchHunks(path, patch) : [],
+      hunks: patch
+        ? parseGitHubFilePatch({
+            ...(oldPath !== undefined ? { oldPath } : {}),
+            patch,
+            path,
+            status,
+          })
+        : [],
     };
   }
 
@@ -984,123 +988,52 @@ const toGitHubAnnotation = (annotation: CheckRunAnnotation): JsonRecord => ({
   title: annotation.title,
 });
 
-/** Parses GitHub's unified diff patch fragment into reviewable hunk anchors. */
-function parsePatchHunks(path: string, patch: string): DiffHunk[] {
-  const hunks: DiffHunk[] = [];
-  let currentHunk: MutableDiffHunk | undefined;
-  let oldLine = 0;
-  let newLine = 0;
-
-  for (const line of patch.split("\n")) {
-    const header = parseHunkHeader(line);
-    if (header) {
-      currentHunk = {
-        hunkId: stableId("hunk", [path, hunks.length, line]),
-        header: line,
-        oldStart: header.oldStart,
-        oldLines: header.oldLines,
-        newStart: header.newStart,
-        newLines: header.newLines,
-        lines: [],
-      };
-      hunks.push(currentHunk);
-      oldLine = header.oldStart;
-      newLine = header.newStart;
-      continue;
+/** Reconciles GitHub file API metadata with raw-diff-derived hunk models. */
+function reconcileChangedFiles(
+  apiFiles: readonly ChangedFile[],
+  rawDiffFiles: readonly ChangedFile[],
+): readonly ChangedFile[] {
+  const rawByPath = new Map(rawDiffFiles.map((file) => [file.path, file]));
+  const apiPaths = new Set(apiFiles.map((file) => file.path));
+  const reconciledApiFiles = apiFiles.map((apiFile) => {
+    const rawFile = rawByPath.get(apiFile.path);
+    if (!rawFile) {
+      return apiFile;
     }
 
-    if (!currentHunk || line.startsWith("\\ No newline")) {
-      continue;
-    }
+    return {
+      ...apiFile,
+      hunks: rawFile.hunks,
+      isBinary: apiFile.isBinary || rawFile.isBinary,
+      ...(rawFile.patch ? { patch: rawFile.patch } : {}),
+    };
+  });
+  const rawOnlyFiles = rawDiffFiles.filter((file) => !apiPaths.has(file.path));
 
-    const parsedLine = parsePatchLine(line, oldLine, newLine);
-    if (!parsedLine) {
-      continue;
-    }
-
-    currentHunk.lines.push(parsedLine.line);
-    oldLine = parsedLine.nextOldLine;
-    newLine = parsedLine.nextNewLine;
-  }
-
-  return hunks;
+  return [...reconciledApiFiles, ...rawOnlyFiles];
 }
 
-type MutableDiffHunk = Omit<DiffHunk, "lines"> & {
-  /** Mutable line collection used while parsing a hunk. */
-  readonly lines: DiffLine[];
-};
+/** Parses a GitHub file API patch fragment through the shared PR snapshot diff parser. */
+function parseGitHubFilePatch(input: {
+  readonly path: string;
+  readonly oldPath?: string;
+  readonly status: ChangedFile["status"];
+  readonly patch: string;
+}): ChangedFile["hunks"] {
+  const oldPath = input.oldPath ?? input.path;
+  const syntheticDiff = [
+    `diff --git ${quoteDiffPath("a", oldPath)} ${quoteDiffPath("b", input.path)}`,
+    `--- ${input.status === "added" ? "/dev/null" : quoteDiffPath("a", oldPath)}`,
+    `+++ ${input.status === "deleted" ? "/dev/null" : quoteDiffPath("b", input.path)}`,
+    input.patch,
+  ].join("\n");
 
-/** Parsed numeric values from a unified diff hunk header. */
-type ParsedHunkHeader = {
-  /** First old-side line covered by the hunk. */
-  readonly oldStart: number;
-  /** Number of old-side lines covered by the hunk. */
-  readonly oldLines: number;
-  /** First new-side line covered by the hunk. */
-  readonly newStart: number;
-  /** Number of new-side lines covered by the hunk. */
-  readonly newLines: number;
-};
-
-/** Parses a unified diff hunk header. */
-function parseHunkHeader(line: string): ParsedHunkHeader | undefined {
-  const match =
-    /^@@ -(?<oldStart>\d+)(?:,(?<oldLines>\d+))? \+(?<newStart>\d+)(?:,(?<newLines>\d+))? @@/u.exec(
-      line,
-    );
-  if (!match?.groups) {
-    return undefined;
-  }
-
-  return {
-    oldStart: Number(match.groups.oldStart),
-    oldLines: Number(match.groups.oldLines ?? 1),
-    newStart: Number(match.groups.newStart),
-    newLines: Number(match.groups.newLines ?? 1),
-  };
+  return parseUnifiedDiff(syntheticDiff)[0]?.hunks ?? [];
 }
 
-/** Parses one line from a unified diff hunk and advances old and new line counters. */
-function parsePatchLine(
-  line: string,
-  oldLine: number,
-  newLine: number,
-):
-  | {
-      readonly line: DiffLine;
-      readonly nextOldLine: number;
-      readonly nextNewLine: number;
-    }
-  | undefined {
-  const marker = line[0];
-  const content = line.slice(1);
-
-  if (marker === "+") {
-    return {
-      line: { kind: "addition", content, newLine },
-      nextOldLine: oldLine,
-      nextNewLine: newLine + 1,
-    };
-  }
-
-  if (marker === "-") {
-    return {
-      line: { kind: "deletion", content, oldLine },
-      nextOldLine: oldLine + 1,
-      nextNewLine: newLine,
-    };
-  }
-
-  if (marker === " ") {
-    return {
-      line: { kind: "context", content, oldLine, newLine },
-      nextOldLine: oldLine + 1,
-      nextNewLine: newLine + 1,
-    };
-  }
-
-  return undefined;
+/** Quotes one side of a Git diff path for safe synthetic diff parsing. */
+function quoteDiffPath(prefix: "a" | "b", path: string): string {
+  return `"${prefix}/${path.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 
 const parseRetryAfter = (response: Response): number | undefined => {
