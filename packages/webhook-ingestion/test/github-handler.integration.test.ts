@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "@repo/db";
@@ -12,7 +12,7 @@ import { pullRequestPayload } from "./fixtures";
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 const testDirectory = fileURLToPath(new URL(".", import.meta.url));
 const bootstrapPath = resolve(testDirectory, "../../db/bootstrap/0000_extensions.sql");
-const migrationPath = resolve(testDirectory, "../../db/migrations/0000_foundation.sql");
+const migrationsDirectory = resolve(testDirectory, "../../db/migrations");
 
 describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () => {
   const schemaName = `heimdall_webhook_${process.pid}_${Date.now()}`.replace(/[^A-Za-z0-9_]/g, "_");
@@ -28,9 +28,7 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
     await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await sql.unsafe(`SET search_path TO "${schemaName}", public`);
     await sql.unsafe(await readFile(bootstrapPath, "utf8"));
-    await sql.unsafe(
-      (await readFile(migrationPath, "utf8")).replaceAll('"public".', `"${schemaName}".`),
-    );
+    await applyMigrations(sql, schemaName);
 
     const rawBody = new TextEncoder().encode(JSON.stringify(pullRequestPayload));
     const signature = computeGitHubWebhookSignature("secret", rawBody);
@@ -91,3 +89,19 @@ describe.runIf(integrationDatabaseUrl)("GitHub webhook handler integration", () 
     expect(jobStatuses).toEqual({ statuses: ["pending", "pending"] });
   });
 });
+
+/** Applies all generated SQL migrations in lexical order to a test schema. */
+async function applyMigrations(sql: postgres.Sql, schemaName: string): Promise<void> {
+  const files = (await readdir(migrationsDirectory))
+    .filter((file) => file.endsWith(".sql"))
+    .sort((left, right) => left.localeCompare(right));
+
+  for (const file of files) {
+    await sql.unsafe(
+      (await readFile(resolve(migrationsDirectory, file), "utf8")).replaceAll(
+        '"public".',
+        `"${schemaName}".`,
+      ),
+    );
+  }
+}
