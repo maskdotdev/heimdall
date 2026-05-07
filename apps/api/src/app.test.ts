@@ -9,7 +9,16 @@ import type {
   RepositorySettings,
   UpdateRepositoryControlPlaneSettingsRequest,
 } from "@repo/contracts";
-import { createMemoryObservabilitySink } from "@repo/observability";
+import {
+  createMemoryObservabilitySink,
+  createMemoryTelemetrySpanSink,
+  createTelemetryMetricRecorder,
+  createTelemetrySpanRecorder,
+  loadObservabilityConfig,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricPoint,
+} from "@repo/observability";
 import { buildReviewPolicySnapshot } from "@repo/rules";
 import { signAdminIdentityAssertion } from "@repo/security";
 import { describe, expect, it } from "vitest";
@@ -203,6 +212,77 @@ describe("api app", () => {
       service: "api",
       status: "pass",
     });
+  });
+
+  it("records product-safe API request metrics and spans", async () => {
+    const config = loadObservabilityConfig({
+      OBSERVABILITY_ENABLED: "true",
+      OBSERVABILITY_EXPORTER: "console",
+      OBSERVABILITY_SERVICE_NAME: "code-review-api",
+    });
+    const metricPoints: TelemetryMetricPoint[] = [];
+    const spanSink = createMemoryTelemetrySpanSink();
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      metrics: createTelemetryMetricRecorder(config, {
+        write: (point) => {
+          metricPoints.push(point);
+        },
+      }),
+      readinessCheck: async () => [{ name: "config", status: "pass" }],
+      traces: createTelemetrySpanRecorder(config, spanSink),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/readyz", {
+        headers: {
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "x-request-id": "req_api_telemetry",
+        },
+      }),
+    );
+
+    const requestCount = metricPoints.find(
+      (point) => point.name === OBSERVABILITY_METRIC_NAMES.apiRequestsTotal,
+    );
+    const requestDuration = metricPoints.find(
+      (point) => point.name === OBSERVABILITY_METRIC_NAMES.apiRequestDurationMs,
+    );
+
+    expect(response.status).toBe(200);
+    expect(requestCount).toMatchObject({
+      kind: "counter",
+      labels: {
+        "http.request.method": "GET",
+        "http.response.status_code": 200,
+        "http.route": "/readyz",
+        "http.status_family": "2xx",
+      },
+      value: 1,
+    });
+    expect(requestDuration).toMatchObject({
+      kind: "histogram",
+      labels: requestCount?.labels,
+      unit: "ms",
+    });
+    expect(requestDuration?.value).toBeGreaterThanOrEqual(0);
+    expect(spanSink.spans()).toEqual([
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          "http.request.method": "GET",
+          "http.response.status_code": 200,
+          "http.route": "/readyz",
+          "http.status_family": "2xx",
+        }),
+        kind: "server",
+        name: OBSERVABILITY_SPAN_NAMES.apiRequest,
+        status: "ok",
+        traceContext: {
+          requestId: "req_api_telemetry",
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        },
+      }),
+    ]);
   });
 
   it("returns readiness failure without leaking dependency details", async () => {

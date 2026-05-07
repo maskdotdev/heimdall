@@ -582,6 +582,8 @@ export const DEFAULT_OBSERVABILITY_CONFIG = {
 
 /** Low-cardinality metric names emitted directly by service bootstrap code. */
 export const OBSERVABILITY_METRIC_NAMES = {
+  apiRequestDurationMs: "code_review_agent.api.request_duration_ms",
+  apiRequestsTotal: "code_review_agent.api.requests_total",
   apiServiceStartsTotal: "code_review_agent.api.service_starts_total",
   apiServiceStopsTotal: "code_review_agent.api.service_stops_total",
   workerServiceStartsTotal: "code_review_agent.worker.service_starts_total",
@@ -590,6 +592,7 @@ export const OBSERVABILITY_METRIC_NAMES = {
 
 /** Stable span names emitted directly by service and queue boundaries. */
 export const OBSERVABILITY_SPAN_NAMES = {
+  apiRequest: "code_review_agent.api.request",
   durableJobProcess: "code_review_agent.durable_job.process",
   pullRequestReview: "code_review_agent.review.pull_request",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
@@ -1111,6 +1114,15 @@ export function createTelemetryMetricRecorder(
   };
 }
 
+/** Creates a metric recorder that intentionally drops every metric point. */
+export function createNoopTelemetryMetricRecorder(): TelemetryMetricRecorder {
+  return {
+    count: () => undefined,
+    gauge: () => undefined,
+    histogram: () => undefined,
+  };
+}
+
 /** Builds a structured span record with safe attributes and resource data. */
 export function createTelemetrySpanRecord(
   config: ObservabilityConfig,
@@ -1257,6 +1269,15 @@ export function createTelemetrySpanRecorder(
         },
       };
     },
+  };
+}
+
+/** Creates a span recorder that intentionally drops every span. */
+export function createNoopTelemetrySpanRecorder(): TelemetrySpanRecorder {
+  return {
+    startSpan: () => ({
+      end: () => undefined,
+    }),
   };
 }
 

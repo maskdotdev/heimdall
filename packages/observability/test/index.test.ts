@@ -294,6 +294,7 @@ describe("structured telemetry metrics", () => {
 describe("structured telemetry spans", () => {
   it("exposes stable review pipeline span names", () => {
     expect(OBSERVABILITY_SPAN_NAMES).toMatchObject({
+      apiRequest: "code_review_agent.api.request",
       durableJobProcess: "code_review_agent.durable_job.process",
       pullRequestReview: "code_review_agent.review.pull_request",
       reviewPipelineStage: "code_review_agent.review.pipeline_stage",

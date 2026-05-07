@@ -119,9 +119,16 @@ import {
   type AdminControlPlaneTelemetryEventInput,
   type AdminControlPlaneTelemetryEventName,
   createNoopObservabilitySink,
+  createNoopTelemetryMetricRecorder,
+  createNoopTelemetrySpanRecorder,
   createTelemetryTraceContextFromHeaders,
   normalizeTelemetryTraceContext,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
   type ObservabilitySink,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
   type TelemetryTraceContext,
   tryRecordAdminControlPlaneTelemetryEvent,
 } from "@repo/observability";
@@ -772,6 +779,30 @@ type AdminResponseSet = {
 type AdminStatusSet = {
   /** HTTP status assigned by the route. */
   status?: number | string;
+};
+
+/** Per-request telemetry state kept outside route contexts. */
+type ApiRequestTelemetryState = {
+  /** Request start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Span handle for the API server request. */
+  readonly span: TelemetrySpanHandle;
+};
+
+/** Input used to close one API request telemetry record. */
+type ApiRequestTelemetryEndInput = {
+  /** Optional error that ended the request. */
+  readonly error?: unknown;
+  /** HTTP method label. */
+  readonly method: string;
+  /** Request object used as the telemetry state key. */
+  readonly request: Request;
+  /** Registered low-cardinality route pattern. */
+  readonly route: string | undefined;
+  /** Elysia response state after route handling. */
+  readonly set: AdminStatusSet;
+  /** Fallback status code when no explicit status is available. */
+  readonly statusCode: number;
 };
 
 /** Authenticated admin request context produced by the session guard. */
@@ -2564,8 +2595,12 @@ export type CreateApiAppOptions = {
   readonly productGitHubOAuth?: ProductGitHubOAuthOptions;
   /** Admin control-plane observability sink for structured telemetry. */
   readonly adminObservabilitySink?: ObservabilitySink;
+  /** Metric recorder for API request and lifecycle telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional readiness check hook for tests or custom composition. */
   readonly readinessCheck?: ApiReadinessCheck;
+  /** Span recorder for API request-boundary telemetry. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Creates the Heimdall API app. */
@@ -2629,7 +2664,10 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
     createProductGitHubOAuthService({ auth: productGitHubOAuth, db: getDatabaseClient().db });
   const adminAuth = resolveAdminControlPlaneAuth(options.adminControlPlaneAuth);
   const observabilitySink = options.adminObservabilitySink ?? createNoopObservabilitySink();
+  const metrics = options.metrics ?? createNoopTelemetryMetricRecorder();
+  const traces = options.traces ?? createNoopTelemetrySpanRecorder();
   const readinessCheck = options.readinessCheck ?? (() => checkApiReadiness(getDatabaseClient));
+  const apiRequestTelemetry = new WeakMap<Request, ApiRequestTelemetryState>();
 
   return new Elysia()
     .use(
@@ -2660,6 +2698,40 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         specPath: "/openapi/json",
       }),
     )
+    .onRequest(({ request }) => {
+      const requestId = requestIdFromRequest(request);
+      const span = traces.startSpan(OBSERVABILITY_SPAN_NAMES.apiRequest, {
+        attributes: {
+          "http.request.method": normalizedRequestMethod(request.method),
+          "http.route": "unknown",
+        },
+        kind: "server",
+        traceContext: traceContextFromRequest(request, requestId),
+      });
+      apiRequestTelemetry.set(request, {
+        span,
+        startedAtMs: Date.now(),
+      });
+    })
+    .onAfterHandle(({ request, responseValue, route, set }) => {
+      finishApiRequestTelemetry(apiRequestTelemetry, metrics, {
+        method: request.method,
+        request,
+        route,
+        set,
+        statusCode: statusCodeFromResponseValue(responseValue, statusCodeFromSet(set, 200)),
+      });
+    })
+    .onError(({ code, error, request, route, set }) => {
+      finishApiRequestTelemetry(apiRequestTelemetry, metrics, {
+        error,
+        method: request.method,
+        request,
+        route,
+        set,
+        statusCode: apiErrorStatusCode(code, set),
+      });
+    })
     .get("/healthz", () => ({ ok: true, service: "api" }))
     .get("/livez", () =>
       createApiHealthResponse([
@@ -14488,9 +14560,136 @@ function recordAdminAccessDenied(
   });
 }
 
+/** HTTP status names that Elysia may expose through response state. */
+const ELYSIA_STATUS_CODE_BY_NAME = {
+  Accepted: 202,
+  "Bad Request": 400,
+  Created: 201,
+  Forbidden: 403,
+  Found: 302,
+  "Internal Server Error": 500,
+  "No Content": 204,
+  "Not Found": 404,
+  OK: 200,
+  "Service Unavailable": 503,
+  Unauthorized: 401,
+} as const satisfies Readonly<Record<string, number>>;
+
+/** Elysia lifecycle error codes mapped to product-safe HTTP status labels. */
+const API_ERROR_STATUS_CODE_BY_CODE = {
+  INTERNAL_SERVER_ERROR: 500,
+  INVALID_COOKIE_SIGNATURE: 400,
+  INVALID_FILE_TYPE: 415,
+  NOT_FOUND: 404,
+  PARSE: 400,
+  UNKNOWN: 500,
+  VALIDATION: 400,
+} as const satisfies Readonly<Record<string, number>>;
+
+/** Ends request-boundary spans and emits low-cardinality request metrics. */
+function finishApiRequestTelemetry(
+  apiRequestTelemetry: WeakMap<Request, ApiRequestTelemetryState>,
+  metrics: TelemetryMetricRecorder,
+  input: ApiRequestTelemetryEndInput,
+): void {
+  const state = apiRequestTelemetry.get(input.request);
+  if (!state) {
+    return;
+  }
+  apiRequestTelemetry.delete(input.request);
+
+  const durationMs = Math.max(0, Date.now() - state.startedAtMs);
+  const method = normalizedRequestMethod(input.method);
+  const route = telemetryRouteLabel(input.route);
+  const statusCode = normalizedStatusCode(input.statusCode, 500);
+  const statusFamily = statusFamilyFromCode(statusCode);
+  const labels = {
+    "http.request.method": method,
+    "http.response.status_code": statusCode,
+    "http.route": route,
+    "http.status_family": statusFamily,
+  };
+
+  metrics.count(OBSERVABILITY_METRIC_NAMES.apiRequestsTotal, { labels });
+  metrics.histogram(OBSERVABILITY_METRIC_NAMES.apiRequestDurationMs, durationMs, {
+    labels,
+    unit: "ms",
+  });
+  state.span.end({
+    attributes: labels,
+    ...(input.error === undefined ? {} : { error: input.error }),
+    status: input.error === undefined && statusCode < 500 ? "ok" : "error",
+  });
+}
+
+/** Returns an uppercase HTTP method label with a bounded fallback. */
+function normalizedRequestMethod(method: string): string {
+  const normalizedMethod = method.trim().toUpperCase();
+  return /^[A-Z]{1,16}$/u.test(normalizedMethod) ? normalizedMethod : "UNKNOWN";
+}
+
+/** Returns a low-cardinality route label for API request telemetry. */
+function telemetryRouteLabel(route: string | undefined): string {
+  if (!route?.startsWith("/")) {
+    return "unknown";
+  }
+
+  return route.replaceAll(/[?#].*$/gu, "").slice(0, 120);
+}
+
+/** Returns a valid HTTP status code for telemetry labels. */
+function normalizedStatusCode(statusCode: number, fallback: number): number {
+  return Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599
+    ? statusCode
+    : fallback;
+}
+
+/** Returns the coarse HTTP status family label for metrics. */
+function statusFamilyFromCode(statusCode: number): string {
+  return `${Math.trunc(statusCode / 100)}xx`;
+}
+
 /** Returns a numeric status code from an Elysia set object. */
 function statusCodeFromSet(set: AdminStatusSet, fallback: number): number {
-  return typeof set.status === "number" ? set.status : fallback;
+  return statusCodeFromResponseStatus(set.status, fallback);
+}
+
+/** Returns a numeric status code from a route response when one is explicit. */
+function statusCodeFromResponseValue(responseValue: unknown, fallback: number): number {
+  if (responseValue instanceof Response) {
+    return normalizedStatusCode(responseValue.status, fallback);
+  }
+
+  return fallback;
+}
+
+/** Returns the status code for an Elysia error lifecycle event. */
+function apiErrorStatusCode(code: string | number, set: AdminStatusSet): number {
+  const fallback =
+    typeof code === "number"
+      ? code
+      : (API_ERROR_STATUS_CODE_BY_CODE[code as keyof typeof API_ERROR_STATUS_CODE_BY_CODE] ?? 500);
+  return statusCodeFromResponseStatus(set.status, fallback);
+}
+
+/** Converts an Elysia response status value into a numeric HTTP status. */
+function statusCodeFromResponseStatus(
+  status: number | string | undefined,
+  fallback: number,
+): number {
+  if (typeof status === "number") {
+    return normalizedStatusCode(status, fallback);
+  }
+  if (typeof status !== "string") {
+    return fallback;
+  }
+
+  const numericStatus = Number(status);
+  if (Number.isInteger(numericStatus)) {
+    return normalizedStatusCode(numericStatus, fallback);
+  }
+
+  return ELYSIA_STATUS_CODE_BY_NAME[status as keyof typeof ELYSIA_STATUS_CODE_BY_NAME] ?? fallback;
 }
 
 /** Returns the path component of a request URL. */
