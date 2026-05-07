@@ -49,6 +49,8 @@ export type RetrievalChunk = {
   readonly tokenEstimate: number;
   /** Optional score from vector search. */
   readonly score?: number;
+  /** Optional source for search-backed chunks. */
+  readonly searchSource?: "full_text_search" | "vector_search";
   /** Optional graph direction relative to the changed symbol. */
   readonly relationKind?: "caller" | "callee";
 };
@@ -83,6 +85,11 @@ export type RetrievalIndex = {
   readonly getRelatedChunks: (symbolIds: readonly string[]) => Promise<readonly RetrievalChunk[]>;
   /** Returns likely related test chunks. */
   readonly getRelatedTestChunks: (paths: readonly string[]) => Promise<readonly RetrievalChunk[]>;
+  /** Returns full-text matches for changed text when no embedding search is required. */
+  readonly searchFullTextChunks?: (
+    query: string,
+    limit: number,
+  ) => Promise<readonly RetrievalChunk[]>;
   /** Returns semantically similar chunks for changed text. */
   readonly searchSimilarChunks: (
     query: string,
@@ -496,6 +503,8 @@ export function createDatabaseRetrievalIndex(options: {
         .filter(({ file }) => stems.some((stem) => file.path.includes(stem ?? "")))
         .map(({ chunk }) => toRetrievalChunk(chunk));
     },
+    searchFullTextChunks: async (query, limit) =>
+      searchFullTextChunks(options.db, options.indexVersionId, query, limit),
     searchSimilarChunks: async (query, limit) => {
       if (options.embedQuery) {
         const queryVector = await options.embedQuery(query);
@@ -519,28 +528,14 @@ export function createDatabaseRetrievalIndex(options: {
           .orderBy(sql`${codeChunkEmbeddings.embedding} <=> ${vectorText}::vector`)
           .limit(limit);
 
-        return rows.map((row) => ({ ...toRetrievalChunk(row.chunk), score: row.score }));
+        return rows.map((row) => ({
+          ...toRetrievalChunk(row.chunk),
+          score: row.score,
+          searchSource: "vector_search" as const,
+        }));
       }
 
-      const terms = new Set(
-        query
-          .toLowerCase()
-          .split(/[^a-z0-9_]+/)
-          .filter((term) => term.length > 2),
-      );
-      const rows = await options.db
-        .select()
-        .from(codeChunks)
-        .where(eq(codeChunks.indexVersionId, options.indexVersionId));
-      return rows
-        .map(toRetrievalChunk)
-        .map((chunk) => ({
-          ...chunk,
-          score: [...terms].filter((term) => chunk.text.toLowerCase().includes(term)).length,
-        }))
-        .filter((chunk) => (chunk.score ?? 0) > 0)
-        .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
-        .slice(0, limit);
+      return [];
     },
   };
 }
@@ -556,12 +551,17 @@ async function retrieveIndexedItems(
     input.index.getSymbolsForFiles(paths),
   ]);
   const symbolIds = symbolsForFiles.map((symbol) => symbol.symbolId);
-  const [relatedResult, relatedTestsResult, similarResult] = await Promise.all([
+  const [relatedResult, relatedTestsResult, fullTextResult, similarResult] = await Promise.all([
     retrieveOptionalIndexItems("symbol-graph", "graph_retrieval_failed", () =>
       input.index.getRelatedChunks(symbolIds),
     ),
     retrieveOptionalIndexItems("related-tests", "test_retrieval_failed", () =>
       input.index.getRelatedTestChunks(paths),
+    ),
+    retrieveOptionalIndexItems(
+      "full-text-search",
+      "full_text_retrieval_failed",
+      () => input.index.searchFullTextChunks?.(query, 8) ?? Promise.resolve([]),
     ),
     retrieveOptionalIndexItems("semantic-search", "semantic_retrieval_failed", () =>
       input.index.searchSimilarChunks(query, 8),
@@ -584,13 +584,17 @@ async function retrieveIndexedItems(
       ...relatedTestsResult.items.map((chunk) =>
         chunkItem(chunk, "related_test", "Related test context."),
       ),
+      ...fullTextResult.items.map((chunk) =>
+        chunkItem(chunk, "similar_pattern", "Full-text search related context."),
+      ),
       ...similarResult.items.map((chunk) =>
-        chunkItem(chunk, "similar_pattern", "Vector or lexical search related context."),
+        chunkItem(chunk, "similar_pattern", "Vector search related context."),
       ),
     ]),
     warnings: [
       ...relatedResult.warnings,
       ...relatedTestsResult.warnings,
+      ...fullTextResult.warnings,
       ...similarResult.warnings,
     ],
   };
@@ -762,6 +766,44 @@ async function chunksForPaths(
   return rows.map(toRetrievalChunk);
 }
 
+/** Runs PostgreSQL full-text search over indexed chunk text metadata. */
+async function searchFullTextChunks(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+  query: string,
+  limit: number,
+): Promise<readonly RetrievalChunk[]> {
+  const fullTextQuery = normalizeFullTextQuery(query);
+  if (fullTextQuery.length === 0 || limit <= 0) {
+    return [];
+  }
+
+  const chunkText = sql<string>`coalesce(${codeChunks.metadata}->>'text', '')`;
+  const searchVector = sql`to_tsvector('simple', ${chunkText})`;
+  const queryExpression = sql`plainto_tsquery('simple', ${fullTextQuery})`;
+  const scoreExpression = sql<number>`ts_rank_cd(${searchVector}, ${queryExpression})`;
+  const rows = await db
+    .select({
+      chunk: codeChunks,
+      score: scoreExpression,
+    })
+    .from(codeChunks)
+    .where(
+      and(
+        eq(codeChunks.indexVersionId, indexVersionId),
+        sql`${searchVector} @@ ${queryExpression}`,
+      ),
+    )
+    .orderBy(sql`${scoreExpression} DESC`)
+    .limit(limit);
+
+  return rows.map((row) => ({
+    ...toRetrievalChunk(row.chunk),
+    score: row.score,
+    searchSource: "full_text_search",
+  }));
+}
+
 function toRetrievalChunk(row: typeof codeChunks.$inferSelect): RetrievalChunk {
   const metadata = row.metadata;
   const metadataObject = metadata && typeof metadata === "object" ? metadata : {};
@@ -800,7 +842,7 @@ function chunkItem(
   return {
     contextItemId: stableId("ctxitem", [kind, chunk.chunkId]),
     kind,
-    source: kind === "similar_pattern" ? "vector_search" : "symbol_graph",
+    source: kind === "similar_pattern" ? (chunk.searchSource ?? "vector_search") : "symbol_graph",
     title: `${chunk.path}:${chunk.startLine}`,
     snippet: {
       path: chunk.path,
@@ -887,6 +929,16 @@ function languageForContext(language: string): CodeSnippet["language"] {
   }
 
   return "unknown";
+}
+
+/** Builds a bounded plain-text query for PostgreSQL full-text search. */
+function normalizeFullTextQuery(query: string): string {
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/u)
+    .filter((term) => term.length > 2);
+
+  return [...new Set(terms)].slice(0, 32).join(" ");
 }
 
 function packItems(items: readonly ContextItem[], maxTokens: number): readonly ContextItem[] {

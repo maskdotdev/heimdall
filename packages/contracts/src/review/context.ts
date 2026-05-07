@@ -36,6 +36,7 @@ export type ContextItemKind = Static<typeof ContextItemKindSchema>;
 export const ContextItemSourceSchema = Type.Union([
   Type.Literal("diff"),
   Type.Literal("symbol_graph"),
+  Type.Literal("full_text_search"),
   Type.Literal("vector_search"),
   Type.Literal("static_analysis"),
   Type.Literal("repo_rule"),

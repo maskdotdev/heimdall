@@ -228,7 +228,7 @@ describe("retrieveContext", () => {
     });
   });
 
-  it("adds index-backed same-file, symbol, test, and similar context", async () => {
+  it("adds index-backed same-file, symbol, test, full-text, and similar context", async () => {
     const index: RetrievalIndex = {
       indexVersionId: "idx_123",
       getSameFileChunks: async () => [
@@ -268,6 +268,20 @@ describe("retrieveContext", () => {
           tokenEstimate: 6,
         },
       ],
+      searchFullTextChunks: async () => [
+        {
+          chunkId: "chunk_full_text",
+          path: "src/search.ts",
+          startLine: 2,
+          endLine: 4,
+          language: "typescript",
+          contentHash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          text: "export function searchRun() { return run(); }",
+          tokenEstimate: 10,
+          score: 0.8,
+          searchSource: "full_text_search",
+        },
+      ],
       searchSimilarChunks: async () => [
         {
           chunkId: "chunk_similar",
@@ -279,6 +293,7 @@ describe("retrieveContext", () => {
           text: "export function other() {}",
           tokenEstimate: 6,
           score: 1,
+          searchSource: "vector_search",
         },
       ],
     };
@@ -304,6 +319,20 @@ describe("retrieveContext", () => {
         "diff",
       ]),
     );
+    expect(bundle.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "similar_pattern",
+          source: "full_text_search",
+          snippet: expect.objectContaining({ path: "src/search.ts" }),
+        }),
+        expect.objectContaining({
+          kind: "similar_pattern",
+          source: "vector_search",
+          snippet: expect.objectContaining({ path: "src/other.ts" }),
+        }),
+      ]),
+    );
   });
 
   it("keeps required context when optional indexed retrievers fail", async () => {
@@ -327,6 +356,9 @@ describe("retrieveContext", () => {
         throw new Error("Graph retriever unavailable.");
       },
       getRelatedTestChunks: async () => [],
+      searchFullTextChunks: async () => {
+        throw new Error("Full-text retriever unavailable.");
+      },
       searchSimilarChunks: async () => {
         throw new Error("Semantic retriever unavailable.");
       },
@@ -345,6 +377,10 @@ describe("retrieveContext", () => {
     expect(bundle.metadata).toMatchObject({
       warnings: [
         expect.objectContaining({ code: "graph_retrieval_failed", retriever: "symbol-graph" }),
+        expect.objectContaining({
+          code: "full_text_retrieval_failed",
+          retriever: "full-text-search",
+        }),
         expect.objectContaining({
           code: "semantic_retrieval_failed",
           retriever: "semantic-search",
