@@ -44,12 +44,18 @@ const implementationPackages = new Set([
   "@repo/retrieval",
   "@repo/review-orchestrator",
   "@repo/review-engine",
+  "@repo/sandbox",
+  "@repo/static-analysis",
+  "@repo/tool-runner",
   "@repo/llm-gateway",
   "@repo/publisher",
   "@repo/memory",
+  "@repo/rules",
+  "@repo/usage",
   "@repo/observability",
   "@repo/security",
   "@repo/admin-tools",
+  "@repo/billing",
 ]);
 
 const forbiddenBySource = new Map<string, ReadonlySet<string>>([

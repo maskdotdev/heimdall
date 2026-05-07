@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "types": ["node"],
+    "tsBuildInfoFile": "./.tsbuildinfo/typecheck.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["dist", "node_modules"],
+  "references": [
+    { "path": "../billing/tsconfig.build.json" },
+    { "path": "../contracts/tsconfig.build.json" },
+    { "path": "../db/tsconfig.build.json" }
+  ]
+}
