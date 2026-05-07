@@ -921,6 +921,13 @@ export function createMemorySecurityEventSink(): MemorySecurityEventSink {
   };
 }
 
+/** Creates a security-event sink that intentionally drops events. */
+export function createNoopSecurityEventSink(): SecurityEventSink {
+  return {
+    record: () => {},
+  };
+}
+
 /** Records a normalized security event and returns the recorded event. */
 export function recordSecurityEvent(
   sink: SecurityEventSink,
@@ -1021,6 +1028,10 @@ function isSafeSecurityMetadataKey(key: string): boolean {
   }
 
   const normalizedKey = key.toLowerCase().replaceAll(/[.-]/gu, "_");
+  if (normalizedKey === "statuscode" || normalizedKey === "status_code") {
+    return true;
+  }
+
   return !sensitiveSecurityMetadataKeyPatterns.some((pattern) => normalizedKey.includes(pattern));
 }
 

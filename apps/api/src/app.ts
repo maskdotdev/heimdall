@@ -168,6 +168,9 @@ import {
   productActorHasRepoPermission,
   productCapabilities,
   productPermissionsForRole,
+  recordSecurityEvent,
+  type SecurityEventSeverity,
+  type SecurityEventSink,
   verifyAdminIdentityAssertion,
   verifyCsrfToken,
 } from "@repo/security";
@@ -309,6 +312,8 @@ type ResolvedAdminControlPlaneAuthOptions = {
   readonly githubOrg?: string | undefined;
   /** In-process limiter for admin route requests. */
   readonly rateLimiter?: AdminRouteRateLimiter | undefined;
+  /** Sink that records normalized security events for admin auth and access denials. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
   /** Configuration error that prevents safe admin access. */
   readonly configurationError?: string | undefined;
 };
@@ -2665,6 +2670,8 @@ export type CreateApiAppOptions = {
   readonly productGitHubOAuth?: ProductGitHubOAuthOptions;
   /** Admin control-plane observability sink for structured telemetry. */
   readonly adminObservabilitySink?: ObservabilitySink;
+  /** Admin control-plane security-event sink for high-risk access denials. */
+  readonly adminSecurityEventSink?: SecurityEventSink;
   /** Metric recorder for API request and lifecycle telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional readiness check hook for tests or custom composition. */
@@ -2672,6 +2679,13 @@ export type CreateApiAppOptions = {
   /** Span recorder for API request-boundary telemetry. */
   readonly traces?: TelemetrySpanRecorder;
 };
+
+/** Creates a local security-event sink that intentionally drops API events. */
+function createNoopApiSecurityEventSink(): SecurityEventSink {
+  return {
+    record: () => {},
+  };
+}
 
 /** Creates the Heimdall API app. */
 export function createApiApp(options: CreateApiAppOptions = {}) {
@@ -2726,8 +2740,12 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
   const getProductGitHubOAuthService = () =>
     options.productGitHubOAuthService ??
     createProductGitHubOAuthService({ auth: productGitHubOAuth, db: getDatabaseClient().db });
-  const adminAuth = resolveAdminControlPlaneAuth(options.adminControlPlaneAuth);
   const observabilitySink = options.adminObservabilitySink ?? createNoopObservabilitySink();
+  const securityEventSink = options.adminSecurityEventSink ?? createNoopApiSecurityEventSink();
+  const adminAuth = {
+    ...resolveAdminControlPlaneAuth(options.adminControlPlaneAuth),
+    securityEventSink,
+  };
   const metrics = options.metrics ?? createNoopTelemetryMetricRecorder();
   const traces = options.traces ?? createNoopTelemetrySpanRecorder();
   const githubWebhookHandler =
@@ -4179,6 +4197,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
             request,
             set,
             observabilitySink,
+            securityEventSink,
           );
           if (rawAccessResponse) {
             return rawAccessResponse;
@@ -4205,6 +4224,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
                 resourceId: params.reviewArtifactId,
                 reviewRunId: params.reviewRunId,
               },
+              securityEventSink,
             );
           }
           return handleAdminControlPlaneError(error, set);
@@ -4251,6 +4271,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
             request,
             set,
             observabilitySink,
+            securityEventSink,
           );
           if (rawAccessResponse) {
             return rawAccessResponse;
@@ -4277,6 +4298,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
                 resourceId: params.reviewArtifactId,
                 reviewRunId: params.reviewRunId,
               },
+              securityEventSink,
             );
           }
           return handleAdminControlPlaneError(error, set);
@@ -4323,6 +4345,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
             request,
             set,
             observabilitySink,
+            securityEventSink,
           );
           if (rawAccessResponse) {
             return rawAccessResponse;
@@ -4358,6 +4381,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
                 resourceId: params.reviewArtifactId,
                 reviewRunId: params.reviewRunId,
               },
+              securityEventSink,
             );
           }
           return handleAdminControlPlaneError(error, set);
@@ -4841,6 +4865,8 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           requestId,
           response.error.code,
           statusCodeFromSet(set, 401),
+          {},
+          securityEventSink,
         );
         return response;
       }
@@ -5383,6 +5409,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           request,
           set,
           observabilitySink,
+          securityEventSink,
         );
         if (rawImportGuardResponse) {
           return rawImportGuardResponse;
@@ -5419,6 +5446,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
             error.code,
             error.status,
             { actorUserId: guardResult.actor.actorUserId, resourceId: params.reviewRunId },
+            securityEventSink,
           );
         }
         return handleAdminDebugError(error, set);
@@ -13269,7 +13297,15 @@ function guardAdminConfiguration(
   setAdminResponseHeaders(request, set, auth, requestId);
   if (!auth.enabled || auth.routeExposure === "disabled") {
     set.status = 404;
-    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.disabled", 404);
+    recordAdminAccessDenied(
+      observabilitySink,
+      request,
+      requestId,
+      "admin.disabled",
+      404,
+      {},
+      auth.securityEventSink,
+    );
     return {
       error: {
         code: "admin.disabled",
@@ -13279,7 +13315,15 @@ function guardAdminConfiguration(
   }
   if (auth.configurationError) {
     set.status = 503;
-    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.misconfigured", 503);
+    recordAdminAccessDenied(
+      observabilitySink,
+      request,
+      requestId,
+      "admin.misconfigured",
+      503,
+      {},
+      auth.securityEventSink,
+    );
     return {
       error: {
         code: "admin.misconfigured",
@@ -13291,7 +13335,15 @@ function guardAdminConfiguration(
     const headerValue = request.headers.get(requireValue(auth.internalHeaderName));
     if (headerValue !== auth.internalHeaderValue) {
       set.status = 404;
-      recordAdminAccessDenied(observabilitySink, request, requestId, "admin.not_exposed", 404);
+      recordAdminAccessDenied(
+        observabilitySink,
+        request,
+        requestId,
+        "admin.not_exposed",
+        404,
+        {},
+        auth.securityEventSink,
+      );
       return {
         error: {
           code: "admin.not_exposed",
@@ -13307,9 +13359,17 @@ function guardAdminConfiguration(
     (origin && !auth.allowedOrigins.includes(origin))
   ) {
     set.status = 403;
-    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.cors_forbidden", 403, {
-      ...(origin ? { origin } : {}),
-    });
+    recordAdminAccessDenied(
+      observabilitySink,
+      request,
+      requestId,
+      "admin.cors_forbidden",
+      403,
+      {
+        ...(origin ? { origin } : {}),
+      },
+      auth.securityEventSink,
+    );
     return {
       error: {
         code: "admin.cors_forbidden",
@@ -13325,9 +13385,17 @@ function guardAdminConfiguration(
         ...(set.headers ?? {}),
         "retry-after": String(rateLimit.retryAfterSeconds),
       };
-      recordAdminAccessDenied(observabilitySink, request, requestId, "admin.rate_limited", 429, {
-        retryAfterSeconds: rateLimit.retryAfterSeconds,
-      });
+      recordAdminAccessDenied(
+        observabilitySink,
+        request,
+        requestId,
+        "admin.rate_limited",
+        429,
+        {
+          retryAfterSeconds: rateLimit.retryAfterSeconds,
+        },
+        auth.securityEventSink,
+      );
       return {
         error: {
           code: "admin.rate_limited",
@@ -13357,7 +13425,15 @@ function guardAdminSession(
   const session = requireValue(auth.sessionManager).read(request.headers.get("cookie"));
   if (!session) {
     set.status = 401;
-    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.unauthorized", 401);
+    recordAdminAccessDenied(
+      observabilitySink,
+      request,
+      requestId,
+      "admin.unauthorized",
+      401,
+      {},
+      auth.securityEventSink,
+    );
     return {
       response: {
         error: {
@@ -13373,7 +13449,15 @@ function guardAdminSession(
     !verifyCsrfToken(session, request.headers.get("x-csrf-token"))
   ) {
     set.status = 403;
-    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.csrf_forbidden", 403);
+    recordAdminAccessDenied(
+      observabilitySink,
+      request,
+      requestId,
+      "admin.csrf_forbidden",
+      403,
+      { actorUserId: session.actor.actorUserId },
+      auth.securityEventSink,
+    );
     return {
       response: {
         error: {
@@ -13386,10 +13470,18 @@ function guardAdminSession(
 
   if (permission && !actorHasPermission(session.actor, permission)) {
     set.status = 403;
-    recordAdminAccessDenied(observabilitySink, request, requestId, "admin.forbidden", 403, {
-      actorUserId: session.actor.actorUserId,
-      permission,
-    });
+    recordAdminAccessDenied(
+      observabilitySink,
+      request,
+      requestId,
+      "admin.forbidden",
+      403,
+      {
+        actorUserId: session.actor.actorUserId,
+        permission,
+      },
+      auth.securityEventSink,
+    );
     return {
       response: {
         error: {
@@ -13410,6 +13502,7 @@ function guardAdminSession(
       "admin.invalid_support_session",
       400,
       { actorUserId: session.actor.actorUserId },
+      auth.securityEventSink,
     );
     return {
       response: {
@@ -13686,6 +13779,7 @@ function guardRawArtifactPayloadAccess(
   request: Request,
   set: AdminStatusSet,
   observabilitySink: ObservabilitySink,
+  securityEventSink: SecurityEventSink,
 ): AdminErrorResponse | undefined {
   if (payloadRequest.accessLevel !== "raw_allowed") {
     return undefined;
@@ -13709,6 +13803,7 @@ function guardRawArtifactPayloadAccess(
       actorUserId: context.actor.actorUserId,
       accessLevel: payloadRequest.accessLevel,
     },
+    securityEventSink,
   );
   return {
     error: {
@@ -13733,6 +13828,7 @@ function guardRawEvalImportAccess(
   request: Request,
   set: AdminStatusSet,
   observabilitySink: ObservabilitySink,
+  securityEventSink: SecurityEventSink,
 ): AdminErrorResponse | undefined {
   if (
     importRequest.redactionLevel !== "raw_allowed" ||
@@ -13754,6 +13850,7 @@ function guardRawEvalImportAccess(
       redactionLevel: importRequest.redactionLevel,
       resourceId: importRequest.reviewRunId,
     },
+    securityEventSink,
   );
   return {
     error: {
@@ -14720,6 +14817,35 @@ function completedAdminActionKind(
   return ADMIN_ACTION_KIND_BY_TELEMETRY_NAME[name];
 }
 
+/** Product-safe attributes attached to admin access-denied telemetry. */
+type AdminAccessDeniedAttributes = Readonly<Record<string, string | number | boolean>>;
+
+/** Security event type emitted for each high-risk admin denial code. */
+const SECURITY_EVENT_TYPE_BY_ADMIN_DENIAL_CODE = {
+  "admin.cors_forbidden": "admin_cors_forbidden",
+  "admin.csrf_forbidden": "admin_csrf_forbidden",
+  "admin.forbidden": "admin_permission_denied",
+  "admin.invalid_support_session": "admin_support_session_invalid",
+  "admin.rate_limited": "admin_rate_limited",
+  "admin.support_session_required": "admin_support_session_required",
+  "admin.unauthorized": "admin_auth_denied",
+} as const satisfies Readonly<Record<string, string>>;
+
+/** Explicit security event severities for admin denial codes that need stronger defaults. */
+const SECURITY_EVENT_SEVERITY_BY_ADMIN_DENIAL_CODE = {
+  "admin.invalid_support_session": "high",
+  "admin.support_session_required": "high",
+} as const satisfies Readonly<Record<string, SecurityEventSeverity>>;
+
+/** Admin denial attribute keys copied to normalized security-event top-level fields. */
+const SECURITY_EVENT_TOP_LEVEL_ADMIN_DENIAL_ATTRIBUTES = new Set([
+  "actorUserId",
+  "orgId",
+  "repoId",
+  "resourceId",
+  "resourceType",
+]);
+
 /** Records a denied admin access event for alerting and audit correlation. */
 function recordAdminAccessDenied(
   observabilitySink: ObservabilitySink,
@@ -14727,7 +14853,8 @@ function recordAdminAccessDenied(
   requestId: string,
   code: string,
   statusCode: number,
-  attributes: Record<string, string | number | boolean> = {},
+  attributes: AdminAccessDeniedAttributes = {},
+  securityEventSink?: SecurityEventSink | undefined,
 ): void {
   recordAdminTelemetry(observabilitySink, request, {
     attributes: {
@@ -14739,6 +14866,133 @@ function recordAdminAccessDenied(
     requestId,
     statusCode,
   });
+  tryRecordAdminAccessDeniedSecurityEvent(
+    securityEventSink,
+    request,
+    requestId,
+    code,
+    statusCode,
+    attributes,
+  );
+}
+
+/** Records a normalized security event for high-risk admin denials when configured. */
+function tryRecordAdminAccessDeniedSecurityEvent(
+  securityEventSink: SecurityEventSink | undefined,
+  request: Request,
+  requestId: string,
+  code: string,
+  statusCode: number,
+  attributes: AdminAccessDeniedAttributes,
+): void {
+  if (!securityEventSink) {
+    return;
+  }
+
+  const eventType = securityEventTypeForAdminDenial(code);
+  if (!eventType) {
+    return;
+  }
+
+  try {
+    recordSecurityEvent(securityEventSink, {
+      actorId: stringAdminDeniedAttribute(attributes, "actorUserId"),
+      metadata: {
+        denialReason: code,
+        method: request.method,
+        requestId,
+        route: routeFromRequest(request),
+        statusCode,
+        ...securityEventMetadataFromAdminDeniedAttributes(attributes),
+      },
+      orgId: stringAdminDeniedAttribute(attributes, "orgId"),
+      repoId: stringAdminDeniedAttribute(attributes, "repoId"),
+      resourceId:
+        stringAdminDeniedAttribute(attributes, "resourceId") ??
+        stringAdminDeniedAttribute(attributes, "reviewRunId"),
+      resourceType: securityEventResourceTypeForAdminDenial(code, attributes),
+      severity: securityEventSeverityForAdminDenial(code, statusCode),
+      source: "api",
+      type: eventType,
+    });
+  } catch {
+    // Security event sinks must never change the request outcome.
+  }
+}
+
+/** Returns the normalized security event type for an admin denial code. */
+function securityEventTypeForAdminDenial(code: string): string | undefined {
+  if (code.startsWith("admin_auth.")) {
+    return "admin_auth_denied";
+  }
+  if (code.startsWith("artifact.")) {
+    return "review_artifact_access_denied";
+  }
+
+  return SECURITY_EVENT_TYPE_BY_ADMIN_DENIAL_CODE[
+    code as keyof typeof SECURITY_EVENT_TYPE_BY_ADMIN_DENIAL_CODE
+  ];
+}
+
+/** Returns the security severity for one admin denial. */
+function securityEventSeverityForAdminDenial(
+  code: string,
+  statusCode: number,
+): SecurityEventSeverity {
+  const explicitSeverity =
+    SECURITY_EVENT_SEVERITY_BY_ADMIN_DENIAL_CODE[
+      code as keyof typeof SECURITY_EVENT_SEVERITY_BY_ADMIN_DENIAL_CODE
+    ];
+  if (explicitSeverity) {
+    return explicitSeverity;
+  }
+  if (statusCode === 401 || statusCode === 403 || statusCode === 429) {
+    return "medium";
+  }
+
+  return statusCode >= 500 ? "high" : "low";
+}
+
+/** Returns the product-safe resource type for one admin denial security event. */
+function securityEventResourceTypeForAdminDenial(
+  code: string,
+  attributes: AdminAccessDeniedAttributes,
+): string {
+  const explicitResourceType = stringAdminDeniedAttribute(attributes, "resourceType");
+  if (explicitResourceType) {
+    return explicitResourceType;
+  }
+  if (code.startsWith("artifact.") || stringAdminDeniedAttribute(attributes, "reviewRunId")) {
+    return "review_artifact";
+  }
+  if (stringAdminDeniedAttribute(attributes, "permission")) {
+    return "admin_permission";
+  }
+
+  return "admin_route";
+}
+
+/** Copies non-top-level admin denial attributes into security-event metadata. */
+function securityEventMetadataFromAdminDeniedAttributes(
+  attributes: AdminAccessDeniedAttributes,
+): AdminAccessDeniedAttributes {
+  const metadata: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (!SECURITY_EVENT_TOP_LEVEL_ADMIN_DENIAL_ATTRIBUTES.has(key)) {
+      metadata[key] = value;
+    }
+  }
+
+  return metadata;
+}
+
+/** Reads one string admin-denial attribute by key. */
+function stringAdminDeniedAttribute(
+  attributes: AdminAccessDeniedAttributes,
+  key: string,
+): string | undefined {
+  const value = attributes[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /** HTTP status names that Elysia may expose through response state. */

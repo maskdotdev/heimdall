@@ -4,6 +4,7 @@ import {
   classifyArtifact,
   createAdminSessionManager,
   createMemorySecurityEventSink,
+  createNoopSecurityEventSink,
   createSecurityEvent,
   DEFAULT_RETENTION_POLICY,
   defaultSecurityEventSeverity,
@@ -266,9 +267,17 @@ describe("admin security", () => {
     });
 
     expect(defaultSecurityEventSeverity("invalid_webhook_signature_spike")).toBe("high");
+    expect(event.metadata).toMatchObject({ statusCode: 403 });
     expect(event.severity).toBe("critical");
     expect(sink.events()).toEqual([event]);
     sink.clear();
     expect(sink.events()).toEqual([]);
+    expect(() =>
+      recordSecurityEvent(createNoopSecurityEventSink(), {
+        metadata: { statusCode: 403 },
+        source: "api",
+        type: "admin_auth_denied",
+      }),
+    ).not.toThrow();
   });
 });

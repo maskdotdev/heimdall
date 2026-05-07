@@ -20,7 +20,7 @@ import {
   type TelemetryMetricPoint,
 } from "@repo/observability";
 import { buildReviewPolicySnapshot } from "@repo/rules";
-import { signAdminIdentityAssertion } from "@repo/security";
+import { createMemorySecurityEventSink, signAdminIdentityAssertion } from "@repo/security";
 import { WebhookAuthenticationError } from "@repo/webhook-ingestion";
 import { describe, expect, it } from "vitest";
 import {
@@ -1879,10 +1879,12 @@ describe("api app", () => {
 
   it("rejects disallowed CORS origins for admin routes", async () => {
     const observabilitySink = createMemoryObservabilitySink();
+    const securityEventSink = createMemorySecurityEventSink();
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({}),
       adminObservabilitySink: observabilitySink,
+      adminSecurityEventSink: securityEventSink,
       githubWebhookHandler: noopWebhookHandler(),
     });
 
@@ -1908,6 +1910,20 @@ describe("api app", () => {
         route: "/admin/auth/login",
         statusCode: 403,
       },
+    ]);
+    expect(securityEventSink.events()).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          denialReason: "admin.cors_forbidden",
+          method: "POST",
+          origin: "https://evil.example",
+          route: "/admin/auth/login",
+        }),
+        resourceType: "admin_route",
+        severity: "medium",
+        source: "api",
+        type: "admin_cors_forbidden",
+      }),
     ]);
   });
 
@@ -4324,6 +4340,7 @@ describe("api app", () => {
   });
 
   it("requires CSRF tokens for cookie-authenticated mutations", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({}),
@@ -4342,6 +4359,7 @@ describe("api app", () => {
           requiresExplicitConfirmation: true,
         }),
       }),
+      adminSecurityEventSink: securityEventSink,
       githubWebhookHandler: noopWebhookHandler(),
     });
     const login = await loginSession(app, {
@@ -4361,6 +4379,20 @@ describe("api app", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "admin.csrf_forbidden" },
     });
+    expect(securityEventSink.events()).toEqual([
+      expect.objectContaining({
+        actorId: "oidc:usr_support",
+        metadata: expect.objectContaining({
+          denialReason: "admin.csrf_forbidden",
+          method: "POST",
+          route: "/admin/debug/webhooks/webhook_1/replay-plan",
+        }),
+        resourceType: "admin_route",
+        severity: "medium",
+        source: "api",
+        type: "admin_csrf_forbidden",
+      }),
+    ]);
   });
 
   it("updates repository settings through the control-plane service", async () => {
