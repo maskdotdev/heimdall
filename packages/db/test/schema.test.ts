@@ -15,6 +15,13 @@ import {
   codeIndexVersions,
   creditGrants,
   debugExports,
+  evalBaselines,
+  evalCaseResults,
+  evalCases,
+  evalHumanLabels,
+  evalRuns,
+  evalSuites,
+  evalVariants,
   findingDuplicateGroups,
   findingValidationEvents,
   indexedFiles,
@@ -71,6 +78,7 @@ const sandboxRepositorySettingsMigrationPath = resolve(
   testDirectory,
   "../migrations/0015_spicy_piledriver.sql",
 );
+const evalHistoryMigrationPath = resolve(testDirectory, "../migrations/0016_grey_ozymandias.sql");
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -123,6 +131,13 @@ describe("database schema foundation", () => {
     expect(adminNotes.adminNoteId.name).toBe("admin_note_id");
     expect(debugExports.debugExportId.name).toBe("debug_export_id");
     expect(artifactAccessEvents.artifactAccessEventId.name).toBe("artifact_access_event_id");
+    expect(evalSuites.evalSuiteId.name).toBe("eval_suite_id");
+    expect(evalCases.evalCaseId.name).toBe("eval_case_id");
+    expect(evalVariants.evalVariantId.name).toBe("eval_variant_id");
+    expect(evalRuns.evalRunId.name).toBe("eval_run_id");
+    expect(evalCaseResults.evalCaseResultId.name).toBe("eval_case_result_id");
+    expect(evalHumanLabels.evalHumanLabelId.name).toBe("eval_human_label_id");
+    expect(evalBaselines.evalRunId.name).toBe("eval_run_id");
   });
 
   it("defines pgvector storage for code chunk embeddings", () => {
@@ -144,6 +159,7 @@ describe("database schema foundation", () => {
       sandboxRepositorySettingsMigrationPath,
       "utf8",
     );
+    const evalHistoryMigration = await readFile(evalHistoryMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -188,6 +204,13 @@ describe("database schema foundation", () => {
     expect(sandboxRepositorySettingsMigration).toContain(
       'ALTER TABLE "repository_settings" ADD COLUMN "sandbox_policy" jsonb',
     );
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_suites"');
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_cases"');
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_variants"');
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_runs"');
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_case_results"');
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_human_labels"');
+    expect(evalHistoryMigration).toContain('CREATE TABLE "eval_baselines"');
   });
 });
 
@@ -343,6 +366,13 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('sandbox_artifacts')::text) AS sandbox_artifacts_table,
         (SELECT to_regclass('sandbox_policy_decisions')::text) AS sandbox_policy_decisions_table,
         (SELECT to_regclass('sandbox_runs')::text) AS sandbox_runs_table,
+        (SELECT to_regclass('eval_suites')::text) AS eval_suites_table,
+        (SELECT to_regclass('eval_cases')::text) AS eval_cases_table,
+        (SELECT to_regclass('eval_variants')::text) AS eval_variants_table,
+        (SELECT to_regclass('eval_runs')::text) AS eval_runs_table,
+        (SELECT to_regclass('eval_case_results')::text) AS eval_case_results_table,
+        (SELECT to_regclass('eval_human_labels')::text) AS eval_human_labels_table,
+        (SELECT to_regclass('eval_baselines')::text) AS eval_baselines_table,
         (SELECT to_regclass('users')::text) AS users_table,
         (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
     `;
@@ -352,6 +382,13 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       webhook_events: 1,
       index_versions: 1,
       embeddings: 1,
+      eval_baselines_table: "eval_baselines",
+      eval_case_results_table: "eval_case_results",
+      eval_cases_table: "eval_cases",
+      eval_human_labels_table: "eval_human_labels",
+      eval_runs_table: "eval_runs",
+      eval_suites_table: "eval_suites",
+      eval_variants_table: "eval_variants",
       finding_duplicate_groups_table: "finding_duplicate_groups",
       finding_validation_events_table: "finding_validation_events",
       memory_candidates_table: "memory_candidates",

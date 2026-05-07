@@ -1415,6 +1415,181 @@ export const memoryCandidates = pgTable(
   ],
 );
 
+/** Versioned evaluation suites used for deterministic and live quality gates. */
+export const evalSuites = pgTable(
+  "eval_suites",
+  {
+    evalSuiteId: text("eval_suite_id").primaryKey(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    version: text("version").notNull(),
+    owner: text("owner").notNull(),
+    tags: jsonb("tags").notNull().default(sql`'[]'::jsonb`),
+    defaultRunner: text("default_runner").notNull(),
+    defaultGraders: jsonb("default_graders").notNull().default(sql`'[]'::jsonb`),
+    thresholds: jsonb("thresholds").notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (table) => [
+    index("eval_suites_owner_idx").on(table.owner),
+    uniqueIndex("eval_suites_name_version_unique").on(table.name, table.version),
+  ],
+);
+
+/** Evaluation cases and expected labels that belong to a suite. */
+export const evalCases = pgTable(
+  "eval_cases",
+  {
+    evalCaseId: text("eval_case_id").primaryKey(),
+    evalSuiteId: text("eval_suite_id")
+      .notNull()
+      .references(() => evalSuites.evalSuiteId),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    language: text("language").notNull(),
+    tags: jsonb("tags").notNull().default(sql`'[]'::jsonb`),
+    source: text("source").notNull(),
+    privacyLevel: text("privacy_level").notNull(),
+    difficulty: text("difficulty").notNull(),
+    fixture: jsonb("fixture").notNull(),
+    input: jsonb("input").notNull(),
+    labels: jsonb("labels").notNull(),
+    expected: jsonb("expected").notNull().default(sql`'{}'::jsonb`),
+    active: boolean("active").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => [
+    index("eval_cases_suite_active_idx").on(table.evalSuiteId, table.active),
+    index("eval_cases_source_idx").on(table.source),
+    index("eval_cases_privacy_idx").on(table.privacyLevel),
+  ],
+);
+
+/** Serializable evaluation variant configurations under comparison. */
+export const evalVariants = pgTable(
+  "eval_variants",
+  {
+    evalVariantId: text("eval_variant_id").primaryKey(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    config: jsonb("config").notNull(),
+    gitCommitSha: text("git_commit_sha"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("eval_variants_git_commit_idx").on(table.gitCommitSha),
+    index("eval_variants_created_by_idx").on(table.createdBy),
+  ],
+);
+
+/** Historical evaluation run summaries for CI, release, and scheduled quality gates. */
+export const evalRuns = pgTable(
+  "eval_runs",
+  {
+    evalRunId: text("eval_run_id").primaryKey(),
+    evalSuiteId: text("eval_suite_id")
+      .notNull()
+      .references(() => evalSuites.evalSuiteId),
+    evalVariantId: text("eval_variant_id")
+      .notNull()
+      .references(() => evalVariants.evalVariantId),
+    baselineVariantId: text("baseline_variant_id").references(() => evalVariants.evalVariantId),
+    status: text("status").notNull(),
+    triggeredBy: text("triggered_by").notNull(),
+    environment: text("environment").notNull(),
+    gitCommitSha: text("git_commit_sha"),
+    branch: text("branch"),
+    caseCount: integer("case_count").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    reportUri: text("report_uri"),
+    summary: jsonb("summary"),
+    error: jsonb("error"),
+  },
+  (table) => [
+    index("eval_runs_suite_started_idx").on(table.evalSuiteId, table.startedAt),
+    index("eval_runs_variant_started_idx").on(table.evalVariantId, table.startedAt),
+    index("eval_runs_status_idx").on(table.status),
+    index("eval_runs_git_commit_idx").on(table.gitCommitSha),
+  ],
+);
+
+/** Per-case evaluation results with scores, costs, timings, and artifact references. */
+export const evalCaseResults = pgTable(
+  "eval_case_results",
+  {
+    evalCaseResultId: text("eval_case_result_id").primaryKey(),
+    evalRunId: text("eval_run_id")
+      .notNull()
+      .references(() => evalRuns.evalRunId, { onDelete: "cascade" }),
+    evalCaseId: text("eval_case_id")
+      .notNull()
+      .references(() => evalCases.evalCaseId),
+    status: text("status").notNull(),
+    scores: jsonb("scores").notNull().default(sql`'[]'::jsonb`),
+    matchedFindings: jsonb("matched_findings").notNull().default(sql`'[]'::jsonb`),
+    unmatchedExpectedFindings: jsonb("unmatched_expected_findings")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    unmatchedGeneratedFindings: jsonb("unmatched_generated_findings")
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    timings: jsonb("timings").notNull().default(sql`'{}'::jsonb`),
+    costs: jsonb("costs").notNull().default(sql`'{}'::jsonb`),
+    artifacts: jsonb("artifacts").notNull().default(sql`'[]'::jsonb`),
+    error: jsonb("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("eval_case_results_run_case_unique").on(table.evalRunId, table.evalCaseId),
+    index("eval_case_results_case_idx").on(table.evalCaseId),
+    index("eval_case_results_status_idx").on(table.status),
+  ],
+);
+
+/** Human labels and adjudication metadata for curated evaluation cases. */
+export const evalHumanLabels = pgTable(
+  "eval_human_labels",
+  {
+    evalHumanLabelId: text("eval_human_label_id").primaryKey(),
+    evalCaseId: text("eval_case_id")
+      .notNull()
+      .references(() => evalCases.evalCaseId),
+    findingFingerprint: text("finding_fingerprint"),
+    labelerUserId: text("labeler_user_id").references(() => users.userId),
+    label: jsonb("label").notNull(),
+    adjudicationStatus: text("adjudication_status").notNull().default("pending"),
+    ...timestamps,
+  },
+  (table) => [
+    index("eval_human_labels_case_idx").on(table.evalCaseId),
+    index("eval_human_labels_labeler_idx").on(table.labelerUserId),
+    index("eval_human_labels_status_idx").on(table.adjudicationStatus),
+  ],
+);
+
+/** Active baseline pointers for suite and variant comparison gates. */
+export const evalBaselines = pgTable(
+  "eval_baselines",
+  {
+    evalSuiteId: text("eval_suite_id")
+      .notNull()
+      .references(() => evalSuites.evalSuiteId),
+    baselineVariantId: text("baseline_variant_id")
+      .notNull()
+      .references(() => evalVariants.evalVariantId),
+    evalRunId: text("eval_run_id").references(() => evalRuns.evalRunId),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.evalSuiteId, table.baselineVariantId] }),
+    index("eval_baselines_active_idx").on(table.evalSuiteId, table.active),
+    index("eval_baselines_run_idx").on(table.evalRunId),
+  ],
+);
+
 /** Durable record of privileged internal admin actions. */
 export const adminActions = pgTable(
   "admin_actions",
