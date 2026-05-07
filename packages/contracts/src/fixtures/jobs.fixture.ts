@@ -44,6 +44,7 @@ export const validPublishReviewJobPayloadFixture = {
   reviewRunId: ids.reviewRunId,
   repoId: ids.repoId,
   pullRequestNumber: 42,
+  publishPlanArtifactId: ids.artifactId,
 } satisfies PublishReviewJobPayload;
 
 export const validUpdateMemoryJobPayloadFixture = {

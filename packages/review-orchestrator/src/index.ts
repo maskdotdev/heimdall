@@ -7,6 +7,7 @@ import {
 import type {
   JobEnvelope,
   PlanSnapshot,
+  PublishReviewJobPayload,
   PullRequestSnapshot,
   ReviewArtifactKind,
   ReviewArtifactRef,
@@ -31,6 +32,7 @@ import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@re
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
+import { createPublishPlan, type PublishPlan } from "@repo/publisher";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { llmReviewPass, runReviewPasses, validateCandidateFindings } from "@repo/review-engine";
@@ -686,6 +688,23 @@ export async function runPullRequestReview(
       },
       createdAt: now().toISOString(),
     });
+    const publishPlan = createPublishPlan({
+      reviewRun,
+      findings: validationResult.accepted,
+    });
+    const publishPlanArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "publish_plan",
+      name: "publish-plan.json",
+      payload: publishPlanArtifactPayload({
+        generatedAt: now().toISOString(),
+        headSha: snapshot.headSha,
+        publishPlan,
+        reviewRunId,
+      }),
+      createdAt: now().toISOString(),
+    });
     const publishedFindingCount = validatedFindings.filter(
       (finding) => finding.decision === "publish",
     ).length;
@@ -701,6 +720,8 @@ export async function runPullRequestReview(
         rejectedFindingCount,
         validatedFindingCount: validatedFindings.length,
         memoryFactCount: reviewMemoryFacts.length,
+        publishPlanArtifactId: publishPlanArtifact.artifactId,
+        publishPlanMode: publishPlanMode(publishPlan),
         validationEventCount: validationResult.trace.events.length,
         validationStats: validationResult.stats,
       },
@@ -741,6 +762,7 @@ export async function runPullRequestReview(
           validatedArtifact,
           rejectedArtifact,
           rankingArtifact,
+          publishPlanArtifact,
         ],
         counts: {
           candidateFindings: candidateFindings.length,
@@ -751,6 +773,7 @@ export async function runPullRequestReview(
         metadata: {
           ...reviewRun.metadata,
           currentStage: "staleness",
+          publishPlanArtifactId: publishPlanArtifact.artifactId,
           staleness: {
             expectedHeadSha: snapshot.headSha,
             status: currentStatus,
@@ -777,6 +800,7 @@ export async function runPullRequestReview(
     await enqueuePublishJob(dependencies.db, {
       reviewRunId,
       repoId: snapshot.repoId,
+      publishPlanArtifactId: publishPlanArtifact.artifactId,
       pullRequestNumber: snapshot.pullRequestNumber,
       timestamp: now().toISOString(),
     });
@@ -784,7 +808,7 @@ export async function runPullRequestReview(
       reviewRunId,
       stage: "publish",
       status: "queued",
-      metadata: { publishJobKey },
+      metadata: { publishJobKey, publishPlanArtifactId: publishPlanArtifact.artifactId },
     });
     const completedAt = now().toISOString();
     await quotaService.consumeReservation({
@@ -843,6 +867,7 @@ export async function runPullRequestReview(
         validatedArtifact,
         rejectedArtifact,
         rankingArtifact,
+        publishPlanArtifact,
       ],
       counts: {
         candidateFindings: candidateFindings.length,
@@ -864,6 +889,7 @@ export async function runPullRequestReview(
         },
         currentStage: "completed",
         publishJobKey,
+        publishPlanArtifactId: publishPlanArtifact.artifactId,
       },
     });
 
@@ -1383,6 +1409,88 @@ function planSnapshotMetadata(snapshot: PlanSnapshot): Record<string, unknown> {
   };
 }
 
+/** Builds the durable publish-plan artifact payload used for publisher handoff inspection. */
+function publishPlanArtifactPayload(input: {
+  /** Timestamp when the artifact was generated. */
+  readonly generatedAt: string;
+  /** Head commit SHA the plan targets. */
+  readonly headSha: string;
+  /** Policy-derived publish plan. */
+  readonly publishPlan: PublishPlan;
+  /** Review run that owns the plan. */
+  readonly reviewRunId: string;
+}): Record<string, unknown> {
+  return {
+    schemaVersion: "publish_plan.v1",
+    reviewRunId: input.reviewRunId,
+    headSha: input.headSha,
+    mode: publishPlanMode(input.publishPlan),
+    policy: input.publishPlan.policy,
+    plannedOperations: input.publishPlan.plannedOperations,
+    inlineComments: input.publishPlan.inlineFindings.map((finding) => ({
+      findingId: finding.findingId,
+      path: finding.location.path,
+      line: finding.location.line,
+      side: finding.location.side,
+      title: finding.title,
+      body: finding.body,
+      severity: finding.severity,
+      category: finding.category,
+    })),
+    fileComments: [],
+    checkAnnotations: input.publishPlan.checkRunFindings.map((finding) => ({
+      findingId: finding.findingId,
+      path: finding.location.path,
+      startLine: finding.location.startLine ?? finding.location.line,
+      endLine: finding.location.line,
+      title: finding.title,
+      message: finding.body,
+      severity: finding.severity,
+      category: finding.category,
+    })),
+    summary: {
+      configuredFindingIds: input.publishPlan.configuredSummaryFindings.map(
+        (finding) => finding.findingId,
+      ),
+      findingCount: input.publishPlan.configuredSummaryFindings.length,
+    },
+    stats: {
+      checkAnnotationCount: input.publishPlan.checkRunFindings.length,
+      configuredSummaryFindingCount: input.publishPlan.configuredSummaryFindings.length,
+      inlineCommentCount: input.publishPlan.inlineFindings.length,
+      plannedOperationCount: input.publishPlan.plannedOperations.length,
+      publishableFindingCount: input.publishPlan.findings.length,
+    },
+    findingIds: input.publishPlan.findings.map((finding) => finding.findingId),
+    generatedAt: input.generatedAt,
+  };
+}
+
+/** Returns a compact publish mode label for dashboards and artifacts. */
+function publishPlanMode(plan: PublishPlan): string {
+  const plannedOperationTypes = plan.plannedOperations
+    .filter((operation) => operation.status === "planned")
+    .map((operation) => operation.operationType);
+
+  if (plannedOperationTypes.length === 0) {
+    return "none";
+  }
+  if (plannedOperationTypes.length > 1) {
+    return "mixed";
+  }
+
+  switch (plannedOperationTypes[0]) {
+    case "check_run.upsert":
+      return "check_run";
+    case "review.inline_comments":
+      return "inline_review";
+    case "summary_comment.configured":
+      return "summary";
+    default:
+      return "mixed";
+  }
+}
+
 /** Reserves one monthly review credit for a review run. */
 async function reserveReviewCreditQuota(input: {
   /** Entitlement-derived plan snapshot. */
@@ -1465,16 +1573,13 @@ async function enqueuePublishJob(
   input: {
     readonly reviewRunId: string;
     readonly repoId: string;
+    readonly publishPlanArtifactId: string;
     readonly pullRequestNumber: number;
     readonly timestamp: string;
   },
 ): Promise<string> {
   const idempotencyKey = createPublishJobKey(input.reviewRunId);
-  const envelope: JobEnvelope<{
-    readonly reviewRunId: string;
-    readonly repoId: string;
-    readonly pullRequestNumber: number;
-  }> = {
+  const envelope: JobEnvelope<PublishReviewJobPayload> = {
     jobId: stableId("job", [idempotencyKey]),
     jobType: JOB_TYPES.PublishReview,
     schemaVersion: "job_envelope.v1",
@@ -1483,6 +1588,7 @@ async function enqueuePublishJob(
     attempt: 0,
     maxAttempts: 3,
     payload: {
+      publishPlanArtifactId: input.publishPlanArtifactId,
       reviewRunId: input.reviewRunId,
       repoId: input.repoId,
       pullRequestNumber: input.pullRequestNumber,

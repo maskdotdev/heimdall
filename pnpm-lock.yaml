@@ -878,6 +878,9 @@ importers:
       '@repo/pr-snapshot':
         specifier: workspace:*
         version: link:../pr-snapshot
+      '@repo/publisher':
+        specifier: workspace:*
+        version: link:../publisher
       '@repo/repo-sync':
         specifier: workspace:*
         version: link:../repo-sync

@@ -91,6 +91,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'raw_diff') AS raw_diff_artifacts,
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'ranking_report') AS ranking_artifacts,
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'rejected_findings') AS rejected_artifacts,
+        (SELECT count(*)::int FROM review_artifacts WHERE kind = 'publish_plan') AS publish_plan_artifacts,
         (SELECT count(*)::int FROM candidate_findings) AS candidate_findings,
         (SELECT count(*)::int FROM validated_findings) AS validated_findings,
         (SELECT count(*)::int FROM finding_validation_events) AS validation_events,
@@ -100,13 +101,14 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.run') AS review_usage_events,
         (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.credit') AS review_credit_events,
         (SELECT count(*)::int FROM quota_reservations WHERE status = 'consumed') AS consumed_quota_reservations,
-        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs,
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1' AND payload->'payload'->>'publishPlanArtifactId' IS NOT NULL) AS publish_jobs_with_plan
     `;
 
     expect(counts).toEqual({
       full_snapshots: 1,
       completed_runs: 1,
-      artifacts: 12,
+      artifacts: 13,
       candidate_findings: 1,
       change_set_artifacts: 1,
       consumed_quota_reservations: 1,
@@ -114,6 +116,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       raw_diff_artifacts: 1,
       ranking_artifacts: 1,
       rejected_artifacts: 1,
+      publish_plan_artifacts: 1,
       validation_events: 6,
       validated_findings: 1,
       stage_events: 9,
@@ -122,6 +125,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       review_credit_events: 1,
       review_usage_events: 1,
       publish_jobs: 1,
+      publish_jobs_with_plan: 1,
     });
   });
 });

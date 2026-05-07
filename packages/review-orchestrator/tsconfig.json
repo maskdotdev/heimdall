@@ -16,6 +16,7 @@
     { "path": "../llm-gateway/tsconfig.build.json" },
     { "path": "../memory/tsconfig.build.json" },
     { "path": "../pr-snapshot/tsconfig.build.json" },
+    { "path": "../publisher/tsconfig.build.json" },
     { "path": "../retrieval/tsconfig.build.json" },
     { "path": "../review-engine/tsconfig.build.json" },
     { "path": "../repo-sync/tsconfig.build.json" },

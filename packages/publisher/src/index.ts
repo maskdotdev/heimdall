@@ -187,7 +187,12 @@ export async function publishReviewRun(
       idempotencyKey,
       status: "running",
       startedAt,
-      metadata: { pullRequestNumber: payload.pullRequestNumber },
+      metadata: {
+        pullRequestNumber: payload.pullRequestNumber,
+        ...(payload.publishPlanArtifactId
+          ? { publishPlanArtifactId: payload.publishPlanArtifactId }
+          : {}),
+      },
     })
     .onConflictDoUpdate({
       target: publishRuns.idempotencyKey,
@@ -196,7 +201,12 @@ export async function publishReviewRun(
         startedAt,
         completedAt: null,
         error: null,
-        metadata: { pullRequestNumber: payload.pullRequestNumber },
+        metadata: {
+          pullRequestNumber: payload.pullRequestNumber,
+          ...(payload.publishPlanArtifactId
+            ? { publishPlanArtifactId: payload.publishPlanArtifactId }
+            : {}),
+        },
       },
     });
 
@@ -217,6 +227,9 @@ export async function publishReviewRun(
             reason: "stale_head",
             expectedHeadSha: reviewRun.headSha,
             actualHeadSha: currentPullRequest.headSha,
+            ...(payload.publishPlanArtifactId
+              ? { publishPlanArtifactId: payload.publishPlanArtifactId }
+              : {}),
           },
         })
         .where(eq(publishRuns.idempotencyKey, idempotencyKey));
@@ -317,6 +330,7 @@ export async function publishReviewRun(
           providerSummaryCommentId: summaryComment?.providerCommentId,
           inlineCommentCount: review?.commentIds.length ?? 0,
           plannedOperations: publishPlan.plannedOperations,
+          publishPlanArtifactId: payload.publishPlanArtifactId,
           publishingPolicy: publishPlan.policy,
           summaryFallback: fallbackSummary !== undefined,
         }),

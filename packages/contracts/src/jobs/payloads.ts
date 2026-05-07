@@ -3,6 +3,7 @@ import { JobPrioritySchema } from "../enums/jobs";
 import { GitProviderSchema } from "../enums/provider";
 import { ReviewTriggerSchema } from "../enums/review";
 import {
+  ArtifactIdSchema,
   ChunkIdSchema,
   FindingIdSchema,
   IndexVersionIdSchema,
@@ -85,6 +86,7 @@ export const PublishReviewJobPayloadSchema = Type.Object(
     reviewRunId: ReviewRunIdSchema,
     repoId: RepoIdSchema,
     pullRequestNumber: Type.Integer({ minimum: 1 }),
+    publishPlanArtifactId: Type.Optional(ArtifactIdSchema),
   },
   { additionalProperties: false },
 );
