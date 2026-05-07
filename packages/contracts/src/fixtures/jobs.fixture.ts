@@ -4,6 +4,7 @@ import type {
   IndexRepoCommitJobPayload,
   PublishReviewJobPayload,
   ReviewPullRequestJobPayload,
+  SandboxCleanupJobPayload,
   SyncInstallationJobPayload,
   UpdateMemoryJobPayload,
 } from "#contracts/jobs/payloads";
@@ -62,3 +63,11 @@ export const validBillingReconcileJobPayloadFixture = {
   periodStart: "2026-05-01T00:00:00.000Z",
   provider: "stripe",
 } satisfies BillingReconcileJobPayload;
+
+export const validSandboxCleanupJobPayloadFixture = {
+  before: "2026-05-01T00:00:00.000Z",
+  dryRun: false,
+  limit: 100,
+  reason: "scheduled",
+  repoId: ids.repoId,
+} satisfies SandboxCleanupJobPayload;

@@ -1,5 +1,8 @@
 import { JOB_TYPES } from "@repo/contracts";
-import { validBillingReconcileJobPayloadFixture } from "@repo/contracts/fixtures/jobs.fixture";
+import {
+  validBillingReconcileJobPayloadFixture,
+  validSandboxCleanupJobPayloadFixture,
+} from "@repo/contracts/fixtures/jobs.fixture";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
 import type { PublishOperationType, PublishThrottleSlotInput } from "@repo/publisher";
 import { describe, expect, it, vi } from "vitest";
@@ -72,6 +75,30 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validBillingReconcileJobPayloadFixture]);
+  });
+
+  it("dispatches sandbox cleanup jobs through the configured cleaner", async () => {
+    const payloads: unknown[] = [];
+    const handlers = createWorkerHandlers({
+      db: {} as never,
+      gitProvider: {} as never,
+      sandboxCleaner: async (payload) => {
+        payloads.push(payload);
+      },
+    });
+
+    await handlers[JOB_TYPES.SandboxCleanup]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "sandbox:cleanup:repo_01HXAMPLE:2026-05-01",
+      jobId: "job_sandbox_cleanup",
+      jobType: JOB_TYPES.SandboxCleanup,
+      maxAttempts: 3,
+      payload: validSandboxCleanupJobPayloadFixture,
+      schemaVersion: "sandbox_cleanup_job.v1",
+    });
+
+    expect(payloads).toEqual([validSandboxCleanupJobPayloadFixture]);
   });
 
   it("creates pending memory candidates from rejected finding outcome jobs", async () => {

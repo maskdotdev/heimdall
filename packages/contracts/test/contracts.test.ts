@@ -35,6 +35,7 @@ import {
   validIndexRepoCommitJobPayloadFixture,
   validPublishReviewJobPayloadFixture,
   validReviewPullRequestJobPayloadFixture,
+  validSandboxCleanupJobPayloadFixture,
   validSyncInstallationJobPayloadFixture,
   validUpdateMemoryJobPayloadFixture,
 } from "#contracts/fixtures/jobs.fixture";
@@ -94,6 +95,7 @@ import {
   IndexRepoCommitJobPayloadSchema,
   PublishReviewJobPayloadSchema,
   ReviewPullRequestJobPayloadSchema,
+  SandboxCleanupJobPayloadSchema,
   SyncInstallationJobPayloadSchema,
   UpdateMemoryJobPayloadSchema,
 } from "#contracts/jobs/payloads";
@@ -363,6 +365,13 @@ describe("contract validation", () => {
         validBillingReconcileJobPayloadFixture,
       ),
     ).toEqual(validBillingReconcileJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "SandboxCleanupJobPayload",
+        SandboxCleanupJobPayloadSchema,
+        validSandboxCleanupJobPayloadFixture,
+      ),
+    ).toEqual(validSandboxCleanupJobPayloadFixture);
 
     const envelope = {
       jobId: "job_01HXAMPLE",

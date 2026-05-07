@@ -165,6 +165,28 @@ export const BillingReconcileJobPayloadSchema = Type.Object(
 );
 export type BillingReconcileJobPayload = Static<typeof BillingReconcileJobPayloadSchema>;
 
+/** Reason a sandbox cleanup job was scheduled. */
+export const SandboxCleanupReasonSchema = Type.Union([
+  Type.Literal("scheduled"),
+  Type.Literal("manual"),
+  Type.Literal("retention_policy"),
+]);
+export type SandboxCleanupReason = Static<typeof SandboxCleanupReasonSchema>;
+
+/** Payload used by scheduled or operator-triggered sandbox cleanup jobs. */
+export const SandboxCleanupJobPayloadSchema = Type.Object(
+  {
+    before: Type.Optional(IsoDateTimeSchema),
+    dryRun: Type.Optional(Type.Boolean()),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+    olderThanDays: Type.Optional(Type.Integer({ minimum: 1, maximum: 3650 })),
+    reason: Type.Optional(SandboxCleanupReasonSchema),
+    repoId: Type.Optional(RepoIdSchema),
+  },
+  { additionalProperties: false },
+);
+export type SandboxCleanupJobPayload = Static<typeof SandboxCleanupJobPayloadSchema>;
+
 export const JobPayloadSchema = Type.Union([
   SyncInstallationJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
@@ -173,5 +195,6 @@ export const JobPayloadSchema = Type.Union([
   PublishReviewJobPayloadSchema,
   UpdateMemoryJobPayloadSchema,
   BillingReconcileJobPayloadSchema,
+  SandboxCleanupJobPayloadSchema,
 ]);
 export type JobPayload = Static<typeof JobPayloadSchema>;

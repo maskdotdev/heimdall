@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createReviewArtifactPayloadStoreFromEnvironment,
   InlineReviewArtifactPayloadStore,
@@ -26,6 +26,7 @@ import {
   type PublishReviewJobPayload,
   parseWithSchema,
   type ReviewPullRequestJobPayload,
+  type SandboxCleanupJobPayload,
   type SyncInstallationJobPayload,
   type UpdateMemoryJobPayload,
 } from "@repo/contracts";
@@ -105,7 +106,7 @@ import {
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
 import { Worker } from "bullmq";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, inArray, lt } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -129,6 +130,8 @@ export type CreateWorkerHandlersOptions = {
   readonly billingProvider?: BillingProvider;
   /** Optional test hook for billing reconciliation jobs. */
   readonly billingReconciler?: (payload: BillingReconcileJobPayload) => Promise<void>;
+  /** Optional test hook for sandbox cleanup jobs. */
+  readonly sandboxCleaner?: (payload: SandboxCleanupJobPayload) => Promise<void>;
   /** Git provider used by repo sync handlers. */
   readonly gitProvider: GitProvider;
   /** Optional model gateway used by review jobs. */
@@ -512,6 +515,15 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...payload,
       });
     },
+    [JOB_TYPES.SandboxCleanup]: async (envelope) => {
+      const payload = asSandboxCleanupPayload(envelope.payload);
+      if (options.sandboxCleaner) {
+        await options.sandboxCleaner(payload);
+        return;
+      }
+
+      await cleanupSandboxRuns(options.db, payload);
+    },
   };
 }
 
@@ -759,6 +771,140 @@ async function persistSandboxRun(
       await transaction.insert(sandboxPolicyDecisions).values(policyDecisionRows);
     }
   });
+}
+
+/** Summary returned after one sandbox cleanup pass. */
+export type SandboxCleanupSummary = {
+  /** Cutoff used to select sandbox runs. */
+  readonly cutoff: string;
+  /** Whether the cleanup only planned work. */
+  readonly dryRun: boolean;
+  /** Number of sandbox run rows selected. */
+  readonly selectedRunCount: number;
+  /** Number of sandbox run rows deleted. */
+  readonly deletedRunCount: number;
+  /** Number of local artifact files deleted. */
+  readonly deletedArtifactFileCount: number;
+  /** Number of artifact URIs skipped because they are not local files or could not be removed. */
+  readonly skippedArtifactFileCount: number;
+};
+
+/** Deletes old sandbox run rows and best-effort local artifact files. */
+export async function cleanupSandboxRuns(
+  db: HeimdallDatabase,
+  payload: SandboxCleanupJobPayload,
+  now: Date = new Date(),
+): Promise<SandboxCleanupSummary> {
+  const cutoff = sandboxCleanupCutoff(payload, now);
+  const limit = payload.limit ?? 100;
+  const dryRun = payload.dryRun ?? false;
+  const conditions = [lt(sandboxRuns.createdAt, cutoff)];
+  if (payload.repoId) {
+    conditions.push(eq(sandboxRuns.repoId, payload.repoId));
+  }
+
+  const selectedRuns = await db
+    .select({ sandboxRunId: sandboxRuns.sandboxRunId })
+    .from(sandboxRuns)
+    .where(and(...conditions))
+    .orderBy(asc(sandboxRuns.createdAt))
+    .limit(limit);
+  const sandboxRunIds = selectedRuns.map((row) => row.sandboxRunId);
+  const artifactRows =
+    sandboxRunIds.length === 0
+      ? []
+      : await db
+          .select({ uri: sandboxArtifacts.uri })
+          .from(sandboxArtifacts)
+          .where(inArray(sandboxArtifacts.sandboxRunId, sandboxRunIds));
+
+  if (dryRun || sandboxRunIds.length === 0) {
+    return {
+      cutoff: cutoff.toISOString(),
+      deletedArtifactFileCount: 0,
+      deletedRunCount: 0,
+      dryRun,
+      selectedRunCount: sandboxRunIds.length,
+      skippedArtifactFileCount: 0,
+    };
+  }
+
+  const artifactCleanup = await removeSandboxArtifactFiles(artifactRows.map((row) => row.uri));
+  await db.delete(sandboxRuns).where(inArray(sandboxRuns.sandboxRunId, sandboxRunIds));
+
+  return {
+    cutoff: cutoff.toISOString(),
+    deletedArtifactFileCount: artifactCleanup.deletedFileCount,
+    deletedRunCount: sandboxRunIds.length,
+    dryRun,
+    selectedRunCount: sandboxRunIds.length,
+    skippedArtifactFileCount: artifactCleanup.skippedFileCount,
+  };
+}
+
+/** Computes the sandbox cleanup cutoff date. */
+function sandboxCleanupCutoff(payload: SandboxCleanupJobPayload, now: Date): Date {
+  if (payload.before) {
+    return new Date(payload.before);
+  }
+
+  return new Date(now.getTime() - (payload.olderThanDays ?? 30) * 24 * 60 * 60 * 1000);
+}
+
+/** Local artifact file cleanup counters. */
+type SandboxArtifactFileCleanup = {
+  /** Number of local files deleted. */
+  readonly deletedFileCount: number;
+  /** Number of artifact URIs skipped. */
+  readonly skippedFileCount: number;
+};
+
+/** Removes local file artifacts referenced by sandbox artifact rows. */
+async function removeSandboxArtifactFiles(
+  artifactUris: readonly string[],
+): Promise<SandboxArtifactFileCleanup> {
+  let deletedFileCount = 0;
+  let skippedFileCount = 0;
+
+  for (const artifactUri of artifactUris) {
+    if (!artifactUri.startsWith("file:")) {
+      skippedFileCount += 1;
+      continue;
+    }
+
+    try {
+      const artifactPath = fileURLToPath(artifactUri);
+      await rm(artifactPath, { force: true });
+      await removeEmptyDirectory(dirname(artifactPath));
+      deletedFileCount += 1;
+    } catch {
+      skippedFileCount += 1;
+    }
+  }
+
+  return { deletedFileCount, skippedFileCount };
+}
+
+/** Removes a directory only when it is already empty. */
+async function removeEmptyDirectory(path: string): Promise<void> {
+  try {
+    await rmdir(path);
+  } catch (error) {
+    if (
+      isNodeErrorWithCode(error, "ENOENT") ||
+      isNodeErrorWithCode(error, "ENOTEMPTY") ||
+      isNodeErrorWithCode(error, "EEXIST")
+    ) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+/** Narrows Node-style filesystem errors by code. */
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 /** Creates the insert row for a sandbox run. */
@@ -1784,6 +1930,11 @@ function asUpdateMemoryPayload(payload: JobPayload): UpdateMemoryJobPayload {
 
 function asBillingReconcilePayload(payload: JobPayload): BillingReconcileJobPayload {
   return payload as BillingReconcileJobPayload;
+}
+
+/** Narrows a generic job payload to a sandbox cleanup payload. */
+function asSandboxCleanupPayload(payload: JobPayload): SandboxCleanupJobPayload {
+  return payload as SandboxCleanupJobPayload;
 }
 
 /** Requires billing provider configuration before provider-mutating billing jobs run. */
