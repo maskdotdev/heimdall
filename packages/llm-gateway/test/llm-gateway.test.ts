@@ -15,6 +15,8 @@ import {
   LLMGatewayError,
   type LLMProvider,
   type OpenAIChatCompletionsFetch,
+  REVIEW_FINDINGS_MODEL_PROFILE,
+  REVIEW_FINDINGS_PROMPT_DEFINITION,
   REVIEW_FINDINGS_PROMPT_VERSION,
   REVIEW_FINDINGS_SYSTEM_PROMPT,
 } from "../src/index";
@@ -205,6 +207,102 @@ describe("createLLMGateway", () => {
         system: REVIEW_FINDINGS_SYSTEM_PROMPT,
       },
     ]);
+  });
+
+  it("uses a configured prompt registry for review finding calls", async () => {
+    const providerInputs: {
+      readonly metadata?: Readonly<Record<string, unknown>>;
+      readonly schemaName: string;
+      readonly system: string;
+    }[] = [];
+    const gateway = createLLMGateway(
+      {
+        id: "capture",
+        generateObject: async (input) => {
+          providerInputs.push({
+            ...(input.metadata ? { metadata: input.metadata } : {}),
+            schemaName: input.schemaName,
+            system: input.system,
+          });
+          return { findings: [] };
+        },
+      },
+      {
+        promptRegistry: {
+          reviewFindings: {
+            ...REVIEW_FINDINGS_PROMPT_DEFINITION,
+            promptVersion: "review-findings.custom.v2",
+            system: "Return only validated custom review findings.",
+          },
+        },
+      },
+    );
+
+    await expect(gateway.generateReviewFindings({ prompt: "{}" })).resolves.toEqual({
+      findings: [],
+    });
+
+    expect(providerInputs).toEqual([
+      {
+        metadata: { promptVersion: "review-findings.custom.v2" },
+        schemaName: "LLMFindingOutput",
+        system: "Return only validated custom review findings.",
+      },
+    ]);
+  });
+
+  it("routes model profiles to configured providers", async () => {
+    const defaultPrompts: string[] = [];
+    const routedPrompts: string[] = [];
+    const gateway = createLLMGateway(
+      {
+        id: "default",
+        generateObject: async (input) => {
+          defaultPrompts.push(input.prompt);
+          return { findings: [] };
+        },
+      },
+      {
+        modelRoutes: [
+          {
+            modelProfile: REVIEW_FINDINGS_MODEL_PROFILE,
+            provider: {
+              id: "review-findings-route",
+              generateObject: async (input) => {
+                routedPrompts.push(input.prompt);
+                return {
+                  findings: [
+                    {
+                      body: "The routed model found a concrete issue.",
+                      category: "correctness",
+                      confidence: 0.82,
+                      evidence: ["The changed branch skips the null case."],
+                      line: 4,
+                      path: "src/routed.ts",
+                      severity: "medium",
+                      title: "Handle the null branch",
+                    },
+                  ],
+                };
+              },
+            },
+            task: "review.findings",
+          },
+        ],
+      },
+    );
+
+    await expect(
+      gateway.generateReviewFindings({
+        metadata: { modelProfile: REVIEW_FINDINGS_MODEL_PROFILE },
+        prompt: "{}",
+      }),
+    ).resolves.toMatchObject({
+      findings: [{ path: "src/routed.ts" }],
+    });
+
+    expect(defaultPrompts).toEqual([]);
+    expect(routedPrompts).toEqual(["{}"]);
   });
 
   it("redacts secret-looking prompt content before provider calls", async () => {

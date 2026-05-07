@@ -17,7 +17,7 @@ import {
   type ValidatedFinding,
 } from "@repo/contracts/review/finding";
 import { safeParseWithSchema } from "@repo/contracts/validation/parse";
-import type { LLMGateway } from "@repo/llm-gateway";
+import { type LLMGateway, REVIEW_FINDINGS_MODEL_PROFILE } from "@repo/llm-gateway";
 import { evaluateSuppression, type MemoryFact, type SuppressionDecision } from "@repo/memory";
 import {
   classifyTelemetryError,
@@ -208,6 +208,7 @@ export const llmReviewPass: ReviewPass = {
         reviewRunId: context.reviewRunId,
         snapshotId: context.snapshot.snapshotId,
         contextBundleId: context.contextBundle?.contextBundleId,
+        modelProfile: REVIEW_FINDINGS_MODEL_PROFILE,
       },
     });
 

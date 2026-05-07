@@ -35,8 +35,7 @@ import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@re
 import {
   createStaticLLMGateway,
   type LLMGateway,
-  REVIEW_FINDINGS_PROMPT_VERSION,
-  REVIEW_FINDINGS_SYSTEM_PROMPT,
+  REVIEW_FINDINGS_PROMPT_DEFINITION,
 } from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import {
@@ -2583,7 +2582,7 @@ function createUsageRecordingLlmGateway(input: {
         ...request,
         metadata: {
           ...(request.metadata ?? {}),
-          promptVersion: REVIEW_FINDINGS_PROMPT_VERSION,
+          promptVersion: REVIEW_FINDINGS_PROMPT_DEFINITION.promptVersion,
         },
       });
       const output = await input.gateway.generateReviewFindings(redactedRequest);
@@ -2596,8 +2595,8 @@ function createUsageRecordingLlmGateway(input: {
         prompt: redactedRequest.prompt,
         sequence: callSequence,
         startedAt,
-        system: REVIEW_FINDINGS_SYSTEM_PROMPT,
-        task: "review.findings",
+        system: REVIEW_FINDINGS_PROMPT_DEFINITION.system,
+        task: REVIEW_FINDINGS_PROMPT_DEFINITION.task,
       });
       return output;
     },

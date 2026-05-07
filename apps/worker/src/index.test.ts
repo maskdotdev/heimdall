@@ -225,6 +225,35 @@ describe("createWorkerLlmGatewayFromEnvironment", () => {
     });
   });
 
+  it("routes review finding calls to the task-specific OpenAI model", async () => {
+    const calls: RecordedLlmFetchCall[] = [];
+    const gateway = await createWorkerLlmGatewayFromEnvironment(
+      {
+        HEIMDALL_LLM_REVIEW_FINDINGS_MODEL: "gpt-review-findings",
+        LLM_PROVIDER: "openai",
+        OPENAI_API_KEY: "sk-test-openai-key",
+        OPENAI_MODEL: "gpt-default",
+      },
+      {
+        fetch: async (url, init) => {
+          calls.push({ ...(init ? { init } : {}), url: String(url) });
+          return llmChatCompletionResponse({ findings: [] });
+        },
+      },
+    );
+    if (!gateway) {
+      throw new Error("Expected configured worker LLM gateway.");
+    }
+
+    await expect(gateway.generateReviewFindings({ prompt: "{}" })).resolves.toEqual({
+      findings: [],
+    });
+
+    expect(llmRequestJsonBody(requireFirstLlmFetchCall(calls))).toMatchObject({
+      model: "gpt-review-findings",
+    });
+  });
+
   it("enforces configured LLM input budgets before provider calls", async () => {
     const calls: RecordedLlmFetchCall[] = [];
     const gateway = await createWorkerLlmGatewayFromEnvironment(

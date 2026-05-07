@@ -83,6 +83,7 @@ import {
   type LLMGatewayBudgetPolicy,
   type LLMProvider,
   type OpenAIChatCompletionsFetch,
+  REVIEW_FINDINGS_MODEL_PROFILE,
 } from "@repo/llm-gateway";
 import {
   createMemoryCandidatesFromCommand,
@@ -877,13 +878,17 @@ export async function createWorkerLlmGatewayFromEnvironment(
     throw new Error(`Unsupported LLM_PROVIDER: ${providerName}`);
   }
 
+  const reviewFindingsModel =
+    optionalEnvString(env.HEIMDALL_LLM_REVIEW_FINDINGS_MODEL) ??
+    optionalEnvString(env.LLM_REVIEW_FINDINGS_MODEL);
   const model =
     optionalEnvString(env.HEIMDALL_LLM_MODEL) ??
     optionalEnvString(env.LLM_MODEL) ??
-    optionalEnvString(env.OPENAI_MODEL);
+    optionalEnvString(env.OPENAI_MODEL) ??
+    reviewFindingsModel;
   if (!model) {
     throw new Error(
-      "HEIMDALL_LLM_MODEL, LLM_MODEL, or OPENAI_MODEL is required when the OpenAI LLM provider is configured.",
+      "HEIMDALL_LLM_MODEL, LLM_MODEL, OPENAI_MODEL, or HEIMDALL_LLM_REVIEW_FINDINGS_MODEL is required when the OpenAI LLM provider is configured.",
     );
   }
 
@@ -905,24 +910,44 @@ export async function createWorkerLlmGatewayFromEnvironment(
     optionalEnvString(env.HEIMDALL_LLM_MODEL_PROFILE) ??
     optionalEnvString(env.LLM_MODEL_PROFILE) ??
     "review_llm";
+  const reviewFindingsModelProfile =
+    optionalEnvString(env.HEIMDALL_LLM_REVIEW_FINDINGS_MODEL_PROFILE) ??
+    optionalEnvString(env.LLM_REVIEW_FINDINGS_MODEL_PROFILE) ??
+    REVIEW_FINDINGS_MODEL_PROFILE;
   const timeoutMs =
     optionalPositiveInteger(env.HEIMDALL_LLM_TIMEOUT_MS) ??
     optionalPositiveInteger(env.LLM_PROVIDER_TIMEOUT_MS) ??
     optionalPositiveInteger(env.OPENAI_TIMEOUT_MS);
   const budget = createWorkerLlmBudgetFromEnvironment(env);
+  const openAIProviderOptions = {
+    apiKey,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+  };
+  const modelRoutes = reviewFindingsModel
+    ? [
+        {
+          modelProfile: reviewFindingsModelProfile,
+          provider: createOpenAIChatCompletionsProvider({
+            ...openAIProviderOptions,
+            model: reviewFindingsModel,
+          }),
+          task: "review.findings" as const,
+        },
+      ]
+    : undefined;
 
   return createLLMGateway(
     createOpenAIChatCompletionsProvider({
-      apiKey,
-      ...(baseUrl ? { baseUrl } : {}),
-      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...openAIProviderOptions,
       model,
-      ...(timeoutMs ? { timeoutMs } : {}),
     }),
     {
       ...(budget ? { budget } : {}),
-      defaultModelProfile: modelProfile,
+      defaultModelProfile: reviewFindingsModel ? reviewFindingsModelProfile : modelProfile,
       ...(options.metrics ? { metrics: options.metrics } : {}),
+      ...(modelRoutes ? { modelRoutes } : {}),
       ...(options.traces ? { traces: options.traces } : {}),
     },
   );
@@ -1750,7 +1775,15 @@ function firstEnvName(
 
 /** Returns whether OpenAI provider settings are present without an explicit provider selector. */
 function hasOpenAIProviderConfiguration(env: WorkerLlmGatewayEnvironment): boolean {
-  return Boolean(firstEnvValue(env, ["HEIMDALL_LLM_MODEL", "LLM_MODEL", "OPENAI_MODEL"]));
+  return Boolean(
+    firstEnvValue(env, [
+      "HEIMDALL_LLM_MODEL",
+      "LLM_MODEL",
+      "OPENAI_MODEL",
+      "HEIMDALL_LLM_REVIEW_FINDINGS_MODEL",
+      "LLM_REVIEW_FINDINGS_MODEL",
+    ]),
+  );
 }
 
 /** Returns whether a provider selector names a local embedding provider. */

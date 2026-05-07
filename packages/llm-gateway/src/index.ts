@@ -14,12 +14,46 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 /** Stable prompt version for review finding generation. */
 export const REVIEW_FINDINGS_PROMPT_VERSION = "review-findings.v1";
 
+/** Stable model profile used by the review finding generation task. */
+export const REVIEW_FINDINGS_MODEL_PROFILE = "review_findings";
+
 /** System prompt used for schema-valid review finding generation. */
 export const REVIEW_FINDINGS_SYSTEM_PROMPT =
   "You are a code review pass. Return only concrete, actionable findings anchored to changed diff lines.";
 
 /** Task names supported by the gateway MVP. */
 export type LLMTask = "review.findings";
+
+/** Prompt definition for the review finding generation task. */
+export type ReviewFindingsPromptDefinition = {
+  /** Stable prompt version written to audit metadata. */
+  readonly promptVersion: string;
+  /** Schema name used in validation errors and provider JSON-mode instructions. */
+  readonly schemaName: "LLMFindingOutput";
+  /** System prompt containing review policy for the task. */
+  readonly system: string;
+  /** Task that owns this prompt definition. */
+  readonly task: "review.findings";
+};
+
+/** Registry of versioned prompts used by gateway convenience methods. */
+export type LLMPromptRegistry = {
+  /** Prompt definition used by `generateReviewFindings`. */
+  readonly reviewFindings: ReviewFindingsPromptDefinition;
+};
+
+/** Default prompt definition for review finding generation. */
+export const REVIEW_FINDINGS_PROMPT_DEFINITION = {
+  promptVersion: REVIEW_FINDINGS_PROMPT_VERSION,
+  schemaName: "LLMFindingOutput",
+  system: REVIEW_FINDINGS_SYSTEM_PROMPT,
+  task: "review.findings",
+} as const satisfies ReviewFindingsPromptDefinition;
+
+/** Default versioned prompt registry used by the gateway. */
+export const DEFAULT_LLM_PROMPT_REGISTRY = {
+  reviewFindings: REVIEW_FINDINGS_PROMPT_DEFINITION,
+} as const satisfies LLMPromptRegistry;
 
 /** Normalized LLM gateway failure codes. */
 export type LLMErrorCode =
@@ -54,6 +88,16 @@ export type LLMGatewayBudgetPolicy = {
   readonly maxTotalInputChars?: number;
 };
 
+/** Provider route selected by task and low-cardinality model profile. */
+export type LLMModelRoute = {
+  /** Model profile requested by callers through metadata or gateway defaults. */
+  readonly modelProfile: string;
+  /** Provider adapter used when this route matches. */
+  readonly provider: LLMProvider;
+  /** Optional task restriction for the route. */
+  readonly task?: LLMTask;
+};
+
 /** Options used to create a schema-validating gateway. */
 export type CreateLLMGatewayOptions = {
   /** Optional product-safe input budget enforced before provider calls. */
@@ -62,6 +106,10 @@ export type CreateLLMGatewayOptions = {
   readonly defaultModelProfile?: string;
   /** Optional metric recorder for product-safe aggregate LLM telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
+  /** Optional model routes selected by task and model profile. */
+  readonly modelRoutes?: readonly LLMModelRoute[];
+  /** Optional versioned prompt registry. Defaults to the built-in registry. */
+  readonly promptRegistry?: LLMPromptRegistry;
   /** Whether to redact secret-like data from prompts before provider calls. Defaults to true. */
   readonly redactPrompts?: boolean | undefined;
   /** Optional bounded retry policy for transient provider failures. */
@@ -441,19 +489,22 @@ export function createLLMGateway(
   options: CreateLLMGatewayOptions = {},
 ): LLMGateway {
   const budget = normalizeBudgetPolicy(options.budget);
+  const promptRegistry = options.promptRegistry ?? DEFAULT_LLM_PROMPT_REGISTRY;
   const retryPolicy = normalizeRetryPolicy(options.retryPolicy);
   const generateObject = async <TSchemaValue extends TSchema>(
     input: GenerateObjectInput<TSchemaValue>,
   ): Promise<Static<TSchemaValue>> => {
+    const route = selectLLMModelRoute(provider, input, options);
+    const routedInput = applyModelRouteMetadata(input, route);
     const providerInput =
-      options.redactPrompts === false ? input : redactGenerateObjectPrompt(input);
-    const telemetry = startLLMCallTelemetry(provider, providerInput, options);
+      options.redactPrompts === false ? routedInput : redactGenerateObjectPrompt(routedInput);
+    const telemetry = startLLMCallTelemetry(route.provider, providerInput, options);
     try {
-      enforceBudgetPolicy(providerInput, budget, provider.id);
-      const output = await executeProviderObject(provider, providerInput, retryPolicy, {
+      enforceBudgetPolicy(providerInput, budget, route.provider.id);
+      const output = await executeProviderObject(route.provider, providerInput, retryPolicy, {
         onRetry: (error) => recordLLMRetryMetric(options.metrics, telemetry, error),
       });
-      const validated = validateObjectOutput(provider, providerInput, output);
+      const validated = validateObjectOutput(route.provider, providerInput, output);
       finishLLMCallTelemetry(options.metrics, telemetry, { status: "succeeded" });
       return validated;
     } catch (error) {
@@ -464,19 +515,79 @@ export function createLLMGateway(
 
   return {
     generateObject,
-    generateReviewFindings: async (input) =>
-      generateObject({
-        task: "review.findings",
+    generateReviewFindings: async (input) => {
+      const promptDefinition = promptRegistry.reviewFindings;
+
+      return generateObject({
+        task: promptDefinition.task,
         schema: LLMFindingOutputSchema,
-        schemaName: "LLMFindingOutput",
-        system: REVIEW_FINDINGS_SYSTEM_PROMPT,
+        schemaName: promptDefinition.schemaName,
+        system: promptDefinition.system,
         prompt: input.prompt,
         metadata: {
           ...(input.metadata ?? {}),
-          promptVersion: REVIEW_FINDINGS_PROMPT_VERSION,
+          promptVersion: promptDefinition.promptVersion,
         },
-      }),
+      });
+    },
   };
+}
+
+type SelectedLLMModelRoute = {
+  /** Model profile selected for the call, when one was configured or requested. */
+  readonly modelProfile?: string;
+  /** Provider selected for the call. */
+  readonly provider: LLMProvider;
+};
+
+/** Selects a provider by task and model profile, falling back to the default provider. */
+function selectLLMModelRoute<TSchemaValue extends TSchema>(
+  defaultProvider: LLMProvider,
+  input: GenerateObjectInput<TSchemaValue>,
+  options: CreateLLMGatewayOptions,
+): SelectedLLMModelRoute {
+  const requestedModelProfile =
+    stringMetadata(input.metadata, "modelProfile") ??
+    stringMetadata(input.metadata, "model_profile") ??
+    options.defaultModelProfile;
+  const requestedProfileKey = modelProfileRouteKey(requestedModelProfile);
+  const route = requestedProfileKey
+    ? options.modelRoutes?.find(
+        (candidate) =>
+          (!candidate.task || candidate.task === input.task) &&
+          modelProfileRouteKey(candidate.modelProfile) === requestedProfileKey,
+      )
+    : undefined;
+  const modelProfile = route?.modelProfile ?? requestedModelProfile;
+
+  return {
+    ...(modelProfile ? { modelProfile } : {}),
+    provider: route?.provider ?? defaultProvider,
+  };
+}
+
+/** Adds the selected model profile to metadata for telemetry and provider-visible audit data. */
+function applyModelRouteMetadata<TSchemaValue extends TSchema>(
+  input: GenerateObjectInput<TSchemaValue>,
+  route: SelectedLLMModelRoute,
+): GenerateObjectInput<TSchemaValue> {
+  if (!route.modelProfile) {
+    return input;
+  }
+
+  return {
+    ...input,
+    metadata: {
+      ...(input.metadata ?? {}),
+      modelProfile: route.modelProfile,
+    },
+  };
+}
+
+/** Normalizes model profile selectors for deterministic route matching. */
+function modelProfileRouteKey(value: string | undefined): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
 /** Redacts secret-like data from the user prompt before an adapter sees it. */
