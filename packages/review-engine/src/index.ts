@@ -20,6 +20,7 @@ import { safeParseWithSchema } from "@repo/contracts/validation/parse";
 import type { LLMGateway } from "@repo/llm-gateway";
 import { evaluateSuppression, type MemoryFact, type SuppressionDecision } from "@repo/memory";
 import { type EffectiveReviewPolicy, evaluateFindingPolicy } from "@repo/rules";
+import type { NormalizedToolDiagnostic, StaticAnalysisReport } from "@repo/static-analysis";
 
 /** Valid finding categories used when normalizing schema-invalid candidates. */
 const FINDING_CATEGORIES = new Set<FindingCategory>([
@@ -62,6 +63,9 @@ const MIN_EVIDENCE_SUMMARY_LENGTH = 12;
 /** Minimum evidence confidence before evidence is considered useful. */
 const MIN_EVIDENCE_CONFIDENCE = 0.2;
 
+/** Maximum static-analysis diagnostics converted by one review pass. */
+const STATIC_ANALYSIS_FINDING_LIMIT = 10;
+
 /** Normalization failures that make later candidate validators unreliable. */
 const SCHEMA_BLOCKING_REASONS = new Set<FindingRejectionReason>([
   "invalid_file_path",
@@ -90,6 +94,8 @@ export type ReviewPassContext = {
   readonly contextBundle?: ContextBundle;
   /** Optional gateway used by model-backed review passes. */
   readonly llmGateway?: LLMGateway;
+  /** Optional static-analysis report used by static-tool synthesis passes. */
+  readonly staticAnalysisReport?: StaticAnalysisReport;
 };
 
 /** Candidate finding pass boundary implemented by review-engine passes. */
@@ -187,6 +193,13 @@ export const llmReviewPass: ReviewPass = {
 
     return findingsFromLLMOutput(context, output);
   },
+};
+
+/** Review pass that converts static-analysis diagnostics into candidate findings. */
+export const staticAnalysisReviewPass: ReviewPass = {
+  name: "static-analysis-synthesis",
+  version: "1.0.0",
+  run: async (context) => staticAnalysisFindingsFromReport(context),
 };
 
 /** Runs review passes in order and returns all emitted candidate findings. */
@@ -928,6 +941,135 @@ function findingsFromLLMOutput(
       metadata: { passVersion: llmReviewPass.version },
     };
   });
+}
+
+/** Converts a static-analysis report into candidate findings anchored to changed lines. */
+function staticAnalysisFindingsFromReport(context: ReviewPassContext): readonly CandidateFinding[] {
+  const report = context.staticAnalysisReport;
+  if (!report) {
+    return [];
+  }
+
+  return report.diagnostics
+    .filter((diagnostic) => diagnostic.isInChangedFile && diagnostic.isOnChangedLine)
+    .slice(0, STATIC_ANALYSIS_FINDING_LIMIT)
+    .map((diagnostic, index) =>
+      staticAnalysisDiagnosticFinding(context, report, diagnostic, index),
+    );
+}
+
+/** Converts one normalized static-analysis diagnostic into a candidate finding. */
+function staticAnalysisDiagnosticFinding(
+  context: ReviewPassContext,
+  report: StaticAnalysisReport,
+  diagnostic: NormalizedToolDiagnostic,
+  index: number,
+): CandidateFinding {
+  const line = Math.max(1, diagnostic.location.startLine);
+  const fingerprint = sha256(["static-analysis", diagnostic.fingerprint].join(":"));
+  const title = boundedText(
+    `${staticAnalysisRuleLabel(diagnostic)}: ${diagnostic.message}`,
+    MAX_CANDIDATE_TITLE_LENGTH,
+  );
+  const body = boundedText(
+    [
+      `${diagnostic.tool} reported this issue on a changed line.`,
+      diagnostic.rawMessage ?? diagnostic.message,
+      diagnostic.ruleUrl ? `Rule documentation: ${diagnostic.ruleUrl}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    MAX_CANDIDATE_BODY_LENGTH,
+  );
+
+  return {
+    body,
+    category: diagnostic.category,
+    confidence: diagnostic.confidence,
+    createdAt: context.timestamp,
+    evidence: [
+      {
+        confidence: diagnostic.confidence,
+        evidenceId: stableId("ev", [
+          context.reviewRunId,
+          staticAnalysisReviewPass.name,
+          diagnostic.diagnosticId,
+        ]),
+        kind: "static_analysis",
+        metadata: {
+          diagnosticId: diagnostic.diagnosticId,
+          reportId: report.reportId,
+          tool: diagnostic.tool,
+          toolRunId: diagnostic.toolRunId,
+          ...(diagnostic.ruleId ? { ruleId: diagnostic.ruleId } : {}),
+        },
+        path: diagnostic.location.filePath,
+        range: {
+          endLine: diagnostic.location.endLine ?? line,
+          startLine: line,
+        },
+        summary: boundedText(diagnostic.message, 1_000),
+      },
+    ],
+    findingId: stableId("fnd", [
+      context.reviewRunId,
+      staticAnalysisReviewPass.name,
+      index,
+      fingerprint,
+    ]),
+    fingerprint,
+    location: {
+      isInDiff: true,
+      line,
+      path: diagnostic.location.filePath,
+      side: "RIGHT",
+    },
+    metadata: {
+      diagnosticId: diagnostic.diagnosticId,
+      passVersion: staticAnalysisReviewPass.version,
+      reportId: report.reportId,
+      tool: diagnostic.tool,
+      toolRunId: diagnostic.toolRunId,
+      ...(diagnostic.ruleId ? { ruleId: diagnostic.ruleId } : {}),
+    },
+    reviewRunId: context.reviewRunId,
+    schemaVersion: "candidate_finding.v1",
+    severity: severityFromStaticDiagnostic(diagnostic.severity),
+    source: "static_analysis",
+    sourceName: staticAnalysisReviewPass.name,
+    title,
+  };
+}
+
+/** Returns a concise rule label for a static-analysis diagnostic. */
+function staticAnalysisRuleLabel(diagnostic: NormalizedToolDiagnostic): string {
+  return diagnostic.ruleId ?? diagnostic.ruleName ?? diagnostic.tool;
+}
+
+/** Maps normalized static-analysis severity to review finding severity. */
+function severityFromStaticDiagnostic(
+  severity: NormalizedToolDiagnostic["severity"],
+): FindingSeverity {
+  switch (severity) {
+    case "critical":
+      return "critical";
+    case "error":
+      return "high";
+    case "warning":
+      return "medium";
+    case "info":
+      return "low";
+  }
+}
+
+/** Truncates text to a character limit without returning an empty string. */
+function boundedText(value: string, maxLength: number): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed.length > 0 ? trimmed : "Static-analysis diagnostic.";
+  }
+
+  return trimmed.slice(0, Math.max(1, maxLength - 1)).trimEnd();
 }
 
 function renderReviewPrompt(context: ReviewPassContext): string {

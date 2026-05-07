@@ -12,6 +12,7 @@
     { "path": "../contracts/tsconfig.build.json" },
     { "path": "../llm-gateway/tsconfig.build.json" },
     { "path": "../memory/tsconfig.build.json" },
-    { "path": "../rules/tsconfig.build.json" }
+    { "path": "../rules/tsconfig.build.json" },
+    { "path": "../static-analysis/tsconfig.build.json" }
   ]
 }

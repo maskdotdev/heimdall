@@ -847,6 +847,9 @@ importers:
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules
+      '@repo/static-analysis':
+        specifier: workspace:*
+        version: link:../static-analysis
     devDependencies:
       '@types/node':
         specifier: 'catalog:'

@@ -23,7 +23,8 @@
     "@repo/contracts": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
     "@repo/memory": "workspace:*",
-    "@repo/rules": "workspace:*"
+    "@repo/rules": "workspace:*",
+    "@repo/static-analysis": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

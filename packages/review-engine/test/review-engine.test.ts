@@ -10,11 +10,13 @@ import type { CandidateFinding, Evidence } from "@repo/contracts/review/finding"
 import { createStaticLLMGateway } from "@repo/llm-gateway";
 import type { MemoryFact } from "@repo/memory";
 import { createPolicyFixture } from "@repo/rules";
+import type { StaticAnalysisReport } from "@repo/static-analysis";
 import { describe, expect, it } from "vitest";
 import {
   llmReviewPass,
   runReviewPasses,
   selectReviewPasses,
+  staticAnalysisReviewPass,
   validateAndRankCandidateFindings,
   validateCandidateFindings,
 } from "../src/index";
@@ -50,6 +52,55 @@ describe("llmReviewPass", () => {
       sourceName: "llm-review",
       location: { path: "src/math.ts", line: 2, side: "RIGHT", isInDiff: true },
     });
+  });
+});
+
+describe("staticAnalysisReviewPass", () => {
+  it("converts changed-line static diagnostics into candidate findings", async () => {
+    const findings = await runReviewPasses({
+      passes: [staticAnalysisReviewPass],
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        staticAnalysisReport: staticAnalysisReportFixture(),
+        timestamp: validCandidateFindingFixture.createdAt,
+      },
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      category: "correctness",
+      evidence: [
+        expect.objectContaining({
+          kind: "static_analysis",
+          path: "src/math.ts",
+          range: { startLine: 2, endLine: 2 },
+        }),
+      ],
+      location: { path: "src/math.ts", line: 2, side: "RIGHT", isInDiff: true },
+      metadata: expect.objectContaining({
+        diagnosticId: "sdiag_test",
+        reportId: "star_test",
+        tool: "eslint",
+      }),
+      severity: "high",
+      source: "static_analysis",
+      sourceName: "static-analysis-synthesis",
+    });
+  });
+
+  it("ignores static diagnostics that are outside changed lines", async () => {
+    const findings = await runReviewPasses({
+      passes: [staticAnalysisReviewPass],
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        staticAnalysisReport: staticAnalysisReportFixture({ isOnChangedLine: false }),
+        timestamp: validCandidateFindingFixture.createdAt,
+      },
+    });
+
+    expect(findings).toEqual([]);
   });
 });
 
@@ -117,6 +168,73 @@ describe("selectReviewPasses", () => {
     ).toEqual(["pr_summary", "behavior_change"]);
   });
 });
+
+/** Creates a static-analysis report with one diagnostic on the fixture diff. */
+function staticAnalysisReportFixture(
+  diagnosticOverrides: Partial<StaticAnalysisReport["diagnostics"][number]> = {},
+): StaticAnalysisReport {
+  const diagnostic = {
+    baselineStatus: "unknown",
+    category: "correctness",
+    confidence: 0.87,
+    diagnosticId: "sdiag_test",
+    fingerprint: "stfp_test",
+    isInChangedFile: true,
+    isOnChangedLine: true,
+    location: {
+      filePath: "src/math.ts",
+      startLine: 2,
+    },
+    message: "Unexpected nullable return.",
+    metadata: {},
+    ruleId: "no-unsafe-return",
+    severity: "error",
+    sourceTrust: "tool_output",
+    tool: "eslint",
+    toolRunId: "str_test",
+    ...diagnosticOverrides,
+  } satisfies StaticAnalysisReport["diagnostics"][number];
+
+  return {
+    commitSha: validPullRequestSnapshotFixture.headSha,
+    diagnostics: [diagnostic],
+    durationMs: 1,
+    finishedAt: "2026-05-06T00:00:00.001Z",
+    mode: "changed_files_fast",
+    repoId: validPullRequestSnapshotFixture.repoId,
+    reportId: "star_test",
+    reviewRunId: validCandidateFindingFixture.reviewRunId,
+    schemaVersion: "static_analysis_report.v1",
+    startedAt: "2026-05-06T00:00:00.000Z",
+    status: "succeeded",
+    summary: {
+      changedLineDiagnosticCount: diagnostic.isOnChangedLine ? 1 : 0,
+      diagnosticCount: 1,
+      failedToolRunCount: 0,
+      highSeverityDiagnosticCount: 1,
+      newDiagnosticCount: 0,
+      succeededToolRunCount: 1,
+      timedOutToolRunCount: 0,
+      toolRunCount: 1,
+    },
+    toolRuns: [
+      {
+        diagnosticCount: 1,
+        durationMs: 1,
+        exitCode: 0,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        planId: "stplan_test",
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "succeeded",
+        stderrBytes: 0,
+        stdoutBytes: 2,
+        tool: "eslint",
+        toolRunId: "str_test",
+      },
+    ],
+    warnings: [],
+  };
+}
 
 describe("validateAndRankCandidateFindings", () => {
   it("rejects unanchored duplicates and publishes ranked findings", () => {
