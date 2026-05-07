@@ -226,6 +226,33 @@ export const ObservabilityAlertDefinitionSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** SLO and product-quality target category used by observability definitions. */
+export const ObservabilitySloCategorySchema = Type.Union([
+  Type.Literal("availability"),
+  Type.Literal("freshness"),
+  Type.Literal("latency"),
+  Type.Literal("quality"),
+  Type.Literal("reliability"),
+]);
+
+/** Vendor-neutral SLO or SLO-like quality target definition. */
+export const ObservabilitySloDefinitionSchema = Type.Object(
+  {
+    category: ObservabilitySloCategorySchema,
+    dashboardPath: Type.String({ minLength: 1 }),
+    id: Type.String({ minLength: 1 }),
+    labels: Type.Array(Type.String({ minLength: 1 })),
+    name: Type.String({ minLength: 1 }),
+    objective: Type.String({ minLength: 1 }),
+    owner: Type.String({ minLength: 1 }),
+    segments: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    sli: Type.String({ minLength: 1 }),
+    target: Type.String({ minLength: 1 }),
+    window: Type.String({ minLength: 1 }),
+  },
+  { additionalProperties: false },
+);
+
 /** Telemetry span kind compatible with common OpenTelemetry span roles. */
 export const TelemetrySpanKindSchema = Type.Union([
   Type.Literal("internal"),
@@ -348,6 +375,12 @@ export type ObservabilityAlertSeverity = Static<typeof ObservabilityAlertSeverit
 
 /** Vendor-neutral alert definition used by deployment and runbook tooling. */
 export type ObservabilityAlertDefinition = Static<typeof ObservabilityAlertDefinitionSchema>;
+
+/** SLO and product-quality target category used by observability definitions. */
+export type ObservabilitySloCategory = Static<typeof ObservabilitySloCategorySchema>;
+
+/** Vendor-neutral SLO or SLO-like quality target definition. */
+export type ObservabilitySloDefinition = Static<typeof ObservabilitySloDefinitionSchema>;
 
 /** Telemetry span kind compatible with common OpenTelemetry span roles. */
 export type TelemetrySpanKind = Static<typeof TelemetrySpanKindSchema>;
@@ -817,6 +850,126 @@ export function getObservabilityAlertDefinition(
   id: string,
 ): ObservabilityAlertDefinition | undefined {
   return OBSERVABILITY_ALERT_DEFINITIONS.find((definition) => definition.id === id);
+}
+
+/** Canonical MVP SLO and product-quality target definitions. */
+export const OBSERVABILITY_SLO_DEFINITIONS = [
+  {
+    category: "latency",
+    dashboardPath: "/admin/debug/webhooks",
+    id: "webhook_ingestion_latency",
+    labels: ["service", "environment", "provider"],
+    name: "Webhook ingestion latency",
+    objective: "99% of valid webhook deliveries return 2xx within 5 seconds.",
+    owner: "integrations",
+    sli: "Webhook delivery duration for valid deliveries grouped by success status.",
+    target: "99% <= 5s",
+    window: "30d rolling",
+  },
+  {
+    category: "latency",
+    dashboardPath: "/admin/overview",
+    id: "review_completion_latency",
+    labels: ["service", "environment", "repo_size", "pr_size"],
+    name: "Review completion latency",
+    objective: "90% of standard PR reviews complete within 5 minutes after webhook ingestion.",
+    owner: "review-pipeline",
+    segments: ["repo_size", "pr_size"],
+    sli: "review_run.completed_at - webhook_event.received_at for standard PR reviews.",
+    target: "90% <= 5m",
+    window: "30d rolling",
+  },
+  {
+    category: "reliability",
+    dashboardPath: "/admin/debug/publisher",
+    id: "publishing_reliability",
+    labels: ["service", "environment", "provider"],
+    name: "Publishing reliability",
+    objective:
+      "99% of publishable review runs publish successfully or are explicitly skipped for a valid reason.",
+    owner: "integrations",
+    sli: "publisher success and valid skip outcomes divided by publishable attempts.",
+    target: "99% successful_or_valid_skip",
+    window: "30d rolling",
+  },
+  {
+    category: "freshness",
+    dashboardPath: "/admin/debug/jobs",
+    id: "review_queue_freshness",
+    labels: ["service", "environment", "queue_name"],
+    name: "Review queue freshness",
+    objective: "95% of pr.review jobs start within 60 seconds.",
+    owner: "platform",
+    sli: "job.started_at - job.enqueued_at for pr.review jobs.",
+    target: "95% <= 60s",
+    window: "30d rolling",
+  },
+  {
+    category: "availability",
+    dashboardPath: "/admin/overview",
+    id: "api_availability",
+    labels: ["service", "environment"],
+    name: "API availability",
+    objective: "99.9% API readiness during production hours.",
+    owner: "platform",
+    sli: "Successful API readiness checks divided by total production-hour readiness checks.",
+    target: "99.9%",
+    window: "30d rolling",
+  },
+  {
+    category: "quality",
+    dashboardPath: "/admin/overview",
+    id: "review_comment_budget",
+    labels: ["service", "environment", "repo_size", "pr_size"],
+    name: "Review comment budget",
+    objective: "Published comments per review stay within the configured review budget.",
+    owner: "review-pipeline",
+    segments: ["repo_size", "pr_size"],
+    sli: "Published comments per review divided by the configured comment budget.",
+    target: "<= configured budget",
+    window: "30d rolling",
+  },
+  {
+    category: "quality",
+    dashboardPath: "/admin/overview",
+    id: "high_confidence_publish_rate",
+    labels: ["service", "environment", "stage"],
+    name: "High-confidence finding publish rate",
+    objective: "High-confidence finding publish rate remains stable across review stages.",
+    owner: "review-pipeline",
+    sli: "Published high-confidence findings divided by validated high-confidence findings.",
+    target: "stable week over week",
+    window: "30d rolling",
+  },
+  {
+    category: "quality",
+    dashboardPath: "/admin/overview",
+    id: "anchor_rejection_balance",
+    labels: ["service", "environment", "rejection_reason"],
+    name: "Anchor rejection balance",
+    objective: "Rejection reasons are not dominated by anchor failures.",
+    owner: "review-pipeline",
+    sli: "Anchor-related rejection reasons divided by all rejected findings.",
+    target: "not dominant",
+    window: "30d rolling",
+  },
+  {
+    category: "quality",
+    dashboardPath: "/admin/overview",
+    id: "duplicate_comment_rate",
+    labels: ["service", "environment", "provider"],
+    name: "Duplicate comment rate",
+    objective: "Duplicate comments stay near zero.",
+    owner: "integrations",
+    sli: "Duplicate or skipped duplicate comments divided by publish attempts.",
+    target: "near zero",
+    window: "30d rolling",
+  },
+] satisfies readonly ObservabilitySloDefinition[];
+
+/** Returns one canonical SLO definition by ID when it exists. */
+export function getObservabilitySloDefinition(id: string): ObservabilitySloDefinition | undefined {
+  return OBSERVABILITY_SLO_DEFINITIONS.find((definition) => definition.id === id);
 }
 
 /** Stable span names emitted directly by service and queue boundaries. */

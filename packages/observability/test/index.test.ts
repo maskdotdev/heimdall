@@ -11,11 +11,13 @@ import {
   createTelemetryTraceHeaders,
   DEFAULT_OBSERVABILITY_CONFIG,
   getObservabilityAlertDefinition,
+  getObservabilitySloDefinition,
   loadObservabilityConfig,
   normalizeAdminControlPlaneTelemetryEvent,
   normalizeTelemetryTraceContext,
   OBSERVABILITY_ALERT_DEFINITIONS,
   OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SLO_DEFINITIONS,
   OBSERVABILITY_SPAN_NAMES,
   ObservabilityConfigValidationError,
   recordAdminControlPlaneTelemetryEvent,
@@ -135,6 +137,37 @@ describe("observability alert definitions", () => {
     expect(
       OBSERVABILITY_ALERT_DEFINITIONS.every(
         (definition) => definition.dashboardPath && definition.runbookPath && definition.owner,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("observability SLO definitions", () => {
+  it("defines MVP SLO and product-quality targets with measurement metadata", () => {
+    const ids = OBSERVABILITY_SLO_DEFINITIONS.map((definition) => definition.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual([
+      "webhook_ingestion_latency",
+      "review_completion_latency",
+      "publishing_reliability",
+      "review_queue_freshness",
+      "api_availability",
+      "review_comment_budget",
+      "high_confidence_publish_rate",
+      "anchor_rejection_balance",
+      "duplicate_comment_rate",
+    ]);
+    expect(getObservabilitySloDefinition("review_completion_latency")).toMatchObject({
+      category: "latency",
+      labels: expect.arrayContaining(["repo_size", "pr_size"]),
+      segments: ["repo_size", "pr_size"],
+      target: "90% <= 5m",
+    });
+    expect(
+      OBSERVABILITY_SLO_DEFINITIONS.every(
+        (definition) =>
+          definition.dashboardPath && definition.owner && definition.sli && definition.target,
       ),
     ).toBe(true);
   });
