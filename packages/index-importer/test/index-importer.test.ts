@@ -75,6 +75,19 @@ describe("createFileSystemIndexArtifactResolver", () => {
     await expect(resolver.readArtifact("repo_1/artifact.json")).resolves.toEqual(emptyArtifact());
   });
 
+  it("reads split artifact directories with manifest and JSONL records", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithChunk();
+    const artifactPath = join(root, "repo_1", "index-artifact");
+    await writeSplitArtifact(artifactPath, artifact);
+    const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
+
+    await expect(resolver.readArtifact("repo_1/index-artifact")).resolves.toEqual(artifact);
+    await expect(readIndexArtifactFromUri(pathToFileURL(artifactPath).toString())).resolves.toEqual(
+      artifact,
+    );
+  });
+
   it("rejects paths outside a configured artifact root", async () => {
     const root = await createTempRoot();
     const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
@@ -386,6 +399,18 @@ async function createTempRoot(): Promise<string> {
 async function writeArtifact(path: string, artifact: IndexArtifact): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+}
+
+/** Writes a split manifest and JSONL records artifact directory to disk. */
+async function writeSplitArtifact(path: string, artifact: IndexArtifact): Promise<void> {
+  await mkdir(path, { recursive: true });
+  await Promise.all([
+    writeFile(join(path, "manifest.json"), `${JSON.stringify(artifact.manifest, null, 2)}\n`),
+    writeFile(
+      join(path, "records.jsonl"),
+      `${artifact.records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    ),
+  ]);
 }
 
 /** Creates a minimal valid index artifact for resolver tests. */

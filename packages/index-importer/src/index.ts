@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ReviewArtifactFetch, S3CompatibleReviewArtifactPayloadStore } from "@repo/artifacts";
@@ -144,7 +144,7 @@ type IndexImporterTelemetryState = {
   readonly span: TelemetrySpanHandle | undefined;
 };
 
-/** Creates a resolver that reads whole-artifact JSON files from file URLs or local paths. */
+/** Creates a resolver that reads filesystem-backed index artifact layouts. */
 export function createFileSystemIndexArtifactResolver(
   options: FileSystemIndexArtifactResolverOptions = {},
 ): IndexArtifactResolver {
@@ -153,9 +153,8 @@ export function createFileSystemIndexArtifactResolver(
   return {
     readArtifact: async (artifactUri) => {
       const artifactPath = resolveLocalArtifactPath(artifactUri, rootPath);
-      const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
 
-      return artifact;
+      return readFilesystemIndexArtifact(artifactPath);
     },
   };
 }
@@ -218,7 +217,7 @@ export function createIndexArtifactResolverFromEnvironment(
   return createFileSystemIndexArtifactResolver();
 }
 
-/** Reads a whole-artifact JSON file from a file URL or local path. */
+/** Reads a filesystem-backed index artifact from a file URL or local path. */
 export async function readIndexArtifactFromUri(
   artifactUri: string,
   options: FileSystemIndexArtifactResolverOptions = {},
@@ -767,6 +766,34 @@ function resolveLocalArtifactPath(artifactUri: string, rootPath: string | undefi
   }
 
   return artifactPath;
+}
+
+/** Reads either a whole-artifact JSON file or a split artifact directory. */
+async function readFilesystemIndexArtifact(artifactPath: string): Promise<IndexArtifact> {
+  const info = await stat(artifactPath);
+  if (info.isDirectory()) {
+    return readSplitIndexArtifactDirectory(artifactPath);
+  }
+
+  return JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
+}
+
+/** Reads an artifact directory containing manifest.json and records.jsonl files. */
+async function readSplitIndexArtifactDirectory(directoryPath: string): Promise<IndexArtifact> {
+  const [manifestJson, recordsJsonl] = await Promise.all([
+    readFile(resolve(directoryPath, "manifest.json"), "utf8"),
+    readFile(resolve(directoryPath, "records.jsonl"), "utf8"),
+  ]);
+  const records = recordsJsonl
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as IndexArtifact["records"][number]);
+
+  return {
+    manifest: JSON.parse(manifestJson) as IndexArtifact["manifest"],
+    records,
+  };
 }
 
 /** Converts R2 object URIs to S3-compatible URIs for the shared object reader. */
