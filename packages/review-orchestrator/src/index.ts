@@ -31,11 +31,7 @@ import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
-import {
-  llmReviewPass,
-  runReviewPasses,
-  validateAndRankCandidateFindings,
-} from "@repo/review-engine";
+import { llmReviewPass, runReviewPasses, validateCandidateFindings } from "@repo/review-engine";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
 import {
   DefaultEntitlementService,
@@ -556,12 +552,13 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "validation";
-    const validatedFindings = validateAndRankCandidateFindings({
+    const validationResult = validateCandidateFindings({
       snapshot,
       findings: candidateFindings,
       timestamp: now().toISOString(),
       config: { policy: policyResult.snapshot.effectivePolicy },
     });
+    const validatedFindings = validationResult.validated;
     for (const finding of validatedFindings) {
       await reviewRepository.insertValidatedFinding(finding);
     }
@@ -582,6 +579,33 @@ export async function runPullRequestReview(
       payload: { schemaVersion: "validated_findings.v1", findings: validatedFindings },
       createdAt: now().toISOString(),
     });
+    const rejectedArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "rejected_findings",
+      name: "rejected-findings.json",
+      payload: {
+        schemaVersion: "rejected_findings.v1",
+        findings: validationResult.rejected,
+        stats: validationResult.stats,
+      },
+      createdAt: now().toISOString(),
+    });
+    const rankingArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "ranking_report",
+      name: "validation-ranking-report.json",
+      payload: {
+        schemaVersion: "finding_validation_report.v1",
+        acceptedFindingIds: validationResult.accepted.map((finding) => finding.findingId),
+        duplicateGroups: validationResult.duplicateGroups,
+        rejectedFindingIds: validationResult.rejected.map((finding) => finding.findingId),
+        stats: validationResult.stats,
+        trace: validationResult.trace,
+      },
+      createdAt: now().toISOString(),
+    });
     const publishedFindingCount = validatedFindings.filter(
       (finding) => finding.decision === "publish",
     ).length;
@@ -596,6 +620,7 @@ export async function runPullRequestReview(
         publishedFindingCount,
         rejectedFindingCount,
         validatedFindingCount: validatedFindings.length,
+        validationStats: validationResult.stats,
       },
     });
     const currentStatus = await checkReviewRunCurrent(dependencies.gitProvider, {
@@ -627,7 +652,14 @@ export async function runPullRequestReview(
           currentStatus === "superseded"
             ? "Review superseded before publish because the pull request head changed."
             : "Review skipped before publish because the pull request is no longer open.",
-        artifactRefs: [...artifacts, contextArtifact, candidateArtifact, validatedArtifact],
+        artifactRefs: [
+          ...artifacts,
+          contextArtifact,
+          candidateArtifact,
+          validatedArtifact,
+          rejectedArtifact,
+          rankingArtifact,
+        ],
         counts: {
           candidateFindings: candidateFindings.length,
           validatedFindings: publishedFindingCount,
@@ -722,7 +754,14 @@ export async function runPullRequestReview(
         candidateFindings.length === 0
           ? "Review completed with no candidate findings and queued publisher handoff."
           : "Review completed with validated findings and queued publisher handoff.",
-      artifactRefs: [...artifacts, contextArtifact, candidateArtifact, validatedArtifact],
+      artifactRefs: [
+        ...artifacts,
+        contextArtifact,
+        candidateArtifact,
+        validatedArtifact,
+        rejectedArtifact,
+        rankingArtifact,
+      ],
       counts: {
         candidateFindings: candidateFindings.length,
         validatedFindings: publishedFindingCount,
