@@ -27,6 +27,7 @@ import {
   embedChunkBatch,
   estimateEmbeddingTokenCost,
   type OpenAIEmbeddingsFetch,
+  reconcileEmbeddingJob,
   roughTokenEstimate,
 } from "../src";
 
@@ -721,6 +722,51 @@ describe("embedChunkBatch", () => {
   });
 });
 
+describe("reconcileEmbeddingJob", () => {
+  it("repairs stale item rows from stored embeddings and refreshes parent progress", async () => {
+    const updatedValues: unknown[] = [];
+    const now = new Date("2026-05-07T12:00:00.000Z");
+
+    await expect(
+      reconcileEmbeddingJob({
+        db: createEmbeddingReconcileDatabaseStub({ updatedValues }),
+        embeddingJobId: "embjob_1",
+        now: () => now,
+      }),
+    ).resolves.toEqual({
+      embeddingJobId: "embjob_1",
+      repairedItemCount: 1,
+      progress: {
+        chunkCountEmbedded: 2,
+        chunkCountFailed: 0,
+        chunkCountSkipped: 0,
+        chunkCountTotal: 2,
+        embeddingJobId: "embjob_1",
+        status: "succeeded",
+      },
+    });
+    expect(updatedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          finishedAt: now,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          status: "embedded",
+        }),
+        expect.objectContaining({
+          chunkCountEmbedded: 2,
+          chunkCountFailed: 0,
+          chunkCountSkipped: 0,
+          finishedAt: now,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          status: "succeeded",
+        }),
+      ]),
+    );
+  });
+});
+
 describe("buildCodeChunkEmbeddingInput", () => {
   it("builds stable code chunk provider input with useful metadata", () => {
     const input = buildCodeChunkEmbeddingInput({
@@ -981,6 +1027,56 @@ function createEmbeddingDatabaseStub(options: {
   };
 
   return db as unknown as HeimdallDatabase;
+}
+
+function createEmbeddingReconcileDatabaseStub(options: {
+  /** Captures values passed to fake update statements. */
+  readonly updatedValues: unknown[];
+}): Pick<HeimdallDatabase, "select" | "update"> {
+  const selectedRows: readonly (readonly unknown[])[] = [
+    [
+      {
+        dimensions: 2,
+        embeddingJobId: "embjob_1",
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        indexVersionId: "idx_01HREVIEW",
+        model: "text-embedding-3-small",
+        provider: "hash",
+        repoId: "repo_01HREVIEW",
+      },
+    ],
+    [
+      { chunkId: "chunk_1", status: "pending" },
+      { chunkId: "chunk_2", status: "embedded" },
+    ],
+    [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
+    [{ embedded: 2, failed: 0, skipped: 0, total: 2 }],
+  ];
+  let selectIndex = 0;
+
+  return {
+    select: () => ({
+      from: (_table: unknown) => ({
+        where: (_condition: unknown) => {
+          const rows = selectedRows[selectIndex] ?? [];
+          selectIndex += 1;
+
+          return Object.assign(Promise.resolve(rows), {
+            limit: async (count: number) => rows.slice(0, count),
+          });
+        },
+      }),
+    }),
+    update: (_table: unknown) => ({
+      set: (values: unknown) => {
+        options.updatedValues.push(values);
+
+        return {
+          where: async (_condition: unknown) => undefined,
+        };
+      },
+    }),
+  } as unknown as Pick<HeimdallDatabase, "select" | "update">;
 }
 
 function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {

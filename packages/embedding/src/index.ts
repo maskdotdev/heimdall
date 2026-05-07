@@ -388,6 +388,42 @@ export type EmbeddingUsageLedger = {
   readonly record: (input: EmbeddingUsageEventInput) => Promise<unknown>;
 };
 
+/** Durable embedding job progress reconstructed from item rows. */
+export type EmbeddingJobProgressSnapshot = {
+  /** Durable embedding job row ID. */
+  readonly embeddingJobId: string;
+  /** Number of item rows marked embedded. */
+  readonly chunkCountEmbedded: number;
+  /** Number of item rows marked failed. */
+  readonly chunkCountFailed: number;
+  /** Number of item rows marked skipped. */
+  readonly chunkCountSkipped: number;
+  /** Number of item rows tracked by this embedding job. */
+  readonly chunkCountTotal: number;
+  /** Reconciled parent job status. */
+  readonly status: "failed" | "running" | "succeeded";
+};
+
+/** Input used to reconcile one durable embedding job from stored vector rows. */
+export type ReconcileEmbeddingJobInput = {
+  /** Database used to inspect embedding rows and repair job state. */
+  readonly db: Pick<HeimdallDatabase, "select" | "update">;
+  /** Durable embedding job row ID to reconcile. */
+  readonly embeddingJobId: string;
+  /** Optional clock used for deterministic repaired timestamps. */
+  readonly now?: () => Date;
+};
+
+/** Result returned after reconciling one durable embedding job. */
+export type ReconcileEmbeddingJobResult = {
+  /** Durable embedding job row ID. */
+  readonly embeddingJobId: string;
+  /** Item rows changed from stale state to embedded. */
+  readonly repairedItemCount: number;
+  /** Recomputed parent progress after repairs. */
+  readonly progress: EmbeddingJobProgressSnapshot;
+};
+
 /** Result produced after embedding one chunk batch. */
 export type EmbedChunkBatchResult = {
   /** Number of chunks newly embedded and stored. */
@@ -647,6 +683,107 @@ export async function embedChunkBatch(
     });
     throw error;
   }
+}
+
+/** Reconciles one durable embedding job against stored embedding rows. */
+export async function reconcileEmbeddingJob(
+  input: ReconcileEmbeddingJobInput,
+): Promise<ReconcileEmbeddingJobResult | undefined> {
+  const [job] = await input.db
+    .select({
+      dimensions: embeddingJobs.dimensions,
+      embeddingJobId: embeddingJobs.embeddingJobId,
+      embeddingProfileVersion: embeddingJobs.embeddingProfileVersion,
+      indexVersionId: embeddingJobs.indexVersionId,
+      model: embeddingJobs.model,
+      provider: embeddingJobs.provider,
+      repoId: embeddingJobs.repoId,
+    })
+    .from(embeddingJobs)
+    .where(eq(embeddingJobs.embeddingJobId, input.embeddingJobId))
+    .limit(1);
+
+  if (!job) {
+    return undefined;
+  }
+
+  const items = await input.db
+    .select({
+      chunkId: embeddingJobItems.chunkId,
+      status: embeddingJobItems.status,
+    })
+    .from(embeddingJobItems)
+    .where(eq(embeddingJobItems.embeddingJobId, input.embeddingJobId));
+  const chunkIds = items.map((item) => item.chunkId);
+  const now = input.now?.() ?? new Date();
+  let repairedItemCount = 0;
+
+  if (chunkIds.length > 0) {
+    const embeddedRows = await input.db
+      .select({ chunkId: codeChunkEmbeddings.chunkId })
+      .from(codeChunkEmbeddings)
+      .where(embeddingRowsForJobCondition(job, chunkIds));
+    const embeddedChunkIds = new Set(embeddedRows.map((row) => row.chunkId));
+    const repairableChunkIds = items
+      .filter((item) => item.status !== "embedded" && embeddedChunkIds.has(item.chunkId))
+      .map((item) => item.chunkId);
+
+    if (repairableChunkIds.length > 0) {
+      await input.db
+        .update(embeddingJobItems)
+        .set({
+          finishedAt: now,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          status: "embedded",
+        })
+        .where(
+          and(
+            eq(embeddingJobItems.embeddingJobId, input.embeddingJobId),
+            inArray(embeddingJobItems.chunkId, repairableChunkIds),
+          ),
+        );
+      repairedItemCount = repairableChunkIds.length;
+    }
+  }
+
+  return {
+    embeddingJobId: input.embeddingJobId,
+    repairedItemCount,
+    progress: await refreshEmbeddingJobProgress(input.db, input.embeddingJobId, now),
+  };
+}
+
+/** Builds the stored-embedding predicate used to repair stale job item rows. */
+function embeddingRowsForJobCondition(
+  job: {
+    /** Vector dimensions recorded on the embedding job. */
+    readonly dimensions: number;
+    /** Embedding profile version recorded on the embedding job. */
+    readonly embeddingProfileVersion: string;
+    /** Imported index version associated with the embedding job. */
+    readonly indexVersionId: string | null;
+    /** Embedding model recorded on the embedding job. */
+    readonly model: string;
+    /** Embedding provider recorded on the embedding job. */
+    readonly provider: string;
+    /** Repository associated with the embedding job. */
+    readonly repoId: string;
+  },
+  chunkIds: readonly string[],
+) {
+  const sharedCondition = and(
+    eq(codeChunkEmbeddings.repoId, job.repoId),
+    eq(codeChunkEmbeddings.embeddingModel, job.model),
+    eq(codeChunkEmbeddings.embeddingDimension, job.dimensions),
+    eq(codeChunkEmbeddings.embeddingProfileVersion, job.embeddingProfileVersion),
+    eq(codeChunkEmbeddings.provider, job.provider),
+    inArray(codeChunkEmbeddings.chunkId, [...chunkIds]),
+  );
+
+  return job.indexVersionId
+    ? and(sharedCondition, eq(codeChunkEmbeddings.indexVersionId, job.indexVersionId))
+    : sharedCondition;
 }
 
 /** Starts product-safe embedding telemetry and returns shared metric labels. */
@@ -1379,7 +1516,7 @@ async function refreshEmbeddingJobProgress(
     /** Product-safe failure message for the job row. */
     readonly message: string;
   },
-): Promise<void> {
+): Promise<EmbeddingJobProgressSnapshot> {
   const [progress] = await db
     .select({
       embedded: sql<number>`count(*) filter (where ${embeddingJobItems.status} = 'embedded')::int`,
@@ -1395,6 +1532,14 @@ async function refreshEmbeddingJobProgress(
   const failed = progress?.failed ?? 0;
   const completed = total > 0 && embedded + skipped + failed >= total;
   const status = completed ? (failed > 0 ? "failed" : "succeeded") : "running";
+  const snapshot = {
+    chunkCountEmbedded: embedded,
+    chunkCountFailed: failed,
+    chunkCountSkipped: skipped,
+    chunkCountTotal: total,
+    embeddingJobId,
+    status,
+  } satisfies EmbeddingJobProgressSnapshot;
 
   await db
     .update(embeddingJobs)
@@ -1409,6 +1554,8 @@ async function refreshEmbeddingJobProgress(
       status,
     })
     .where(eq(embeddingJobs.embeddingJobId, embeddingJobId));
+
+  return snapshot;
 }
 
 /** Builds a bounded product-safe failure summary for embedding job rows. */
