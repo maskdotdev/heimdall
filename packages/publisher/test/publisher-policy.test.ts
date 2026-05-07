@@ -1,7 +1,7 @@
 import type { ValidatedFinding } from "@repo/contracts";
 import { validValidatedFindingFixture } from "@repo/contracts/fixtures/finding.fixture";
 import { describe, expect, it } from "vitest";
-import { createPublishPlan } from "../src";
+import { createPublishPlan, hasPlannedPublishOperations } from "../src";
 
 describe("createPublishPlan", () => {
   it("uses legacy check-run and inline publishing when no policy snapshot exists", () => {
@@ -81,7 +81,7 @@ describe("createPublishPlan", () => {
     ]);
   });
 
-  it("marks inline publishing as skipped when no findings can be anchored inline", () => {
+  it("plans fallback summary publishing when no findings can be anchored inline", () => {
     const plan = createPublishPlan({
       reviewRun: reviewRunWithPublishingPolicy({
         maxCommentsPerReview: 5,
@@ -100,7 +100,39 @@ describe("createPublishPlan", () => {
         reason: "no_inline_findings",
         status: "skipped",
       },
+      {
+        findingCount: 1,
+        operationType: "summary_comment.fallback",
+        status: "planned",
+      },
     ]);
+    expect(hasPlannedPublishOperations(plan)).toBe(true);
+  });
+
+  it("treats no accepted findings as a no-op publish plan", () => {
+    const plan = createPublishPlan({
+      reviewRun: {},
+      findings: [],
+    });
+
+    expect(plan.checkRunFindings).toHaveLength(0);
+    expect(plan.inlineFindings).toHaveLength(0);
+    expect(plan.configuredSummaryFindings).toHaveLength(0);
+    expect(plan.plannedOperations).toEqual([
+      {
+        findingCount: 0,
+        operationType: "check_run.upsert",
+        reason: "no_check_run_findings",
+        status: "skipped",
+      },
+      {
+        findingCount: 0,
+        operationType: "review.inline_comments",
+        reason: "no_inline_findings",
+        status: "skipped",
+      },
+    ]);
+    expect(hasPlannedPublishOperations(plan)).toBe(false);
   });
 });
 

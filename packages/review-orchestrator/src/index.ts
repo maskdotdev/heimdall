@@ -32,7 +32,7 @@ import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@re
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
-import { createPublishPlan, type PublishPlan } from "@repo/publisher";
+import { createPublishPlan, hasPlannedPublishOperations, type PublishPlan } from "@repo/publisher";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { llmReviewPass, runReviewPasses, validateCandidateFindings } from "@repo/review-engine";
@@ -759,6 +759,17 @@ export async function runPullRequestReview(
     const rejectedFindingCount = validatedFindings.filter(
       (finding) => finding.decision === "reject",
     ).length;
+    const publishPlanModeLabel = publishPlanMode(publishPlan);
+    const publishPlanHasExternalWrites = hasPlannedPublishOperations(publishPlan);
+    const completedReviewArtifactRefs = [
+      ...artifacts,
+      contextArtifact,
+      candidateArtifact,
+      validatedArtifact,
+      rejectedArtifact,
+      rankingArtifact,
+      publishPlanArtifact,
+    ];
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "validation",
@@ -771,7 +782,8 @@ export async function runPullRequestReview(
         duplicateGroupCount: validationResult.duplicateGroups.length,
         publishPlanId,
         publishPlanArtifactId: publishPlanArtifact.artifactId,
-        publishPlanMode: publishPlanMode(publishPlan),
+        publishPlanHasExternalWrites,
+        publishPlanMode: publishPlanModeLabel,
         validationEventCount: validationResult.trace.events.length,
         validationStats: validationResult.stats,
       },
@@ -805,15 +817,7 @@ export async function runPullRequestReview(
           currentStatus === "superseded"
             ? "Review superseded before publish because the pull request head changed."
             : "Review skipped before publish because the pull request is no longer open.",
-        artifactRefs: [
-          ...artifacts,
-          contextArtifact,
-          candidateArtifact,
-          validatedArtifact,
-          rejectedArtifact,
-          rankingArtifact,
-          publishPlanArtifact,
-        ],
+        artifactRefs: completedReviewArtifactRefs,
         counts: {
           candidateFindings: candidateFindings.length,
           validatedFindings: publishedFindingCount,
@@ -828,6 +832,104 @@ export async function runPullRequestReview(
           staleness: {
             expectedHeadSha: snapshot.headSha,
             status: currentStatus,
+          },
+        },
+      });
+
+      return {
+        reviewRunId: reviewRun.reviewRunId,
+        snapshotId: snapshot.snapshotId,
+        candidateFindingCount: candidateFindings.length,
+        validatedFindingCount: publishedFindingCount,
+      };
+    }
+
+    if (!publishPlanHasExternalWrites) {
+      await reviewRepository.insertStageEvent({
+        reviewRunId,
+        stage: "publish",
+        status: "skipped",
+        metadata: {
+          reason: "no_planned_publish_operations",
+          publishPlanId,
+          publishPlanArtifactId: publishPlanArtifact.artifactId,
+          publishPlanMode: publishPlanModeLabel,
+        },
+      });
+      const completedAt = now().toISOString();
+      await quotaService.consumeReservation({
+        now: completedAt,
+        quotaReservationId: quotaReservation.reservation.quotaReservationId,
+      });
+      quotaReservationFinalized = true;
+      await usageLedger.recordMany([
+        {
+          idempotencyKey: `review.run.completed:${reviewRunId}`,
+          orgId: repositoryRecord.orgId,
+          repoId: snapshot.repoId,
+          reviewRunId,
+          eventType: "review.run",
+          quantity: 1,
+          unit: "review",
+          occurredAt: completedAt,
+          metadata: {
+            candidateFindingCount: candidateFindings.length,
+            headSha: snapshot.headSha,
+            pullRequestNumber: snapshot.pullRequestNumber,
+            rejectedFindingCount,
+            trigger: input.trigger,
+            validatedFindingCount: publishedFindingCount,
+          },
+        },
+        {
+          idempotencyKey: `review.credit:${reviewRunId}`,
+          orgId: repositoryRecord.orgId,
+          repoId: snapshot.repoId,
+          reviewRunId,
+          eventType: "review.credit",
+          quantity: 1,
+          unit: "credit",
+          occurredAt: completedAt,
+          metadata: {
+            planKey: planSnapshot.planKey,
+            planVersionId: planSnapshot.planVersionId,
+            quotaReservationId: quotaReservation.reservation.quotaReservationId,
+          },
+        },
+      ]);
+      reviewRun = await reviewRepository.upsertReviewRun({
+        ...reviewRun,
+        status: "completed",
+        completedAt,
+        updatedAt: completedAt,
+        summary:
+          candidateFindings.length === 0
+            ? "Review completed with no candidate findings and no publisher handoff."
+            : "Review completed with no publishable findings and no publisher handoff.",
+        artifactRefs: completedReviewArtifactRefs,
+        counts: {
+          candidateFindings: candidateFindings.length,
+          validatedFindings: publishedFindingCount,
+          publishedFindings: 0,
+          rejectedFindings: rejectedFindingCount,
+        },
+        metadata: {
+          ...reviewRun.metadata,
+          planSnapshot: planSnapshotMetadata(planSnapshot),
+          policySnapshot: policySnapshotMetadata(policyResult.snapshot),
+          quota: {
+            decision: quotaReservation.decision,
+            reservationId: quotaReservation.reservation.quotaReservationId,
+          },
+          workspace: {
+            checkedOutSha: workspace.checkedOutSha,
+            cleanedUp: workspace.cleanedUp,
+          },
+          currentStage: "completed",
+          publishPlanId,
+          publishPlanArtifactId: publishPlanArtifact.artifactId,
+          publishSkipped: {
+            reason: "no_planned_publish_operations",
           },
         },
       });
@@ -916,15 +1018,7 @@ export async function runPullRequestReview(
         candidateFindings.length === 0
           ? "Review completed with no candidate findings and queued publisher handoff."
           : "Review completed with validated findings and queued publisher handoff.",
-      artifactRefs: [
-        ...artifacts,
-        contextArtifact,
-        candidateArtifact,
-        validatedArtifact,
-        rejectedArtifact,
-        rankingArtifact,
-        publishPlanArtifact,
-      ],
+      artifactRefs: completedReviewArtifactRefs,
       counts: {
         candidateFindings: candidateFindings.length,
         validatedFindings: publishedFindingCount,
@@ -1575,6 +1669,7 @@ function publishPlanMode(plan: PublishPlan): string {
     case "review.inline_comments":
       return "inline_review";
     case "summary_comment.configured":
+    case "summary_comment.fallback":
       return "summary";
     default:
       return "mixed";

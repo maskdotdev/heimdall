@@ -61,7 +61,8 @@ export type PublishReviewResult = {
 export type PublishOperationType =
   | "check_run.upsert"
   | "review.inline_comments"
-  | "summary_comment.configured";
+  | "summary_comment.configured"
+  | "summary_comment.fallback";
 
 /** Dry-run-friendly description of one publish operation. */
 export type PlannedPublishOperation = {
@@ -121,15 +122,17 @@ export function createPublishPlan(input: {
 export function planPublishOperations(
   plan: Pick<
     PublishPlan,
-    "policy" | "checkRunFindings" | "inlineFindings" | "configuredSummaryFindings"
+    "policy" | "findings" | "checkRunFindings" | "inlineFindings" | "configuredSummaryFindings"
   >,
 ): readonly PlannedPublishOperation[] {
   const operations: PlannedPublishOperation[] = [];
   if (plan.policy.publishCheckRun) {
+    const findingCount = plan.checkRunFindings.length;
     operations.push({
-      findingCount: plan.checkRunFindings.length,
+      findingCount,
       operationType: "check_run.upsert",
-      status: "planned",
+      status: findingCount > 0 ? "planned" : "skipped",
+      ...(findingCount === 0 ? { reason: "no_check_run_findings" } : {}),
     });
   }
   if (plan.policy.publishInlineComments) {
@@ -141,14 +144,32 @@ export function planPublishOperations(
     });
   }
   if (plan.policy.publishSummaryComment) {
+    const findingCount = plan.configuredSummaryFindings.length;
     operations.push({
-      findingCount: plan.configuredSummaryFindings.length,
+      findingCount,
       operationType: "summary_comment.configured",
+      status: findingCount > 0 ? "planned" : "skipped",
+      ...(findingCount === 0 ? { reason: "no_summary_findings" } : {}),
+    });
+  }
+  const fallbackSummaryFindingCount =
+    plan.policy.publishInlineComments && !plan.policy.publishSummaryComment
+      ? Math.max(0, plan.findings.length - plan.inlineFindings.length)
+      : 0;
+  if (fallbackSummaryFindingCount > 0) {
+    operations.push({
+      findingCount: fallbackSummaryFindingCount,
+      operationType: "summary_comment.fallback",
       status: "planned",
     });
   }
 
   return operations;
+}
+
+/** Returns true when a publish plan contains at least one external write. */
+export function hasPlannedPublishOperations(plan: Pick<PublishPlan, "plannedOperations">): boolean {
+  return plan.plannedOperations.some((operation) => operation.status === "planned");
 }
 
 /** Creates or updates live PR output and persists durable publish state. */
@@ -257,7 +278,7 @@ export async function publishReviewRun(
       (finding) => finding.decision === "publish",
     );
     const publishPlan = createPublishPlan({ reviewRun, findings });
-    const checkRun = publishPlan.policy.publishCheckRun
+    const checkRun = hasPlannedPublishOperation(publishPlan, "check_run.upsert")
       ? await publishCheckRun({
           db: dependencies.db,
           gitProvider: dependencies.gitProvider,
@@ -268,7 +289,7 @@ export async function publishReviewRun(
           findings: publishPlan.checkRunFindings,
         })
       : undefined;
-    const review = publishPlan.policy.publishInlineComments
+    const review = hasPlannedPublishOperation(publishPlan, "review.inline_comments")
       ? await publishInlineComments({
           db: dependencies.db,
           gitProvider: dependencies.gitProvider,
@@ -285,7 +306,7 @@ export async function publishReviewRun(
       plan: publishPlan,
       commentIdsByFindingId: review?.commentIdsByFindingId ?? {},
     });
-    const configuredSummary = publishPlan.policy.publishSummaryComment
+    const configuredSummary = hasPlannedPublishOperation(publishPlan, "summary_comment.configured")
       ? await publishSummaryComment({
           db: dependencies.db,
           gitProvider: dependencies.gitProvider,
@@ -382,6 +403,15 @@ type PublishedReviewWithFindingMap = Awaited<ReturnType<GitProvider["publishRevi
 type PublishedCheckRun = Awaited<ReturnType<GitProvider["createOrUpdateCheckRun"]>>;
 
 type SummaryCommentPurpose = "configured" | "fallback";
+
+function hasPlannedPublishOperation(
+  plan: Pick<PublishPlan, "plannedOperations">,
+  operationType: PublishOperationType,
+): boolean {
+  return plan.plannedOperations.some(
+    (operation) => operation.operationType === operationType && operation.status === "planned",
+  );
+}
 
 async function publishCheckRun(input: {
   readonly db: HeimdallDatabase;

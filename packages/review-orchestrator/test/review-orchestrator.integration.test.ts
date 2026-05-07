@@ -35,11 +35,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
   });
 
   it("persists a review run, findings, validation output, and publish job", async () => {
-    await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
-    await sql.unsafe(`SET search_path TO "${schemaName}", public`);
-    await sql.unsafe(await readFile(bootstrapPath, "utf8"));
-    await applyMigrations(sql, schemaName);
-    await seedRepository(sql);
+    await resetDatabase(sql, schemaName);
 
     const result = await runPullRequestReview(
       {
@@ -142,7 +138,83 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       publish_jobs_with_plan: 1,
     });
   });
+
+  it("does not enqueue publish work when all findings are rejected", async () => {
+    await resetDatabase(sql, schemaName);
+
+    const result = await runPullRequestReview(
+      {
+        repoId: "repo_test",
+        installationId: "inst_test",
+        pullRequestNumber: 7,
+        baseSha: "1111111",
+        headSha: "2222222",
+        trigger: "webhook",
+      },
+      {
+        db,
+        gitProvider: fakeGitProvider,
+        now: () => new Date(now),
+        llmGateway: createStaticLLMGateway({
+          findings: [
+            {
+              path: "src/index.ts",
+              line: 1,
+              severity: "medium",
+              category: "correctness",
+              title: "Maybe check exported value",
+              body: "The exported value might need validation.",
+              evidence: ["The added line exports a literal value."],
+              confidence: 0.2,
+            },
+          ],
+        }),
+        syncWorkspace: async () => ({
+          workspacePath: "/tmp/heimdall-review-test",
+          checkedOutSha: "2222222",
+          cleanedUp: true,
+        }),
+        indexWaitTimeoutMs: 0,
+      },
+    );
+
+    expect(result.candidateFindingCount).toBe(1);
+    expect(result.validatedFindingCount).toBe(0);
+    expect(result.publishJobKey).toBeUndefined();
+
+    const [counts] = await sql`
+      SELECT
+        (SELECT count(*)::int FROM review_runs WHERE status = 'completed') AS completed_runs,
+        (SELECT count(*)::int FROM review_artifacts WHERE kind = 'publish_plan') AS publish_plan_artifacts,
+        (SELECT count(*)::int FROM publish_plans WHERE mode = 'none') AS empty_publish_plans,
+        (SELECT count(*)::int FROM validated_findings WHERE decision = 'reject') AS rejected_findings,
+        (SELECT count(*)::int FROM review_run_stage_events WHERE stage = 'publish' AND status = 'skipped') AS skipped_publish_events,
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs,
+        (SELECT count(*)::int FROM quota_reservations WHERE status = 'consumed') AS consumed_quota_reservations,
+        (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.run') AS review_usage_events
+    `;
+
+    expect(counts).toEqual({
+      completed_runs: 1,
+      consumed_quota_reservations: 1,
+      empty_publish_plans: 1,
+      publish_jobs: 0,
+      publish_plan_artifacts: 1,
+      rejected_findings: 1,
+      review_usage_events: 1,
+      skipped_publish_events: 1,
+    });
+  });
 });
+
+async function resetDatabase(sql: postgres.Sql, schemaName: string): Promise<void> {
+  await sql.unsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+  await sql.unsafe(`CREATE SCHEMA "${schemaName}"`);
+  await sql.unsafe(`SET search_path TO "${schemaName}", public`);
+  await sql.unsafe(await readFile(bootstrapPath, "utf8"));
+  await applyMigrations(sql, schemaName);
+  await seedRepository(sql);
+}
 
 async function applyMigrations(sql: postgres.Sql, schemaName: string): Promise<void> {
   const files = (await readdir(migrationsDirectory))
