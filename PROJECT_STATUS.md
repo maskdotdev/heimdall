@@ -334,7 +334,9 @@ tracked milestone.
   Postgres-backed package integration tests run in CI. The DB integration test applies every
   generated migration from an empty schema before inserting core rows and checking latest tables,
   and review, admin-tools, webhook-ingestion, and publisher integration coverage now boot against
-  the same current migration chain.
+  the same current migration chain. Product review artifact metadata, payload, download, and signed
+  URL routes now have cross-tenant denial coverage that proves artifact data is not read after a
+  foreign review-run scope check fails.
 - Latest release-control milestone: `.github/ISSUE_TEMPLATE/admin-control-plane-production-release.md`
   and `docs/releases/admin-control-plane-production-release.md` define the controlled production
   release ticket, and `infra/railway/*.railway.json` codifies Railway build/deploy settings for

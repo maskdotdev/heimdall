@@ -1056,6 +1056,57 @@ describe("api app", () => {
     });
   });
 
+  it("blocks cross-tenant product artifact routes before reading artifact data", async () => {
+    const artifactCalls: string[] = [];
+    const app = createApiApp({
+      adminControlPlaneService: createMockControlPlaneService({
+        createReviewArtifactDownloadUrl: async () => {
+          artifactCalls.push("download-url");
+          return reviewArtifactDownloadUrlFixture();
+        },
+        getReviewRun: async () => ({
+          ...reviewRunSummaryFixture,
+          orgId: "org_2",
+          repoFullName: "other-org/heimdall",
+          repoId: "repo_2",
+          reviewRunId: "rrn_foreign",
+        }),
+        getReviewArtifactPayload: async () => {
+          artifactCalls.push("payload");
+          return reviewArtifactPayloadFixture();
+        },
+        listReviewArtifacts: async () => {
+          artifactCalls.push("metadata");
+          return [reviewArtifactFixture()];
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+      productSessionAuth: productAuth,
+      productSessionService: createMockProductSessionService(),
+    });
+
+    const requests = [
+      "http://localhost/api/v1/review-runs/rrn_foreign/artifacts",
+      "http://localhost/api/v1/review-runs/rrn_foreign/artifacts/art_2/payload?reason=Inspect%20foreign%20payload",
+      "http://localhost/api/v1/review-runs/rrn_foreign/artifacts/art_2/download?reason=Download%20foreign%20payload",
+      "http://localhost/api/v1/review-runs/rrn_foreign/artifacts/art_2/download-url?reason=Sign%20foreign%20payload",
+    ];
+
+    for (const url of requests) {
+      const response = await app.handle(
+        new Request(url, {
+          headers: { cookie: "car_session=opaque" },
+        }),
+      );
+
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "product_auth.forbidden" },
+      });
+    }
+    expect(artifactCalls).toEqual([]);
+  });
+
   it("rejects product suppress-similar writes when the role lacks rule permission", async () => {
     let suppressCalled = false;
     const viewerSession = productSessionFixture({
