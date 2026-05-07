@@ -793,6 +793,16 @@ type AdminMemoryCandidateDebugSummary = {
   readonly trustLevel: string;
   /** User login that created the candidate when available. */
   readonly createdByLogin?: string;
+  /** Source finding ID when known. */
+  readonly sourceFindingId?: string;
+  /** Memory fact created from this candidate when approved. */
+  readonly approvedMemoryFactId?: string;
+  /** User ID that made the moderation decision when present. */
+  readonly decidedByUserId?: string;
+  /** Moderation decision timestamp when present. */
+  readonly decidedAt?: string;
+  /** Expiration timestamp when present. */
+  readonly expiresAt?: string;
   /** Sorted proposed scope keys. */
   readonly proposedScopeKeys: readonly string[];
   /** Sorted proposed applies-to keys. */
@@ -869,7 +879,7 @@ type AdminMemoryRulesDebugDetails = {
     readonly canApprove: boolean;
     /** Whether rejection is available. */
     readonly canReject: boolean;
-    /** Why candidate actions are unavailable. */
+    /** Explanation of the current moderation availability. */
     readonly reason: string;
   };
   /** Policy and finding evaluation tools. */
@@ -2242,6 +2252,9 @@ type InspectorViewState = {
   loading?: string | undefined;
 };
 
+/** Moderation decision available for one pending memory candidate. */
+type MemoryCandidateModerationDecision = "approve" | "reject";
+
 /** Mutable application state. */
 type AppState = {
   /** Active top-level console mode. */
@@ -2761,6 +2774,16 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "import-eval") {
     await importToEval(state.activeKind);
+    return;
+  }
+
+  if (action === "approve-memory-candidate") {
+    await moderateMemoryCandidate(requiredDatasetValue(element, "memoryCandidateId"), "approve");
+    return;
+  }
+
+  if (action === "reject-memory-candidate") {
+    await moderateMemoryCandidate(requiredDatasetValue(element, "memoryCandidateId"), "reject");
     return;
   }
 
@@ -4055,6 +4078,68 @@ async function importToEval(kind: InspectorKind): Promise<void> {
           suiteId: "smoke-full-pipeline-v1",
         }),
       },
+    );
+  } catch (error) {
+    inspector.error = errorMessage(error);
+  } finally {
+    inspector.loading = undefined;
+    render();
+  }
+}
+
+/** Moderates one pending memory candidate from the memory and rules inspector. */
+async function moderateMemoryCandidate(
+  memoryCandidateId: string,
+  decision: MemoryCandidateModerationDecision,
+): Promise<void> {
+  const inspector = state.inspectors.memory;
+  const details = inspector.details;
+  if (!details || !isMemoryRulesDetails(details)) {
+    inspector.error = "Load memory and rules details before moderating a candidate.";
+    render();
+    return;
+  }
+
+  const candidate = details.memoryCandidates.find(
+    (row) => row.memoryCandidateId === memoryCandidateId,
+  );
+  if (!candidate) {
+    inspector.error = `Memory candidate ${memoryCandidateId} is not in the loaded inspector data.`;
+    render();
+    return;
+  }
+
+  const reason = window.prompt(decision === "approve" ? "Approval reason" : "Rejection reason", "");
+  if (reason === null) {
+    return;
+  }
+
+  const trimmedReason = reason.trim();
+  inspector.loading =
+    decision === "approve" ? "Approving memory candidate" : "Rejecting memory candidate";
+  inspector.error = undefined;
+  render();
+
+  try {
+    await requestAdminData<unknown>(
+      `/api/v1/memory-candidates/${encodeURIComponent(memoryCandidateId)}/${decision}`,
+      {
+        body: JSON.stringify({
+          metadata: {
+            candidateKind: candidate.candidateKind,
+            inspectorRepoId: details.repository.repoId,
+            source: "memory_rules_inspector",
+          },
+          ...(trimmedReason ? { reason: trimmedReason } : {}),
+        }),
+        headers: {
+          "idempotency-key": `memory-candidate-${decision}-${memoryCandidateId}-${crypto.randomUUID()}`,
+        },
+        method: "POST",
+      },
+    );
+    inspector.details = await requestAdminData<InspectorDetails>(
+      inspectorConfigs.memory.detailsPath(details.repository.repoId),
     );
   } catch (error) {
     inspector.error = errorMessage(error);
@@ -8284,6 +8369,7 @@ function renderMemoryRulesDetails(details: AdminMemoryRulesDebugDetails): string
   const pendingCandidateCount = details.memoryCandidates.filter(
     (candidate) => candidate.status === "pending",
   ).length;
+  const inspectorBusy = Boolean(state.inspectors.memory.loading);
 
   return `
     <section class="summary-grid">
@@ -8308,7 +8394,7 @@ function renderMemoryRulesDetails(details: AdminMemoryRulesDebugDetails): string
       ${renderMemoryRuleTools(details)}
     </section>
     ${renderMemoryWarnings(details.warnings)}
-    ${renderMemoryCandidates(details.memoryCandidates)}
+    ${renderMemoryCandidates(details.memoryCandidates, details.candidateActions, inspectorBusy)}
     ${renderMemoryFacts(details.memoryFacts)}
     ${renderEffectiveRules(details.rules)}
   `;
@@ -8369,7 +8455,11 @@ function renderMemoryWarnings(warnings: readonly string[]): string {
 }
 
 /** Renders proposed memory candidate rows. */
-function renderMemoryCandidates(candidates: readonly AdminMemoryCandidateDebugSummary[]): string {
+function renderMemoryCandidates(
+  candidates: readonly AdminMemoryCandidateDebugSummary[],
+  actions: AdminMemoryRulesDebugDetails["candidateActions"],
+  inspectorBusy: boolean,
+): string {
   if (candidates.length === 0) {
     return renderEmptyState("No memory candidates currently apply to this repository.");
   }
@@ -8380,32 +8470,66 @@ function renderMemoryCandidates(candidates: readonly AdminMemoryCandidateDebugSu
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Candidate</th><th>Status</th><th>Trust</th><th>Confidence</th><th>Updated</th></tr>
+            <tr><th>Candidate</th><th>Status</th><th>Trust</th><th>Confidence</th><th>Updated</th><th>Actions</th></tr>
           </thead>
           <tbody>
             ${candidates
-              .map(
-                (candidate) => `
-                  <tr>
-                    <td>
-                      <strong>${escapeHtml(candidate.candidateKind)}</strong>
-                      <p class="muted-text">${escapeHtml(candidate.proposedContent)}</p>
-                      <p class="muted-text">${escapeHtml(candidate.sourceKind)}${candidate.createdByLogin ? ` by ${escapeHtml(candidate.createdByLogin)}` : ""}</p>
-                      ${candidate.proposedScopeKeys.length > 0 ? `<p class="muted-text">scope: ${escapeHtml(candidate.proposedScopeKeys.join(", "))}</p>` : ""}
-                      ${candidate.proposedAppliesToKeys.length > 0 ? `<p class="muted-text">applies: ${escapeHtml(candidate.proposedAppliesToKeys.join(", "))}</p>` : ""}
-                    </td>
-                    <td><span class="status ${statusClass(candidate.status)}">${escapeHtml(candidate.status)}</span></td>
-                    <td>${escapeHtml(candidate.trustLevel)}</td>
-                    <td>${Math.round(candidate.confidence * 100)}%</td>
-                    <td>${formatTime(candidate.updatedAt)}</td>
-                  </tr>
-                `,
-              )
+              .map((candidate) => renderMemoryCandidateRow(candidate, actions, inspectorBusy))
               .join("")}
           </tbody>
         </table>
       </div>
     </section>
+  `;
+}
+
+/** Renders one memory candidate table row. */
+function renderMemoryCandidateRow(
+  candidate: AdminMemoryCandidateDebugSummary,
+  actions: AdminMemoryRulesDebugDetails["candidateActions"],
+  inspectorBusy: boolean,
+): string {
+  const canApprove = candidate.status === "pending" && actions.canApprove && !inspectorBusy;
+  const canReject = candidate.status === "pending" && actions.canReject && !inspectorBusy;
+
+  return `
+    <tr>
+      <td>
+        <strong>${escapeHtml(candidate.candidateKind)}</strong>
+        <p class="muted-text">${escapeHtml(candidate.proposedContent)}</p>
+        <p class="muted-text">${escapeHtml(candidate.sourceKind)}${candidate.createdByLogin ? ` by ${escapeHtml(candidate.createdByLogin)}` : ""}</p>
+        ${candidate.approvedMemoryFactId ? `<p class="muted-text">fact: ${escapeHtml(candidate.approvedMemoryFactId)}</p>` : ""}
+        ${candidate.decidedAt ? `<p class="muted-text">decided: ${escapeHtml(formatTime(candidate.decidedAt))}</p>` : ""}
+        ${candidate.proposedScopeKeys.length > 0 ? `<p class="muted-text">scope: ${escapeHtml(candidate.proposedScopeKeys.join(", "))}</p>` : ""}
+        ${candidate.proposedAppliesToKeys.length > 0 ? `<p class="muted-text">applies: ${escapeHtml(candidate.proposedAppliesToKeys.join(", "))}</p>` : ""}
+      </td>
+      <td><span class="status ${statusClass(candidate.status)}">${escapeHtml(candidate.status)}</span></td>
+      <td>${escapeHtml(candidate.trustLevel)}</td>
+      <td>${Math.round(candidate.confidence * 100)}%</td>
+      <td>${formatTime(candidate.updatedAt)}</td>
+      <td>
+        <div class="row-actions">
+          <button
+            class="small"
+            data-action="approve-memory-candidate"
+            data-memory-candidate-id="${escapeAttribute(candidate.memoryCandidateId)}"
+            type="button"
+            ${canApprove ? "" : "disabled"}
+          >
+            Approve
+          </button>
+          <button
+            class="danger small"
+            data-action="reject-memory-candidate"
+            data-memory-candidate-id="${escapeAttribute(candidate.memoryCandidateId)}"
+            type="button"
+            ${canReject ? "" : "disabled"}
+          >
+            Reject
+          </button>
+        </div>
+      </td>
+    </tr>
   `;
 }
 

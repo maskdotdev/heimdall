@@ -998,10 +998,10 @@ export type AdminMemoryRulesDebugDetails = {
   /** Candidate moderation capability shown by the inspector. */
   readonly candidateActions: {
     /** Whether an operator can approve memory candidates from this inspector. */
-    readonly canApprove: false;
+    readonly canApprove: boolean;
     /** Whether an operator can reject memory candidates from this inspector. */
-    readonly canReject: false;
-    /** Why candidate actions are unavailable. */
+    readonly canReject: boolean;
+    /** Explanation of the current moderation availability. */
     readonly reason: string;
   };
   /** Policy and finding evaluation tools available from this repository context. */
@@ -1967,9 +1967,9 @@ export async function getMemoryRulesDebugDetails(
     memoryCandidates: memoryCandidatesSummary,
     rules: rulesSummary,
     candidateActions: {
-      canApprove: false,
-      canReject: false,
-      reason: "Memory candidate approval and rejection workflows are not wired yet.",
+      canApprove: true,
+      canReject: true,
+      reason: "Pending candidates can be moderated through the scoped API.",
     },
     evaluationTools: [
       {
@@ -3331,7 +3331,7 @@ function memoryRulesWarnings(
   candidates: readonly AdminMemoryCandidateDebugSummary[],
   rules: readonly AdminRepoRuleDebugSummary[],
 ): readonly string[] {
-  const warnings = ["Memory candidate approval and rejection workflows are not wired yet."];
+  const warnings: string[] = [];
   if (facts.length === 0) {
     warnings.push("No memory facts currently apply to this repository.");
   }

@@ -5909,9 +5909,9 @@ function memoryRulesDebugDetailsFixture(
       },
     ],
     candidateActions: {
-      canApprove: false,
-      canReject: false,
-      reason: "Memory candidate approval and rejection workflows are not wired yet.",
+      canApprove: true,
+      canReject: true,
+      reason: "Pending candidates can be moderated through the scoped API.",
     },
     evaluationTools: [
       {
