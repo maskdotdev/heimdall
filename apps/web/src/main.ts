@@ -1070,6 +1070,54 @@ type DashboardRouteState = {
   readonly evaluationSuiteId?: string | undefined;
   /** Requested evaluation run ID. */
   readonly evaluationRunId?: string | undefined;
+  /** Requested audit organization filter. */
+  readonly auditOrgId?: string | undefined;
+  /** Requested audit action filter. */
+  readonly auditAction?: string | undefined;
+  /** Requested audit resource type filter. */
+  readonly auditResourceType?: string | undefined;
+  /** Requested audit resource ID filter. */
+  readonly auditResourceId?: string | undefined;
+  /** Requested audit actor user ID filter. */
+  readonly auditActorUserId?: string | undefined;
+  /** Requested audit search text. */
+  readonly auditSearch?: string | undefined;
+  /** Requested security organization filter. */
+  readonly securityOrgId?: string | undefined;
+  /** Requested security repository filter. */
+  readonly securityRepoId?: string | undefined;
+  /** Requested security event type filter. */
+  readonly securityType?: string | undefined;
+  /** Requested security event severity filter. */
+  readonly securitySeverity?: string | undefined;
+  /** Requested security event source filter. */
+  readonly securitySource?: string | undefined;
+  /** Requested security event status filter. */
+  readonly securityStatus?: string | undefined;
+  /** Requested security event actor ID filter. */
+  readonly securityActorId?: string | undefined;
+  /** Requested security event resource type filter. */
+  readonly securityResourceType?: string | undefined;
+  /** Requested security event resource ID filter. */
+  readonly securityResourceId?: string | undefined;
+  /** Requested security event search text. */
+  readonly securitySearch?: string | undefined;
+  /** Requested usage organization filter. */
+  readonly usageOrgId?: string | undefined;
+  /** Requested usage repository filter. */
+  readonly usageRepoId?: string | undefined;
+  /** Requested usage period start filter. */
+  readonly usagePeriodStart?: string | undefined;
+  /** Requested usage period end filter. */
+  readonly usagePeriodEnd?: string | undefined;
+  /** Requested entitlement organization filter. */
+  readonly entitlementOrgId?: string | undefined;
+  /** Requested billing organization filter. */
+  readonly billingOrgId?: string | undefined;
+  /** Requested billing meter status filter. */
+  readonly billingMeterStatus?: string | undefined;
+  /** Requested billing meter period key filter. */
+  readonly billingMeterPeriodKey?: string | undefined;
 };
 
 /** API envelope returned by the admin API for successful requests. */
@@ -2882,6 +2930,20 @@ const DASHBOARD_ROUTE_PARAM_KEYS = [
   "reviewRunId",
   "findingId",
   "settingsRepoId",
+  "action",
+  "resourceType",
+  "actorUserId",
+  "repoId",
+  "search",
+  "type",
+  "severity",
+  "source",
+  "status",
+  "actorId",
+  "periodStart",
+  "periodEnd",
+  "meterStatus",
+  "meterPeriodKey",
   "repositorySearch",
   "reviewRepoId",
   "reviewStatus",
@@ -3029,41 +3091,41 @@ const state: AppState = {
     rules: [],
   },
   audit: {
-    orgId: "",
-    action: "",
-    resourceType: "",
-    resourceId: "",
-    actorUserId: "",
-    search: "",
+    orgId: initialRouteState.auditOrgId ?? "",
+    action: initialRouteState.auditAction ?? "",
+    resourceType: initialRouteState.auditResourceType ?? "",
+    resourceId: initialRouteState.auditResourceId ?? "",
+    actorUserId: initialRouteState.auditActorUserId ?? "",
+    search: initialRouteState.auditSearch ?? "",
     rows: [],
   },
   security: {
-    orgId: "",
-    repoId: "",
-    type: "",
-    severity: "",
-    source: "",
-    status: "",
-    actorId: "",
-    resourceType: "",
-    resourceId: "",
-    search: "",
+    orgId: initialRouteState.securityOrgId ?? "",
+    repoId: initialRouteState.securityRepoId ?? "",
+    type: initialRouteState.securityType ?? "",
+    severity: initialRouteState.securitySeverity ?? "",
+    source: initialRouteState.securitySource ?? "",
+    status: initialRouteState.securityStatus ?? "",
+    actorId: initialRouteState.securityActorId ?? "",
+    resourceType: initialRouteState.securityResourceType ?? "",
+    resourceId: initialRouteState.securityResourceId ?? "",
+    search: initialRouteState.securitySearch ?? "",
     rows: [],
   },
   usage: {
-    orgId: "",
-    repoId: "",
-    periodStart: currentMonthStartIso(),
-    periodEnd: "",
+    orgId: initialRouteState.usageOrgId ?? "",
+    repoId: initialRouteState.usageRepoId ?? "",
+    periodStart: initialRouteState.usagePeriodStart ?? currentMonthStartIso(),
+    periodEnd: initialRouteState.usagePeriodEnd ?? "",
   },
   entitlements: {
-    orgId: "",
+    orgId: initialRouteState.entitlementOrgId ?? "",
     featureKeys: DEFAULT_ENTITLEMENT_FEATURE_KEYS,
   },
   billing: {
-    orgId: "",
-    meterPeriodKey: currentMonthKey(),
-    meterStatus: "all",
+    orgId: initialRouteState.billingOrgId ?? "",
+    meterPeriodKey: initialRouteState.billingMeterPeriodKey ?? currentMonthKey(),
+    meterStatus: initialRouteState.billingMeterStatus ?? "all",
   },
   evaluation: {
     runs: [],
@@ -3077,6 +3139,9 @@ app.addEventListener("click", (event) => {
   void handleClick(event);
 });
 app.addEventListener("input", handleInput);
+window.addEventListener("popstate", () => {
+  void applyDashboardRouteFromBrowser();
+});
 
 render();
 void loadProductSession();
@@ -3094,7 +3159,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   const view = element.dataset.view as ViewKind | undefined;
   if (view && isViewKind(view)) {
     state.activeView = view;
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState("push");
     render();
     if (view === "overview" && state.session && state.overview.repositories.length === 0) {
       await loadOverview();
@@ -3117,7 +3182,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   const tab = element.dataset.tab as InspectorKind | undefined;
   if (tab && isInspectorKind(tab)) {
     state.activeKind = tab;
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState("push");
     render();
     return;
   }
@@ -3130,7 +3195,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   event.preventDefault();
   if (action === "show-product") {
     state.activeMode = "product";
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState("push");
     render();
     if (!state.product.data && !state.product.loading) {
       await loadProductOnboarding();
@@ -3140,7 +3205,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "show-admin") {
     state.activeMode = "admin";
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState("push");
     render();
     return;
   }
@@ -3171,7 +3236,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   if (action === "select-product-org") {
-    await loadProductResources(requiredDatasetValue(element, "orgId"));
+    await loadProductResources(requiredDatasetValue(element, "orgId"), "push");
     return;
   }
 
@@ -3184,12 +3249,12 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   if (action === "open-product-repository-settings") {
-    await loadProductRepositorySettings(requiredDatasetValue(element, "repoId"));
+    await loadProductRepositorySettings(requiredDatasetValue(element, "repoId"), "push");
     return;
   }
 
   if (action === "open-product-review-detail") {
-    await loadProductReviewDetail(requiredDatasetValue(element, "reviewRunId"));
+    await loadProductReviewDetail(requiredDatasetValue(element, "reviewRunId"), "push");
     return;
   }
 
@@ -3223,7 +3288,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
   }
 
   if (action === "select-product-finding") {
-    await loadProductFindingDetail(requiredDatasetValue(element, "findingId"));
+    await loadProductFindingDetail(requiredDatasetValue(element, "findingId"), "push");
     return;
   }
 
@@ -3640,26 +3705,31 @@ function handleInput(event: Event): void {
 
   if (field?.startsWith("audit.")) {
     updateAuditField(field.slice("audit.".length), target.value);
+    replaceDashboardRouteFromState();
     return;
   }
 
   if (field?.startsWith("security.")) {
     updateSecurityEventField(field.slice("security.".length), target.value);
+    replaceDashboardRouteFromState();
     return;
   }
 
   if (field?.startsWith("usage.")) {
     updateUsageField(field.slice("usage.".length), target.value);
+    replaceDashboardRouteFromState();
     return;
   }
 
   if (field?.startsWith("entitlements.")) {
     updateEntitlementsField(field.slice("entitlements.".length), target.value);
+    replaceDashboardRouteFromState();
     return;
   }
 
   if (field?.startsWith("billing.")) {
     updateBillingField(field.slice("billing.".length), target.value);
+    replaceDashboardRouteFromState();
   }
 }
 
@@ -3832,7 +3902,10 @@ async function logoutProductSession(): Promise<void> {
 }
 
 /** Loads authenticated product organizations, repositories, reviews, and usage. */
-async function loadProductResources(orgId?: string): Promise<void> {
+async function loadProductResources(
+  orgId?: string,
+  historyMode: "replace" | "push" = "replace",
+): Promise<void> {
   if (!state.product.session) {
     return;
   }
@@ -3855,7 +3928,7 @@ async function loadProductResources(orgId?: string): Promise<void> {
         reviews: [],
         loaded: true,
       };
-      replaceDashboardRouteFromState();
+      replaceDashboardRouteFromState(historyMode);
       return;
     }
 
@@ -3879,7 +3952,7 @@ async function loadProductResources(orgId?: string): Promise<void> {
       usage,
       loaded: true,
     };
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState(historyMode);
   } catch (error) {
     state.product.resources = {
       ...defaultProductResources(state.product.resources),
@@ -3915,7 +3988,10 @@ async function setProductRepositoryEnabled(repoId: string, enabled: boolean): Pr
 }
 
 /** Loads product repository settings, rules, and effective policy preview. */
-async function loadProductRepositorySettings(repoId: string): Promise<void> {
+async function loadProductRepositorySettings(
+  repoId: string,
+  historyMode: "replace" | "push" = "replace",
+): Promise<void> {
   state.product.repositorySettings = {
     memoryCandidates: [],
     memoryFacts: [],
@@ -3924,7 +4000,7 @@ async function loadProductRepositorySettings(repoId: string): Promise<void> {
     rules: [],
     loading: "Loading repository settings",
   };
-  replaceDashboardRouteFromState();
+  replaceDashboardRouteFromState(historyMode);
   render();
 
   try {
@@ -4162,7 +4238,10 @@ async function requestProductRepositoryMemory(
 }
 
 /** Loads product review details and validated findings for one review run. */
-async function loadProductReviewDetail(reviewRunId: string): Promise<void> {
+async function loadProductReviewDetail(
+  reviewRunId: string,
+  historyMode: "replace" | "push" = "replace",
+): Promise<void> {
   const previousDetail = state.product.reviewDetail;
   const previousArtifacts =
     previousDetail?.reviewRunId === reviewRunId ? previousDetail.artifacts : undefined;
@@ -4191,7 +4270,7 @@ async function loadProductReviewDetail(reviewRunId: string): Promise<void> {
       previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionScope : "repo",
     loading: "Loading review detail",
   };
-  replaceDashboardRouteFromState();
+  replaceDashboardRouteFromState(historyMode);
   render();
 
   try {
@@ -4223,7 +4302,7 @@ async function loadProductReviewDetail(reviewRunId: string): Promise<void> {
       suppressionScope:
         previousDetail?.reviewRunId === reviewRunId ? previousDetail.suppressionScope : "repo",
     };
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState(historyMode);
   } catch (error) {
     state.product.reviewDetail = {
       reviewRunId,
@@ -4385,7 +4464,10 @@ async function downloadProductReviewArtifactPayload(
 }
 
 /** Loads full product finding detail for the selected finding panel. */
-async function loadProductFindingDetail(findingId: string): Promise<void> {
+async function loadProductFindingDetail(
+  findingId: string,
+  historyMode: "replace" | "push" = "replace",
+): Promise<void> {
   const detail = state.product.reviewDetail;
   if (!detail) {
     return;
@@ -4406,7 +4488,7 @@ async function loadProductFindingDetail(findingId: string): Promise<void> {
     detail.findings = detail.findings.map((finding) =>
       finding.findingId === data.finding.findingId ? data.finding : finding,
     );
-    replaceDashboardRouteFromState();
+    replaceDashboardRouteFromState(historyMode);
   } catch (error) {
     detail.error = errorMessage(error);
   } finally {
@@ -5086,7 +5168,7 @@ async function loadEvaluationRun(evalRunId: string): Promise<void> {
 async function openRepositorySettings(repoId: string): Promise<void> {
   state.activeView = "settings";
   state.settings.repoId = repoId;
-  replaceDashboardRouteFromState();
+  replaceDashboardRouteFromState("push");
   await loadSettings();
 }
 
@@ -5095,7 +5177,7 @@ async function openInspector(kind: InspectorKind, resourceId: string): Promise<v
   state.activeView = "inspectors";
   state.activeKind = kind;
   state.inspectors[kind].id = resourceId;
-  replaceDashboardRouteFromState();
+  replaceDashboardRouteFromState("push");
   await loadDetails(kind);
 }
 
@@ -5112,7 +5194,7 @@ async function openAuditSearch(input: {
   state.audit.resourceType = input.resourceType ?? "";
   state.audit.resourceId = input.resourceId ?? "";
   state.audit.search = input.search ?? "";
-  replaceDashboardRouteFromState();
+  replaceDashboardRouteFromState("push");
   await loadAuditHistory();
 }
 
@@ -5652,28 +5734,57 @@ function readDashboardRouteState(): DashboardRouteState {
   const mode = queryConsoleMode(params.get("mode"));
   const view = queryViewKind(params.get("view"));
   const inspectorKind = queryInspectorKind(params.get("inspector"));
+  const orgId = boundedQueryParam(params, "orgId");
+  const repoId = boundedQueryParam(params, "repoId");
+  const resourceId = boundedQueryParam(params, "resourceId");
 
   return {
+    auditAction: view === "audit" ? boundedQueryParam(params, "action") : undefined,
+    auditActorUserId: view === "audit" ? boundedQueryParam(params, "actorUserId") : undefined,
+    auditOrgId: view === "audit" ? orgId : undefined,
+    auditResourceId: view === "audit" ? resourceId : undefined,
+    auditResourceType: view === "audit" ? boundedQueryParam(params, "resourceType") : undefined,
+    auditSearch: view === "audit" ? boundedQueryParam(params, "search") : undefined,
+    billingMeterPeriodKey:
+      view === "billing" ? boundedQueryParam(params, "meterPeriodKey") : undefined,
+    billingMeterStatus: view === "billing" ? boundedQueryParam(params, "meterStatus") : undefined,
+    billingOrgId: view === "billing" ? orgId : undefined,
+    entitlementOrgId: view === "plan" ? orgId : undefined,
     evaluationRunId: boundedQueryParam(params, "evalRunId"),
     evaluationSuiteId: boundedQueryParam(params, "suiteId"),
     inspectorKind,
-    inspectorResourceId: boundedQueryParam(params, "resourceId"),
+    inspectorResourceId: view === "inspectors" ? resourceId : undefined,
     mode,
     productFindingId: boundedQueryParam(params, "findingId"),
-    productOrgId: boundedQueryParam(params, "orgId"),
+    productOrgId: mode === "product" ? orgId : undefined,
     productRepoId: boundedQueryParam(params, "productRepoId"),
     productReviewRunId: boundedQueryParam(params, "reviewRunId"),
     repositorySearch: boundedQueryParam(params, "repositorySearch"),
     reviewRepoId: boundedQueryParam(params, "reviewRepoId"),
     reviewSearch: boundedQueryParam(params, "reviewSearch"),
     reviewStatus: boundedQueryParam(params, "reviewStatus"),
+    securityActorId: view === "security" ? boundedQueryParam(params, "actorId") : undefined,
+    securityOrgId: view === "security" ? orgId : undefined,
+    securityRepoId: view === "security" ? repoId : undefined,
+    securityResourceId: view === "security" ? resourceId : undefined,
+    securityResourceType:
+      view === "security" ? boundedQueryParam(params, "resourceType") : undefined,
+    securitySearch: view === "security" ? boundedQueryParam(params, "search") : undefined,
+    securitySeverity: view === "security" ? boundedQueryParam(params, "severity") : undefined,
+    securitySource: view === "security" ? boundedQueryParam(params, "source") : undefined,
+    securityStatus: view === "security" ? boundedQueryParam(params, "status") : undefined,
+    securityType: view === "security" ? boundedQueryParam(params, "type") : undefined,
     settingsRepoId: boundedQueryParam(params, "settingsRepoId"),
+    usageOrgId: view === "usage" ? orgId : undefined,
+    usagePeriodEnd: view === "usage" ? boundedQueryParam(params, "periodEnd") : undefined,
+    usagePeriodStart: view === "usage" ? boundedQueryParam(params, "periodStart") : undefined,
+    usageRepoId: view === "usage" ? repoId : undefined,
     view,
   };
 }
 
-/** Replaces owned dashboard URL query parameters from the current in-memory state. */
-function replaceDashboardRouteFromState(): void {
+/** Replaces or pushes owned dashboard URL query parameters from the current in-memory state. */
+function replaceDashboardRouteFromState(historyMode: "replace" | "push" = "replace"): void {
   const route = dashboardRouteStateFromState();
   state.route = route;
   const url = new URL(window.location.href);
@@ -5684,8 +5795,16 @@ function replaceDashboardRouteFromState(): void {
   setDashboardRouteParam(url.searchParams, "mode", route.mode);
   setDashboardRouteParam(url.searchParams, "view", route.view);
   setDashboardRouteParam(url.searchParams, "inspector", route.inspectorKind);
-  setDashboardRouteParam(url.searchParams, "resourceId", route.inspectorResourceId);
-  setDashboardRouteParam(url.searchParams, "orgId", route.productOrgId);
+  setDashboardRouteParam(
+    url.searchParams,
+    "orgId",
+    route.productOrgId ??
+      route.auditOrgId ??
+      route.securityOrgId ??
+      route.usageOrgId ??
+      route.entitlementOrgId ??
+      route.billingOrgId,
+  );
   setDashboardRouteParam(url.searchParams, "productRepoId", route.productRepoId);
   setDashboardRouteParam(url.searchParams, "reviewRunId", route.productReviewRunId);
   setDashboardRouteParam(url.searchParams, "findingId", route.productFindingId);
@@ -5696,7 +5815,36 @@ function replaceDashboardRouteFromState(): void {
   setDashboardRouteParam(url.searchParams, "reviewSearch", route.reviewSearch);
   setDashboardRouteParam(url.searchParams, "suiteId", route.evaluationSuiteId);
   setDashboardRouteParam(url.searchParams, "evalRunId", route.evaluationRunId);
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  setDashboardRouteParam(url.searchParams, "action", route.auditAction);
+  setDashboardRouteParam(url.searchParams, "actorUserId", route.auditActorUserId);
+  setDashboardRouteParam(url.searchParams, "repoId", route.securityRepoId ?? route.usageRepoId);
+  setDashboardRouteParam(
+    url.searchParams,
+    "resourceType",
+    route.securityResourceType ?? route.auditResourceType,
+  );
+  setDashboardRouteParam(
+    url.searchParams,
+    "resourceId",
+    route.securityResourceId ?? route.auditResourceId ?? route.inspectorResourceId,
+  );
+  setDashboardRouteParam(url.searchParams, "search", route.securitySearch ?? route.auditSearch);
+  setDashboardRouteParam(url.searchParams, "type", route.securityType);
+  setDashboardRouteParam(url.searchParams, "severity", route.securitySeverity);
+  setDashboardRouteParam(url.searchParams, "source", route.securitySource);
+  setDashboardRouteParam(url.searchParams, "status", route.securityStatus);
+  setDashboardRouteParam(url.searchParams, "actorId", route.securityActorId);
+  setDashboardRouteParam(url.searchParams, "periodStart", route.usagePeriodStart);
+  setDashboardRouteParam(url.searchParams, "periodEnd", route.usagePeriodEnd);
+  setDashboardRouteParam(url.searchParams, "meterStatus", route.billingMeterStatus);
+  setDashboardRouteParam(url.searchParams, "meterPeriodKey", route.billingMeterPeriodKey);
+  const nextPath = `${url.pathname}${url.search}${url.hash}`;
+  if (historyMode === "push" && nextPath !== productReturnPath()) {
+    window.history.pushState({}, "", nextPath);
+    return;
+  }
+
+  window.history.replaceState({}, "", nextPath);
 }
 
 /** Builds route state from current dashboard selections. */
@@ -5744,6 +5892,68 @@ function dashboardRouteStateFromState(): DashboardRouteState {
       reviewRepoId: optionalRouteValue(state.overview.reviewRepoId),
       reviewSearch: optionalRouteValue(state.overview.reviewSearch),
       reviewStatus: optionalRouteValue(state.overview.reviewStatus),
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "audit") {
+    return {
+      auditAction: optionalRouteValue(state.audit.action),
+      auditActorUserId: optionalRouteValue(state.audit.actorUserId),
+      auditOrgId: optionalRouteValue(state.audit.orgId),
+      auditResourceId: optionalRouteValue(state.audit.resourceId),
+      auditResourceType: optionalRouteValue(state.audit.resourceType),
+      auditSearch: optionalRouteValue(state.audit.search),
+      mode: "admin",
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "security") {
+    return {
+      mode: "admin",
+      securityActorId: optionalRouteValue(state.security.actorId),
+      securityOrgId: optionalRouteValue(state.security.orgId),
+      securityRepoId: optionalRouteValue(state.security.repoId),
+      securityResourceId: optionalRouteValue(state.security.resourceId),
+      securityResourceType: optionalRouteValue(state.security.resourceType),
+      securitySearch: optionalRouteValue(state.security.search),
+      securitySeverity: optionalRouteValue(state.security.severity),
+      securitySource: optionalRouteValue(state.security.source),
+      securityStatus: optionalRouteValue(state.security.status),
+      securityType: optionalRouteValue(state.security.type),
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "usage") {
+    return {
+      mode: "admin",
+      usageOrgId: optionalRouteValue(state.usage.orgId),
+      usagePeriodEnd: optionalRouteValue(state.usage.periodEnd),
+      usagePeriodStart: optionalRouteValue(state.usage.periodStart),
+      usageRepoId: optionalRouteValue(state.usage.repoId),
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "plan") {
+    return {
+      entitlementOrgId: optionalRouteValue(state.entitlements.orgId),
+      mode: "admin",
+      view: state.activeView,
+    };
+  }
+
+  if (state.activeView === "billing") {
+    return {
+      billingMeterPeriodKey: optionalRouteValue(state.billing.meterPeriodKey),
+      billingMeterStatus:
+        state.billing.meterStatus === "all"
+          ? undefined
+          : optionalRouteValue(state.billing.meterStatus),
+      billingOrgId: optionalRouteValue(state.billing.orgId),
+      mode: "admin",
       view: state.activeView,
     };
   }
@@ -5828,6 +6038,70 @@ async function loadProductRouteSelections(): Promise<void> {
   if (route.productFindingId) {
     await loadProductFindingDetail(route.productFindingId);
   }
+}
+
+/** Applies URL route state after browser back/forward navigation. */
+async function applyDashboardRouteFromBrowser(): Promise<void> {
+  const route = readDashboardRouteState();
+  applyDashboardRouteState(route);
+  render();
+
+  if (state.activeMode === "product") {
+    if (state.product.session) {
+      await loadProductResources(route.productOrgId);
+      await loadProductRouteSelections();
+    }
+    return;
+  }
+
+  if (state.session) {
+    await loadAdminRouteData();
+  }
+}
+
+/** Copies parsed dashboard route state into mutable view state. */
+function applyDashboardRouteState(route: DashboardRouteState): void {
+  state.route = route;
+  state.activeMode = route.mode ?? "product";
+  state.activeView = route.view ?? "overview";
+  state.activeKind = route.inspectorKind ?? "webhook";
+  if (route.inspectorKind) {
+    state.inspectors[route.inspectorKind].id = route.inspectorResourceId ?? "";
+    state.inspectors[route.inspectorKind].error = undefined;
+  }
+
+  state.overview.repositorySearch = route.repositorySearch ?? "";
+  state.overview.reviewRepoId = route.reviewRepoId ?? "";
+  state.overview.reviewStatus = route.reviewStatus ?? "";
+  state.overview.reviewSearch = route.reviewSearch ?? "";
+  state.settings.repoId = route.settingsRepoId ?? "";
+  state.settings.error = undefined;
+  state.audit.orgId = route.auditOrgId ?? "";
+  state.audit.action = route.auditAction ?? "";
+  state.audit.resourceType = route.auditResourceType ?? "";
+  state.audit.resourceId = route.auditResourceId ?? "";
+  state.audit.actorUserId = route.auditActorUserId ?? "";
+  state.audit.search = route.auditSearch ?? "";
+  state.security.orgId = route.securityOrgId ?? "";
+  state.security.repoId = route.securityRepoId ?? "";
+  state.security.type = route.securityType ?? "";
+  state.security.severity = route.securitySeverity ?? "";
+  state.security.source = route.securitySource ?? "";
+  state.security.status = route.securityStatus ?? "";
+  state.security.actorId = route.securityActorId ?? "";
+  state.security.resourceType = route.securityResourceType ?? "";
+  state.security.resourceId = route.securityResourceId ?? "";
+  state.security.search = route.securitySearch ?? "";
+  state.usage.orgId = route.usageOrgId ?? "";
+  state.usage.repoId = route.usageRepoId ?? "";
+  state.usage.periodStart = route.usagePeriodStart ?? currentMonthStartIso();
+  state.usage.periodEnd = route.usagePeriodEnd ?? "";
+  state.entitlements.orgId = route.entitlementOrgId ?? "";
+  state.billing.orgId = route.billingOrgId ?? "";
+  state.billing.meterPeriodKey = route.billingMeterPeriodKey ?? currentMonthKey();
+  state.billing.meterStatus = route.billingMeterStatus ?? "all";
+  state.evaluation.selectedSuiteId = route.evaluationSuiteId ?? "";
+  state.evaluation.selectedRun = undefined;
 }
 
 /** Writes one optional dashboard route query parameter. */
