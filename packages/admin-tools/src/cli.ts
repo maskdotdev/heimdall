@@ -505,6 +505,7 @@ function formatReviewInspection(details: AdminReviewDebugDetails): string {
     `Candidate findings: ${details.candidateFindings.length}`,
     `Validated findings: ${details.validatedFindings.length}`,
     `LLM calls: ${details.llmCalls.length}`,
+    `Sandbox runs: ${details.sandboxRuns.length}`,
     `Related jobs: ${details.relatedJobs.length}`,
     `Failures: ${details.failures.length}`,
   ].join("\n");

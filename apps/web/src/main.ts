@@ -152,6 +152,8 @@ type AdminReviewDebugDetails = {
   readonly validatedFindings: readonly AdminValidatedFindingSummary[];
   /** LLM call summaries linked to the review run. */
   readonly llmCalls?: readonly AdminLlmCallSummary[];
+  /** Sandbox run summaries linked to the review run. */
+  readonly sandboxRuns?: readonly AdminSandboxRunSummary[];
   /** Related durable jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
   /** Audited replay decisions. */
@@ -220,6 +222,84 @@ type AdminReviewArtifactPayloadSummary = {
   readonly accessLevel: "redacted" | "raw_allowed";
   /** Redacted artifact payload returned by the API. */
   readonly payload: unknown;
+};
+
+/** Sandbox artifact metadata shown on review inspectors. */
+type AdminSandboxArtifactSummary = {
+  /** Sandbox artifact row ID. */
+  readonly sandboxArtifactId: string;
+  /** Artifact display name. */
+  readonly name: string;
+  /** Artifact URI. */
+  readonly uri: string;
+  /** Artifact SHA-256 digest. */
+  readonly sha256: string;
+  /** Artifact byte size. */
+  readonly sizeBytes: number;
+  /** Artifact content type when available. */
+  readonly contentType?: string;
+  /** Whether artifact persistence truncated the payload. */
+  readonly truncated: boolean;
+  /** Artifact creation timestamp. */
+  readonly createdAt: string;
+};
+
+/** Product-safe policy decision counts for one sandbox run. */
+type AdminSandboxPolicyDecisionCounts = {
+  /** Allowed policy decision count. */
+  readonly allowed: number;
+  /** Warning policy decision count. */
+  readonly warning: number;
+  /** Denied policy decision count. */
+  readonly denied: number;
+};
+
+/** Sandbox run metadata shown on review inspectors. */
+type AdminSandboxRunSummary = {
+  /** Sandbox run row ID. */
+  readonly sandboxRunId: string;
+  /** Unique sandbox request ID. */
+  readonly requestId: string;
+  /** Runner kind used for the execution. */
+  readonly runnerKind: string;
+  /** Sandbox trust level. */
+  readonly trustLevel: string;
+  /** Sandbox execution category. */
+  readonly category: string;
+  /** Static-analysis run ID when available. */
+  readonly staticAnalysisRunId?: string;
+  /** Tool run ID when available. */
+  readonly toolRunId?: string;
+  /** Container image name. */
+  readonly image: string;
+  /** Container image digest when available. */
+  readonly imageDigest?: string;
+  /** Final sandbox status. */
+  readonly status: string;
+  /** Process exit code when available. */
+  readonly exitCode?: number;
+  /** Process signal when available. */
+  readonly signal?: string;
+  /** Captured stdout hash when available. */
+  readonly stdoutHash?: string;
+  /** Captured stderr hash when available. */
+  readonly stderrHash?: string;
+  /** Whether stdout was truncated. */
+  readonly stdoutTruncated: boolean;
+  /** Whether stderr was truncated. */
+  readonly stderrTruncated: boolean;
+  /** Product-safe warning count. */
+  readonly warningCount: number;
+  /** Product-safe policy decision counts. */
+  readonly policyDecisionCounts: AdminSandboxPolicyDecisionCounts;
+  /** Artifact metadata collected by the run. */
+  readonly artifacts: readonly AdminSandboxArtifactSummary[];
+  /** Execution start timestamp when available. */
+  readonly startedAt?: string;
+  /** Execution finish timestamp when available. */
+  readonly finishedAt?: string;
+  /** Row creation timestamp. */
+  readonly createdAt: string;
 };
 
 /** Candidate finding summary shown on review inspectors. */
@@ -8671,6 +8751,7 @@ function renderReviewDetails(details: AdminReviewDebugDetails): string {
     ${renderCandidateFindings(details.candidateFindings)}
     ${renderValidatedFindings(details.validatedFindings)}
     ${renderReviewArtifacts(details.artifacts ?? [])}
+    ${renderSandboxRuns(details.sandboxRuns ?? [])}
     ${renderReviewDependencies(details.dependencies ?? [])}
     ${renderLlmCalls(details.llmCalls ?? [])}
     ${renderFailures(details.failures)}
@@ -9141,6 +9222,104 @@ function renderReviewArtifacts(artifacts: readonly AdminReviewArtifactSummary[])
       </div>
     </section>
   `;
+}
+
+/** Renders persisted sandbox run summaries linked to a review. */
+function renderSandboxRuns(runs: readonly AdminSandboxRunSummary[]): string {
+  if (runs.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Sandbox Runs</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Status</th><th>Runner</th><th>Tool run</th><th>Policy</th><th>Output</th><th>Artifacts</th><th>Finished</th></tr>
+          </thead>
+          <tbody>
+            ${runs
+              .map(
+                (run) => `
+                  <tr>
+                    <td><span class="status ${statusClass(run.status)}">${escapeHtml(run.status)}</span></td>
+                    <td>
+                      ${escapeHtml(`${run.runnerKind}/${run.category}`)}
+                      <div class="muted-text">${escapeHtml(run.trustLevel)}</div>
+                    </td>
+                    <td>${renderSandboxToolRunCell(run)}</td>
+                    <td>${renderSandboxPolicyCell(run)}</td>
+                    <td>${renderSandboxOutputCell(run)}</td>
+                    <td>${renderSandboxArtifactsCell(run.artifacts)}</td>
+                    <td>${run.finishedAt ? formatTime(run.finishedAt) : "n/a"}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders the sandbox tool-run identifier cell. */
+function renderSandboxToolRunCell(run: AdminSandboxRunSummary): string {
+  const primaryId = run.toolRunId ?? run.staticAnalysisRunId ?? run.requestId;
+  const secondaryId = run.toolRunId
+    ? (run.staticAnalysisRunId ?? run.requestId)
+    : run.staticAnalysisRunId
+      ? run.requestId
+      : run.sandboxRunId;
+
+  return `
+    <code>${escapeHtml(shortHash(primaryId))}</code>
+    <div class="muted-text">${escapeHtml(shortHash(secondaryId))}</div>
+  `;
+}
+
+/** Renders product-safe sandbox policy counts. */
+function renderSandboxPolicyCell(run: AdminSandboxRunSummary): string {
+  const decisions = run.policyDecisionCounts;
+  const decisionText = `${decisions.allowed}/${decisions.warning}/${decisions.denied}`;
+  const warningText =
+    run.warningCount > 0 ? `<div class="muted-text">${run.warningCount} warnings</div>` : "";
+
+  return `${escapeHtml(decisionText)}${warningText}`;
+}
+
+/** Renders captured-output hashes and truncation state for a sandbox run. */
+function renderSandboxOutputCell(run: AdminSandboxRunSummary): string {
+  const stdoutLabel = run.stdoutHash ? `stdout ${shortHash(run.stdoutHash)}` : "stdout n/a";
+  const stderrLabel = run.stderrHash ? `stderr ${shortHash(run.stderrHash)}` : "stderr n/a";
+  const flags = [
+    run.stdoutTruncated ? "stdout truncated" : undefined,
+    run.stderrTruncated ? "stderr truncated" : undefined,
+  ].filter((flag): flag is string => typeof flag === "string");
+  const flagText =
+    flags.length > 0 ? `<div class="muted-text">${escapeHtml(flags.join(", "))}</div>` : "";
+
+  return `
+    <code>${escapeHtml(stdoutLabel)}</code>
+    <div><code>${escapeHtml(stderrLabel)}</code></div>
+    ${flagText}
+  `;
+}
+
+/** Renders sandbox artifact names without loading payload content. */
+function renderSandboxArtifactsCell(artifacts: readonly AdminSandboxArtifactSummary[]): string {
+  if (artifacts.length === 0) {
+    return "none";
+  }
+
+  return artifacts
+    .map((artifact) => {
+      const size = formatBytes(artifact.sizeBytes);
+      const truncated = artifact.truncated ? " truncated" : "";
+      return `<code>${escapeHtml(artifact.name)}</code><div class="muted-text">${escapeHtml(`${size}${truncated}`)}</div>`;
+    })
+    .join("");
 }
 
 /** Renders durable dependencies attached to a review. */
@@ -10337,10 +10516,20 @@ function requestIdFromMetadata(metadata: unknown): string | undefined {
 
 /** Returns a CSS class for a durable status. */
 function statusClass(status: string): string {
-  if (["active", "completed", "processed", "published"].includes(status)) {
+  if (["active", "completed", "processed", "published", "succeeded"].includes(status)) {
     return "ok";
   }
-  if (["failed", "dead_lettered"].includes(status)) {
+  if (
+    [
+      "dead_lettered",
+      "failed",
+      "killed",
+      "policy_denied",
+      "resource_exceeded",
+      "runner_error",
+      "timed_out",
+    ].includes(status)
+  ) {
     return "bad";
   }
   if (["pending", "running", "received"].includes(status)) {

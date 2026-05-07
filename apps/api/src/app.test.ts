@@ -5890,6 +5890,7 @@ function reviewDebugDetailsFixture(
     llmCalls: [],
     relatedJobs: [],
     replayAudits: [],
+    sandboxRuns: [],
     stageEvents: [],
     validatedFindings: [],
   };

@@ -400,6 +400,7 @@ function reviewDetailsFixture(): AdminReviewDebugDetails {
     ],
     relatedJobs: [],
     replayAudits: [],
+    sandboxRuns: [],
     stageEvents: [],
     validatedFindings: [
       {

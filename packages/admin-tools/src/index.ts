@@ -41,6 +41,9 @@ import {
   reviewArtifacts,
   reviewRunDependencies,
   reviewRunStageEvents,
+  sandboxArtifacts,
+  sandboxPolicyDecisions,
+  sandboxRuns,
   usageEvents,
   validatedFindings,
   webhookEvents,
@@ -108,6 +111,7 @@ export type AdminFailureSource =
   | "review_run"
   | "review_stage_event"
   | "llm_call"
+  | "sandbox_run"
   | "publish_run"
   | "publish_operation"
   | "published_finding";
@@ -476,6 +480,86 @@ export type AdminReviewArtifactDebugSummary = {
   readonly metadataKeys: readonly string[];
 };
 
+/** Debug summary for one artifact collected by a sandbox run. */
+export type AdminSandboxArtifactDebugSummary = {
+  /** Sandbox artifact row ID. */
+  readonly sandboxArtifactId: string;
+  /** Artifact name scoped to the sandbox run. */
+  readonly name: string;
+  /** Durable artifact URI. */
+  readonly uri: string;
+  /** Artifact SHA-256 digest. */
+  readonly sha256: string;
+  /** Artifact byte size. */
+  readonly sizeBytes: number;
+  /** Artifact content type when available. */
+  readonly contentType?: string;
+  /** Whether the artifact was truncated before persistence. */
+  readonly truncated: boolean;
+  /** ISO timestamp for artifact creation. */
+  readonly createdAt: string;
+};
+
+/** Product-safe policy decision counts for one sandbox run. */
+export type AdminSandboxPolicyDecisionCounts = {
+  /** Allowed decision count. */
+  readonly allowed: number;
+  /** Warning decision count. */
+  readonly warning: number;
+  /** Denied decision count. */
+  readonly denied: number;
+};
+
+/** Debug summary for one persisted sandbox run. */
+export type AdminSandboxRunDebugSummary = {
+  /** Sandbox run row ID. */
+  readonly sandboxRunId: string;
+  /** Unique sandbox request ID. */
+  readonly requestId: string;
+  /** Runner kind, such as docker or gvisor. */
+  readonly runnerKind: string;
+  /** Sandbox trust level. */
+  readonly trustLevel: string;
+  /** Sandbox execution category. */
+  readonly category: string;
+  /** Static-analysis run ID when available. */
+  readonly staticAnalysisRunId?: string;
+  /** Tool run ID when available. */
+  readonly toolRunId?: string;
+  /** Container image name. */
+  readonly image: string;
+  /** Container image digest when available. */
+  readonly imageDigest?: string;
+  /** Final sandbox status. */
+  readonly status: string;
+  /** Process exit code when available. */
+  readonly exitCode?: number;
+  /** Process signal when available. */
+  readonly signal?: string;
+  /** Captured stdout hash when available. */
+  readonly stdoutHash?: string;
+  /** Captured stderr hash when available. */
+  readonly stderrHash?: string;
+  /** Whether stdout was truncated. */
+  readonly stdoutTruncated: boolean;
+  /** Whether stderr was truncated. */
+  readonly stderrTruncated: boolean;
+  /** Product-safe warning count. */
+  readonly warningCount: number;
+  /** Product-safe policy decision counts. */
+  readonly policyDecisionCounts: AdminSandboxPolicyDecisionCounts;
+  /** Artifacts collected for the sandbox run. */
+  readonly artifacts: readonly AdminSandboxArtifactDebugSummary[];
+  /** ISO timestamp when execution started. */
+  readonly startedAt?: string;
+  /** ISO timestamp when execution finished. */
+  readonly finishedAt?: string;
+  /** ISO timestamp when the sandbox run row was created. */
+  readonly createdAt: string;
+  /** Structured sandbox failure when available. */
+  readonly failure?: AdminFailureDetail;
+};
+
 /** Debug summary for one candidate finding. */
 export type AdminCandidateFindingDebugSummary = {
   /** Candidate finding ID. */
@@ -682,6 +766,8 @@ export type AdminReviewDebugDetails = {
   readonly validatedFindings: readonly AdminValidatedFindingDebugSummary[];
   /** LLM calls linked to the review run. */
   readonly llmCalls: readonly AdminLlmCallDebugSummary[];
+  /** Sandbox runs linked to the review run. */
+  readonly sandboxRuns: readonly AdminSandboxRunDebugSummary[];
   /** Related review and publish jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
   /** Replay decisions already audited for this review run. */
@@ -1576,6 +1662,7 @@ export async function getReviewDebugDetails(
     candidateRows,
     validatedRows,
     llmRows,
+    sandboxRunRows,
     relatedJobs,
     replayAudits,
   ] = await Promise.all([
@@ -1612,6 +1699,11 @@ export async function getReviewDebugDetails(
       .from(llmCalls)
       .where(eq(llmCalls.reviewRunId, reviewRunId))
       .orderBy(asc(llmCalls.startedAt)),
+    dependencies.db
+      .select()
+      .from(sandboxRuns)
+      .where(eq(sandboxRuns.reviewRunId, reviewRunId))
+      .orderBy(asc(sandboxRuns.createdAt)),
     listRelatedReviewJobs(dependencies.db, {
       reviewRunId,
       repoId: reviewRun.repoId,
@@ -1624,6 +1716,13 @@ export async function getReviewDebugDetails(
       resourceId: reviewRunId,
     }),
   ]);
+  const sandboxRunIds = sandboxRunRows.map((row) => row.sandboxRunId);
+  const [sandboxArtifactRows, sandboxPolicyDecisionRows] = await Promise.all([
+    listSandboxArtifactsForRuns(dependencies.db, sandboxRunIds),
+    listSandboxPolicyDecisionsForRuns(dependencies.db, sandboxRunIds),
+  ]);
+  const sandboxArtifactsByRun = rowsBySandboxRunId(sandboxArtifactRows);
+  const sandboxPolicyDecisionsByRun = rowsBySandboxRunId(sandboxPolicyDecisionRows);
 
   const stageEvents = stageRows.map(toReviewStageEventDebugSummary);
   const reviewFailure = failureFromUnknown({
@@ -1635,11 +1734,19 @@ export async function getReviewDebugDetails(
     error: reviewRun.error,
   });
   const llmCallSummaries = llmRows.map(toLlmCallDebugSummary);
+  const sandboxRunSummaries = sandboxRunRows.map((row) =>
+    toSandboxRunDebugSummary(
+      row,
+      sandboxArtifactsByRun.get(row.sandboxRunId) ?? [],
+      sandboxPolicyDecisionsByRun.get(row.sandboxRunId) ?? [],
+    ),
+  );
   const failures = collectFailures([
     reviewRun.status === "failed" ? reviewFailure : undefined,
     ...stageEvents.map((stageEvent) => stageEvent.failure),
     ...relatedJobs.map((job) => job.failure),
     ...llmCallSummaries.map((llmCall) => llmCall.failure),
+    ...sandboxRunSummaries.map((sandboxRun) => sandboxRun.failure),
   ]);
 
   return {
@@ -1651,6 +1758,7 @@ export async function getReviewDebugDetails(
     candidateFindings: candidateRows.map(toCandidateFindingDebugSummary),
     validatedFindings: validatedRows.map(toValidatedFindingDebugSummary),
     llmCalls: llmCallSummaries,
+    sandboxRuns: sandboxRunSummaries,
     relatedJobs,
     replayAudits,
     failures,
@@ -2894,6 +3002,9 @@ type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
 type ReviewStageEventRow = typeof reviewRunStageEvents.$inferSelect;
 type ReviewDependencyRow = typeof reviewRunDependencies.$inferSelect;
 type ReviewArtifactRow = typeof reviewArtifacts.$inferSelect;
+type SandboxRunRow = typeof sandboxRuns.$inferSelect;
+type SandboxArtifactRow = typeof sandboxArtifacts.$inferSelect;
+type SandboxPolicyDecisionRow = typeof sandboxPolicyDecisions.$inferSelect;
 type CandidateFindingRow = typeof candidateFindings.$inferSelect;
 type ValidatedFindingRow = typeof validatedFindings.$inferSelect;
 type LlmCallRow = typeof llmCalls.$inferSelect;
@@ -3126,6 +3237,41 @@ async function listRelatedReviewJobs(
     .orderBy(asc(backgroundJobs.createdAt));
 
   return rows.map(toBackgroundJobDebugSummary);
+}
+
+/** Lists artifact rows collected by the given sandbox runs. */
+async function listSandboxArtifactsForRuns(
+  db: HeimdallDatabase,
+  sandboxRunIds: readonly string[],
+): Promise<readonly SandboxArtifactRow[]> {
+  if (sandboxRunIds.length === 0) {
+    return [];
+  }
+
+  return db
+    .select()
+    .from(sandboxArtifacts)
+    .where(inArray(sandboxArtifacts.sandboxRunId, [...sandboxRunIds]))
+    .orderBy(asc(sandboxArtifacts.createdAt), asc(sandboxArtifacts.sandboxArtifactId));
+}
+
+/** Lists policy decision rows emitted by the given sandbox runs. */
+async function listSandboxPolicyDecisionsForRuns(
+  db: HeimdallDatabase,
+  sandboxRunIds: readonly string[],
+): Promise<readonly SandboxPolicyDecisionRow[]> {
+  if (sandboxRunIds.length === 0) {
+    return [];
+  }
+
+  return db
+    .select()
+    .from(sandboxPolicyDecisions)
+    .where(inArray(sandboxPolicyDecisions.sandboxRunId, [...sandboxRunIds]))
+    .orderBy(
+      asc(sandboxPolicyDecisions.createdAt),
+      asc(sandboxPolicyDecisions.sandboxPolicyDecisionId),
+    );
 }
 
 async function listPublishOperations(
@@ -3470,6 +3616,62 @@ function toReviewArtifactDebugSummary(row: ReviewArtifactRow): AdminReviewArtifa
   };
 }
 
+/** Converts a sandbox artifact row into review inspector metadata. */
+function toSandboxArtifactDebugSummary(row: SandboxArtifactRow): AdminSandboxArtifactDebugSummary {
+  return {
+    sandboxArtifactId: row.sandboxArtifactId,
+    name: row.name,
+    uri: row.uri,
+    sha256: row.sha256,
+    sizeBytes: row.sizeBytes,
+    ...(row.contentType ? { contentType: row.contentType } : {}),
+    truncated: row.truncated,
+    createdAt: toIso(row.createdAt),
+  };
+}
+
+/** Converts a persisted sandbox run and child rows into review inspector metadata. */
+function toSandboxRunDebugSummary(
+  row: SandboxRunRow,
+  artifacts: readonly SandboxArtifactRow[],
+  policyDecisions: readonly SandboxPolicyDecisionRow[],
+): AdminSandboxRunDebugSummary {
+  const failure = failureFromUnknown({
+    source: "sandbox_run",
+    fallbackCode: `sandbox.${row.status}`,
+    fallbackMessage: `Sandbox run ${row.sandboxRunId} finished with status ${row.status}.`,
+    rowId: row.sandboxRunId,
+    occurredAt: row.finishedAt ? toIso(row.finishedAt) : undefined,
+    error: row.errorJson,
+  });
+
+  return {
+    sandboxRunId: row.sandboxRunId,
+    requestId: row.requestId,
+    runnerKind: row.runnerKind,
+    trustLevel: row.trustLevel,
+    category: row.category,
+    ...(row.staticAnalysisRunId ? { staticAnalysisRunId: row.staticAnalysisRunId } : {}),
+    ...(row.toolRunId ? { toolRunId: row.toolRunId } : {}),
+    image: row.image,
+    ...(row.imageDigest ? { imageDigest: row.imageDigest } : {}),
+    status: row.status,
+    ...(row.exitCode !== null ? { exitCode: row.exitCode } : {}),
+    ...(row.signal ? { signal: row.signal } : {}),
+    ...(row.stdoutHash ? { stdoutHash: row.stdoutHash } : {}),
+    ...(row.stderrHash ? { stderrHash: row.stderrHash } : {}),
+    stdoutTruncated: row.stdoutTruncated,
+    stderrTruncated: row.stderrTruncated,
+    warningCount: sandboxWarningCount(row.warningsJson),
+    policyDecisionCounts: sandboxPolicyDecisionCounts(policyDecisions),
+    artifacts: artifacts.map(toSandboxArtifactDebugSummary),
+    ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
+    ...(row.finishedAt ? { finishedAt: toIso(row.finishedAt) } : {}),
+    createdAt: toIso(row.createdAt),
+    ...(isFailureSandboxStatus(row.status) ? { failure } : {}),
+  };
+}
+
 function toCandidateFindingDebugSummary(
   row: CandidateFindingRow,
 ): AdminCandidateFindingDebugSummary {
@@ -3749,6 +3951,54 @@ function collectFailures(
   values: readonly (AdminFailureDetail | undefined)[],
 ): readonly AdminFailureDetail[] {
   return values.filter((value): value is AdminFailureDetail => value !== undefined);
+}
+
+/** Groups rows that belong to the same sandbox run. */
+function rowsBySandboxRunId<T extends { readonly sandboxRunId: string }>(
+  rows: readonly T[],
+): ReadonlyMap<string, readonly T[]> {
+  const byRunId = new Map<string, T[]>();
+  for (const row of rows) {
+    const existing = byRunId.get(row.sandboxRunId);
+    if (existing) {
+      existing.push(row);
+    } else {
+      byRunId.set(row.sandboxRunId, [row]);
+    }
+  }
+
+  return byRunId;
+}
+
+/** Counts product-safe policy decisions by status. */
+function sandboxPolicyDecisionCounts(
+  decisions: readonly SandboxPolicyDecisionRow[],
+): AdminSandboxPolicyDecisionCounts {
+  return decisions.reduce<AdminSandboxPolicyDecisionCounts>(
+    (counts, decision) => ({
+      allowed: counts.allowed + (decision.status === "allowed" ? 1 : 0),
+      warning: counts.warning + (decision.status === "warning" ? 1 : 0),
+      denied: counts.denied + (decision.status === "denied" ? 1 : 0),
+    }),
+    { allowed: 0, denied: 0, warning: 0 },
+  );
+}
+
+/** Counts product-safe sandbox warnings stored as JSON. */
+function sandboxWarningCount(warningsJson: unknown): number {
+  return Array.isArray(warningsJson) ? warningsJson.length : 0;
+}
+
+/** Returns whether a sandbox run status should surface as a failure. */
+function isFailureSandboxStatus(status: string): boolean {
+  return [
+    "failed",
+    "killed",
+    "policy_denied",
+    "resource_exceeded",
+    "runner_error",
+    "timed_out",
+  ].includes(status);
 }
 
 /** Compares persisted retrieval output with dry-run retrieval output. */
