@@ -332,7 +332,8 @@ tracked milestone.
   where the eval reports exist, and a root workflow test guards the report paths. CI now also starts
   a `pgvector/pgvector:pg17` Postgres service and sets `HEIMDALL_DB_TEST_URL` for release gates, so
   Postgres-backed package integration tests run in CI. The DB integration test applies every
-  generated migration from an empty schema before inserting core rows and checking latest tables.
+  generated migration from an empty schema before inserting core rows and checking latest tables,
+  and admin-tools replay coverage now boots against the same current migration chain.
 - Latest release-control milestone: `.github/ISSUE_TEMPLATE/admin-control-plane-production-release.md`
   and `docs/releases/admin-control-plane-production-release.md` define the controlled production
   release ticket, and `infra/railway/*.railway.json` codifies Railway build/deploy settings for
