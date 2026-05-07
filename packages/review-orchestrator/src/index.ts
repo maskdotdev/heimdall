@@ -1583,6 +1583,8 @@ type ReviewPublishPlanArtifactPayload = {
   readonly mode: string;
   /** Effective publishing policy used by the plan. */
   readonly policy: PublishPlan["policy"];
+  /** Publish throttle details used by the plan. */
+  readonly throttle: PublishPlan["throttle"];
   /** Planned external operations. */
   readonly plannedOperations: PublishPlan["plannedOperations"];
   /** Inline comments planned for provider publishing. */
@@ -1618,6 +1620,7 @@ function publishPlanArtifactPayload(input: {
     headSha: input.headSha,
     mode: publishPlanMode(input.publishPlan),
     policy: input.publishPlan.policy,
+    throttle: input.publishPlan.throttle,
     plannedOperations: input.publishPlan.plannedOperations,
     inlineComments: input.publishPlan.inlineFindings.map((finding) => ({
       findingId: finding.findingId,
@@ -1650,6 +1653,7 @@ function publishPlanArtifactPayload(input: {
       checkAnnotationCount: input.publishPlan.checkRunFindings.length,
       configuredSummaryFindingCount: input.publishPlan.configuredSummaryFindings.length,
       inlineCommentCount: input.publishPlan.inlineFindings.length,
+      inlineFindingsSkippedByThrottle: input.publishPlan.throttle.inlineFindingsSkippedByThrottle,
       plannedOperationCount: input.publishPlan.plannedOperations.length,
       publishableFindingCount: input.publishPlan.findings.length,
     },

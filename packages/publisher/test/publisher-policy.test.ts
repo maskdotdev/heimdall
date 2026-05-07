@@ -1,7 +1,14 @@
 import type { ValidatedFinding } from "@repo/contracts";
 import { validValidatedFindingFixture } from "@repo/contracts/fixtures/finding.fixture";
 import { describe, expect, it } from "vitest";
-import { createPublishPlan, hasPlannedPublishOperations } from "../src";
+import {
+  createInMemoryPublishThrottle,
+  createPublishPlan,
+  hasPlannedPublishOperations,
+  PUBLISH_LIMITS,
+  type PublishOperationType,
+  type PublishThrottleLimits,
+} from "../src";
 
 describe("createPublishPlan", () => {
   it("uses legacy check-run and inline publishing when no policy snapshot exists", () => {
@@ -81,6 +88,39 @@ describe("createPublishPlan", () => {
     ]);
   });
 
+  it("throttles inline comments and routes overflow findings to a fallback summary", () => {
+    const plan = createPublishPlan({
+      reviewRun: reviewRunWithPublishingPolicy({
+        maxCommentsPerReview: 5,
+        publishCheckRun: false,
+        publishInlineComments: true,
+        publishSummaryComment: false,
+      }),
+      findings: [findingFixture("fnd_one"), findingFixture("fnd_two"), findingFixture("fnd_three")],
+      throttleLimits: { maxInlineCommentsPerReview: 1 },
+    });
+
+    expect(plan.inlineFindings.map((finding) => finding.findingId)).toEqual(["fnd_one"]);
+    expect(plan.throttle).toMatchObject({
+      inlineCommentLimit: 1,
+      inlineFindingCountAfterThrottle: 1,
+      inlineFindingCountBeforeThrottle: 3,
+      inlineFindingsSkippedByThrottle: 2,
+    });
+    expect(plan.plannedOperations).toEqual([
+      {
+        findingCount: 1,
+        operationType: "review.inline_comments",
+        status: "planned",
+      },
+      {
+        findingCount: 2,
+        operationType: "summary_comment.fallback",
+        status: "planned",
+      },
+    ]);
+  });
+
   it("plans fallback summary publishing when no findings can be anchored inline", () => {
     const plan = createPublishPlan({
       reviewRun: reviewRunWithPublishingPolicy({
@@ -136,6 +176,60 @@ describe("createPublishPlan", () => {
   });
 });
 
+describe("createInMemoryPublishThrottle", () => {
+  it("waits when the repository operation minute limit is exhausted", async () => {
+    let nowMs = Date.parse("2026-05-07T12:00:00.000Z");
+    const sleeps: number[] = [];
+    const throttle = createInMemoryPublishThrottle({
+      limits: throttleLimits({
+        maxPublishOperationsPerInstallationPerMinute: 10,
+        maxPublishOperationsPerRepoPerMinute: 1,
+        maxSummaryCommentsPerPrPerHour: 10,
+      }),
+      now: () => new Date(nowMs),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+
+    await throttle.waitForSlot(throttleSlot("check_run.upsert"));
+    const decision = await throttle.waitForSlot(throttleSlot("review.inline_comments"));
+
+    expect(decision).toMatchObject({
+      limitReason: "publish_operations_per_repo_per_minute",
+      waitedMs: 60_000,
+    });
+    expect(sleeps).toEqual([60_000]);
+  });
+
+  it("waits when the summary comment hourly PR limit is exhausted", async () => {
+    let nowMs = Date.parse("2026-05-07T12:00:00.000Z");
+    const sleeps: number[] = [];
+    const throttle = createInMemoryPublishThrottle({
+      limits: throttleLimits({
+        maxPublishOperationsPerInstallationPerMinute: 10,
+        maxPublishOperationsPerRepoPerMinute: 10,
+        maxSummaryCommentsPerPrPerHour: 1,
+      }),
+      now: () => new Date(nowMs),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+
+    await throttle.waitForSlot(throttleSlot("summary_comment.configured"));
+    const decision = await throttle.waitForSlot(throttleSlot("summary_comment.fallback"));
+
+    expect(decision).toMatchObject({
+      limitReason: "summary_comments_per_pr_per_hour",
+      waitedMs: 3_600_000,
+    });
+    expect(sleeps).toEqual([3_600_000]);
+  });
+});
+
 /** Creates a minimal review-run object with publishing policy metadata. */
 function reviewRunWithPublishingPolicy(policy: {
   readonly maxCommentsPerReview: number;
@@ -160,5 +254,23 @@ function findingFixture(
       ...validValidatedFindingFixture.location,
       ...overrides.location,
     },
+  };
+}
+
+/** Creates a complete throttle limit object for tests. */
+function throttleLimits(overrides: Partial<PublishThrottleLimits>): PublishThrottleLimits {
+  return {
+    ...PUBLISH_LIMITS,
+    ...overrides,
+  };
+}
+
+/** Creates a throttle slot input for one test repository. */
+function throttleSlot(operationType: PublishOperationType) {
+  return {
+    installationId: "inst_1",
+    operationType,
+    pullRequestNumber: 7,
+    repositoryKey: "repo_1",
   };
 }

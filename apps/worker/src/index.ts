@@ -53,7 +53,11 @@ import {
 } from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 import type { LLMGateway } from "@repo/llm-gateway";
-import { publishReviewRun } from "@repo/publisher";
+import {
+  createInMemoryPublishThrottle,
+  type PublishThrottle,
+  publishReviewRun,
+} from "@repo/publisher";
 import {
   BullMqQueueProducer,
   createDurableJobProcessor,
@@ -96,6 +100,8 @@ export type CreateWorkerHandlersOptions = {
   readonly llmGateway?: LLMGateway;
   /** Optional review artifact payload store used by review orchestration. */
   readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
+  /** Optional shared throttle for provider-visible publisher writes. */
+  readonly publishThrottle?: PublishThrottle;
   /** Optional parent directory for repo-sync workspaces. */
   readonly workspaceRoot?: string;
   /** Durable directory used to store imported index artifacts before workspace cleanup. */
@@ -210,6 +216,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       await publishReviewRun(payload, {
         db: options.db,
         gitProvider: options.gitProvider,
+        ...(options.publishThrottle ? { publishThrottle: options.publishThrottle } : {}),
       });
     },
     [JOB_TYPES.BillingReconcile]: async (envelope) => {
@@ -250,6 +257,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ? createWorkerReviewSmokeGateway()
       : undefined;
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
+  const publishThrottle = createInMemoryPublishThrottle();
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;
@@ -268,6 +276,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       gitProvider,
       ...(llmGateway ? { llmGateway } : {}),
       ...(artifactPayloadStore ? { artifactPayloadStore } : {}),
+      publishThrottle,
       ...(workspaceRoot ? { workspaceRoot } : {}),
       indexArtifactRoot,
       indexerDriver,

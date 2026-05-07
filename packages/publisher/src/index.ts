@@ -35,6 +35,76 @@ const LEGACY_PUBLISHING_POLICY = {
   publishSummaryComment: false,
 } as const satisfies EffectivePublishingPolicy;
 
+/** Conservative default publish throttles for provider-visible writes. */
+export const PUBLISH_LIMITS = {
+  maxInlineCommentsPerReview: 8,
+  maxPublishOperationsPerInstallationPerMinute: 30,
+  maxPublishOperationsPerRepoPerMinute: 10,
+  maxSummaryCommentsPerPrPerHour: 4,
+} as const satisfies PublishThrottleLimits;
+
+/** Rolling window used for per-repository and per-installation publish throttles. */
+const PUBLISH_THROTTLE_MINUTE_WINDOW_MS = 60_000;
+
+/** Rolling window used for per-PR summary comment throttles. */
+const PUBLISH_THROTTLE_HOUR_WINDOW_MS = 3_600_000;
+
+/** Limits applied before provider-visible publish writes. */
+export type PublishThrottleLimits = {
+  /** Maximum inline findings included in one grouped PR review. */
+  readonly maxInlineCommentsPerReview: number;
+  /** Maximum summary comment creates or updates for one pull request per hour. */
+  readonly maxSummaryCommentsPerPrPerHour: number;
+  /** Maximum provider publish operations for one repository per minute. */
+  readonly maxPublishOperationsPerRepoPerMinute: number;
+  /** Maximum provider publish operations for one installation per minute. */
+  readonly maxPublishOperationsPerInstallationPerMinute: number;
+};
+
+/** Stable reason code explaining which throttle window required waiting. */
+export type PublishThrottleLimitReason =
+  | "publish_operations_per_installation_per_minute"
+  | "publish_operations_per_repo_per_minute"
+  | "summary_comments_per_pr_per_hour";
+
+/** Provider-visible operation waiting for a throttle slot. */
+export type PublishThrottleSlotInput = {
+  /** Operation type being sent to the provider. */
+  readonly operationType: PublishOperationType;
+  /** Installation-scoped key used for shared write throttling. */
+  readonly installationId: string;
+  /** Repository-scoped key used for shared write throttling. */
+  readonly repositoryKey: string;
+  /** Pull request number targeted by the operation. */
+  readonly pullRequestNumber: number;
+};
+
+/** Result returned after a publish operation receives a throttle slot. */
+export type PublishThrottleDecision = {
+  /** Total milliseconds waited before a slot was available. */
+  readonly waitedMs: number;
+  /** First throttle window that required waiting, when any wait occurred. */
+  readonly limitReason?: PublishThrottleLimitReason;
+  /** Limits used by the throttle. */
+  readonly limits: PublishThrottleLimits;
+};
+
+/** Shared publisher throttle used by worker processes. */
+export type PublishThrottle = {
+  /** Waits until the operation can be safely sent to the provider. */
+  readonly waitForSlot: (input: PublishThrottleSlotInput) => Promise<PublishThrottleDecision>;
+};
+
+/** Test and runtime options for the in-memory publish throttle. */
+export type CreateInMemoryPublishThrottleOptions = {
+  /** Optional limit overrides. */
+  readonly limits?: Partial<PublishThrottleLimits>;
+  /** Optional clock for deterministic tests. */
+  readonly now?: () => Date;
+  /** Optional sleep implementation for deterministic tests. */
+  readonly sleep?: (ms: number) => Promise<void>;
+};
+
 /** Dependencies required to publish one completed review run. */
 export type ReviewPublisherDependencies = {
   /** Database used to read review output and persist publish state. */
@@ -43,6 +113,10 @@ export type ReviewPublisherDependencies = {
   readonly gitProvider: GitProvider;
   /** Optional clock for deterministic tests. */
   readonly now?: () => Date;
+  /** Optional shared throttle for provider-visible publish writes. */
+  readonly publishThrottle?: PublishThrottle;
+  /** Optional publish throttle limit overrides used while planning. */
+  readonly publishThrottleLimits?: Partial<PublishThrottleLimits>;
 };
 
 /** Result returned by one publisher handoff. */
@@ -82,10 +156,26 @@ export type PlannedPublishOperation = {
   readonly reason?: string;
 };
 
+/** Publish-plan throttle details persisted into plan artifacts and run metadata. */
+export type PublishPlanThrottle = {
+  /** Limits used to build the plan. */
+  readonly limits: PublishThrottleLimits;
+  /** Inline comment limit applied to the plan. */
+  readonly inlineCommentLimit: number;
+  /** Inline-capable findings before the throttle was applied. */
+  readonly inlineFindingCountBeforeThrottle: number;
+  /** Inline findings left after the throttle was applied. */
+  readonly inlineFindingCountAfterThrottle: number;
+  /** Inline-capable findings redirected away from inline comments by the throttle. */
+  readonly inlineFindingsSkippedByThrottle: number;
+};
+
 /** Policy-derived publish plan for one completed review run. */
 export type PublishPlan = {
   /** Effective publishing policy used by the publisher. */
   readonly policy: EffectivePublishingPolicy;
+  /** Throttle limits and plan-level throttle decisions. */
+  readonly throttle: PublishPlanThrottle;
   /** Publishable findings after applying the policy comment budget. */
   readonly findings: readonly ValidatedFinding[];
   /** Findings to include in check-run annotations. */
@@ -131,17 +221,29 @@ export function createPublishPlan(input: {
   readonly reviewRun: Pick<ReviewRun, "metadata">;
   /** Validated publishable findings for the review run. */
   readonly findings: readonly ValidatedFinding[];
+  /** Optional publish throttle limit overrides. */
+  readonly throttleLimits?: Partial<PublishThrottleLimits>;
 }): PublishPlan {
   const policy = publishingPolicyFromReviewRun(input.reviewRun);
+  const throttleLimits = normalizePublishThrottleLimits(input.throttleLimits);
   const maxFindings = Math.max(0, Math.floor(policy.maxCommentsPerReview));
   const findings = input.findings.slice(0, maxFindings);
+  const inlineCandidates = policy.publishInlineComments
+    ? findings.filter((finding) => finding.location.isInDiff !== false)
+    : [];
+  const inlineFindings = inlineCandidates.slice(0, throttleLimits.maxInlineCommentsPerReview);
   const plan = {
     policy,
+    throttle: {
+      limits: throttleLimits,
+      inlineCommentLimit: throttleLimits.maxInlineCommentsPerReview,
+      inlineFindingCountBeforeThrottle: inlineCandidates.length,
+      inlineFindingCountAfterThrottle: inlineFindings.length,
+      inlineFindingsSkippedByThrottle: Math.max(0, inlineCandidates.length - inlineFindings.length),
+    },
     findings,
     checkRunFindings: policy.publishCheckRun ? findings : [],
-    inlineFindings: policy.publishInlineComments
-      ? findings.filter((finding) => finding.location.isInDiff !== false)
-      : [],
+    inlineFindings,
     configuredSummaryFindings: policy.publishSummaryComment ? findings : [],
   };
 
@@ -203,6 +305,31 @@ export function planPublishOperations(
 /** Returns true when a publish plan contains at least one external write. */
 export function hasPlannedPublishOperations(plan: Pick<PublishPlan, "plannedOperations">): boolean {
   return plan.plannedOperations.some((operation) => operation.status === "planned");
+}
+
+/** Creates a process-local throttle for provider-visible publish operations. */
+export function createInMemoryPublishThrottle(
+  options: CreateInMemoryPublishThrottleOptions = {},
+): PublishThrottle {
+  const limits = normalizePublishThrottleLimits(options.limits);
+  const now = options.now ?? (() => new Date());
+  const sleep = options.sleep ?? defaultSleep;
+  const entries: PublishThrottleEntry[] = [];
+  let tail: Promise<void> = Promise.resolve();
+
+  return {
+    waitForSlot: async (input) => {
+      const run = tail.then(() =>
+        waitForInMemoryPublishThrottleSlot({ entries, input, limits, now, sleep }),
+      );
+      tail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      return run;
+    },
+  };
 }
 
 /** Creates or updates live PR output and persists durable publish state. */
@@ -310,14 +437,24 @@ export async function publishReviewRun(
     const findings = (await reviewRepository.listValidatedFindings(payload.reviewRunId)).filter(
       (finding) => finding.decision === "publish",
     );
-    const publishPlan = createPublishPlan({ reviewRun, findings });
+    const publishPlan = createPublishPlan({
+      reviewRun,
+      findings,
+      ...(dependencies.publishThrottleLimits
+        ? { throttleLimits: dependencies.publishThrottleLimits }
+        : {}),
+    });
     const checkRun = hasPlannedPublishOperation(publishPlan, "check_run.upsert")
       ? await publishCheckRun({
           db: dependencies.db,
           gitProvider: dependencies.gitProvider,
           repository,
+          ...(dependencies.publishThrottle
+            ? { publishThrottle: dependencies.publishThrottle }
+            : {}),
           publishRunId,
           reviewRunId: payload.reviewRunId,
+          pullRequestNumber: payload.pullRequestNumber,
           headSha: reviewRun.headSha,
           findings: publishPlan.checkRunFindings,
         })
@@ -327,6 +464,9 @@ export async function publishReviewRun(
           db: dependencies.db,
           gitProvider: dependencies.gitProvider,
           repository,
+          ...(dependencies.publishThrottle
+            ? { publishThrottle: dependencies.publishThrottle }
+            : {}),
           publishRunId,
           reviewRunId: payload.reviewRunId,
           pullRequestNumber: payload.pullRequestNumber,
@@ -344,6 +484,9 @@ export async function publishReviewRun(
           db: dependencies.db,
           gitProvider: dependencies.gitProvider,
           repository,
+          ...(dependencies.publishThrottle
+            ? { publishThrottle: dependencies.publishThrottle }
+            : {}),
           publishRunId,
           reviewRunId: payload.reviewRunId,
           pullRequestNumber: payload.pullRequestNumber,
@@ -364,6 +507,9 @@ export async function publishReviewRun(
             db: dependencies.db,
             gitProvider: dependencies.gitProvider,
             repository,
+            ...(dependencies.publishThrottle
+              ? { publishThrottle: dependencies.publishThrottle }
+              : {}),
             publishRunId,
             reviewRunId: payload.reviewRunId,
             pullRequestNumber: payload.pullRequestNumber,
@@ -389,6 +535,7 @@ export async function publishReviewRun(
           plannedOperations: publishPlan.plannedOperations,
           publishPlanId: payload.publishPlanId,
           publishPlanArtifactId: payload.publishPlanArtifactId,
+          publishThrottle: publishPlan.throttle,
           publishingPolicy: publishPlan.policy,
           summaryFallback: fallbackSummary !== undefined,
         }),
@@ -421,6 +568,7 @@ type PublishInlineCommentsInput = {
   readonly db: HeimdallDatabase;
   readonly gitProvider: GitProvider;
   readonly repository: GitHubRepositoryRef;
+  readonly publishThrottle?: PublishThrottle;
   readonly publishRunId: string;
   readonly reviewRunId: string;
   readonly pullRequestNumber: number;
@@ -437,6 +585,15 @@ type PublishedCheckRun = Awaited<ReturnType<GitProvider["createOrUpdateCheckRun"
 
 type SummaryCommentPurpose = "configured" | "fallback";
 
+type PublishThrottleEntry = PublishThrottleSlotInput & {
+  readonly createdAtMs: number;
+};
+
+type PublishThrottleWait = {
+  readonly reason: PublishThrottleLimitReason;
+  readonly waitMs: number;
+};
+
 function hasPlannedPublishOperation(
   plan: Pick<PublishPlan, "plannedOperations">,
   operationType: PublishOperationType,
@@ -446,12 +603,141 @@ function hasPlannedPublishOperation(
   );
 }
 
+async function waitForInMemoryPublishThrottleSlot(input: {
+  readonly entries: PublishThrottleEntry[];
+  readonly input: PublishThrottleSlotInput;
+  readonly limits: PublishThrottleLimits;
+  readonly now: () => Date;
+  readonly sleep: (ms: number) => Promise<void>;
+}): Promise<PublishThrottleDecision> {
+  let waitedMs = 0;
+  let limitReason: PublishThrottleLimitReason | undefined;
+
+  while (true) {
+    const nowMs = input.now().getTime();
+    prunePublishThrottleEntries(input.entries, nowMs);
+    const wait = publishThrottleWait(input.entries, input.input, input.limits, nowMs);
+    if (!wait) {
+      input.entries.push({ ...input.input, createdAtMs: nowMs });
+      return {
+        waitedMs,
+        ...(limitReason ? { limitReason } : {}),
+        limits: input.limits,
+      };
+    }
+
+    limitReason ??= wait.reason;
+    waitedMs += wait.waitMs;
+    await input.sleep(wait.waitMs);
+  }
+}
+
+function publishThrottleWait(
+  entries: readonly PublishThrottleEntry[],
+  input: PublishThrottleSlotInput,
+  limits: PublishThrottleLimits,
+  nowMs: number,
+): PublishThrottleWait | undefined {
+  return (
+    waitForWindow({
+      entries: entries.filter((entry) => entry.repositoryKey === input.repositoryKey),
+      limit: limits.maxPublishOperationsPerRepoPerMinute,
+      nowMs,
+      reason: "publish_operations_per_repo_per_minute",
+      windowMs: PUBLISH_THROTTLE_MINUTE_WINDOW_MS,
+    }) ??
+    waitForWindow({
+      entries: entries.filter((entry) => entry.installationId === input.installationId),
+      limit: limits.maxPublishOperationsPerInstallationPerMinute,
+      nowMs,
+      reason: "publish_operations_per_installation_per_minute",
+      windowMs: PUBLISH_THROTTLE_MINUTE_WINDOW_MS,
+    }) ??
+    (isSummaryOperation(input.operationType)
+      ? waitForWindow({
+          entries: entries.filter(
+            (entry) =>
+              entry.repositoryKey === input.repositoryKey &&
+              entry.pullRequestNumber === input.pullRequestNumber &&
+              isSummaryOperation(entry.operationType),
+          ),
+          limit: limits.maxSummaryCommentsPerPrPerHour,
+          nowMs,
+          reason: "summary_comments_per_pr_per_hour",
+          windowMs: PUBLISH_THROTTLE_HOUR_WINDOW_MS,
+        })
+      : undefined)
+  );
+}
+
+function waitForWindow(input: {
+  readonly entries: readonly PublishThrottleEntry[];
+  readonly limit: number;
+  readonly nowMs: number;
+  readonly reason: PublishThrottleLimitReason;
+  readonly windowMs: number;
+}): PublishThrottleWait | undefined {
+  const activeEntries = input.entries.filter(
+    (entry) => input.nowMs - entry.createdAtMs < input.windowMs,
+  );
+  if (activeEntries.length < input.limit) {
+    return undefined;
+  }
+
+  const oldestCreatedAtMs = Math.min(...activeEntries.map((entry) => entry.createdAtMs));
+  return {
+    reason: input.reason,
+    waitMs: Math.max(1, input.windowMs - (input.nowMs - oldestCreatedAtMs)),
+  };
+}
+
+function prunePublishThrottleEntries(entries: PublishThrottleEntry[], nowMs: number): void {
+  const oldestActiveMs = nowMs - PUBLISH_THROTTLE_HOUR_WINDOW_MS;
+  const firstActiveIndex = entries.findIndex((entry) => entry.createdAtMs > oldestActiveMs);
+  if (firstActiveIndex > 0) {
+    entries.splice(0, firstActiveIndex);
+  } else if (firstActiveIndex === -1) {
+    entries.length = 0;
+  }
+}
+
+async function waitForPublishThrottleSlot(input: {
+  readonly operationType: PublishOperationType;
+  readonly pullRequestNumber: number;
+  readonly repository: GitHubRepositoryRef;
+  readonly publishThrottle?: PublishThrottle;
+}): Promise<void> {
+  if (!input.publishThrottle) {
+    return;
+  }
+
+  await input.publishThrottle.waitForSlot({
+    installationId: input.repository.installationId,
+    operationType: input.operationType,
+    pullRequestNumber: input.pullRequestNumber,
+    repositoryKey:
+      input.repository.providerRepoId ?? `${input.repository.owner}/${input.repository.repo}`,
+  });
+}
+
+function isSummaryOperation(operationType: PublishOperationType): boolean {
+  return (
+    operationType === "summary_comment.configured" || operationType === "summary_comment.fallback"
+  );
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function publishCheckRun(input: {
   readonly db: HeimdallDatabase;
   readonly gitProvider: GitProvider;
   readonly repository: GitHubRepositoryRef;
+  readonly publishThrottle?: PublishThrottle;
   readonly publishRunId: string;
   readonly reviewRunId: string;
+  readonly pullRequestNumber: number;
   readonly headSha: string;
   readonly findings: readonly ValidatedFinding[];
 }): Promise<PublishedCheckRun> {
@@ -467,6 +753,12 @@ async function publishCheckRun(input: {
     summary: renderSummary(input.findings),
     annotations: input.findings.map(toCheckRunAnnotation),
   };
+  await waitForPublishThrottleSlot({
+    operationType: "check_run.upsert",
+    pullRequestNumber: input.pullRequestNumber,
+    repository: input.repository,
+    ...(input.publishThrottle ? { publishThrottle: input.publishThrottle } : {}),
+  });
   await insertPublishOperation(input.db, input.publishRunId, "check_run.upsert", {
     status: "running",
     requestHash: hashJson(checkRunInput),
@@ -531,6 +823,12 @@ async function publishInlineComments(input: PublishInlineCommentsInput): Promise
       findingId: finding.findingId,
     })),
   };
+  await waitForPublishThrottleSlot({
+    operationType: "review.inline_comments",
+    pullRequestNumber: input.pullRequestNumber,
+    repository: input.repository,
+    ...(input.publishThrottle ? { publishThrottle: input.publishThrottle } : {}),
+  });
   await insertPublishOperation(input.db, input.publishRunId, "review.inline_comments", {
     status: "running",
     requestHash: hashJson(reviewInput),
@@ -596,6 +894,7 @@ async function publishSummaryComment(input: {
   readonly db: HeimdallDatabase;
   readonly gitProvider: GitProvider;
   readonly repository: GitHubRepositoryRef;
+  readonly publishThrottle?: PublishThrottle;
   readonly publishRunId: string;
   readonly reviewRunId: string;
   readonly pullRequestNumber: number;
@@ -616,6 +915,12 @@ async function publishSummaryComment(input: {
   };
   const operationType =
     input.purpose === "fallback" ? "summary_comment.fallback" : "summary_comment.configured";
+  await waitForPublishThrottleSlot({
+    operationType,
+    pullRequestNumber: input.pullRequestNumber,
+    repository: input.repository,
+    ...(input.publishThrottle ? { publishThrottle: input.publishThrottle } : {}),
+  });
   await insertPublishOperation(input.db, input.publishRunId, operationType, {
     status: "running",
     requestHash: hashJson(summaryInput),
@@ -786,6 +1091,41 @@ function summaryPublishedFindingsForPlan(input: {
     (finding) =>
       finding.location.isInDiff === false || !input.commentIdsByFindingId[finding.findingId],
   );
+}
+
+function normalizePublishThrottleLimits(
+  overrides: Partial<PublishThrottleLimits> | undefined,
+): PublishThrottleLimits {
+  return {
+    maxInlineCommentsPerReview: nonNegativeInteger(
+      overrides?.maxInlineCommentsPerReview,
+      PUBLISH_LIMITS.maxInlineCommentsPerReview,
+    ),
+    maxPublishOperationsPerInstallationPerMinute: positiveInteger(
+      overrides?.maxPublishOperationsPerInstallationPerMinute,
+      PUBLISH_LIMITS.maxPublishOperationsPerInstallationPerMinute,
+    ),
+    maxPublishOperationsPerRepoPerMinute: positiveInteger(
+      overrides?.maxPublishOperationsPerRepoPerMinute,
+      PUBLISH_LIMITS.maxPublishOperationsPerRepoPerMinute,
+    ),
+    maxSummaryCommentsPerPrPerHour: positiveInteger(
+      overrides?.maxSummaryCommentsPerPrPerHour,
+      PUBLISH_LIMITS.maxSummaryCommentsPerPrPerHour,
+    ),
+  };
+}
+
+function nonNegativeInteger(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.floor(value))
+    : fallback;
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(1, Math.floor(value))
+    : fallback;
 }
 
 function publishingPolicyFromReviewRun(
