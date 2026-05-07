@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { type ReviewArtifactFetch, S3CompatibleReviewArtifactPayloadStore } from "@repo/artifacts";
 import {
@@ -800,20 +802,43 @@ async function readFilesystemIndexArtifact(artifactPath: string): Promise<IndexA
 
 /** Reads an artifact directory containing manifest.json and records.jsonl files. */
 async function readSplitIndexArtifactDirectory(directoryPath: string): Promise<IndexArtifact> {
-  const [manifestJson, recordsJsonl] = await Promise.all([
+  const [manifestJson, records] = await Promise.all([
     readFile(resolve(directoryPath, "manifest.json"), "utf8"),
-    readFile(resolve(directoryPath, "records.jsonl"), "utf8"),
+    readJsonlIndexRecords(resolve(directoryPath, "records.jsonl")),
   ]);
-  const records = recordsJsonl
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as IndexArtifact["records"][number]);
 
   return {
     manifest: JSON.parse(manifestJson) as IndexArtifact["manifest"],
     records,
   };
+}
+
+/** Streams newline-delimited index records from a split artifact records file. */
+async function readJsonlIndexRecords(recordsPath: string): Promise<IndexArtifact["records"]> {
+  const records: Array<IndexArtifact["records"][number]> = [];
+  const lines = createInterface({
+    crlfDelay: Number.POSITIVE_INFINITY,
+    input: createReadStream(recordsPath, { encoding: "utf8" }),
+  });
+  let lineNumber = 0;
+
+  for await (const line of lines) {
+    lineNumber += 1;
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+
+    try {
+      records.push(JSON.parse(trimmed) as IndexArtifact["records"][number]);
+    } catch (error) {
+      throw new Error(`Invalid index artifact JSONL record at line ${lineNumber}.`, {
+        cause: error,
+      });
+    }
+  }
+
+  return records;
 }
 
 /** Converts R2 object URIs to S3-compatible URIs for the shared object reader. */

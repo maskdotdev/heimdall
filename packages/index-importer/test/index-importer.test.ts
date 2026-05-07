@@ -88,6 +88,24 @@ describe("createFileSystemIndexArtifactResolver", () => {
     );
   });
 
+  it("reports the JSONL line number for invalid split artifact records", async () => {
+    const root = await createTempRoot();
+    const artifactPath = join(root, "repo_1", "index-artifact");
+    await mkdir(artifactPath, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(artifactPath, "manifest.json"),
+        `${JSON.stringify(emptyArtifact().manifest)}\n`,
+      ),
+      writeFile(join(artifactPath, "records.jsonl"), "{}\nnot-json\n"),
+    ]);
+    const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
+
+    await expect(resolver.readArtifact("repo_1/index-artifact")).rejects.toThrow(
+      "Invalid index artifact JSONL record at line 2.",
+    );
+  });
+
   it("rejects paths outside a configured artifact root", async () => {
     const root = await createTempRoot();
     const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
