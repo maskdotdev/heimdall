@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { isAbsolute, posix, relative, resolve } from "node:path";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -552,6 +554,16 @@ export type CaptureSandboxOutputInput = {
   readonly truncateStrategy?: SandboxOutputPolicy["truncateStrategy"] | undefined;
 };
 
+/** Options for the unsafe local-process sandbox runner. */
+export type LocalProcessSandboxRunnerOptions = {
+  /** Node environment name used to forbid production construction. */
+  readonly nodeEnv?: string | undefined;
+  /** Signal used when a local sandbox process exceeds its timeout. */
+  readonly timeoutSignal?: NodeJS.Signals | undefined;
+  /** Grace period before escalating timeout termination to SIGKILL. */
+  readonly timeoutKillGraceMs?: number | undefined;
+};
+
 /** Abstraction implemented by sandbox runners. */
 export interface SandboxRunner {
   /** Runs one sandbox request and returns a bounded result. */
@@ -603,11 +615,38 @@ export class FakeSandboxRunner implements SandboxRunner {
   }
 }
 
+/** Unsafe local-process runner for local development and trusted fixtures only. */
+export class LocalProcessSandboxRunner implements SandboxRunner {
+  private readonly options: LocalProcessSandboxRunnerOptions;
+
+  /** Creates a local-process runner and rejects production environments. */
+  public constructor(options: LocalProcessSandboxRunnerOptions = {}) {
+    const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV;
+    if (process.env.NODE_ENV === "production" || nodeEnv === "production") {
+      throw new Error("local_process sandbox runner is forbidden in production.");
+    }
+
+    this.options = options;
+  }
+
+  /** Runs one sandbox request as a local child process with bounded output. */
+  public async run(request: SandboxRunRequest): Promise<SandboxRunResult> {
+    return runLocalProcessSandbox(request, this.options);
+  }
+}
+
 /** Creates a deterministic fake sandbox runner. */
 export function createFakeSandboxRunner(
   fixtures: readonly FakeSandboxRunnerFixture[] = [],
 ): SandboxRunner {
   return new FakeSandboxRunner(fixtures);
+}
+
+/** Creates an unsafe local-process sandbox runner for local development only. */
+export function createLocalProcessSandboxRunner(
+  options: LocalProcessSandboxRunnerOptions = {},
+): SandboxRunner {
+  return new LocalProcessSandboxRunner(options);
 }
 
 /** Parses unknown data into a sandbox run request. */
@@ -653,6 +692,358 @@ export function createSandboxCapturedOutput(
     redacted: redaction.redacted,
     text: truncated.text,
     truncated: truncated.truncated,
+  };
+}
+
+/** Executes one sandbox request through the unsafe local-process runner. */
+async function runLocalProcessSandbox(
+  request: SandboxRunRequest,
+  options: LocalProcessSandboxRunnerOptions,
+): Promise<SandboxRunResult> {
+  const parsedRequest = parseSandboxRunRequest(request);
+  const plan = createLocalProcessExecutionPlan(parsedRequest);
+  const deniedDecision = plan.policyDecisions.find((decision) => decision.status === "denied");
+
+  if (deniedDecision || !plan.workingDirectory) {
+    return localProcessNonExecutionResult(parsedRequest, plan.policyDecisions, {
+      code: deniedDecision?.code ?? "working_directory_outside_mount",
+      message: deniedDecision?.message ?? "Local process working directory is outside bind mounts.",
+      retryable: false,
+    });
+  }
+
+  return executeLocalProcessSandbox(
+    parsedRequest,
+    { ...plan, workingDirectory: plan.workingDirectory },
+    options,
+  );
+}
+
+/** Executes one validated local-process sandbox plan. */
+function executeLocalProcessSandbox(
+  request: SandboxRunRequest,
+  plan: LocalProcessExecutionPlan & { readonly workingDirectory: string },
+  options: LocalProcessSandboxRunnerOptions,
+): Promise<SandboxRunResult> {
+  const startedAt = request.createdAt;
+  const startedTimeMs = Date.now();
+  const output = createLocalProcessOutputCapture({
+    stderrMaxBytes: Math.min(request.output.maxStderrBytes, request.limits.maxStderrBytes),
+    stdoutMaxBytes: Math.min(request.output.maxStdoutBytes, request.limits.maxStdoutBytes),
+  });
+  let timedOut = false;
+
+  return new Promise((resolveResult) => {
+    const executable = request.command.argv[0] ?? "";
+    const child = spawn(executable, request.command.argv.slice(1), {
+      cwd: plan.workingDirectory,
+      env: request.environment.env,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill(options.timeoutSignal ?? "SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        if (!settled) {
+          child.kill("SIGKILL");
+        }
+      }, options.timeoutKillGraceMs ?? request.limits.gracefulShutdownMs);
+    }, request.limits.timeoutMs);
+
+    const finish = (
+      status: SandboxRunStatus,
+      exitCode: number | null,
+      signal: string | null,
+      error?: SandboxRunError | undefined,
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      const durationMs = Math.max(0, Date.now() - startedTimeMs);
+      const finishedAt = new Date(Date.parse(startedAt) + durationMs).toISOString();
+
+      resolveResult({
+        artifacts: [],
+        durationMs,
+        exitCode,
+        finishedAt,
+        policyDecisions: [...plan.policyDecisions],
+        requestId: request.requestId,
+        runId: stableSandboxId("srun", request.requestId),
+        runner: localProcessRunnerInfo(),
+        schemaVersion: "sandbox_run_result.v1",
+        startedAt,
+        status,
+        stderr: localProcessCapturedOutput(request, output, "stderr"),
+        stdout: localProcessCapturedOutput(request, output, "stdout"),
+        warnings: [],
+        ...(error ? { error } : {}),
+        ...(signal ? { signal } : {}),
+      });
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      output.append("stdout", chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      output.append("stderr", chunk);
+    });
+    child.once("error", (error) => {
+      output.append("stderr", `Failed to start sandbox command: ${error.message}`);
+      finish("runner_error", null, null, {
+        code: "local_process_spawn_failed",
+        message: "Local process sandbox runner could not start the command.",
+        retryable: false,
+      });
+    });
+    child.once("close", (exitCode, signal) => {
+      const status = timedOut
+        ? "timed_out"
+        : exitCode !== null && request.command.expectedExitCodes.includes(exitCode)
+          ? "succeeded"
+          : "failed";
+      finish(status, exitCode, signal);
+    });
+
+    if (request.command.stdin === "provided") {
+      child.stdin.end(request.command.stdinText ?? "");
+      return;
+    }
+
+    child.stdin.end();
+  });
+}
+
+/** Local-process execution plan after policy and path checks. */
+type LocalProcessExecutionPlan = {
+  /** Policy decisions emitted before execution. */
+  readonly policyDecisions: readonly SandboxPolicyDecision[];
+  /** Host working directory mapped from the sandbox request. */
+  readonly workingDirectory?: string | undefined;
+};
+
+/** Creates a local-process plan and policy decisions for a sandbox request. */
+function createLocalProcessExecutionPlan(request: SandboxRunRequest): LocalProcessExecutionPlan {
+  const policyDecisions: SandboxPolicyDecision[] = [
+    ...evaluateSandboxRequestSafety(request),
+    {
+      code: "local_process_runner_unsafe",
+      message: "Local process sandbox runner is unsafe and allowed only for local development.",
+      status: "warning",
+    },
+  ];
+
+  if (request.network.mode !== "none") {
+    policyDecisions.push({
+      code: "local_process_network_policy_unsupported",
+      message: "Local process sandbox runner only supports no-network requests.",
+      status: "denied",
+    });
+  }
+
+  const workingDirectory = hostPathForSandboxPath(request, request.command.workingDirectory);
+  if (!workingDirectory) {
+    policyDecisions.push({
+      code: "working_directory_outside_mount",
+      message: "Sandbox command working directory must be inside a bind mount.",
+      status: "denied",
+    });
+  }
+
+  return {
+    policyDecisions: [...policyDecisions],
+    ...(workingDirectory ? { workingDirectory } : {}),
+  };
+}
+
+/** Maps a sandbox path to a host bind-mount path for local-process execution. */
+function hostPathForSandboxPath(
+  request: SandboxRunRequest,
+  sandboxPath: string,
+): string | undefined {
+  const normalizedSandboxPath = posix.resolve("/", sandboxPath);
+  const bindMounts = request.mounts
+    .filter((mount) => mount.type === "bind")
+    .sort((left, right) => right.target.length - left.target.length);
+
+  for (const mount of bindMounts) {
+    const normalizedTarget = posix.resolve("/", mount.target);
+    const isInsideTarget =
+      normalizedSandboxPath === normalizedTarget ||
+      normalizedSandboxPath.startsWith(`${normalizedTarget}/`);
+    if (!isInsideTarget) continue;
+
+    const relativeSandboxPath = posix.relative(normalizedTarget, normalizedSandboxPath);
+    const hostPath =
+      relativeSandboxPath.length === 0
+        ? resolve(mount.source)
+        : resolve(mount.source, ...relativeSandboxPath.split("/"));
+
+    return isPathInside(hostPath, mount.source) ? hostPath : undefined;
+  }
+
+  return undefined;
+}
+
+/** Returns true when a child path is contained by a parent path. */
+function isPathInside(childPath: string, parentPath: string): boolean {
+  const normalizedParent = resolve(parentPath);
+  const normalizedChild = resolve(childPath);
+  const relativePath = relative(normalizedParent, normalizedChild);
+
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+/** Creates a policy-denied local-process result without executing a command. */
+function localProcessNonExecutionResult(
+  request: SandboxRunRequest,
+  policyDecisions: readonly SandboxPolicyDecision[],
+  error: SandboxRunError,
+): SandboxRunResult {
+  return {
+    artifacts: [],
+    durationMs: 0,
+    error,
+    exitCode: null,
+    finishedAt: request.createdAt,
+    policyDecisions: [...policyDecisions],
+    requestId: request.requestId,
+    runId: stableSandboxId("srun", request.requestId),
+    runner: localProcessRunnerInfo(),
+    schemaVersion: "sandbox_run_result.v1",
+    startedAt: request.createdAt,
+    status: "policy_denied",
+    stderr: emptyCapturedOutput(),
+    stdout: emptyCapturedOutput(),
+    warnings: [],
+  };
+}
+
+/** Local process output stream name. */
+type LocalProcessOutputStreamName = "stdout" | "stderr";
+
+/** Bounded local-process output capture. */
+type LocalProcessOutputCapture = {
+  /** Appends a chunk to one stream while honoring that stream's byte budget. */
+  readonly append: (stream: LocalProcessOutputStreamName, chunk: Buffer | string) => void;
+  /** Returns captured stdout text. */
+  readonly stdout: () => string;
+  /** Returns captured stderr text. */
+  readonly stderr: () => string;
+  /** Returns whether stdout capture was truncated. */
+  readonly stdoutTruncated: () => boolean;
+  /** Returns whether stderr capture was truncated. */
+  readonly stderrTruncated: () => boolean;
+};
+
+/** Creates a per-stream local-process output capture. */
+function createLocalProcessOutputCapture(input: {
+  /** Maximum stdout bytes to capture. */
+  readonly stdoutMaxBytes: number;
+  /** Maximum stderr bytes to capture. */
+  readonly stderrMaxBytes: number;
+}): LocalProcessOutputCapture {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let stdoutTruncated = false;
+  let stderrTruncated = false;
+
+  return {
+    append: (stream, chunk) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const maxBytes = stream === "stdout" ? input.stdoutMaxBytes : input.stderrMaxBytes;
+      const consumedBytes = stream === "stdout" ? stdoutBytes : stderrBytes;
+      const remainingBytes = Math.max(0, maxBytes - consumedBytes);
+      if (buffer.length === 0) return;
+      if (remainingBytes === 0) {
+        if (stream === "stdout") stdoutTruncated = true;
+        else stderrTruncated = true;
+        return;
+      }
+
+      const captured = buffer.subarray(0, remainingBytes);
+      if (captured.length < buffer.length) {
+        if (stream === "stdout") stdoutTruncated = true;
+        else stderrTruncated = true;
+      }
+
+      if (stream === "stdout") {
+        stdout.push(captured);
+        stdoutBytes += captured.length;
+        return;
+      }
+
+      stderr.push(captured);
+      stderrBytes += captured.length;
+    },
+    stderr: () => Buffer.concat(stderr).toString("utf8"),
+    stderrTruncated: () => stderrTruncated,
+    stdout: () => Buffer.concat(stdout).toString("utf8"),
+    stdoutTruncated: () => stdoutTruncated,
+  };
+}
+
+/** Converts local-process captured output to the sandbox output contract. */
+function localProcessCapturedOutput(
+  request: SandboxRunRequest,
+  output: LocalProcessOutputCapture,
+  stream: LocalProcessOutputStreamName,
+): SandboxCapturedOutput {
+  const policy =
+    stream === "stdout"
+      ? {
+          capture: request.output.captureStdout,
+          maxBytes: Math.min(request.output.maxStdoutBytes, request.limits.maxStdoutBytes),
+          text: output.stdout(),
+          truncated: output.stdoutTruncated(),
+        }
+      : {
+          capture: request.output.captureStderr,
+          maxBytes: Math.min(request.output.maxStderrBytes, request.limits.maxStderrBytes),
+          text: output.stderr(),
+          truncated: output.stderrTruncated(),
+        };
+
+  if (!policy.capture) {
+    return emptyCapturedOutput();
+  }
+
+  const captured = createSandboxCapturedOutput({
+    maxBytes: policy.maxBytes,
+    normalizeAnsi: request.output.normalizeAnsi,
+    redactSecrets: request.output.redactSecrets,
+    redactionValues: redactionValuesForRequest(request),
+    text: policy.text,
+    truncateStrategy: request.output.truncateStrategy,
+  });
+
+  return {
+    ...captured,
+    truncated: captured.truncated || policy.truncated,
+  };
+}
+
+/** Returns redaction values selected by request redacted environment keys. */
+function redactionValuesForRequest(request: SandboxRunRequest): string[] {
+  return request.environment.redactedEnvKeys
+    .map((key) => request.environment.env[key])
+    .filter(isNonEmptyString);
+}
+
+/** Returns local-process runner metadata for sandbox results. */
+function localProcessRunnerInfo(): SandboxRunnerInfo {
+  return {
+    isolation: "none",
+    kind: "local_process",
+    name: "LocalProcessSandboxRunner",
+    version: "sandbox.local_process.v1",
   };
 }
 

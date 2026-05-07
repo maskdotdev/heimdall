@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDefaultSandboxEnvironment,
   createFakeSandboxRunner,
+  createLocalProcessSandboxRunner,
   DEFAULT_SANDBOX_ARTIFACT_POLICY,
   DEFAULT_SANDBOX_NETWORK_POLICY,
   DEFAULT_SANDBOX_OUTPUT_POLICY,
@@ -125,6 +126,93 @@ describe("FakeSandboxRunner", () => {
   });
 });
 
+describe("LocalProcessSandboxRunner", () => {
+  it("runs local fixture commands with explicit environment and bounded output", async () => {
+    const runner = createLocalProcessSandboxRunner({ nodeEnv: "test" });
+    const request = createLocalProcessRequest({
+      command: {
+        argv: [
+          process.execPath,
+          "-e",
+          'process.stdout.write((process.env.SANDBOX_TEST_VALUE ?? "") + ":abcdef");',
+        ],
+        expectedExitCodes: [0],
+        shell: false,
+        stdin: "none",
+        workingDirectory: "/workspace",
+      },
+      environment: {
+        env: { SANDBOX_TEST_VALUE: "ok" },
+        inheritHostEnv: false,
+        redactedEnvKeys: [],
+      },
+      output: {
+        ...DEFAULT_SANDBOX_OUTPUT_POLICY,
+        maxStdoutBytes: 5,
+        truncateStrategy: "head",
+      },
+    });
+
+    const result = await runner.run(request);
+
+    expect(result.status).toBe("succeeded");
+    expect(result.runner.kind).toBe("local_process");
+    expect(result.stdout.text).toBe("ok:ab");
+    expect(result.stdout.truncated).toBe(true);
+    expect(result.policyDecisions).toContainEqual({
+      code: "local_process_runner_unsafe",
+      message: "Local process sandbox runner is unsafe and allowed only for local development.",
+      status: "warning",
+    });
+  });
+
+  it("marks local fixture commands as timed out when they exceed the limit", async () => {
+    const runner = createLocalProcessSandboxRunner({ nodeEnv: "test", timeoutKillGraceMs: 10 });
+    const result = await runner.run(
+      createLocalProcessRequest({
+        command: {
+          argv: [process.execPath, "-e", "setTimeout(() => {}, 5_000);"],
+          expectedExitCodes: [0],
+          shell: false,
+          stdin: "none",
+          workingDirectory: "/workspace",
+        },
+        limits: {
+          ...DEFAULT_SANDBOX_RESOURCE_LIMITS,
+          timeoutMs: 25,
+        },
+      }),
+    );
+
+    expect(result.status).toBe("timed_out");
+    expect(result.exitCode).toBeNull();
+  });
+
+  it("denies local fixture commands whose working directory is outside bind mounts", async () => {
+    const runner = createLocalProcessSandboxRunner({ nodeEnv: "test" });
+    const result = await runner.run(
+      createLocalProcessRequest({
+        command: {
+          argv: [process.execPath, "-e", 'process.stdout.write("nope");'],
+          expectedExitCodes: [0],
+          shell: false,
+          stdin: "none",
+          workingDirectory: "/outside",
+        },
+      }),
+    );
+
+    expect(result.status).toBe("policy_denied");
+    expect(result.error?.code).toBe("working_directory_outside_mount");
+  });
+
+  it("rejects local process runner construction in production", () => {
+    expect(() => createLocalProcessSandboxRunner({ nodeEnv: "production" })).toThrow(
+      "local_process sandbox runner is forbidden in production.",
+    );
+  });
+});
+
 /** Creates a valid sandbox request fixture with optional overrides. */
 function createRequest(overrides: Partial<SandboxRunRequest> = {}): SandboxRunRequest {
   return {
@@ -179,4 +267,42 @@ function createRequest(overrides: Partial<SandboxRunRequest> = {}): SandboxRunRe
     },
     ...overrides,
   };
+}
+
+/** Creates a sandbox request that can execute as a local process in tests. */
+function createLocalProcessRequest(overrides: Partial<SandboxRunRequest> = {}): SandboxRunRequest {
+  return createRequest({
+    command: {
+      argv: [process.execPath, "-e", 'process.stdout.write("ok");'],
+      expectedExitCodes: [0],
+      shell: false,
+      stdin: "none",
+      workingDirectory: "/workspace",
+    },
+    image: {
+      allowedImageClass: "first_party_static_tools",
+      image: "local-process-test",
+      pullPolicy: "never",
+    },
+    limits: {
+      ...DEFAULT_SANDBOX_RESOURCE_LIMITS,
+      timeoutMs: 1_000,
+    },
+    mounts: [
+      {
+        purpose: "workspace",
+        readOnly: true,
+        source: process.cwd(),
+        target: "/workspace",
+        type: "bind",
+      },
+    ],
+    output: {
+      ...DEFAULT_SANDBOX_OUTPUT_POLICY,
+      maxStderrBytes: 1_000,
+      maxStdoutBytes: 1_000,
+      truncateStrategy: "head",
+    },
+    ...overrides,
+  });
 }
