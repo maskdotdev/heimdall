@@ -31,6 +31,8 @@
     "@repo/publisher": "workspace:*",
     "@repo/review-orchestrator": "workspace:*",
     "@repo/repo-sync": "workspace:*",
+    "@repo/sandbox": "workspace:*",
+    "@repo/tool-runner": "workspace:*",
     "@repo/usage": "workspace:*",
     "bullmq": "catalog:",
     "drizzle-orm": "catalog:",

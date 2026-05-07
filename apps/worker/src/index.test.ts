@@ -8,6 +8,7 @@ import {
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
   createWorkerReviewSmokeGateway,
+  createWorkerStaticAnalysisRunnerFromEnvironment,
   type RedisPublishThrottleClient,
   verifyWorkerIndexerCapabilities,
 } from "./index";
@@ -431,6 +432,59 @@ describe("createRedisPublishThrottle", () => {
       waitedMs: 3_600_000,
     });
     expect(sleeps).toEqual([3_600_000]);
+  });
+});
+
+describe("createWorkerStaticAnalysisRunnerFromEnvironment", () => {
+  it("keeps static analysis disabled by default", () => {
+    expect(createWorkerStaticAnalysisRunnerFromEnvironment({})).toBeUndefined();
+  });
+
+  it("creates a fake sandbox-backed static-analysis runner when configured", async () => {
+    const runner = createWorkerStaticAnalysisRunnerFromEnvironment({
+      STATIC_ANALYSIS_RUNNER: "fake",
+    });
+
+    const result = await runner?.run({
+      command: {
+        args: ["--format", "json"],
+        cwd: "/workspace/repo",
+        displayCommand: "eslint --format json",
+        env: {},
+        executable: "eslint",
+        filesystemPolicy: "read_only",
+        networkPolicy: "none",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_worker_static_analysis",
+      sandboxContext: {
+        commitSha: "abc123",
+        orgId: "org_1",
+        repoId: "repo_1",
+      },
+      startedAt: "2026-05-07T12:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(result).toMatchObject({
+      status: "succeeded",
+      stdout: "",
+    });
+  });
+
+  it("rejects unsafe local-process static analysis in production", () => {
+    expect(() =>
+      createWorkerStaticAnalysisRunnerFromEnvironment({
+        NODE_ENV: "production",
+        STATIC_ANALYSIS_RUNNER: "local_process",
+      }),
+    ).toThrow("local_process sandbox runner is forbidden in production.");
+  });
+
+  it("rejects docker and gvisor before execution runners exist", () => {
+    expect(() =>
+      createWorkerStaticAnalysisRunnerFromEnvironment({ SANDBOX_RUNNER: "docker" }),
+    ).toThrow("SANDBOX_RUNNER=docker is not executable by this worker yet.");
   });
 });
 

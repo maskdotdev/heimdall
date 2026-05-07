@@ -89,6 +89,8 @@ import {
 } from "@repo/queue";
 import { syncRepositoryWorkspace } from "@repo/repo-sync";
 import { runPullRequestReview } from "@repo/review-orchestrator";
+import { createFakeSandboxRunner, createLocalProcessSandboxRunner } from "@repo/sandbox";
+import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
 import { Worker } from "bullmq";
 import { and, eq } from "drizzle-orm";
@@ -119,6 +121,8 @@ export type CreateWorkerHandlersOptions = {
   readonly gitProvider: GitProvider;
   /** Optional model gateway used by review jobs. */
   readonly llmGateway?: LLMGateway;
+  /** Optional static-analysis runner used by review jobs. */
+  readonly staticAnalysisRunner?: ToolRunner;
   /** Optional review artifact payload store used by review orchestration. */
   readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
   /** Optional shared throttle for provider-visible publisher writes. */
@@ -135,6 +139,9 @@ export type CreateWorkerHandlersOptions = {
 
 /** Environment values used to select the worker indexer driver. */
 export type WorkerIndexerDriverEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Environment values used to select the worker static-analysis runner. */
+export type WorkerStaticAnalysisRunnerEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** Runtime handle returned by the worker process bootstrap. */
 export type WorkerRuntime = {
@@ -454,6 +461,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         db: options.db,
         gitProvider: options.gitProvider,
         ...(options.llmGateway ? { llmGateway: options.llmGateway } : {}),
+        ...(options.staticAnalysisRunner
+          ? { staticAnalysisRunner: options.staticAnalysisRunner }
+          : {}),
         ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
       });
     },
@@ -509,6 +519,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ? createWorkerReviewSmokeGateway()
       : undefined;
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
+  const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env);
   const publishThrottle = createRedisPublishThrottle(workerConnection);
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
@@ -527,6 +538,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       db: databaseClient.db,
       gitProvider,
       ...(llmGateway ? { llmGateway } : {}),
+      ...(staticAnalysisRunner ? { staticAnalysisRunner } : {}),
       ...(artifactPayloadStore ? { artifactPayloadStore } : {}),
       publishThrottle,
       ...(workspaceRoot ? { workspaceRoot } : {}),
@@ -573,6 +585,37 @@ export function createWorkerReviewArtifactPayloadStoreFromEnv():
   const store = createReviewArtifactPayloadStoreFromEnvironment(process.env);
 
   return store instanceof InlineReviewArtifactPayloadStore ? undefined : store;
+}
+
+/** Creates the optional static-analysis runner selected by worker environment. */
+export function createWorkerStaticAnalysisRunnerFromEnvironment(
+  env: WorkerStaticAnalysisRunnerEnvironment,
+): ToolRunner | undefined {
+  const runnerName = (env.STATIC_ANALYSIS_RUNNER ?? env.SANDBOX_RUNNER ?? "off").trim();
+  if (
+    runnerName === "" ||
+    runnerName === "off" ||
+    runnerName === "none" ||
+    runnerName === "disabled"
+  ) {
+    return undefined;
+  }
+
+  if (runnerName === "fake") {
+    return createSandboxToolRunner({ runner: createFakeSandboxRunner() });
+  }
+
+  if (runnerName === "local_process") {
+    return createSandboxToolRunner({
+      runner: createLocalProcessSandboxRunner({ nodeEnv: env.NODE_ENV }),
+    });
+  }
+
+  if (runnerName === "docker" || runnerName === "gvisor") {
+    throw new Error(`SANDBOX_RUNNER=${runnerName} is not executable by this worker yet.`);
+  }
+
+  throw new Error(`Unsupported SANDBOX_RUNNER: ${runnerName}`);
 }
 
 /** Creates the optional worker indexer driver selected by environment configuration. */

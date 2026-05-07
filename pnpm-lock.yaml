@@ -313,6 +313,12 @@ importers:
       '@repo/review-orchestrator':
         specifier: workspace:*
         version: link:../../packages/review-orchestrator
+      '@repo/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
+      '@repo/tool-runner':
+        specifier: workspace:*
+        version: link:../../packages/tool-runner
       '@repo/usage':
         specifier: workspace:*
         version: link:../../packages/usage
