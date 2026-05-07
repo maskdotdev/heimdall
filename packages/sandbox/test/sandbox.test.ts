@@ -2,6 +2,13 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import {
   buildDockerSandboxCommand,
@@ -23,6 +30,7 @@ import {
   parseSandboxRunResult,
   type SandboxRunRequest,
   type ToolSandboxPolicy,
+  withSandboxTelemetry,
 } from "../src/index";
 
 describe("sandbox contracts", () => {
@@ -134,6 +142,157 @@ describe("FakeSandboxRunner", () => {
     expect(result.status).toBe("policy_denied");
     expect(result.exitCode).toBeNull();
     expect(result.error?.code).toBe("image_class_blocked");
+  });
+});
+
+describe("withSandboxTelemetry", () => {
+  it("records sandbox run metrics and spans without raw command output or paths", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const runner = withSandboxTelemetry(
+      createFakeSandboxRunner([
+        {
+          artifacts: [
+            {
+              name: "report.json",
+              sha256: "abc123",
+              sizeBytes: 42,
+              truncated: false,
+              uri: "file:///tmp/workspace/report.json",
+            },
+          ],
+          durationMs: 17,
+          executable: "eslint",
+          resourceUsage: {
+            cpuTimeMs: 9,
+            peakMemoryBytes: 1_024,
+          },
+          stderr: "diagnostic details",
+          stdout: "raw lint output",
+        },
+      ]),
+      {
+        metrics: createRecordingMetrics(metrics),
+        traces: createRecordingTraces(spans),
+      },
+    );
+
+    const result = await runner.run(createRequest());
+
+    expect(metrics).toContainEqual({
+      kind: "counter",
+      labels: {
+        category: "lint",
+        runner_kind: "fake",
+        status: "succeeded",
+        trust_level: "trusted_pr",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.sandboxRunsTotal,
+      value: 1,
+    });
+    expect(metrics).toContainEqual({
+      kind: "histogram",
+      labels: {
+        category: "lint",
+        runner_kind: "fake",
+        status: "succeeded",
+        trust_level: "trusted_pr",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.sandboxDurationMs,
+      unit: "ms",
+      value: 17,
+    });
+    expect(metrics).toContainEqual({
+      kind: "histogram",
+      labels: {
+        category: "lint",
+        runner_kind: "fake",
+        status: "succeeded",
+        stream: "stdout",
+        trust_level: "trusted_pr",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.sandboxOutputBytes,
+      unit: "bytes",
+      value: result.stdout.bytes,
+    });
+    expect(metrics).toContainEqual({
+      kind: "histogram",
+      labels: {
+        category: "lint",
+        runner_kind: "fake",
+        status: "succeeded",
+        trust_level: "trusted_pr",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.sandboxCpuMs,
+      unit: "ms",
+      value: 9,
+    });
+    expect(metrics).toContainEqual({
+      kind: "histogram",
+      labels: {
+        category: "lint",
+        runner_kind: "fake",
+        status: "succeeded",
+        trust_level: "trusted_pr",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.sandboxMemoryPeakBytes,
+      unit: "bytes",
+      value: 1_024,
+    });
+    expect(spans).toContainEqual({
+      endAttributes: expect.objectContaining({
+        "sandbox.artifact_bytes": 42,
+        "sandbox.artifact_count": 1,
+        "sandbox.duration_ms": 17,
+        "sandbox.runner_kind": "fake",
+        "sandbox.status": "succeeded",
+        "sandbox.stderr_bytes": result.stderr.bytes,
+        "sandbox.stdout_bytes": result.stdout.bytes,
+      }),
+      name: OBSERVABILITY_SPAN_NAMES.sandboxRun,
+      startAttributes: expect.objectContaining({
+        "sandbox.category": "lint",
+        "sandbox.network_mode": "none",
+        "sandbox.trust_level": "trusted_pr",
+      }),
+      status: "ok",
+    });
+    const serializedTelemetry = JSON.stringify({ metrics, spans });
+    expect(serializedTelemetry).not.toContain("raw lint output");
+    expect(serializedTelemetry).not.toContain("diagnostic details");
+    expect(serializedTelemetry).not.toContain("/tmp/workspace");
+    expect(serializedTelemetry).not.toContain("file:///tmp");
+  });
+
+  it("records denied sandbox policy decisions as violation metrics", async () => {
+    const metrics: RecordedMetric[] = [];
+    const runner = withSandboxTelemetry(createFakeSandboxRunner(), {
+      metrics: createRecordingMetrics(metrics),
+    });
+
+    const result = await runner.run(
+      createRequest({
+        image: {
+          allowedImageClass: "blocked",
+          image: "customer/image:latest",
+          pullPolicy: "always",
+        },
+      }),
+    );
+
+    expect(result.status).toBe("policy_denied");
+    expect(metrics).toContainEqual({
+      kind: "counter",
+      labels: {
+        category: "lint",
+        runner_kind: "fake",
+        status: "policy_denied",
+        trust_level: "trusted_pr",
+        violation_type: "image_class_blocked",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.sandboxViolationsTotal,
+      value: 1,
+    });
   });
 });
 
@@ -544,6 +703,78 @@ describe("LocalProcessSandboxRunner", () => {
     );
   });
 });
+
+/** Metric record captured by telemetry assertions. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels attached to the record. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Span record captured by telemetry assertions. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric records in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}
 
 /** Creates a valid sandbox request fixture with optional overrides. */
 function createRequest(overrides: Partial<SandboxRunRequest> = {}): SandboxRunRequest {

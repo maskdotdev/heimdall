@@ -624,6 +624,12 @@ export const OBSERVABILITY_METRIC_NAMES = {
   retrievalDurationMs: "code_review_agent.retrieval.duration_ms",
   retrievalRequestsTotal: "code_review_agent.retrieval.requests_total",
   retrievalSourceCandidatesTotal: "code_review_agent.retrieval.source_candidates_total",
+  sandboxCpuMs: "code_review_agent.sandbox.cpu_ms",
+  sandboxDurationMs: "code_review_agent.sandbox.duration_ms",
+  sandboxMemoryPeakBytes: "code_review_agent.sandbox.memory_peak_bytes",
+  sandboxOutputBytes: "code_review_agent.sandbox.output_bytes",
+  sandboxRunsTotal: "code_review_agent.sandbox.runs_total",
+  sandboxViolationsTotal: "code_review_agent.sandbox.violations_total",
   webhookDeliveriesTotal: "code_review_agent.webhook.deliveries_total",
   webhookDeliveryDurationMs: "code_review_agent.webhook.delivery_duration_ms",
   webhookDuplicateDeliveriesTotal: "code_review_agent.webhook.duplicate_deliveries_total",
@@ -653,6 +659,7 @@ export const OBSERVABILITY_SPAN_NAMES = {
   repoSyncCheckoutWorkspace: "code_review_agent.repo_sync.checkout_workspace",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
   retrievalBuildContext: "code_review_agent.retrieval.build_context",
+  sandboxRun: "code_review_agent.sandbox.run",
   webhookDelivery: "code_review_agent.webhook.delivery",
 } as const;
 

@@ -1024,6 +1024,9 @@ importers:
 
   packages/sandbox:
     dependencies:
+      '@repo/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@sinclair/typebox':
         specifier: 'catalog:'
         version: 0.34.49

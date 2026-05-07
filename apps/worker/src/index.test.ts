@@ -4,6 +4,11 @@ import {
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+} from "@repo/observability";
 import type { PublishOperationType, PublishThrottleSlotInput } from "@repo/publisher";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -499,6 +504,55 @@ describe("createWorkerStaticAnalysisRunnerFromEnvironment", () => {
     });
   });
 
+  it("passes telemetry recorders to configured sandbox runners", async () => {
+    const metrics: WorkerRecordedMetric[] = [];
+    const runner = createWorkerStaticAnalysisRunnerFromEnvironment(
+      {
+        STATIC_ANALYSIS_RUNNER: "fake",
+      },
+      {
+        metrics: createWorkerRecordingMetrics(metrics),
+      },
+    );
+    if (!runner) {
+      throw new Error("Expected configured static-analysis runner.");
+    }
+
+    await runner.run({
+      command: {
+        args: ["--format", "json"],
+        cwd: "/workspace/repo",
+        displayCommand: "eslint --format json",
+        env: {},
+        executable: "eslint",
+        filesystemPolicy: "read_only",
+        networkPolicy: "none",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_worker_static_analysis",
+      sandboxContext: {
+        commitSha: "abc123",
+        orgId: "org_1",
+        repoId: "repo_1",
+      },
+      startedAt: "2026-05-07T12:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(metrics).toContainEqual(
+      expect.objectContaining({
+        labels: expect.objectContaining({
+          category: "lint",
+          runner_kind: "fake",
+          status: "succeeded",
+          trust_level: "trusted_pr",
+        }),
+        name: OBSERVABILITY_METRIC_NAMES.sandboxRunsTotal,
+        value: 1,
+      }),
+    );
+  });
+
   it("rejects unsafe local-process static analysis in production", () => {
     expect(() =>
       createWorkerStaticAnalysisRunnerFromEnvironment({
@@ -615,6 +669,43 @@ describe("verifyWorkerIndexerCapabilities", () => {
     info.mockRestore();
   });
 });
+
+/** Metric record captured by worker telemetry assertions. */
+type WorkerRecordedMetric = {
+  /** Metric labels attached to the record. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Creates a metric recorder that stores worker telemetry records in memory. */
+function createWorkerRecordingMetrics(records: WorkerRecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        labels: options?.labels,
+        name,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: (name, value, options) => {
+      records.push({
+        labels: options?.labels,
+        name,
+        value,
+      });
+    },
+    histogram: (name, value, options) => {
+      records.push({
+        labels: options?.labels,
+        name,
+        value,
+      });
+    },
+  };
+}
 
 /** In-memory Redis script harness shared by cross-process throttle unit tests. */
 class InMemoryRedisPublishThrottleClient implements RedisPublishThrottleClient {

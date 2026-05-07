@@ -4,6 +4,16 @@ import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat } from "n
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -690,6 +700,38 @@ export interface SandboxRunner {
   run(request: SandboxRunRequest): Promise<SandboxRunResult>;
 }
 
+/** Optional telemetry dependencies used to instrument sandbox runner execution. */
+export type SandboxTelemetryOptions = {
+  /** Optional metric recorder for aggregate sandbox run telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional trace context propagated from the parent job or request. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe sandbox run spans. */
+  readonly traces?: TelemetrySpanRecorder;
+};
+
+/** Low-cardinality sandbox metric labels shared by run-level metrics. */
+type SandboxTelemetryLabels = Readonly<{
+  /** Sandbox execution category from the request policy. */
+  readonly category: string;
+  /** Runner implementation kind, or unknown when execution throws before returning. */
+  readonly runner_kind: string;
+  /** Final sandbox run status. */
+  readonly status: string;
+  /** Trust level selected for the sandbox run. */
+  readonly trust_level: string;
+}>;
+
+/** Mutable state carried while one sandbox telemetry span is open. */
+type SandboxTelemetryState = {
+  /** Request attributes used for metrics and span completion. */
+  readonly request: SandboxRunRequest;
+  /** Monotonic start time used when a runner throws before returning a result. */
+  readonly startedAtMs: number;
+  /** Product-safe sandbox run span. */
+  readonly span?: TelemetrySpanHandle | undefined;
+};
+
 /** Fixture consumed by the deterministic fake sandbox runner. */
 export type FakeSandboxRunnerFixture = {
   /** Optional request ID to match. */
@@ -788,6 +830,34 @@ export class GVisorSandboxRunner implements SandboxRunner {
   }
 }
 
+/** Sandbox runner decorator that records product-safe telemetry around executions. */
+class TelemetrySandboxRunner implements SandboxRunner {
+  private readonly runner: SandboxRunner;
+
+  private readonly telemetry: SandboxTelemetryOptions;
+
+  /** Creates a telemetry wrapper around an existing sandbox runner. */
+  public constructor(runner: SandboxRunner, telemetry: SandboxTelemetryOptions) {
+    this.runner = runner;
+    this.telemetry = telemetry;
+  }
+
+  /** Runs one sandbox request and records bounded metrics and spans. */
+  public async run(request: SandboxRunRequest): Promise<SandboxRunResult> {
+    const telemetry = startSandboxTelemetry(request, this.telemetry);
+
+    try {
+      const result = await this.runner.run(request);
+      finishSandboxTelemetry(this.telemetry.metrics, telemetry, { result });
+
+      return result;
+    } catch (error) {
+      finishSandboxTelemetry(this.telemetry.metrics, telemetry, { error });
+      throw error;
+    }
+  }
+}
+
 /** Error thrown when a Docker command cannot be built safely. */
 export class DockerSandboxCommandPolicyError extends Error {
   /** Product-safe policy decisions explaining why command building failed. */
@@ -827,6 +897,18 @@ export function createGVisorSandboxRunner(
   options: DockerContainerSandboxRunnerOptions = {},
 ): SandboxRunner {
   return new GVisorSandboxRunner(options);
+}
+
+/** Wraps a sandbox runner with product-safe run-level telemetry. */
+export function withSandboxTelemetry(
+  runner: SandboxRunner,
+  telemetry: SandboxTelemetryOptions = {},
+): SandboxRunner {
+  if (!telemetry.metrics && !telemetry.traces) {
+    return runner;
+  }
+
+  return new TelemetrySandboxRunner(runner, telemetry);
 }
 
 /** Parses unknown data into a sandbox run request. */
@@ -873,6 +955,219 @@ export function createSandboxCapturedOutput(
     text: truncated.text,
     truncated: truncated.truncated,
   };
+}
+
+/** Starts product-safe telemetry for one sandbox run. */
+function startSandboxTelemetry(
+  request: SandboxRunRequest,
+  telemetry: SandboxTelemetryOptions,
+): SandboxTelemetryState {
+  const span = telemetry.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.sandboxRun, {
+    attributes: {
+      "app.org_id": request.orgId,
+      "app.repo_id": request.repoId,
+      ...(request.reviewRunId ? { "app.review_run_id": request.reviewRunId } : {}),
+      "sandbox.artifact_glob_count": request.artifacts.collectFiles.length,
+      "sandbox.category": request.category,
+      "sandbox.expected_exit_code_count": request.command.expectedExitCodes.length,
+      "sandbox.max_cpu_count": request.limits.maxCpuCount,
+      "sandbox.max_memory_bytes": request.limits.maxMemoryBytes,
+      "sandbox.mount_count": request.mounts.length,
+      "sandbox.network_block_metadata": request.network.blockMetadataEndpoints,
+      "sandbox.network_block_private": request.network.blockPrivateNetworks,
+      "sandbox.network_mode": request.network.mode,
+      "sandbox.output_stderr_limit_bytes": request.output.maxStderrBytes,
+      "sandbox.output_stdout_limit_bytes": request.output.maxStdoutBytes,
+      "sandbox.timeout_ms": request.limits.timeoutMs,
+      "sandbox.trust_level": request.trustLevel,
+      "sandbox.workspace_mode": request.workspace.mode,
+    },
+    kind: "internal",
+    traceContext: telemetry.traceContext,
+  });
+
+  return {
+    request,
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Finishes product-safe telemetry for one sandbox run. */
+function finishSandboxTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: SandboxTelemetryState,
+  input: {
+    /** Error thrown by the runner before a result was returned. */
+    readonly error?: unknown;
+    /** Completed sandbox run result, when execution returned normally. */
+    readonly result?: SandboxRunResult;
+  },
+): void {
+  const status = input.result?.status ?? "runner_error";
+  const runnerKind = input.result?.runner.kind ?? "unknown";
+  const durationMs = input.result?.durationMs ?? Math.max(0, Date.now() - telemetry.startedAtMs);
+  const labels = sandboxTelemetryLabels(telemetry.request, runnerKind, status);
+  const errorClass = input.error ? classifyTelemetryError(input.error) : undefined;
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.sandboxRunsTotal, {
+    labels: errorClass ? { ...labels, error_class: errorClass } : labels,
+  });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.sandboxDurationMs, durationMs, {
+    labels,
+    unit: "ms",
+  });
+
+  if (input.result) {
+    recordSandboxOutputTelemetry(metrics, labels, input.result);
+    recordSandboxResourceTelemetry(metrics, labels, input.result);
+    recordSandboxViolationTelemetry(metrics, labels, input.result);
+  }
+
+  telemetry.span?.end({
+    ...(input.error ? { error: input.error } : {}),
+    attributes: sandboxSpanEndAttributes(durationMs, status, runnerKind, input.result, errorClass),
+    status: sandboxTelemetrySpanStatus(status),
+  });
+}
+
+/** Creates low-cardinality metric labels for one sandbox run. */
+function sandboxTelemetryLabels(
+  request: SandboxRunRequest,
+  runnerKind: string,
+  status: SandboxRunStatus | "runner_error",
+): SandboxTelemetryLabels {
+  return {
+    category: request.category,
+    runner_kind: sanitizeSandboxTelemetryLabel(runnerKind),
+    status,
+    trust_level: request.trustLevel,
+  };
+}
+
+/** Creates product-safe span end attributes for one sandbox run. */
+function sandboxSpanEndAttributes(
+  durationMs: number,
+  status: SandboxRunStatus | "runner_error",
+  runnerKind: string,
+  result: SandboxRunResult | undefined,
+  errorClass: string | undefined,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    ...(errorClass ? { "sandbox.error_class": errorClass } : {}),
+    ...(result
+      ? {
+          "sandbox.artifact_bytes": sandboxArtifactBytes(result),
+          "sandbox.artifact_count": result.artifacts.length,
+          "sandbox.exit_code": result.exitCode ?? undefined,
+          "sandbox.policy_denied_count": sandboxDeniedDecisionCount(result),
+          "sandbox.stderr_bytes": result.stderr.bytes,
+          "sandbox.stderr_truncated": result.stderr.truncated,
+          "sandbox.stdout_bytes": result.stdout.bytes,
+          "sandbox.stdout_truncated": result.stdout.truncated,
+          "sandbox.warning_count": result.warnings.length,
+          ...(result.resourceUsage?.cpuTimeMs !== undefined
+            ? { "sandbox.cpu_ms": result.resourceUsage.cpuTimeMs }
+            : {}),
+          ...(result.resourceUsage?.peakMemoryBytes !== undefined
+            ? { "sandbox.memory_peak_bytes": result.resourceUsage.peakMemoryBytes }
+            : {}),
+        }
+      : {}),
+    "sandbox.duration_ms": durationMs,
+    "sandbox.runner_kind": sanitizeSandboxTelemetryLabel(runnerKind),
+    "sandbox.status": status,
+  };
+}
+
+/** Records stdout and stderr byte telemetry without storing output text. */
+function recordSandboxOutputTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  labels: SandboxTelemetryLabels,
+  result: SandboxRunResult,
+): void {
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.sandboxOutputBytes, result.stdout.bytes, {
+    labels: { ...labels, stream: "stdout" },
+    unit: "bytes",
+  });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.sandboxOutputBytes, result.stderr.bytes, {
+    labels: { ...labels, stream: "stderr" },
+    unit: "bytes",
+  });
+}
+
+/** Records optional resource usage telemetry from a sandbox result. */
+function recordSandboxResourceTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  labels: SandboxTelemetryLabels,
+  result: SandboxRunResult,
+): void {
+  if (result.resourceUsage?.cpuTimeMs !== undefined) {
+    metrics?.histogram(OBSERVABILITY_METRIC_NAMES.sandboxCpuMs, result.resourceUsage.cpuTimeMs, {
+      labels,
+      unit: "ms",
+    });
+  }
+  if (result.resourceUsage?.peakMemoryBytes !== undefined) {
+    metrics?.histogram(
+      OBSERVABILITY_METRIC_NAMES.sandboxMemoryPeakBytes,
+      result.resourceUsage.peakMemoryBytes,
+      {
+        labels,
+        unit: "bytes",
+      },
+    );
+  }
+}
+
+/** Records denied policy decisions grouped by bounded violation type. */
+function recordSandboxViolationTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  labels: SandboxTelemetryLabels,
+  result: SandboxRunResult,
+): void {
+  const violationsByType = new Map<string, number>();
+  for (const decision of result.policyDecisions) {
+    if (decision.status !== "denied") {
+      continue;
+    }
+
+    const violationType = sanitizeSandboxTelemetryLabel(decision.code);
+    violationsByType.set(violationType, (violationsByType.get(violationType) ?? 0) + 1);
+  }
+
+  for (const [violationType, count] of violationsByType) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.sandboxViolationsTotal, {
+      labels: { ...labels, violation_type: violationType },
+      value: count,
+    });
+  }
+}
+
+/** Returns the aggregate byte size of collected sandbox artifacts. */
+function sandboxArtifactBytes(result: SandboxRunResult): number {
+  return result.artifacts.reduce((total, artifact) => total + artifact.sizeBytes, 0);
+}
+
+/** Returns the number of denied policy decisions in a sandbox result. */
+function sandboxDeniedDecisionCount(result: SandboxRunResult): number {
+  return result.policyDecisions.filter((decision) => decision.status === "denied").length;
+}
+
+/** Converts one sandbox status into an OpenTelemetry-compatible span status. */
+function sandboxTelemetrySpanStatus(status: SandboxRunStatus | "runner_error"): "error" | "ok" {
+  return status === "succeeded" ? "ok" : "error";
+}
+
+/** Normalizes a telemetry label value into a bounded token. */
+function sanitizeSandboxTelemetryLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/gu, "_")
+    .replace(/^_+|_+$/gu, "");
+
+  return normalized.length > 0 ? normalized.slice(0, 80) : "unknown";
 }
 
 /** Executes one sandbox request through the unsafe local-process runner. */

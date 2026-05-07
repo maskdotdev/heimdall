@@ -108,6 +108,7 @@ import {
   type SandboxRunner,
   type SandboxRunRequest,
   type SandboxRunResult,
+  withSandboxTelemetry,
 } from "@repo/sandbox";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
@@ -172,6 +173,10 @@ export type WorkerStaticAnalysisRunnerEnvironment = Readonly<Record<string, stri
 export type WorkerStaticAnalysisRunnerOptions = {
   /** Optional database used to persist sandbox run results. */
   readonly db?: HeimdallDatabase | undefined;
+  /** Optional metric recorder used for sandbox run telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional span recorder used for sandbox run telemetry. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** Runtime handle returned by the worker process bootstrap. */
@@ -598,6 +603,8 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
   const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env, {
     db: databaseClient.db,
+    metrics: observability.metrics,
+    traces: observability.traces,
   });
   const publishThrottle = createRedisPublishThrottle(workerConnection);
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
@@ -696,8 +703,15 @@ export function createWorkerStaticAnalysisRunnerFromEnvironment(
     return undefined;
   }
 
+  const instrumentedRunner = withSandboxTelemetry(sandboxRunner, {
+    ...(options.metrics ? { metrics: options.metrics } : {}),
+    ...(options.traces ? { traces: options.traces } : {}),
+  });
+
   return createSandboxToolRunner({
-    runner: options.db ? createPersistingSandboxRunner(sandboxRunner, options.db) : sandboxRunner,
+    runner: options.db
+      ? createPersistingSandboxRunner(instrumentedRunner, options.db)
+      : instrumentedRunner,
   });
 }
 
