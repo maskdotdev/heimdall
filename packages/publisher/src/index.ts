@@ -17,7 +17,13 @@ import {
   ReviewRepository,
   repositories,
 } from "@repo/db";
-import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
+import {
+  type GitHubErrorCode,
+  GitHubProviderError,
+  type GitHubRateLimitSnapshot,
+  type GitHubRepositoryRef,
+  type GitProvider,
+} from "@repo/github";
 import type { EffectivePublishingPolicy } from "@repo/rules";
 import { and, eq } from "drizzle-orm";
 
@@ -90,6 +96,33 @@ export type PublishPlan = {
   readonly configuredSummaryFindings: readonly ValidatedFinding[];
   /** Dry-run-friendly planned external operations. */
   readonly plannedOperations: readonly PlannedPublishOperation[];
+};
+
+/** Stable failure reason recorded with failed publisher runs and operations. */
+export type PublisherFailureReason = GitHubErrorCode | "publisher_error" | "unknown_error";
+
+/** Structured publisher failure metadata persisted for dashboard and retry diagnostics. */
+export type SerializedPublisherError = {
+  /** Publisher operation code that failed. */
+  readonly code: string;
+  /** Product-facing reason for the failure. */
+  readonly reason: PublisherFailureReason;
+  /** Human-readable failure message. */
+  readonly message: string;
+  /** Whether retrying the same operation can reasonably succeed. */
+  readonly retryable: boolean;
+  /** External provider that returned the failure, when known. */
+  readonly provider?: "github";
+  /** HTTP status returned by GitHub, when available. */
+  readonly status?: number;
+  /** GitHub request identifier, when available. */
+  readonly requestId?: string;
+  /** Retry delay in seconds requested by GitHub, when available. */
+  readonly retryAfterSeconds?: number;
+  /** Parsed GitHub rate-limit headers, when available. */
+  readonly rateLimit?: GitHubRateLimitSnapshot;
+  /** Extra diagnostic details for logs and debug views. */
+  readonly details?: Record<string, unknown>;
 };
 
 /** Creates a policy-derived publish plan from a review run and validated findings. */
@@ -860,10 +893,33 @@ async function insertPublishOperation(
   });
 }
 
-function serializePublisherError(error: unknown, code: string): Record<string, unknown> {
+/** Converts thrown publisher/provider errors into durable structured failure metadata. */
+export function serializePublisherError(error: unknown, code: string): SerializedPublisherError {
+  if (error instanceof GitHubProviderError) {
+    return {
+      code,
+      reason: error.code,
+      message: error.message,
+      retryable: isRetryableGitHubError(error.code),
+      provider: "github",
+      ...(error.status !== undefined ? { status: error.status } : {}),
+      ...(error.requestId !== undefined ? { requestId: error.requestId } : {}),
+      ...(error.retryAfterSeconds !== undefined
+        ? { retryAfterSeconds: error.retryAfterSeconds }
+        : {}),
+      ...(error.rateLimit !== undefined ? { rateLimit: error.rateLimit } : {}),
+      details: {
+        name: error.name,
+        providerCode: error.code,
+        ...(error.stack ? { stack: error.stack } : {}),
+      },
+    };
+  }
+
   if (error instanceof Error) {
     return {
       code,
+      reason: "publisher_error",
       message: error.message,
       retryable: true,
       details: {
@@ -875,9 +931,20 @@ function serializePublisherError(error: unknown, code: string): Record<string, u
 
   return {
     code,
+    reason: "unknown_error",
     message: String(error),
     retryable: true,
   };
+}
+
+/** Returns whether a GitHub provider error should be retried without configuration changes. */
+function isRetryableGitHubError(code: GitHubErrorCode): boolean {
+  return (
+    code === "github_rate_limit" ||
+    code === "github_secondary_rate_limit" ||
+    code === "github_unavailable" ||
+    code === "github_unknown"
+  );
 }
 
 function stableId(prefix: string, parts: readonly unknown[]): string {
