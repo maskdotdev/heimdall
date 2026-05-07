@@ -11,5 +11,8 @@
   },
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"],
-  "references": [{ "path": "../index-schema/tsconfig.build.json" }]
+  "references": [
+    { "path": "../index-schema/tsconfig.build.json" },
+    { "path": "../observability/tsconfig.build.json" }
+  ]
 }

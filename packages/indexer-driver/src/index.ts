@@ -10,6 +10,14 @@ import {
   type IndexRecord,
   IndexRecordSchema,
 } from "@repo/index-schema";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { Value } from "@sinclair/typebox/value";
 
 export const packageName = "@repo/indexer-driver" as const;
@@ -26,6 +34,8 @@ export type IndexRepositoryInput = {
   readonly previousIndexVersionId?: string;
   /** Optional cancellation signal propagated by driver wrappers. */
   readonly signal?: AbortSignal;
+  /** Optional product-safe telemetry passed through driver wrappers and implementations. */
+  readonly telemetry?: IndexerTelemetryOptions;
 };
 
 /** Validated index artifact emitted by a driver before database import. */
@@ -226,6 +236,24 @@ export type IndexerTimeoutOptions = {
   readonly timeoutMs: number;
 };
 
+/** Product-safe telemetry dependencies used by indexer driver wrappers. */
+export type IndexerTelemetryOptions = {
+  /** Optional metric recorder for low-cardinality indexer metrics. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional span recorder for product-safe indexer traces. */
+  readonly traces?: TelemetrySpanRecorder;
+  /** Optional trace context propagated from durable job boundaries. */
+  readonly traceContext?: TelemetryTraceContextInput;
+};
+
+/** Telemetry context for validating an artifact at an indexer boundary. */
+export type IndexArtifactValidationTelemetryInput = IndexerTelemetryOptions & {
+  /** Stable driver name attached to validation spans. */
+  readonly driverName: string;
+  /** Driver implementation version attached to validation spans. */
+  readonly driverVersion: string;
+};
+
 /** Input used to validate CLI indexer filesystem boundaries. */
 type ValidateCliIndexerPathsInput = {
   /** Root directory where artifacts are written. */
@@ -416,6 +444,44 @@ export function validateIndexArtifact(artifact: IndexArtifact): readonly string[
   }
 
   return errors;
+}
+
+/** Validates an index artifact and emits a product-safe validation span when configured. */
+export function validateIndexArtifactWithTelemetry(
+  artifact: IndexArtifact,
+  input: IndexArtifactValidationTelemetryInput,
+): readonly string[] {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.indexerDriverValidateResult, {
+    attributes: {
+      ...indexArtifactValidationAttributes(artifact),
+      "indexer_driver.driver": normalizeTelemetryLabel(input.driverName),
+      "indexer_driver.version": input.driverVersion,
+    },
+    kind: "internal",
+    ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+  });
+
+  try {
+    const validationErrors = validateIndexArtifact(artifact);
+    span?.end({
+      attributes: {
+        "indexer_driver.status": validationErrors.length === 0 ? "succeeded" : "failed",
+        "indexer_driver.validation_error_count": validationErrors.length,
+      },
+      status: validationErrors.length === 0 ? "ok" : "error",
+    });
+
+    return validationErrors;
+  } catch (error) {
+    span?.end({
+      attributes: {
+        "indexer_driver.error_class": "validation_error",
+        "indexer_driver.status": "failed",
+      },
+      status: "error",
+    });
+    throw error;
+  }
 }
 
 /** Converts an unknown thrown value to a durable indexer failure. */
@@ -616,9 +682,13 @@ export function createRemoteIndexerDriver(options: RemoteIndexerDriverOptions): 
 
         return await remoteTerminalResult({
           diagnostics,
+          driverName: name,
+          driverVersion: version,
           fetcher,
           run: current,
           ...(input.signal ? { signal: input.signal } : {}),
+          ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
+          ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
         });
       } catch (error) {
         if (input.signal?.aborted) {
@@ -729,7 +799,7 @@ export function createCliIndexerDriver(options: CliIndexerDriverOptions): CodeIn
         };
       }
 
-      const processResult = await runCliIndexerProcess({
+      const processResult = await runCliIndexerProcessWithTelemetry({
         args: [
           ...(options.args ?? []),
           "index",
@@ -747,6 +817,11 @@ export function createCliIndexerDriver(options: CliIndexerDriverOptions): CodeIn
         stderrMaxBytes,
         stdoutMaxBytes,
         timeoutMs,
+        driverName: name,
+        driverVersion: version,
+        ...(input.telemetry?.metrics ? { metrics: input.telemetry.metrics } : {}),
+        ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
+        ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
       });
       const diagnostics = cliProcessDiagnostics(processResult);
@@ -777,7 +852,12 @@ export function createCliIndexerDriver(options: CliIndexerDriverOptions): CodeIn
 
       try {
         const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
-        const validationErrors = validateIndexArtifact(artifact);
+        const validationErrors = validateIndexArtifactWithTelemetry(artifact, {
+          driverName: name,
+          driverVersion: version,
+          ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
+          ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
+        });
         if (validationErrors.length > 0) {
           return {
             ok: false,
@@ -871,12 +951,20 @@ async function fetchRemoteIndexRun(input: {
 async function remoteTerminalResult(input: {
   /** Terminal remote run response. */
   readonly run: NormalizedRemoteIndexRun;
+  /** Stable driver name attached to validation spans. */
+  readonly driverName: string;
+  /** Driver implementation version attached to validation spans. */
+  readonly driverVersion: string;
   /** Diagnostics accumulated while submitting and polling. */
   readonly diagnostics: readonly string[];
   /** Fetch implementation used to download remote artifacts. */
   readonly fetcher: RemoteIndexerFetch;
   /** Optional cancellation signal. */
   readonly signal?: AbortSignal;
+  /** Optional span recorder for product-safe validation traces. */
+  readonly traces?: TelemetrySpanRecorder;
+  /** Optional trace context propagated from durable job boundaries. */
+  readonly traceContext?: TelemetryTraceContextInput;
 }): Promise<IndexRepositoryResult> {
   if (input.run.status !== "succeeded") {
     return {
@@ -895,7 +983,12 @@ async function remoteTerminalResult(input: {
     };
   }
 
-  const validationErrors = validateIndexArtifact(artifactResult.artifact);
+  const validationErrors = validateIndexArtifactWithTelemetry(artifactResult.artifact, {
+    driverName: input.driverName,
+    driverVersion: input.driverVersion,
+    ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+    ...(input.traces ? { traces: input.traces } : {}),
+  });
   if (validationErrors.length > 0) {
     return {
       ok: false,
@@ -1261,6 +1354,76 @@ function requireOptionalNonNegativeNumber(
   }
 }
 
+/** Wraps a driver with product-safe run metrics and tracing. */
+export function withIndexerTelemetry(
+  driver: CodeIndexerDriver,
+  options: IndexerTelemetryOptions,
+): CodeIndexerDriver {
+  return {
+    name: driver.name,
+    version: driver.version,
+    getCapabilities: () => driver.getCapabilities(),
+    indexRepository: async (input) => {
+      const telemetry = mergeIndexerTelemetry(input.telemetry, options);
+      const startedAt = Date.now();
+      const span = telemetry.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.indexerDriverRun, {
+        attributes: {
+          "app.repo_id": input.repoId,
+          "indexer_driver.driver": normalizeTelemetryLabel(driver.name),
+          "indexer_driver.previous_index_available": input.previousIndexVersionId !== undefined,
+          "indexer_driver.version": driver.version,
+        },
+        kind: "internal",
+        ...(telemetry.traceContext ? { traceContext: telemetry.traceContext } : {}),
+      });
+
+      try {
+        const result = await driver.indexRepository({ ...input, telemetry });
+        const durationMs = Date.now() - startedAt;
+        const status = result.ok ? "succeeded" : "failed";
+        const errorClass = result.ok ? undefined : indexerFailureErrorClass(result.error);
+
+        recordIndexerRunMetrics(telemetry.metrics, {
+          driverName: driver.name,
+          durationMs,
+          ...(errorClass ? { errorClass } : {}),
+          ...(result.ok ? {} : { failureCode: result.error.code }),
+          status,
+        });
+        span?.end({
+          attributes: {
+            ...indexerRunResultAttributes(result),
+            "indexer_driver.duration_ms": durationMs,
+            ...(errorClass ? { "indexer_driver.error_class": errorClass } : {}),
+            "indexer_driver.status": status,
+          },
+          status: result.ok ? "ok" : "error",
+        });
+
+        return result;
+      } catch (error) {
+        const durationMs = Date.now() - startedAt;
+        const errorClass = "unknown_error";
+        recordIndexerRunMetrics(telemetry.metrics, {
+          driverName: driver.name,
+          durationMs,
+          errorClass,
+          status: "failed",
+        });
+        span?.end({
+          attributes: {
+            "indexer_driver.duration_ms": durationMs,
+            "indexer_driver.error_class": errorClass,
+            "indexer_driver.status": "failed",
+          },
+          status: "error",
+        });
+        throw error;
+      }
+    },
+  };
+}
+
 /** Wraps a driver with timeout handling and abort-signal propagation. */
 export function withIndexerTimeout(
   driver: CodeIndexerDriver,
@@ -1319,6 +1482,211 @@ function normalizeTimeoutMs(timeoutMs: number): number {
   }
 
   return Math.floor(timeoutMs);
+}
+
+/** Bounded run outcome labels used by indexer driver metrics. */
+type IndexerRunTelemetryStatus = "failed" | "succeeded";
+
+/** Input used when recording one indexer run's metrics. */
+type RecordIndexerRunMetricsInput = {
+  /** Stable driver name. */
+  readonly driverName: string;
+  /** Wall-clock duration in milliseconds. */
+  readonly durationMs: number;
+  /** Coarse product-safe error class for failed runs. */
+  readonly errorClass?: TelemetryAttributeValue;
+  /** Durable driver failure code when the run returned a normalized failure. */
+  readonly failureCode?: IndexerFailure["code"];
+  /** Bounded run status label. */
+  readonly status: IndexerRunTelemetryStatus;
+};
+
+/** Merges wrapper-level telemetry with telemetry already present on an index request. */
+function mergeIndexerTelemetry(
+  inputTelemetry: IndexerTelemetryOptions | undefined,
+  wrapperTelemetry: IndexerTelemetryOptions,
+): IndexerTelemetryOptions {
+  const metrics = inputTelemetry?.metrics ?? wrapperTelemetry.metrics;
+  const traceContext = inputTelemetry?.traceContext ?? wrapperTelemetry.traceContext;
+  const traces = inputTelemetry?.traces ?? wrapperTelemetry.traces;
+
+  return {
+    ...(metrics ? { metrics } : {}),
+    ...(traceContext ? { traceContext } : {}),
+    ...(traces ? { traces } : {}),
+  };
+}
+
+/** Records low-cardinality metrics for one completed indexer run. */
+function recordIndexerRunMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  input: RecordIndexerRunMetricsInput,
+): void {
+  if (!metrics) {
+    return;
+  }
+
+  const labels = {
+    driver: normalizeTelemetryLabel(input.driverName),
+    ...(input.errorClass ? { error_class: input.errorClass } : {}),
+    status: input.status,
+  };
+  metrics.count(OBSERVABILITY_METRIC_NAMES.indexerDriverRunsTotal, {
+    labels,
+    unit: "1",
+  });
+  metrics.histogram(OBSERVABILITY_METRIC_NAMES.indexerDriverDurationMs, input.durationMs, {
+    labels,
+    unit: "ms",
+  });
+  if (input.failureCode === "timeout") {
+    metrics.count(OBSERVABILITY_METRIC_NAMES.indexerDriverTimeoutsTotal, {
+      labels: {
+        driver: normalizeTelemetryLabel(input.driverName),
+      },
+      unit: "1",
+    });
+  }
+}
+
+/** Returns product-safe span attributes from an indexer result. */
+function indexerRunResultAttributes(
+  result: IndexRepositoryResult,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  if (!result.ok) {
+    return {
+      "indexer_driver.error_code": result.error.code,
+    };
+  }
+
+  return {
+    "indexer_driver.artifact_remote": result.artifactUri !== undefined,
+    "indexer_driver.chunk_count": result.artifact.manifest.chunkCount,
+    "indexer_driver.diagnostic_count": result.diagnostics.length,
+    "indexer_driver.edge_count": result.artifact.manifest.edgeCount,
+    "indexer_driver.file_count": result.artifact.manifest.fileCount,
+    "indexer_driver.record_count": result.artifact.manifest.recordCount,
+    "indexer_driver.symbol_count": result.artifact.manifest.symbolCount,
+  };
+}
+
+/** Returns product-safe span attributes for an artifact validation handoff. */
+function indexArtifactValidationAttributes(
+  artifact: IndexArtifact,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  const manifest = isRecord((artifact as { readonly manifest?: unknown }).manifest)
+    ? (artifact as { readonly manifest: Record<string, unknown> }).manifest
+    : {};
+  const attributes: Record<string, TelemetryAttributeValue> = {};
+  addStringAttribute(attributes, "app.repo_id", manifest.repoId);
+  addNumberAttribute(attributes, "indexer_driver.chunk_count", manifest.chunkCount);
+  addNumberAttribute(attributes, "indexer_driver.edge_count", manifest.edgeCount);
+  addNumberAttribute(attributes, "indexer_driver.file_count", manifest.fileCount);
+  addNumberAttribute(attributes, "indexer_driver.record_count", manifest.recordCount);
+  addNumberAttribute(attributes, "indexer_driver.symbol_count", manifest.symbolCount);
+
+  return attributes;
+}
+
+/** Maps durable indexer failures to product-safe telemetry error classes. */
+function indexerFailureErrorClass(failure: IndexerFailure): TelemetryAttributeValue {
+  switch (failure.code) {
+    case "artifact_invalid":
+    case "request_invalid":
+    case "unsupported_language":
+      return "validation_error";
+    case "cancelled":
+    case "timeout":
+      return "timeout_error";
+    case "process_exit_nonzero":
+    case "process_signal":
+    case "remote_job_failed":
+    case "remote_unavailable":
+      return "provider_error";
+    case "filesystem_error":
+    case "unknown":
+      return "unknown_error";
+  }
+}
+
+/** Records stdout and stderr byte counts without exporting raw output content. */
+function recordCliOutputMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  driverName: string,
+  result: CliIndexerProcessResult,
+): void {
+  if (!metrics) {
+    return;
+  }
+
+  for (const stream of ["stdout", "stderr"] as const) {
+    metrics.histogram(
+      OBSERVABILITY_METRIC_NAMES.indexerDriverOutputBytes,
+      result[stream].byteLength,
+      {
+        labels: {
+          driver: normalizeTelemetryLabel(driverName),
+          status: result.status,
+          stream,
+        },
+        unit: "bytes",
+      },
+    );
+  }
+}
+
+/** Returns product-safe span attributes for one CLI process result. */
+function cliProcessTelemetryAttributes(
+  result: CliIndexerProcessResult,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  return {
+    ...(result.status === "exited" ? { "indexer_driver.exit_code": result.exitCode } : {}),
+    ...(result.status === "signaled" ? { "indexer_driver.signal": result.signal } : {}),
+    "indexer_driver.process_status": result.status,
+    "indexer_driver.stderr_bytes": result.stderr.byteLength,
+    "indexer_driver.stderr_truncated": result.stderr.truncated,
+    "indexer_driver.stdout_bytes": result.stdout.byteLength,
+    "indexer_driver.stdout_truncated": result.stdout.truncated,
+  };
+}
+
+/** Maps CLI process outcomes to span status without including raw stdout or stderr. */
+function cliProcessSpanStatus(result: CliIndexerProcessResult): "error" | "ok" {
+  return result.status === "exited" && result.exitCode === 0 ? "ok" : "error";
+}
+
+/** Normalizes user- or provider-supplied labels to bounded telemetry cardinality. */
+function normalizeTelemetryLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized.length > 0 ? normalized : "unknown";
+}
+
+/** Adds a telemetry attribute when the unknown value is a string. */
+function addStringAttribute(
+  attributes: Record<string, TelemetryAttributeValue>,
+  key: string,
+  value: unknown,
+): void {
+  if (typeof value === "string") {
+    attributes[key] = value;
+  }
+}
+
+/** Adds a telemetry attribute when the unknown value is a finite number. */
+function addNumberAttribute(
+  attributes: Record<string, TelemetryAttributeValue>,
+  key: string,
+  value: unknown,
+): void {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    attributes[key] = value;
+  }
 }
 
 /** Validates path constraints before a CLI indexer can run. */
@@ -1464,6 +1832,36 @@ async function runCliIndexerProcess(
       input.signal?.addEventListener("abort", abortFromCaller, { once: true });
     }
   });
+}
+
+/** Runs one CLI indexer process and emits bounded spawn/output telemetry. */
+async function runCliIndexerProcessWithTelemetry(
+  input: RunCliIndexerProcessInput &
+    IndexerTelemetryOptions & {
+      /** Stable driver name attached to process telemetry. */
+      readonly driverName: string;
+      /** Driver implementation version attached to process telemetry. */
+      readonly driverVersion: string;
+    },
+): Promise<CliIndexerProcessResult> {
+  const { driverName, driverVersion, metrics, traces, traceContext, ...processInput } = input;
+  const span = traces?.startSpan(OBSERVABILITY_SPAN_NAMES.indexerDriverSpawnCli, {
+    attributes: {
+      "indexer_driver.cli_arg_count": processInput.args.length,
+      "indexer_driver.driver": normalizeTelemetryLabel(driverName),
+      "indexer_driver.version": driverVersion,
+    },
+    kind: "client",
+    ...(traceContext ? { traceContext } : {}),
+  });
+  const result = await runCliIndexerProcess(processInput);
+  recordCliOutputMetrics(metrics, driverName, result);
+  span?.end({
+    attributes: cliProcessTelemetryAttributes(result),
+    status: cliProcessSpanStatus(result),
+  });
+
+  return result;
 }
 
 /** Creates diagnostics from bounded CLI process output. */

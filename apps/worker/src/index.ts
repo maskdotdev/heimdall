@@ -58,6 +58,7 @@ import {
   createCliIndexerDriver,
   createRemoteIndexerDriver,
   type IndexerCapabilities,
+  withIndexerTelemetry,
   withIndexerTimeout,
 } from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
@@ -439,10 +440,14 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         },
       );
       try {
-        const driver = withIndexerTimeout(
-          options.indexerDriver ?? createTypeScriptIndexerDriver(),
-          {
+        const driver = withIndexerTelemetry(
+          withIndexerTimeout(options.indexerDriver ?? createTypeScriptIndexerDriver(), {
             timeoutMs: options.indexerTimeoutMs ?? DEFAULT_INDEXER_TIMEOUT_MS,
+          }),
+          {
+            ...(options.metrics ? { metrics: options.metrics } : {}),
+            ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+            ...(options.traces ? { traces: options.traces } : {}),
           },
         );
         const result = await driver.indexRepository({

@@ -16,7 +16,7 @@ import type { CodeIndexerDriver, IndexArtifact, IndexerCapabilities } from "@rep
 import {
   INDEX_REQUEST_SCHEMA_VERSION,
   toIndexerFailure,
-  validateIndexArtifact,
+  validateIndexArtifactWithTelemetry,
 } from "@repo/indexer-driver";
 import ts from "typescript";
 
@@ -36,7 +36,12 @@ export function createTypeScriptIndexerDriver(): CodeIndexerDriver {
     indexRepository: async (input) => {
       try {
         const artifact = await indexTypeScriptRepository(input);
-        const diagnostics = validateIndexArtifact(artifact);
+        const diagnostics = validateIndexArtifactWithTelemetry(artifact, {
+          driverName: INDEXER_NAME,
+          driverVersion: INDEXER_VERSION,
+          ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
+          ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
+        });
         if (diagnostics.length > 0) {
           return {
             ok: false,

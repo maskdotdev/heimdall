@@ -1,6 +1,13 @@
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import type { IndexArtifact, IndexerCapabilities, RemoteIndexerFetch } from "../src";
 import {
@@ -9,6 +16,7 @@ import {
   createFakeIndexerDriver,
   createIndexerDriverRegistry,
   createRemoteIndexerDriver,
+  withIndexerTelemetry,
   withIndexerTimeout,
 } from "../src";
 
@@ -425,6 +433,252 @@ describe("withIndexerTimeout", () => {
     expect(signal?.aborted).toBe(true);
   });
 });
+
+describe("withIndexerTelemetry", () => {
+  it("records successful run metrics and spans without workspace paths", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const driver = withIndexerTelemetry(createFakeIndexerDriver({ name: "Fake Driver" }), {
+      metrics: createRecordingMetrics(metrics),
+      traceContext: { requestId: "req_indexer_success" },
+      traces: createRecordingTraces(spans),
+    });
+
+    await expect(
+      driver.indexRepository({
+        commitSha: "abc123",
+        repoId: "repo_1",
+        workspacePath: "/tmp/private-indexer-workspace",
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: { driver: "fake_driver", status: "succeeded" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverRunsTotal,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { driver: "fake_driver", status: "succeeded" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverDurationMs,
+          unit: "ms",
+        }),
+      ]),
+    );
+    expect(spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endAttributes: expect.objectContaining({
+            "indexer_driver.status": "succeeded",
+          }),
+          name: OBSERVABILITY_SPAN_NAMES.indexerDriverRun,
+          status: "ok",
+        }),
+      ]),
+    );
+    expect(JSON.stringify({ metrics, spans })).not.toContain("/tmp/private-indexer-workspace");
+  });
+
+  it("records failed timeout results with bounded error labels", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const driver = withIndexerTelemetry(
+      createFakeIndexerDriver({
+        failure: { code: "timeout", message: "Indexer timed out." },
+        name: "timeout-driver",
+      }),
+      {
+        metrics: createRecordingMetrics(metrics),
+        traces: createRecordingTraces(spans),
+      },
+    );
+
+    await expect(
+      driver.indexRepository({
+        commitSha: "abc123",
+        repoId: "repo_1",
+        workspacePath: "/tmp/private-indexer-workspace",
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "timeout" },
+      ok: false,
+    });
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: {
+            driver: "timeout-driver",
+            error_class: "timeout_error",
+            status: "failed",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverRunsTotal,
+        }),
+        expect.objectContaining({
+          labels: { driver: "timeout-driver" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverTimeoutsTotal,
+        }),
+      ]),
+    );
+    expect(spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endAttributes: expect.objectContaining({
+            "indexer_driver.error_class": "timeout_error",
+            "indexer_driver.error_code": "timeout",
+            "indexer_driver.status": "failed",
+          }),
+          name: OBSERVABILITY_SPAN_NAMES.indexerDriverRun,
+          status: "error",
+        }),
+      ]),
+    );
+  });
+
+  it("records CLI spawn spans and output byte metrics without raw process output", async () => {
+    const artifactRoot = await createTempRoot();
+    const workspaceRoot = await createTempRoot();
+    const workspacePath = await createTempRoot(workspaceRoot);
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const driver = withIndexerTelemetry(
+      createCliIndexerDriver({
+        artifactRootPath: artifactRoot,
+        args: ["-e", successfulCliScript()],
+        command: process.execPath,
+        envAllowlist: ["PATH"],
+        name: "node-fake-cli",
+        timeoutMs: 1_000,
+        workspaceRootPath: workspaceRoot,
+      }),
+      {
+        metrics: createRecordingMetrics(metrics),
+        traces: createRecordingTraces(spans),
+      },
+    );
+
+    await expect(
+      driver.indexRepository({
+        commitSha: "abc1234",
+        repoId: "repo_1",
+        workspacePath,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { driver: "node-fake-cli", status: "exited", stream: "stdout" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverOutputBytes,
+          unit: "bytes",
+          value: 11,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { driver: "node-fake-cli", status: "exited", stream: "stderr" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverOutputBytes,
+          unit: "bytes",
+          value: 11,
+        }),
+      ]),
+    );
+    expect(spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endAttributes: expect.objectContaining({
+            "indexer_driver.process_status": "exited",
+            "indexer_driver.stderr_bytes": 11,
+            "indexer_driver.stdout_bytes": 11,
+          }),
+          name: OBSERVABILITY_SPAN_NAMES.indexerDriverSpawnCli,
+          status: "ok",
+        }),
+        expect.objectContaining({
+          name: OBSERVABILITY_SPAN_NAMES.indexerDriverValidateResult,
+          status: "ok",
+        }),
+      ]),
+    );
+    expect(JSON.stringify({ metrics, spans })).not.toContain("cli stdout");
+    expect(JSON.stringify({ metrics, spans })).not.toContain("cli stderr");
+    expect(JSON.stringify({ metrics, spans })).not.toContain(workspacePath);
+  });
+});
+
+/** Recorded metric point used by indexer-driver telemetry tests. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels captured by the test recorder. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Recorded span payload used by indexer-driver telemetry tests. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric points in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}
 
 /** Creates a minimal valid index artifact for timeout wrapper tests. */
 function emptyArtifact(): IndexArtifact {
