@@ -1,4 +1,5 @@
 import type { ChangedFile, PullRequestSnapshot, Repository } from "@repo/contracts";
+import type { TelemetryMetricRecorder, TelemetrySpanRecorder } from "@repo/observability";
 
 /** GitHub App provider configuration. */
 export type GitHubProviderConfig = {
@@ -79,10 +80,14 @@ export type GitHubRequestObserver = (observation: GitHubRequestObservation) => v
 export type GitHubProviderDependencies = {
   /** Fetch implementation used for GitHub API calls. */
   readonly fetch?: GitHubFetch;
+  /** Optional metric recorder for low-cardinality GitHub adapter metrics. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Clock used for token caching and response observation timestamps. */
   readonly now?: () => Date;
   /** Optional request observer for metrics and diagnostics. */
   readonly observeRequest?: GitHubRequestObserver;
+  /** Optional span recorder for product-safe GitHub adapter traces. */
+  readonly traces?: TelemetrySpanRecorder;
 };
 
 /** GitHub installation reference. */

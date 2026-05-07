@@ -1,4 +1,11 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import type {
   CheckRunAnnotation,
@@ -84,7 +91,14 @@ const summaryDedupeMarker = (input: {
   return `<!-- heimdall:summary:${input.pullRequestNumber}:${fingerprint} -->`;
 };
 
-const createProvider = (fetcher: GitHubFetch, observeRequest?: GitHubRequestObserver) =>
+const createProvider = (
+  fetcher: GitHubFetch,
+  options: {
+    readonly metrics?: TelemetryMetricRecorder;
+    readonly observeRequest?: GitHubRequestObserver;
+    readonly traces?: TelemetrySpanRecorder;
+  } = {},
+) =>
   createGitHubProvider(
     {
       appId: "12345",
@@ -93,8 +107,10 @@ const createProvider = (fetcher: GitHubFetch, observeRequest?: GitHubRequestObse
     },
     {
       fetch: fetcher,
+      ...(options.metrics ? { metrics: options.metrics } : {}),
       now: () => new Date("2026-05-05T12:00:00.000Z"),
-      ...(observeRequest ? { observeRequest } : {}),
+      ...(options.observeRequest ? { observeRequest: options.observeRequest } : {}),
+      ...(options.traces ? { traces: options.traces } : {}),
     },
   );
 
@@ -141,7 +157,12 @@ describe("GitHubAppProvider", () => {
 
   it("generates and caches installation tokens", async () => {
     const fetcher = createMockFetch([tokenRoute]);
-    const provider = createProvider(fetcher);
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const provider = createProvider(fetcher, {
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
 
     await expect(
       provider.getInstallationToken({ provider: "github", installationId: "99" }),
@@ -169,7 +190,9 @@ describe("GitHubAppProvider", () => {
         ),
       },
     ]);
-    const provider = createProvider(fetcher, (observation) => observations.push(observation));
+    const provider = createProvider(fetcher, {
+      observeRequest: (observation) => observations.push(observation),
+    });
 
     await provider.getInstallationToken({ provider: "github", installationId: "99" });
 
@@ -195,6 +218,78 @@ describe("GitHubAppProvider", () => {
     expect(provider.getRecentRequestObservations?.()).toEqual(observations);
   });
 
+  it("records product-safe request telemetry without tokens or raw URLs", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const fetcher = createMockFetch([
+      {
+        match: (url: string) => url.endsWith("/app/installations/99/access_tokens"),
+        response: jsonResponse(
+          { token: "ghs_secret_token", expires_at: "2026-05-05T13:00:00.000Z" },
+          201,
+          rateLimitHeaders,
+        ),
+      },
+    ]);
+    const provider = createProvider(fetcher, {
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
+
+    await expect(
+      provider.getInstallationToken({ provider: "github", installationId: "99" }),
+    ).resolves.toMatchObject({
+      expiresAt: "2026-05-05T13:00:00.000Z",
+      token: "ghs_secret_token",
+    });
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: expect.objectContaining({
+            operation: "post_app_installations_installation_id_access_tokens",
+            route: "app_installations_installation_id_access_tokens",
+            status: "succeeded",
+            status_family: "2xx",
+          }),
+          name: OBSERVABILITY_METRIC_NAMES.githubRequestsTotal,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          name: OBSERVABILITY_METRIC_NAMES.githubRequestDurationMs,
+          unit: "ms",
+        }),
+      ]),
+    );
+    expect(spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endAttributes: expect.objectContaining({
+            "github.status": "succeeded",
+            "github.token_cache_status": "miss",
+          }),
+          name: OBSERVABILITY_SPAN_NAMES.githubCreateInstallationToken,
+          status: "ok",
+        }),
+        expect.objectContaining({
+          endAttributes: expect.objectContaining({
+            "github.rate_limit_remaining": 4999,
+            "github.status_code": 201,
+          }),
+          name: OBSERVABILITY_SPAN_NAMES.githubRestRequest,
+          startAttributes: expect.objectContaining({
+            "github.api_route_template": "/app/installations/{installation_id}/access_tokens",
+          }),
+          status: "ok",
+        }),
+      ]),
+    );
+    expect(JSON.stringify({ metrics, spans })).not.toContain("/99/");
+    expect(JSON.stringify({ metrics, spans })).not.toContain("ghs_secret_token");
+    expect(JSON.stringify({ metrics, spans })).not.toContain("api.github.com");
+  });
+
   it("discovers installation repositories", async () => {
     const fetcher = createMockFetch([
       tokenRoute,
@@ -203,7 +298,12 @@ describe("GitHubAppProvider", () => {
         response: jsonResponse({ repositories: [repositoryPayload] }),
       },
     ]);
-    const provider = createProvider(fetcher);
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const provider = createProvider(fetcher, {
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
 
     await expect(
       provider.listInstallationRepositories({
@@ -287,7 +387,12 @@ describe("GitHubAppProvider", () => {
         response: textResponse(rawDiff),
       },
     ]);
-    const provider = createProvider(fetcher);
+    const snapshotMetrics: RecordedMetric[] = [];
+    const snapshotSpans: RecordedSpan[] = [];
+    const provider = createProvider(fetcher, {
+      metrics: createRecordingMetrics(snapshotMetrics),
+      traces: createRecordingTraces(snapshotSpans),
+    });
 
     if (!provider.fetchPullRequestSnapshotWithRawDiff) {
       throw new Error("GitHub provider must expose raw diff snapshot fetching.");
@@ -337,6 +442,27 @@ describe("GitHubAppProvider", () => {
       ],
       diffHash: "sha256:c1fb5e6c0fa1b437573372d5d629e605aacf62da27796f0516134135f699a70a",
     });
+    expect(snapshotSpans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: OBSERVABILITY_SPAN_NAMES.githubFetchPrSnapshot,
+          status: "ok",
+        }),
+        expect.objectContaining({
+          name: OBSERVABILITY_SPAN_NAMES.githubFetchDiff,
+          status: "ok",
+        }),
+        expect.objectContaining({
+          name: OBSERVABILITY_SPAN_NAMES.githubRestRequest,
+          startAttributes: expect.objectContaining({
+            "github.api_route_template": "/repos/{owner}/{repo}/pulls/{pull_number}",
+          }),
+        }),
+      ]),
+    );
+    expect(JSON.stringify({ metrics: snapshotMetrics, spans: snapshotSpans })).not.toContain(
+      "acme/api",
+    );
   });
 
   it("publishes reviews, summaries, clone auth, branch metadata, and check runs", async () => {
@@ -678,6 +804,7 @@ describe("GitHubAppProvider", () => {
   });
 
   it("maps GitHub API errors to typed provider errors", async () => {
+    const metrics: RecordedMetric[] = [];
     const provider = createProvider(
       createMockFetch([
         {
@@ -685,6 +812,9 @@ describe("GitHubAppProvider", () => {
           response: jsonResponse({ message: "API rate limit exceeded" }, 403, rateLimitHeaders),
         },
       ]),
+      {
+        metrics: createRecordingMetrics(metrics),
+      },
     );
 
     const tokenRequest = provider.getInstallationToken({
@@ -704,6 +834,14 @@ describe("GitHubAppProvider", () => {
         retryAfterSeconds: 60,
       },
     });
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: { kind: "primary" },
+          name: OBSERVABILITY_METRIC_NAMES.githubRateLimitedTotal,
+        }),
+      ]),
+    );
 
     const notFoundProvider = createProvider(
       createMockFetch([
@@ -725,3 +863,75 @@ describe("GitHubAppProvider", () => {
     ).rejects.toBeInstanceOf(GitHubNotFoundError);
   });
 });
+
+/** Recorded metric point used by GitHub telemetry tests. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels captured by the test recorder. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Recorded span payload used by GitHub telemetry tests. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric points in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}

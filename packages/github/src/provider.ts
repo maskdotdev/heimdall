@@ -1,5 +1,12 @@
 import { createHash, createSign } from "node:crypto";
 import type { ChangedFile, CodeLanguage, PullRequestSnapshot, Repository } from "@repo/contracts";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { hashRawDiff, parseUnifiedDiff } from "@repo/pr-snapshot";
 import {
   GitHubInstallationSuspendedError,
@@ -201,8 +208,10 @@ export class GitHubAppProvider implements GitProvider {
     Pick<GitHubProviderConfig, "appId" | "privateKey">;
 
   private readonly fetcher: GitHubFetch;
+  private readonly metrics: TelemetryMetricRecorder | undefined;
   private readonly now: () => Date;
   private readonly observeRequest: GitHubRequestObserver | undefined;
+  private readonly traces: TelemetrySpanRecorder | undefined;
   private readonly tokenCache = new Map<string, CachedToken>();
   private readonly recentRequestObservations: GitHubRequestObservation[] = [];
 
@@ -224,8 +233,10 @@ export class GitHubAppProvider implements GitProvider {
       enableReviewComments: config.enableReviewComments ?? true,
     };
     this.fetcher = dependencies.fetch ?? fetch;
+    this.metrics = dependencies.metrics;
     this.now = dependencies.now ?? (() => new Date());
     this.observeRequest = dependencies.observeRequest;
+    this.traces = dependencies.traces;
   }
 
   /** Returns recently observed GitHub request metadata in observation order. */
@@ -237,28 +248,44 @@ export class GitHubAppProvider implements GitProvider {
   public async getInstallationToken(
     input: GitHubInstallationRef,
   ): Promise<{ readonly token: string; readonly expiresAt: string }> {
-    const providerInstallationId = normalizeInstallationId(input);
-    const cached = this.tokenCache.get(providerInstallationId);
-    if (cached && this.isTokenUsable(cached)) {
-      return cached;
-    }
-
-    const tokenResponse = await this.requestApp<GitHubInstallationTokenResponse>(
-      `/app/installations/${providerInstallationId}/access_tokens`,
+    return await this.withGitHubSpan(
+      OBSERVABILITY_SPAN_NAMES.githubCreateInstallationToken,
       {
-        method: "POST",
-        body: JSON.stringify({}),
+        operation: "create_installation_token",
+      },
+      async (span) => {
+        const providerInstallationId = normalizeInstallationId(input);
+        const cached = this.tokenCache.get(providerInstallationId);
+        if (cached && this.isTokenUsable(cached)) {
+          span.setEndAttributes({
+            "github.token_cache_status": "hit",
+          });
+
+          return cached;
+        }
+
+        const tokenResponse = await this.requestApp<GitHubInstallationTokenResponse>(
+          `/app/installations/${providerInstallationId}/access_tokens`,
+          {
+            method: "POST",
+            body: JSON.stringify({}),
+          },
+        );
+        const tokenValue = tokenResponse.token;
+        const expiresAt = tokenResponse.expires_at ?? tokenResponse.expiresAt;
+        if (!tokenValue || !expiresAt) {
+          throw new GitHubTokenError("GitHub installation token response was incomplete.", {});
+        }
+
+        const token = { token: tokenValue, expiresAt };
+        this.tokenCache.set(providerInstallationId, token);
+        span.setEndAttributes({
+          "github.token_cache_status": "miss",
+        });
+
+        return token;
       },
     );
-    const tokenValue = tokenResponse.token;
-    const expiresAt = tokenResponse.expires_at ?? tokenResponse.expiresAt;
-    if (!tokenValue || !expiresAt) {
-      throw new GitHubTokenError("GitHub installation token response was incomplete.", {});
-    }
-
-    const token = { token: tokenValue, expiresAt };
-    this.tokenCache.set(providerInstallationId, token);
-    return token;
   }
 
   /** Lists repositories visible to an installation. */
@@ -304,74 +331,96 @@ export class GitHubAppProvider implements GitProvider {
   public async fetchPullRequestSnapshotWithRawDiff(
     input: GitHubPullRequestRef,
   ): Promise<PullRequestSnapshotWithRawDiff> {
-    const [pullRequest, apiChangedFiles, rawDiff] = await Promise.all([
-      this.requestInstallation<JsonRecord>(
-        input,
-        `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
-      ),
-      this.fetchChangedFiles(input),
-      this.fetchRawDiff(input),
-    ]);
-    const base = asRecord(pullRequest.base, "pull_request.base");
-    const head = asRecord(pullRequest.head, "pull_request.head");
-    const repository = asRecord(pullRequest.base, "pull_request.base").repo;
-    const repositoryRecord = optionalRecord(repository);
-    const providerRepoId =
-      input.providerRepoId ?? (repositoryRecord ? asString(repositoryRecord, "id") : undefined);
-    const fullName =
-      repositoryRecord && optionalString(repositoryRecord, "full_name")
-        ? asString(repositoryRecord, "full_name")
-        : `${input.owner}/${input.repo}`;
-    const baseSha = asString(base, "sha");
-    const headSha = asString(head, "sha");
-    const labels = Array.isArray(pullRequest.labels)
-      ? pullRequest.labels
-          .map((label) => optionalRecord(label)?.name)
-          .filter((label): label is string => typeof label === "string")
-      : [];
-    const rawState = optionalString(pullRequest, "merged_at")
-      ? "merged"
-      : (optionalString(pullRequest, "state") ?? "unknown");
-    const state =
-      rawState === "open" || rawState === "closed" || rawState === "merged" ? rawState : "unknown";
-    const providerPullRequestId = asString(pullRequest, "id");
-    const changedFiles = reconcileChangedFiles(apiChangedFiles, parseUnifiedDiff(rawDiff));
-    const rawDiffHash = hashRawDiff(rawDiff);
-
-    return {
-      rawDiff,
-      rawDiffBytes: Buffer.byteLength(rawDiff, "utf8"),
-      rawDiffHash,
-      snapshot: {
-        snapshotId: stableId("prs", ["github", providerRepoId, input.pullRequestNumber, headSha]),
-        schemaVersion: "pull_request_snapshot.v1",
-        provider: "github",
-        repoId: stableId("repo", ["github", providerRepoId ?? fullName]),
-        installationId: input.installationId,
-        providerRepoId: providerRepoId ?? fullName,
-        providerPullRequestId,
-        pullRequestNumber: input.pullRequestNumber,
-        title: asString(pullRequest, "title"),
-        ...withOptional("body", optionalString(pullRequest, "body")),
-        authorLogin: asString(asRecord(pullRequest.user, "pull_request.user"), "login"),
-        ...withOptional("authorAssociation", optionalString(pullRequest, "author_association")),
-        state,
-        isDraft: optionalBoolean(pullRequest, "draft"),
-        labels,
-        baseRef: asString(base, "ref"),
-        baseSha,
-        headRef: asString(head, "ref"),
-        headSha,
-        ...withOptional("mergeBaseSha", optionalString(pullRequest, "merge_commit_sha")),
-        changedFiles: changedFiles.slice(0, this.config.maxPrFiles),
-        diffHash: rawDiffHash,
-        additions: asNumber(pullRequest, "additions"),
-        deletions: asNumber(pullRequest, "deletions"),
-        changedFileCount: asNumber(pullRequest, "changed_files"),
-        fetchedAt: this.now().toISOString(),
-        ...withOptional("providerMetadata", pullRequest),
+    return await this.withGitHubSpan(
+      OBSERVABILITY_SPAN_NAMES.githubFetchPrSnapshot,
+      {
+        attributes: {
+          "github.pull_request_number": input.pullRequestNumber,
+        },
+        operation: "fetch_pr_snapshot",
       },
-    };
+      async (span) => {
+        const [pullRequest, apiChangedFiles, rawDiff] = await Promise.all([
+          this.requestInstallation<JsonRecord>(
+            input,
+            `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
+          ),
+          this.fetchChangedFiles(input),
+          this.fetchRawDiff(input),
+        ]);
+        const base = asRecord(pullRequest.base, "pull_request.base");
+        const head = asRecord(pullRequest.head, "pull_request.head");
+        const repository = asRecord(pullRequest.base, "pull_request.base").repo;
+        const repositoryRecord = optionalRecord(repository);
+        const providerRepoId =
+          input.providerRepoId ?? (repositoryRecord ? asString(repositoryRecord, "id") : undefined);
+        const fullName =
+          repositoryRecord && optionalString(repositoryRecord, "full_name")
+            ? asString(repositoryRecord, "full_name")
+            : `${input.owner}/${input.repo}`;
+        const baseSha = asString(base, "sha");
+        const headSha = asString(head, "sha");
+        const labels = Array.isArray(pullRequest.labels)
+          ? pullRequest.labels
+              .map((label) => optionalRecord(label)?.name)
+              .filter((label): label is string => typeof label === "string")
+          : [];
+        const rawState = optionalString(pullRequest, "merged_at")
+          ? "merged"
+          : (optionalString(pullRequest, "state") ?? "unknown");
+        const state =
+          rawState === "open" || rawState === "closed" || rawState === "merged"
+            ? rawState
+            : "unknown";
+        const providerPullRequestId = asString(pullRequest, "id");
+        const changedFiles = reconcileChangedFiles(apiChangedFiles, parseUnifiedDiff(rawDiff));
+        const rawDiffHash = hashRawDiff(rawDiff);
+        span.setEndAttributes({
+          "github.changed_file_count": changedFiles.length,
+          "github.raw_diff_bytes": Buffer.byteLength(rawDiff, "utf8"),
+        });
+
+        return {
+          rawDiff,
+          rawDiffBytes: Buffer.byteLength(rawDiff, "utf8"),
+          rawDiffHash,
+          snapshot: {
+            snapshotId: stableId("prs", [
+              "github",
+              providerRepoId,
+              input.pullRequestNumber,
+              headSha,
+            ]),
+            schemaVersion: "pull_request_snapshot.v1",
+            provider: "github",
+            repoId: stableId("repo", ["github", providerRepoId ?? fullName]),
+            installationId: input.installationId,
+            providerRepoId: providerRepoId ?? fullName,
+            providerPullRequestId,
+            pullRequestNumber: input.pullRequestNumber,
+            title: asString(pullRequest, "title"),
+            ...withOptional("body", optionalString(pullRequest, "body")),
+            authorLogin: asString(asRecord(pullRequest.user, "pull_request.user"), "login"),
+            ...withOptional("authorAssociation", optionalString(pullRequest, "author_association")),
+            state,
+            isDraft: optionalBoolean(pullRequest, "draft"),
+            labels,
+            baseRef: asString(base, "ref"),
+            baseSha,
+            headRef: asString(head, "ref"),
+            headSha,
+            ...withOptional("mergeBaseSha", optionalString(pullRequest, "merge_commit_sha")),
+            changedFiles: changedFiles.slice(0, this.config.maxPrFiles),
+            diffHash: rawDiffHash,
+            additions: asNumber(pullRequest, "additions"),
+            deletions: asNumber(pullRequest, "deletions"),
+            changedFileCount: asNumber(pullRequest, "changed_files"),
+            fetchedAt: this.now().toISOString(),
+            ...withOptional("providerMetadata", pullRequest),
+          },
+        };
+      },
+    );
   }
 
   /** Fetches changed files for a pull request. */
@@ -422,171 +471,204 @@ export class GitHubAppProvider implements GitProvider {
 
   /** Publishes a PR review with inline comments. */
   public async publishReview(input: PublishReviewInput): Promise<PublishedReview> {
-    if (!this.config.enableReviewComments) {
-      throw new GitHubPermissionError("GitHub review comments are disabled by configuration.", {});
-    }
-
-    const existingComments = await this.fetchExistingReviewComments(input);
-    const requestedComments = input.comments.map((comment) => ({
-      path: comment.path,
-      line: comment.line,
-      side: comment.side,
-      body: this.withDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
-      marker: this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
-      ...(comment.findingId ? { findingId: comment.findingId } : {}),
-    }));
-    const comments = requestedComments.filter(
-      (comment) =>
-        !existingComments.some((existingComment) =>
-          hasGitHubCommentMarker(existingComment.body, comment.marker),
-        ),
-    );
-
-    if (comments.length === 0) {
-      const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
-        requestedComments,
-        existingComments,
-      );
-      const existingCommentIds = requestedComments
-        .map(
-          (comment) =>
-            existingComments.find((existingComment) =>
-              hasGitHubCommentMarker(existingComment.body, comment.marker),
-            )?.providerCommentId,
-        )
-        .filter((commentId): commentId is string => Boolean(commentId));
-
-      return {
-        providerReviewId: stableId("review", [
-          "github",
-          input.owner,
-          input.repo,
-          input.pullRequestNumber,
-          input.reviewRunId,
-        ]),
-        commentIds: existingCommentIds,
-        commentIdsByFindingId,
-      };
-    }
-
-    const review = await this.requestInstallation<JsonRecord>(
-      input,
-      `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}/reviews`,
+    return await this.withGitHubSpan(
+      OBSERVABILITY_SPAN_NAMES.githubPublishReview,
       {
-        method: "POST",
-        body: JSON.stringify({
-          commit_id: input.headSha,
-          event: "COMMENT",
-          body: input.body
-            ? this.withDedupeMarker(input.body, input.reviewRunId)
-            : `Heimdall review ${input.reviewRunId}`,
-          comments: comments.map(
-            ({ marker: _marker, findingId: _findingId, ...comment }) => comment,
-          ),
-        }),
+        attributes: {
+          "github.comment_count": input.comments.length,
+          "github.pull_request_number": input.pullRequestNumber,
+        },
+        operation: "publish_review",
+      },
+      async (span) => {
+        if (!this.config.enableReviewComments) {
+          throw new GitHubPermissionError(
+            "GitHub review comments are disabled by configuration.",
+            {},
+          );
+        }
+
+        const existingComments = await this.fetchExistingReviewComments(input);
+        const requestedComments = input.comments.map((comment) => ({
+          path: comment.path,
+          line: comment.line,
+          side: comment.side,
+          body: this.withDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+          marker: this.createDedupeMarker(comment.body, input.reviewRunId, comment.findingId),
+          ...(comment.findingId ? { findingId: comment.findingId } : {}),
+        }));
+        const comments = requestedComments.filter(
+          (comment) =>
+            !existingComments.some((existingComment) =>
+              hasGitHubCommentMarker(existingComment.body, comment.marker),
+            ),
+        );
+        span.setEndAttributes({
+          "github.comment_publish_count": comments.length,
+          "github.comment_skip_count": requestedComments.length - comments.length,
+        });
+
+        if (comments.length === 0) {
+          const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
+            requestedComments,
+            existingComments,
+          );
+          const existingCommentIds = requestedComments
+            .map(
+              (comment) =>
+                existingComments.find((existingComment) =>
+                  hasGitHubCommentMarker(existingComment.body, comment.marker),
+                )?.providerCommentId,
+            )
+            .filter((commentId): commentId is string => Boolean(commentId));
+
+          return {
+            providerReviewId: stableId("review", [
+              "github",
+              input.owner,
+              input.repo,
+              input.pullRequestNumber,
+              input.reviewRunId,
+            ]),
+            commentIds: existingCommentIds,
+            commentIdsByFindingId,
+          };
+        }
+
+        const review = await this.requestInstallation<JsonRecord>(
+          input,
+          `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}/reviews`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              commit_id: input.headSha,
+              event: "COMMENT",
+              body: input.body
+                ? this.withDedupeMarker(input.body, input.reviewRunId)
+                : `Heimdall review ${input.reviewRunId}`,
+              comments: comments.map(
+                ({ marker: _marker, findingId: _findingId, ...comment }) => comment,
+              ),
+            }),
+          },
+        );
+        const providerReviewId = asString(review, "id");
+        const returnedComments = Array.isArray(review.comments) ? review.comments : [];
+
+        const responseCommentIds = returnedComments
+          .map((comment) => optionalRecord(comment)?.id)
+          .filter((id): id is string | number => typeof id === "string" || typeof id === "number")
+          .map(String);
+        const refreshedComments = await this.fetchExistingReviewComments(input);
+        const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
+          requestedComments,
+          refreshedComments,
+        );
+        const existingCommentIds = requestedComments
+          .map(
+            (comment) =>
+              refreshedComments.find((existingComment) =>
+                hasGitHubCommentMarker(existingComment.body, comment.marker),
+              )?.providerCommentId,
+          )
+          .filter((commentId): commentId is string => Boolean(commentId));
+
+        return {
+          providerReviewId,
+          commentIds: [...new Set([...existingCommentIds, ...responseCommentIds])],
+          commentIdsByFindingId,
+        };
       },
     );
-    const providerReviewId = asString(review, "id");
-    const returnedComments = Array.isArray(review.comments) ? review.comments : [];
-
-    const responseCommentIds = returnedComments
-      .map((comment) => optionalRecord(comment)?.id)
-      .filter((id): id is string | number => typeof id === "string" || typeof id === "number")
-      .map(String);
-    const refreshedComments = await this.fetchExistingReviewComments(input);
-    const commentIdsByFindingId = this.mapExistingCommentIdsByFindingId(
-      requestedComments,
-      refreshedComments,
-    );
-    const existingCommentIds = requestedComments
-      .map(
-        (comment) =>
-          refreshedComments.find((existingComment) =>
-            hasGitHubCommentMarker(existingComment.body, comment.marker),
-          )?.providerCommentId,
-      )
-      .filter((commentId): commentId is string => Boolean(commentId));
-
-    return {
-      providerReviewId,
-      commentIds: [...new Set([...existingCommentIds, ...responseCommentIds])],
-      commentIdsByFindingId,
-    };
   }
 
   /** Publishes or creates a check run. */
   public async createOrUpdateCheckRun(
     input: CreateOrUpdateCheckRunInput,
   ): Promise<ProviderCheckRun> {
-    if (!this.config.enableCheckRuns) {
-      throw new GitHubPermissionError("GitHub check runs are disabled by configuration.", {});
-    }
-
-    const annotations = input.annotations ?? [];
-    const firstBatch = annotations.slice(0, 50);
-    const existingCheckRunId = await this.findExistingCheckRunId(input);
-    const checkRun = existingCheckRunId
-      ? await this.requestInstallation<JsonRecord>(
-          input,
-          `/repos/${input.owner}/${input.repo}/check-runs/${existingCheckRunId}`,
-          {
-            method: "PATCH",
-            body: JSON.stringify({
-              name: input.name,
-              status: input.status,
-              conclusion: input.conclusion,
-              output: {
-                title: input.title,
-                summary: input.summary,
-                text: input.text,
-                annotations: firstBatch.map(toGitHubAnnotation),
-              },
-            }),
-          },
-        )
-      : await this.requestInstallation<JsonRecord>(
-          input,
-          `/repos/${input.owner}/${input.repo}/check-runs`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              name: input.name,
-              head_sha: input.headSha,
-              status: input.status,
-              conclusion: input.conclusion,
-              external_id: input.reviewRunId,
-              output: {
-                title: input.title,
-                summary: input.summary,
-                text: input.text,
-                annotations: firstBatch.map(toGitHubAnnotation),
-              },
-            }),
-          },
-        );
-    const providerCheckRunId = asString(checkRun, "id");
-
-    for (let index = 50; index < annotations.length; index += 50) {
-      await this.requestInstallation<JsonRecord>(
-        input,
-        `/repos/${input.owner}/${input.repo}/check-runs/${providerCheckRunId}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            output: {
-              title: input.title,
-              summary: input.summary,
-              annotations: annotations.slice(index, index + 50).map(toGitHubAnnotation),
-            },
-          }),
+    return await this.withGitHubSpan(
+      OBSERVABILITY_SPAN_NAMES.githubCreateCheckRun,
+      {
+        attributes: {
+          "github.annotation_count": input.annotations?.length ?? 0,
         },
-      );
-    }
+        operation: "create_check_run",
+      },
+      async (span) => {
+        if (!this.config.enableCheckRuns) {
+          throw new GitHubPermissionError("GitHub check runs are disabled by configuration.", {});
+        }
 
-    return {
-      providerCheckRunId,
-      ...withOptional("htmlUrl", optionalString(checkRun, "html_url")),
-    };
+        const annotations = input.annotations ?? [];
+        const firstBatch = annotations.slice(0, 50);
+        const existingCheckRunId = await this.findExistingCheckRunId(input);
+        const checkRun = existingCheckRunId
+          ? await this.requestInstallation<JsonRecord>(
+              input,
+              `/repos/${input.owner}/${input.repo}/check-runs/${existingCheckRunId}`,
+              {
+                method: "PATCH",
+                body: JSON.stringify({
+                  name: input.name,
+                  status: input.status,
+                  conclusion: input.conclusion,
+                  output: {
+                    title: input.title,
+                    summary: input.summary,
+                    text: input.text,
+                    annotations: firstBatch.map(toGitHubAnnotation),
+                  },
+                }),
+              },
+            )
+          : await this.requestInstallation<JsonRecord>(
+              input,
+              `/repos/${input.owner}/${input.repo}/check-runs`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  name: input.name,
+                  head_sha: input.headSha,
+                  status: input.status,
+                  conclusion: input.conclusion,
+                  external_id: input.reviewRunId,
+                  output: {
+                    title: input.title,
+                    summary: input.summary,
+                    text: input.text,
+                    annotations: firstBatch.map(toGitHubAnnotation),
+                  },
+                }),
+              },
+            );
+        const providerCheckRunId = asString(checkRun, "id");
+
+        for (let index = 50; index < annotations.length; index += 50) {
+          await this.requestInstallation<JsonRecord>(
+            input,
+            `/repos/${input.owner}/${input.repo}/check-runs/${providerCheckRunId}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({
+                output: {
+                  title: input.title,
+                  summary: input.summary,
+                  annotations: annotations.slice(index, index + 50).map(toGitHubAnnotation),
+                },
+              }),
+            },
+          );
+        }
+        span.setEndAttributes({
+          "github.check_run_operation": existingCheckRunId ? "update" : "create",
+        });
+
+        return {
+          providerCheckRunId,
+          ...withOptional("htmlUrl", optionalString(checkRun, "html_url")),
+        };
+      },
+    );
   }
 
   /** Publishes a summary issue comment. */
@@ -730,7 +812,7 @@ export class GitHubAppProvider implements GitProvider {
     const response = await this.fetchGitHub(path, init, authenticationKind);
 
     if (!response.ok) {
-      await raiseGitHubError(response);
+      await this.raiseObservedGitHubError(response);
     }
 
     if (response.status === 204) {
@@ -746,21 +828,68 @@ export class GitHubAppProvider implements GitProvider {
     authenticationKind: GitHubRequestAuthenticationKind,
   ): Promise<Response> {
     const startedAt = this.now().getTime();
-    const response = await this.fetcher(`${this.config.apiBaseUrl}${path}`, {
-      ...init,
-      headers: {
-        ...this.baseHeaders(),
-        ...init.headers,
+    const method = init.method ?? "GET";
+    const routeTemplate = githubRouteTemplate(path);
+    const operation = githubOperationLabel(method, routeTemplate);
+    const span = this.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.githubRestRequest, {
+      attributes: {
+        "app.provider": "github",
+        "github.api_route_template": routeTemplate,
+        "github.authentication_kind": authenticationKind,
+        "github.method": method.toUpperCase(),
+        "github.operation": operation,
       },
+      kind: "client",
     });
-    this.observeGitHubResponse({
-      authenticationKind,
-      latencyMs: Math.max(0, this.now().getTime() - startedAt),
-      method: init.method ?? "GET",
-      path,
-      response,
-    });
-    return response;
+
+    try {
+      const response = await this.fetcher(`${this.config.apiBaseUrl}${path}`, {
+        ...init,
+        headers: {
+          ...this.baseHeaders(),
+          ...init.headers,
+        },
+      });
+      const latencyMs = Math.max(0, this.now().getTime() - startedAt);
+      this.observeGitHubResponse({
+        authenticationKind,
+        latencyMs,
+        method,
+        path,
+        response,
+      });
+      this.recordGitHubRequestMetrics({
+        durationMs: latencyMs,
+        operation,
+        routeTemplate,
+        status: response.ok ? "succeeded" : "failed",
+        statusCode: response.status,
+      });
+      span?.end({
+        attributes: {
+          ...githubRateLimitAttributes(response.headers),
+          "github.status_code": response.status,
+        },
+        status: response.ok ? "ok" : "error",
+      });
+
+      return response;
+    } catch (error) {
+      const latencyMs = Math.max(0, this.now().getTime() - startedAt);
+      this.recordGitHubRequestMetrics({
+        durationMs: latencyMs,
+        operation,
+        routeTemplate,
+        status: "failed",
+      });
+      span?.end({
+        attributes: {
+          "github.error_class": "provider_error",
+        },
+        status: "error",
+      });
+      throw error;
+    }
   }
 
   private async paginateInstallation<T extends JsonRecord>(
@@ -791,32 +920,47 @@ export class GitHubAppProvider implements GitProvider {
   }
 
   private async fetchRawDiff(input: GitHubPullRequestRef): Promise<string> {
-    const token = await this.getInstallationToken(input);
-    const response = await this.fetchGitHub(
-      `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
+    return await this.withGitHubSpan(
+      OBSERVABILITY_SPAN_NAMES.githubFetchDiff,
       {
-        headers: {
-          ...this.baseHeaders(),
-          accept: "application/vnd.github.v3.diff",
-          authorization: `Bearer ${token.token}`,
+        attributes: {
+          "github.pull_request_number": input.pullRequestNumber,
         },
+        operation: "fetch_diff",
       },
-      "installation",
+      async (span) => {
+        const token = await this.getInstallationToken(input);
+        const response = await this.fetchGitHub(
+          `/repos/${input.owner}/${input.repo}/pulls/${input.pullRequestNumber}`,
+          {
+            headers: {
+              ...this.baseHeaders(),
+              accept: "application/vnd.github.v3.diff",
+              authorization: `Bearer ${token.token}`,
+            },
+          },
+          "installation",
+        );
+
+        if (!response.ok) {
+          await this.raiseObservedGitHubError(response);
+        }
+
+        const diff = await response.text();
+        const diffBytes = Buffer.byteLength(diff, "utf8");
+        span.setEndAttributes({
+          "github.raw_diff_bytes": diffBytes,
+        });
+        if (diffBytes > this.config.maxDiffBytes) {
+          throw new GitHubValidationError(
+            "GitHub pull request diff exceeds configured size limit.",
+            errorOptions(response),
+          );
+        }
+
+        return diff;
+      },
     );
-
-    if (!response.ok) {
-      await raiseGitHubError(response);
-    }
-
-    const diff = await response.text();
-    if (Buffer.byteLength(diff, "utf8") > this.config.maxDiffBytes) {
-      throw new GitHubValidationError(
-        "GitHub pull request diff exceeds configured size limit.",
-        errorOptions(response),
-      );
-    }
-
-    return diff;
   }
 
   private async findExistingCheckRunId(
@@ -989,6 +1133,114 @@ export class GitHubAppProvider implements GitProvider {
       }));
   }
 
+  private async withGitHubSpan<T>(
+    spanName: string,
+    input: {
+      readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>>;
+      readonly operation: string;
+    },
+    callback: (span: {
+      readonly setEndAttributes: (
+        attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+      ) => void;
+    }) => Promise<T>,
+  ): Promise<T> {
+    let endAttributes: Readonly<Record<string, TelemetryAttributeValue | undefined>> = {};
+    const span = this.traces?.startSpan(spanName, {
+      attributes: {
+        "app.provider": "github",
+        "github.operation": input.operation,
+        ...(input.attributes ?? {}),
+      },
+      kind: "client",
+    });
+
+    try {
+      const result = await callback({
+        setEndAttributes: (attributes) => {
+          endAttributes = { ...endAttributes, ...attributes };
+        },
+      });
+      span?.end({
+        attributes: {
+          ...endAttributes,
+          "github.status": "succeeded",
+        },
+        status: "ok",
+      });
+
+      return result;
+    } catch (error) {
+      span?.end({
+        attributes: {
+          ...endAttributes,
+          "github.error_class": githubErrorClass(error),
+          "github.status": "failed",
+        },
+        status: "error",
+      });
+      throw error;
+    }
+  }
+
+  private recordGitHubRequestMetrics(input: {
+    readonly durationMs: number;
+    readonly operation: string;
+    readonly routeTemplate: string;
+    readonly status: "failed" | "succeeded";
+    readonly statusCode?: number;
+  }): void {
+    if (!this.metrics) {
+      return;
+    }
+
+    const labels = {
+      operation: normalizeTelemetryLabel(input.operation),
+      route: normalizeTelemetryLabel(input.routeTemplate),
+      status: input.status,
+      ...(input.statusCode ? { status_family: httpStatusFamily(input.statusCode) } : {}),
+    };
+    this.metrics.count(OBSERVABILITY_METRIC_NAMES.githubRequestsTotal, {
+      labels,
+      unit: "1",
+    });
+    this.metrics.histogram(OBSERVABILITY_METRIC_NAMES.githubRequestDurationMs, input.durationMs, {
+      labels,
+      unit: "ms",
+    });
+  }
+
+  private async raiseObservedGitHubError(response: Response): Promise<never> {
+    try {
+      await raiseGitHubError(response);
+    } catch (error) {
+      this.recordGitHubRateLimitError(error);
+      throw error;
+    }
+
+    throw new GitHubProviderError(
+      "github_unknown",
+      "GitHub error handling returned unexpectedly.",
+      errorOptions(response),
+    );
+  }
+
+  private recordGitHubRateLimitError(error: unknown): void {
+    if (
+      !this.metrics ||
+      !(error instanceof GitHubRateLimitError || error instanceof GitHubSecondaryRateLimitError)
+    ) {
+      return;
+    }
+
+    this.metrics.count(OBSERVABILITY_METRIC_NAMES.githubRateLimitedTotal, {
+      labels: {
+        kind: error instanceof GitHubSecondaryRateLimitError ? "secondary" : "primary",
+      },
+      unit: "1",
+    });
+  }
+
   private observeGitHubResponse(input: {
     readonly authenticationKind: GitHubRequestAuthenticationKind;
     readonly method: string;
@@ -1028,6 +1280,121 @@ const asArray = (value: unknown, name: string): readonly unknown[] => {
 
   return value;
 };
+
+/** Returns a product-safe route template for GitHub REST telemetry. */
+function githubRouteTemplate(path: string): string {
+  const pathname = path.split("?")[0] ?? path;
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return "/";
+  }
+  if (segments[0] === "app" && segments[1] === "installations" && segments[3] === "access_tokens") {
+    return "/app/installations/{installation_id}/access_tokens";
+  }
+  if (segments[0] === "installation" && segments[1] === "repositories") {
+    return "/installation/repositories";
+  }
+  if (segments[0] !== "repos" || segments.length < 3) {
+    return `/${segments.map((segment) => sanitizeRouteSegment(segment)).join("/")}`;
+  }
+
+  const output = ["repos", "{owner}", "{repo}"];
+  for (let index = 3; index < segments.length; index += 1) {
+    output.push(githubRouteToken(segments, index));
+  }
+
+  return `/${output.join("/")}`;
+}
+
+/** Returns a bounded operation label from a request method and route template. */
+function githubOperationLabel(method: string, routeTemplate: string): string {
+  return normalizeTelemetryLabel(`${method.toLowerCase()}_${routeTemplate.replace(/^\/+/u, "")}`);
+}
+
+/** Replaces route path values that are likely to carry customer-specific identifiers. */
+function githubRouteToken(segments: readonly string[], index: number): string {
+  const segment = segments[index] ?? "";
+  const previous = segments[index - 1];
+  if (segment === "comments" || segment === "check-runs" || segment === "files") {
+    return segment;
+  }
+  if (previous === "pulls") {
+    return "{pull_number}";
+  }
+  if (previous === "issues") {
+    return "{issue_number}";
+  }
+  if (previous === "comments") {
+    return "{comment_id}";
+  }
+  if (previous === "branches") {
+    return "{ref}";
+  }
+  if (previous === "commits") {
+    return "{sha}";
+  }
+  if (previous === "check-runs") {
+    return "{check_run_id}";
+  }
+
+  return sanitizeRouteSegment(segment);
+}
+
+/** Keeps only known route-literal characters in a template segment. */
+function sanitizeRouteSegment(segment: string): string {
+  return segment.replaceAll(/[^A-Za-z0-9._-]+/gu, "_") || "segment";
+}
+
+/** Returns product-safe rate-limit attributes from GitHub response headers. */
+function githubRateLimitAttributes(
+  headers: Headers,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  const rateLimit = readGitHubRateLimitSnapshot(headers);
+  if (!rateLimit) {
+    return {};
+  }
+
+  return {
+    ...(rateLimit.remaining !== undefined
+      ? { "github.rate_limit_remaining": rateLimit.remaining }
+      : {}),
+    ...(rateLimit.resetEpochSeconds !== undefined
+      ? { "github.rate_limit_reset_unix": rateLimit.resetEpochSeconds }
+      : {}),
+  };
+}
+
+/** Maps known GitHub errors to low-cardinality telemetry classes. */
+function githubErrorClass(error: unknown): TelemetryAttributeValue {
+  if (error instanceof GitHubRateLimitError || error instanceof GitHubSecondaryRateLimitError) {
+    return "rate_limit_error";
+  }
+  if (error instanceof GitHubValidationError) {
+    return "validation_error";
+  }
+  if (error instanceof GitHubPermissionError || error instanceof GitHubTokenError) {
+    return "auth_error";
+  }
+
+  return "provider_error";
+}
+
+/** Returns a low-cardinality HTTP status family label. */
+function httpStatusFamily(statusCode: number): string {
+  return `${Math.trunc(statusCode / 100)}xx`;
+}
+
+/** Normalizes labels before they are attached to metrics. */
+function normalizeTelemetryLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized.length > 0 ? normalized : "unknown";
+}
 
 const normalizeFileStatus = (status: string): ChangedFile["status"] => {
   if (

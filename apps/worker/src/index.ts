@@ -578,10 +578,16 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const queueProducer = new BullMqQueueProducer(config.redisUrl);
   const workerConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
   const billingProvider = createWorkerBillingProviderFromEnv(databaseClient.db);
-  const gitProvider = createGitHubProvider({
-    appId: config.githubAppId,
-    privateKey: githubPrivateKey,
-  });
+  const gitProvider = createGitHubProvider(
+    {
+      appId: config.githubAppId,
+      privateKey: githubPrivateKey,
+    },
+    {
+      metrics: observability.metrics,
+      traces: observability.traces,
+    },
+  );
   const llmGateway =
     process.env.HEIMDALL_REVIEW_SMOKE_FINDING === "true"
       ? createWorkerReviewSmokeGateway({
