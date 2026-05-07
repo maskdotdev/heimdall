@@ -86,6 +86,7 @@ export const PublishReviewJobPayloadSchema = Type.Object(
     reviewRunId: ReviewRunIdSchema,
     repoId: RepoIdSchema,
     pullRequestNumber: Type.Integer({ minimum: 1 }),
+    publishPlanId: Type.Optional(Type.String({ pattern: "^pp_[A-Za-z0-9_-]+$" })),
     publishPlanArtifactId: Type.Optional(ArtifactIdSchema),
   },
   { additionalProperties: false },

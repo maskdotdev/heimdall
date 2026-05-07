@@ -700,6 +700,31 @@ export const findingDuplicateGroups = pgTable(
   ],
 );
 
+/** Durable publish plans produced after validation and before publisher handoff. */
+export const publishPlans = pgTable(
+  "publish_plans",
+  {
+    publishPlanId: text("publish_plan_id").primaryKey(),
+    reviewRunId: text("review_run_id")
+      .notNull()
+      .references(() => reviewRuns.reviewRunId),
+    reviewArtifactId: text("review_artifact_id").references(() => reviewArtifacts.reviewArtifactId),
+    headSha: text("head_sha").notNull(),
+    mode: text("mode").notNull(),
+    inlineComments: jsonb("inline_comments").notNull().default(sql`'[]'::jsonb`),
+    fileComments: jsonb("file_comments").notNull().default(sql`'[]'::jsonb`),
+    checkAnnotations: jsonb("check_annotations").notNull().default(sql`'[]'::jsonb`),
+    summary: jsonb("summary").notNull().default(sql`'{}'::jsonb`),
+    stats: jsonb("stats").notNull().default(sql`'{}'::jsonb`),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("publish_plans_review_run_unique").on(table.reviewRunId),
+    index("publish_plans_review_artifact_idx").on(table.reviewArtifactId),
+  ],
+);
+
 /** Provider publication state for validated findings. */
 export const publishedFindings = pgTable("published_findings", {
   findingId: text("finding_id").primaryKey(),

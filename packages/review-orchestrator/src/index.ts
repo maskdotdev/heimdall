@@ -720,18 +720,38 @@ export async function runPullRequestReview(
       reviewRun,
       findings: validationResult.accepted,
     });
+    const publishPlanPayload = publishPlanArtifactPayload({
+      generatedAt: now().toISOString(),
+      headSha: snapshot.headSha,
+      publishPlan,
+      reviewRunId,
+    });
     const publishPlanArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
       repoId: snapshot.repoId,
       kind: "publish_plan",
       name: "publish-plan.json",
-      payload: publishPlanArtifactPayload({
-        generatedAt: now().toISOString(),
-        headSha: snapshot.headSha,
-        publishPlan,
-        reviewRunId,
-      }),
-      createdAt: now().toISOString(),
+      payload: publishPlanPayload,
+      createdAt: publishPlanPayload.generatedAt,
+    });
+    const publishPlanId = stableId("pp", [reviewRunId, publishPlanArtifact.artifactId]);
+    await reviewRepository.insertPublishPlan({
+      publishPlanId,
+      reviewRunId,
+      reviewArtifactId: publishPlanArtifact.artifactId,
+      headSha: publishPlanPayload.headSha,
+      mode: publishPlanPayload.mode,
+      inlineComments: publishPlanPayload.inlineComments,
+      fileComments: publishPlanPayload.fileComments,
+      checkAnnotations: publishPlanPayload.checkAnnotations,
+      summary: publishPlanPayload.summary,
+      stats: publishPlanPayload.stats,
+      metadata: {
+        findingIds: publishPlanPayload.findingIds,
+        plannedOperations: publishPlanPayload.plannedOperations,
+        policy: publishPlanPayload.policy,
+      },
+      createdAt: publishPlanPayload.generatedAt,
     });
     const publishedFindingCount = validatedFindings.filter(
       (finding) => finding.decision === "publish",
@@ -749,6 +769,7 @@ export async function runPullRequestReview(
         validatedFindingCount: validatedFindings.length,
         memoryFactCount: reviewMemoryFacts.length,
         duplicateGroupCount: validationResult.duplicateGroups.length,
+        publishPlanId,
         publishPlanArtifactId: publishPlanArtifact.artifactId,
         publishPlanMode: publishPlanMode(publishPlan),
         validationEventCount: validationResult.trace.events.length,
@@ -802,6 +823,7 @@ export async function runPullRequestReview(
         metadata: {
           ...reviewRun.metadata,
           currentStage: "staleness",
+          publishPlanId,
           publishPlanArtifactId: publishPlanArtifact.artifactId,
           staleness: {
             expectedHeadSha: snapshot.headSha,
@@ -829,6 +851,7 @@ export async function runPullRequestReview(
     await enqueuePublishJob(dependencies.db, {
       reviewRunId,
       repoId: snapshot.repoId,
+      publishPlanId,
       publishPlanArtifactId: publishPlanArtifact.artifactId,
       pullRequestNumber: snapshot.pullRequestNumber,
       timestamp: now().toISOString(),
@@ -837,7 +860,11 @@ export async function runPullRequestReview(
       reviewRunId,
       stage: "publish",
       status: "queued",
-      metadata: { publishJobKey, publishPlanArtifactId: publishPlanArtifact.artifactId },
+      metadata: {
+        publishJobKey,
+        publishPlanId,
+        publishPlanArtifactId: publishPlanArtifact.artifactId,
+      },
     });
     const completedAt = now().toISOString();
     await quotaService.consumeReservation({
@@ -918,6 +945,7 @@ export async function runPullRequestReview(
         },
         currentStage: "completed",
         publishJobKey,
+        publishPlanId,
         publishPlanArtifactId: publishPlanArtifact.artifactId,
       },
     });
@@ -1438,6 +1466,39 @@ function planSnapshotMetadata(snapshot: PlanSnapshot): Record<string, unknown> {
   };
 }
 
+/** JSON object used inside durable publish plan payloads. */
+type PublishPlanPayloadObject = Record<string, unknown>;
+
+/** Durable publish-plan artifact payload shape. */
+type ReviewPublishPlanArtifactPayload = {
+  /** Artifact schema version. */
+  readonly schemaVersion: "publish_plan.v1";
+  /** Review run that owns the plan. */
+  readonly reviewRunId: string;
+  /** Head commit SHA the plan targets. */
+  readonly headSha: string;
+  /** Compact publish mode label. */
+  readonly mode: string;
+  /** Effective publishing policy used by the plan. */
+  readonly policy: PublishPlan["policy"];
+  /** Planned external operations. */
+  readonly plannedOperations: PublishPlan["plannedOperations"];
+  /** Inline comments planned for provider publishing. */
+  readonly inlineComments: readonly PublishPlanPayloadObject[];
+  /** File comments planned for provider publishing. */
+  readonly fileComments: readonly PublishPlanPayloadObject[];
+  /** Check annotations planned for provider publishing. */
+  readonly checkAnnotations: readonly PublishPlanPayloadObject[];
+  /** Summary payload planned for provider publishing. */
+  readonly summary: PublishPlanPayloadObject;
+  /** Aggregate plan statistics. */
+  readonly stats: PublishPlanPayloadObject;
+  /** Publishable finding IDs included in the plan. */
+  readonly findingIds: readonly string[];
+  /** Timestamp when the artifact was generated. */
+  readonly generatedAt: string;
+};
+
 /** Builds the durable publish-plan artifact payload used for publisher handoff inspection. */
 function publishPlanArtifactPayload(input: {
   /** Timestamp when the artifact was generated. */
@@ -1448,7 +1509,7 @@ function publishPlanArtifactPayload(input: {
   readonly publishPlan: PublishPlan;
   /** Review run that owns the plan. */
   readonly reviewRunId: string;
-}): Record<string, unknown> {
+}): ReviewPublishPlanArtifactPayload {
   return {
     schemaVersion: "publish_plan.v1",
     reviewRunId: input.reviewRunId,
@@ -1616,6 +1677,7 @@ async function enqueuePublishJob(
   input: {
     readonly reviewRunId: string;
     readonly repoId: string;
+    readonly publishPlanId: string;
     readonly publishPlanArtifactId: string;
     readonly pullRequestNumber: number;
     readonly timestamp: string;
@@ -1631,6 +1693,7 @@ async function enqueuePublishJob(
     attempt: 0,
     maxAttempts: 3,
     payload: {
+      publishPlanId: input.publishPlanId,
       publishPlanArtifactId: input.publishPlanArtifactId,
       reviewRunId: input.reviewRunId,
       repoId: input.repoId,

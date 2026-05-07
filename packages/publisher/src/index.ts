@@ -189,6 +189,7 @@ export async function publishReviewRun(
       startedAt,
       metadata: {
         pullRequestNumber: payload.pullRequestNumber,
+        ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
         ...(payload.publishPlanArtifactId
           ? { publishPlanArtifactId: payload.publishPlanArtifactId }
           : {}),
@@ -203,6 +204,7 @@ export async function publishReviewRun(
         error: null,
         metadata: {
           pullRequestNumber: payload.pullRequestNumber,
+          ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
           ...(payload.publishPlanArtifactId
             ? { publishPlanArtifactId: payload.publishPlanArtifactId }
             : {}),
@@ -227,6 +229,7 @@ export async function publishReviewRun(
             reason: "stale_head",
             expectedHeadSha: reviewRun.headSha,
             actualHeadSha: currentPullRequest.headSha,
+            ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
             ...(payload.publishPlanArtifactId
               ? { publishPlanArtifactId: payload.publishPlanArtifactId }
               : {}),
@@ -330,6 +333,7 @@ export async function publishReviewRun(
           providerSummaryCommentId: summaryComment?.providerCommentId,
           inlineCommentCount: review?.commentIds.length ?? 0,
           plannedOperations: publishPlan.plannedOperations,
+          publishPlanId: payload.publishPlanId,
           publishPlanArtifactId: payload.publishPlanArtifactId,
           publishingPolicy: publishPlan.policy,
           summaryFallback: fallbackSummary !== undefined,

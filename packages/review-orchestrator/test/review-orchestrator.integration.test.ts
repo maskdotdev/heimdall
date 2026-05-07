@@ -102,6 +102,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'ranking_report') AS ranking_artifacts,
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'rejected_findings') AS rejected_artifacts,
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'publish_plan') AS publish_plan_artifacts,
+        (SELECT count(*)::int FROM publish_plans) AS publish_plans,
         (SELECT count(*)::int FROM candidate_findings) AS candidate_findings,
         (SELECT count(*)::int FROM validated_findings) AS validated_findings,
         (SELECT count(*)::int FROM finding_validation_events) AS validation_events,
@@ -113,7 +114,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.credit') AS review_credit_events,
         (SELECT count(*)::int FROM quota_reservations WHERE status = 'consumed') AS consumed_quota_reservations,
         (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs,
-        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1' AND payload->'payload'->>'publishPlanArtifactId' IS NOT NULL) AS publish_jobs_with_plan
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1' AND payload->'payload'->>'publishPlanId' IS NOT NULL AND payload->'payload'->>'publishPlanArtifactId' IS NOT NULL) AS publish_jobs_with_plan
     `;
 
     expect(counts).toEqual({
@@ -129,6 +130,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       ranking_artifacts: 1,
       rejected_artifacts: 1,
       publish_plan_artifacts: 1,
+      publish_plans: 1,
       validation_events: 12,
       validated_findings: 2,
       stage_events: 9,

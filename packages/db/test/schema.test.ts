@@ -24,6 +24,7 @@ import {
   publishedCheckRuns,
   publishedReviews,
   publishedSummaryComments,
+  publishPlans,
   pullRequests,
   quotaCounters,
   quotaReservations,
@@ -55,6 +56,7 @@ const duplicateGroupsMigrationPath = resolve(
   testDirectory,
   "../migrations/0011_rich_wind_dancer.sql",
 );
+const publishPlansMigrationPath = resolve(testDirectory, "../migrations/0012_smart_scarecrow.sql");
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -78,6 +80,7 @@ describe("database schema foundation", () => {
       "finding_validation_event_id",
     );
     expect(findingDuplicateGroups.findingDuplicateGroupId.name).toBe("finding_duplicate_group_id");
+    expect(publishPlans.publishPlanId.name).toBe("publish_plan_id");
     expect(publishedReviews.publishedReviewId.name).toBe("published_review_id");
     expect(publishedSummaryComments.publishedSummaryCommentId.name).toBe(
       "published_summary_comment_id",
@@ -115,6 +118,7 @@ describe("database schema foundation", () => {
     const productAuthMigration = await readFile(productAuthMigrationPath, "utf8");
     const validationEventsMigration = await readFile(validationEventsMigrationPath, "utf8");
     const duplicateGroupsMigration = await readFile(duplicateGroupsMigrationPath, "utf8");
+    const publishPlansMigration = await readFile(publishPlansMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -151,6 +155,7 @@ describe("database schema foundation", () => {
     expect(productAuthMigration).toContain('CREATE TABLE "oauth_states"');
     expect(validationEventsMigration).toContain('CREATE TABLE "finding_validation_events"');
     expect(duplicateGroupsMigration).toContain('CREATE TABLE "finding_duplicate_groups"');
+    expect(publishPlansMigration).toContain('CREATE TABLE "publish_plans"');
   });
 });
 
@@ -300,6 +305,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('admin_actions')::text) AS admin_actions_table,
         (SELECT to_regclass('finding_duplicate_groups')::text) AS finding_duplicate_groups_table,
         (SELECT to_regclass('finding_validation_events')::text) AS finding_validation_events_table,
+        (SELECT to_regclass('publish_plans')::text) AS publish_plans_table,
         (SELECT to_regclass('replay_runs')::text) AS replay_runs_table,
         (SELECT to_regclass('users')::text) AS users_table,
         (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
@@ -312,6 +318,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       embeddings: 1,
       finding_duplicate_groups_table: "finding_duplicate_groups",
       finding_validation_events_table: "finding_validation_events",
+      publish_plans_table: "publish_plans",
       oauth_states_table: "oauth_states",
       replay_runs_table: "replay_runs",
       users_table: "users",

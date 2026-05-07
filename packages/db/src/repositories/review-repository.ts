@@ -11,6 +11,7 @@ import {
   candidateFindings,
   findingDuplicateGroups,
   findingValidationEvents,
+  publishPlans,
   reviewArtifacts,
   reviewRunStageEvents,
   reviewRuns,
@@ -77,6 +78,34 @@ export type FindingDuplicateGroupInsert = {
   /** Optional product-safe duplicate metadata. */
   readonly metadata?: Record<string, unknown>;
   /** Group creation time. */
+  readonly createdAt?: Date | string;
+};
+
+/** Publish plan row to persist for review replay and publisher handoff debugging. */
+export type PublishPlanInsert = {
+  /** Stable publish plan ID. */
+  readonly publishPlanId: string;
+  /** Review run that owns the plan. */
+  readonly reviewRunId: string;
+  /** Review artifact that stores the full publish plan payload. */
+  readonly reviewArtifactId?: string | null;
+  /** Head commit SHA targeted by the plan. */
+  readonly headSha: string;
+  /** Compact plan mode, such as check_run, inline_review, summary, mixed, or none. */
+  readonly mode: string;
+  /** Inline comments planned for provider publishing. */
+  readonly inlineComments: readonly unknown[];
+  /** File-level comments planned for provider publishing. */
+  readonly fileComments: readonly unknown[];
+  /** Check annotations planned for provider publishing. */
+  readonly checkAnnotations: readonly unknown[];
+  /** Summary payload planned for provider publishing. */
+  readonly summary: Record<string, unknown>;
+  /** Aggregate plan statistics. */
+  readonly stats: Record<string, unknown>;
+  /** Optional product-safe plan metadata. */
+  readonly metadata?: Record<string, unknown>;
+  /** Plan creation time. */
   readonly createdAt?: Date | string;
 };
 
@@ -224,6 +253,27 @@ export class ReviewRepository {
           reviewRunId: group.reviewRunId,
         })),
       )
+      .onConflictDoNothing();
+  }
+
+  /** Inserts a publish plan and preserves existing review-run plans. */
+  public async insertPublishPlan(plan: PublishPlanInsert): Promise<void> {
+    await this.db
+      .insert(publishPlans)
+      .values({
+        checkAnnotations: [...plan.checkAnnotations],
+        createdAt: plan.createdAt ? new Date(plan.createdAt) : undefined,
+        fileComments: [...plan.fileComments],
+        headSha: plan.headSha,
+        inlineComments: [...plan.inlineComments],
+        metadata: plan.metadata,
+        mode: plan.mode,
+        publishPlanId: plan.publishPlanId,
+        reviewArtifactId: plan.reviewArtifactId ?? undefined,
+        reviewRunId: plan.reviewRunId,
+        stats: plan.stats,
+        summary: plan.summary,
+      })
       .onConflictDoNothing();
   }
 
