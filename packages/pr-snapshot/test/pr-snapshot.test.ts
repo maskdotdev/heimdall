@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCommentableLineIndex,
   buildFileAnchorIndex,
+  buildRawDiffArtifact,
   buildSnapshotDerivedArtifacts,
   computeSnapshotHash,
   extractChangeSet,
@@ -318,6 +319,29 @@ Binary files a/assets/logo.png and b/assets/logo.png differ
 describe("hashRawDiff", () => {
   it("hashes raw diff text with the repository hash prefix", () => {
     expect(hashRawDiff("diff --git a/a b/a\n")).toMatch(/^sha256:[a-f0-9]{64}$/u);
+  });
+});
+
+describe("buildRawDiffArtifact", () => {
+  it("wraps exact provider raw diff text in a hashed review artifact payload", () => {
+    const rawDiff = "diff --git a/src/math.ts b/src/math.ts\n";
+    const artifact = buildRawDiffArtifact({
+      createdAt: "2026-05-07T00:00:00.000Z",
+      rawDiff,
+      snapshot: validPullRequestSnapshotFixture,
+    });
+
+    expect(artifact).toEqual({
+      createdAt: "2026-05-07T00:00:00.000Z",
+      diffHash: hashRawDiff(rawDiff),
+      headSha: validPullRequestSnapshotFixture.headSha,
+      pullRequestNumber: validPullRequestSnapshotFixture.pullRequestNumber,
+      rawDiff,
+      repoId: validPullRequestSnapshotFixture.repoId,
+      schemaVersion: "raw_diff.v1",
+      sizeBytes: new TextEncoder().encode(rawDiff).byteLength,
+      snapshotId: validPullRequestSnapshotFixture.snapshotId,
+    });
   });
 });
 

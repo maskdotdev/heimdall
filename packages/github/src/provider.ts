@@ -34,6 +34,7 @@ import type {
   PublishedSummaryComment,
   PublishReviewInput,
   PublishSummaryCommentInput,
+  PullRequestSnapshotWithRawDiff,
   SyncInstallationInput,
   SyncInstallationResult,
 } from "./types";
@@ -293,6 +294,13 @@ export class GitHubAppProvider implements GitProvider {
 
   /** Fetches a snapshot with changed files and diff metadata. */
   public async fetchPullRequestSnapshot(input: GitHubPullRequestRef): Promise<PullRequestSnapshot> {
+    return (await this.fetchPullRequestSnapshotWithRawDiff(input)).snapshot;
+  }
+
+  /** Fetches a snapshot with the exact raw diff used for diff-derived metadata. */
+  public async fetchPullRequestSnapshotWithRawDiff(
+    input: GitHubPullRequestRef,
+  ): Promise<PullRequestSnapshotWithRawDiff> {
     const [pullRequest, apiChangedFiles, rawDiff] = await Promise.all([
       this.requestInstallation<JsonRecord>(
         input,
@@ -325,35 +333,41 @@ export class GitHubAppProvider implements GitProvider {
       rawState === "open" || rawState === "closed" || rawState === "merged" ? rawState : "unknown";
     const providerPullRequestId = asString(pullRequest, "id");
     const changedFiles = reconcileChangedFiles(apiChangedFiles, parseUnifiedDiff(rawDiff));
+    const rawDiffHash = hashRawDiff(rawDiff);
 
     return {
-      snapshotId: stableId("prs", ["github", providerRepoId, input.pullRequestNumber, headSha]),
-      schemaVersion: "pull_request_snapshot.v1",
-      provider: "github",
-      repoId: stableId("repo", ["github", providerRepoId ?? fullName]),
-      installationId: input.installationId,
-      providerRepoId: providerRepoId ?? fullName,
-      providerPullRequestId,
-      pullRequestNumber: input.pullRequestNumber,
-      title: asString(pullRequest, "title"),
-      ...withOptional("body", optionalString(pullRequest, "body")),
-      authorLogin: asString(asRecord(pullRequest.user, "pull_request.user"), "login"),
-      ...withOptional("authorAssociation", optionalString(pullRequest, "author_association")),
-      state,
-      isDraft: optionalBoolean(pullRequest, "draft"),
-      labels,
-      baseRef: asString(base, "ref"),
-      baseSha,
-      headRef: asString(head, "ref"),
-      headSha,
-      ...withOptional("mergeBaseSha", optionalString(pullRequest, "merge_commit_sha")),
-      changedFiles: changedFiles.slice(0, this.config.maxPrFiles),
-      diffHash: hashRawDiff(rawDiff),
-      additions: asNumber(pullRequest, "additions"),
-      deletions: asNumber(pullRequest, "deletions"),
-      changedFileCount: asNumber(pullRequest, "changed_files"),
-      fetchedAt: this.now().toISOString(),
-      ...withOptional("providerMetadata", pullRequest),
+      rawDiff,
+      rawDiffBytes: Buffer.byteLength(rawDiff, "utf8"),
+      rawDiffHash,
+      snapshot: {
+        snapshotId: stableId("prs", ["github", providerRepoId, input.pullRequestNumber, headSha]),
+        schemaVersion: "pull_request_snapshot.v1",
+        provider: "github",
+        repoId: stableId("repo", ["github", providerRepoId ?? fullName]),
+        installationId: input.installationId,
+        providerRepoId: providerRepoId ?? fullName,
+        providerPullRequestId,
+        pullRequestNumber: input.pullRequestNumber,
+        title: asString(pullRequest, "title"),
+        ...withOptional("body", optionalString(pullRequest, "body")),
+        authorLogin: asString(asRecord(pullRequest.user, "pull_request.user"), "login"),
+        ...withOptional("authorAssociation", optionalString(pullRequest, "author_association")),
+        state,
+        isDraft: optionalBoolean(pullRequest, "draft"),
+        labels,
+        baseRef: asString(base, "ref"),
+        baseSha,
+        headRef: asString(head, "ref"),
+        headSha,
+        ...withOptional("mergeBaseSha", optionalString(pullRequest, "merge_commit_sha")),
+        changedFiles: changedFiles.slice(0, this.config.maxPrFiles),
+        diffHash: rawDiffHash,
+        additions: asNumber(pullRequest, "additions"),
+        deletions: asNumber(pullRequest, "deletions"),
+        changedFileCount: asNumber(pullRequest, "changed_files"),
+        fetchedAt: this.now().toISOString(),
+        ...withOptional("providerMetadata", pullRequest),
+      },
     };
   }
 

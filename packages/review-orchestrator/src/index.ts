@@ -26,9 +26,9 @@ import {
   ReviewRepository,
   repositories,
 } from "@repo/db";
-import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
+import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
-import { buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
+import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import {
@@ -109,6 +109,18 @@ export type ReviewOrchestratorDependencies = {
   readonly now?: () => Date;
 };
 
+/** PR snapshot fetch result used by review orchestration. */
+type ReviewSnapshotFetchResult = {
+  /** Provider-neutral pull request snapshot. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Exact provider raw unified diff text, when the provider can return it. */
+  readonly rawDiff?: string;
+  /** Hash of the raw diff text, when available. */
+  readonly rawDiffHash?: PullRequestSnapshot["diffHash"];
+  /** UTF-8 byte size of the raw diff text, when available. */
+  readonly rawDiffBytes?: number;
+};
+
 /** Workspace sync function used by review orchestration. */
 export type SyncWorkspace = (
   input: GitHubRepositoryRef & {
@@ -172,7 +184,11 @@ export async function runPullRequestReview(
   const repository = await loadGitHubRepositoryRef(dependencies.db, input);
   const pullRequestRef = { ...repository, pullRequestNumber: input.pullRequestNumber };
 
-  const snapshot = await dependencies.gitProvider.fetchPullRequestSnapshot(pullRequestRef);
+  const snapshotFetch = await fetchPullRequestSnapshotForReview(
+    dependencies.gitProvider,
+    pullRequestRef,
+  );
+  const snapshot = snapshotFetch.snapshot;
   assertSnapshotMatchesJob(input, snapshot);
   const reviewRunId = stableId("rrn", [
     "github",
@@ -186,6 +202,14 @@ export async function runPullRequestReview(
     createdAt: startedAt,
     snapshot,
   });
+  const rawDiffArtifact =
+    snapshotFetch.rawDiff !== undefined
+      ? buildRawDiffArtifact({
+          createdAt: startedAt,
+          rawDiff: snapshotFetch.rawDiff,
+          snapshot,
+        })
+      : undefined;
   const repositorySettings = await repositoryRepository.getSettings(input.repoId);
   const activeRules = await new RepoRuleRepository(dependencies.db).listEffectiveRules({
     orgId: repositoryRecord.orgId,
@@ -282,6 +306,12 @@ export async function runPullRequestReview(
         diffHash: snapshot.diffHash,
         fileAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.files.length,
         lineAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.lines.length,
+        ...(snapshotFetch.rawDiffBytes !== undefined
+          ? { rawDiffBytes: snapshotFetch.rawDiffBytes }
+          : {}),
+        ...(snapshotFetch.rawDiffHash !== undefined
+          ? { rawDiffHash: snapshotFetch.rawDiffHash }
+          : {}),
         snapshotId: snapshot.snapshotId,
       },
     });
@@ -320,6 +350,18 @@ export async function runPullRequestReview(
         payload: snapshot,
         createdAt: now().toISOString(),
       }),
+      ...(rawDiffArtifact
+        ? [
+            await persistArtifact(reviewRepository, artifactPayloadStore, {
+              reviewRunId,
+              repoId: snapshot.repoId,
+              kind: "raw_diff",
+              name: "raw-diff.json",
+              payload: rawDiffArtifact,
+              createdAt: now().toISOString(),
+            }),
+          ]
+        : []),
       await persistArtifact(reviewRepository, artifactPayloadStore, {
         reviewRunId,
         repoId: snapshot.repoId,
@@ -370,6 +412,14 @@ export async function runPullRequestReview(
             fileCount: snapshotDerivedArtifacts.lineAnchorIndex.files.length,
             lineCount: snapshotDerivedArtifacts.lineAnchorIndex.lines.length,
           },
+          ...(rawDiffArtifact
+            ? {
+                rawDiff: {
+                  diffHash: rawDiffArtifact.diffHash,
+                  sizeBytes: rawDiffArtifact.sizeBytes,
+                },
+              }
+            : {}),
           workspace: {
             checkedOutSha: workspace.checkedOutSha,
             cleanedUp: workspace.cleanedUp,
@@ -730,6 +780,20 @@ async function findReadyIndexVersionId(
 /** Resolves after the requested number of milliseconds. */
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+/** Fetches the strongest snapshot payload the provider can supply for deterministic review. */
+async function fetchPullRequestSnapshotForReview(
+  gitProvider: GitProvider,
+  input: GitHubPullRequestRef,
+): Promise<ReviewSnapshotFetchResult> {
+  if (gitProvider.fetchPullRequestSnapshotWithRawDiff) {
+    return gitProvider.fetchPullRequestSnapshotWithRawDiff(input);
+  }
+
+  return {
+    snapshot: await gitProvider.fetchPullRequestSnapshot(input),
+  };
 }
 
 /** Loads a GitHub repository reference for review orchestration. */

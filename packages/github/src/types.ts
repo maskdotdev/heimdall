@@ -258,6 +258,18 @@ export type PublishedSummaryComment = {
   readonly htmlUrl?: string;
 };
 
+/** Pull request snapshot plus the exact raw diff used to derive its diff metadata. */
+export type PullRequestSnapshotWithRawDiff = {
+  /** Provider-neutral pull request snapshot. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Exact provider raw unified diff text. */
+  readonly rawDiff: string;
+  /** Hash of the raw diff text. */
+  readonly rawDiffHash: PullRequestSnapshot["diffHash"];
+  /** UTF-8 byte size of the raw diff text. */
+  readonly rawDiffBytes: number;
+};
+
 /** Provider-neutral GitHub adapter consumed by workers and publishers. */
 export interface GitProvider {
   /** Provider discriminator. */
@@ -278,6 +290,10 @@ export interface GitProvider {
   fetchRepository(input: GitHubRepositoryRef & { readonly orgId?: string }): Promise<Repository>;
   /** Fetches a snapshot with changed files and diff metadata. */
   fetchPullRequestSnapshot(input: GitHubPullRequestRef): Promise<PullRequestSnapshot>;
+  /** Fetches a snapshot and the exact raw diff used to build its diff metadata. */
+  fetchPullRequestSnapshotWithRawDiff?(
+    input: GitHubPullRequestRef,
+  ): Promise<PullRequestSnapshotWithRawDiff>;
   /** Fetches changed files for a pull request. */
   fetchChangedFiles(input: GitHubPullRequestRef): Promise<readonly ChangedFile[]>;
   /** Fetches branch and commit metadata. */

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChangedFile, PullRequestSnapshot, Repository } from "@repo/contracts";
+import { hashRawDiff } from "@repo/pr-snapshot";
 import type {
   CloneAuth,
   CreateOrUpdateCheckRunInput,
@@ -13,6 +14,7 @@ import type {
   PublishedSummaryComment,
   PublishReviewInput,
   PublishSummaryCommentInput,
+  PullRequestSnapshotWithRawDiff,
   SyncInstallationInput,
   SyncInstallationResult,
 } from "./types";
@@ -101,6 +103,22 @@ export class FakeGitProvider implements GitProvider {
     }
 
     return snapshot;
+  }
+
+  /** Fetches a seeded pull request snapshot with a synthetic raw diff for artifact tests. */
+  public async fetchPullRequestSnapshotWithRawDiff(
+    input: GitHubPullRequestRef,
+  ): Promise<PullRequestSnapshotWithRawDiff> {
+    const snapshot = await this.fetchPullRequestSnapshot(input);
+    const rawDiff = syntheticRawDiff(snapshot.changedFiles);
+    const rawDiffHash = hashRawDiff(rawDiff);
+
+    return {
+      rawDiff,
+      rawDiffBytes: Buffer.byteLength(rawDiff, "utf8"),
+      rawDiffHash,
+      snapshot: { ...snapshot, diffHash: rawDiffHash },
+    };
   }
 
   /** Fetches changed files from a seeded pull request snapshot. */
@@ -212,6 +230,23 @@ const pullRequestKey = (input: GitHubPullRequestRef): string =>
 
 const snapshotKey = (snapshot: PullRequestSnapshot): string =>
   `${snapshot.providerRepoId}#${snapshot.pullRequestNumber}`;
+
+const syntheticRawDiff = (files: readonly ChangedFile[]): string =>
+  files.map(syntheticRawDiffFile).join("\n");
+
+const syntheticRawDiffFile = (file: ChangedFile): string => {
+  const oldPath = file.oldPath ?? file.path;
+  const header = [
+    `diff --git ${quoteDiffPath("a", oldPath)} ${quoteDiffPath("b", file.path)}`,
+    `--- ${file.status === "added" ? "/dev/null" : quoteDiffPath("a", oldPath)}`,
+    `+++ ${file.status === "deleted" ? "/dev/null" : quoteDiffPath("b", file.path)}`,
+  ];
+
+  return [...header, file.patch ?? ""].join("\n");
+};
+
+const quoteDiffPath = (prefix: "a" | "b", path: string): string =>
+  `"${prefix}/${path.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 
 const stableId = (prefix: string, parts: readonly unknown[]): string =>
   `${prefix}_${createHash("sha256")

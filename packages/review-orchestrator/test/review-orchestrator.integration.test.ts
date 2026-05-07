@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import * as schema from "@repo/db";
 import type { GitProvider } from "@repo/github";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
+import { hashRawDiff } from "@repo/pr-snapshot";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, describe, expect, it } from "vitest";
@@ -14,6 +15,14 @@ const testDirectory = fileURLToPath(new URL(".", import.meta.url));
 const bootstrapPath = resolve(testDirectory, "../../db/bootstrap/0000_extensions.sql");
 const migrationsDirectory = resolve(testDirectory, "../../db/migrations");
 const now = "2026-04-28T12:00:00.000Z";
+const rawDiff = [
+  "diff --git a/src/index.ts b/src/index.ts",
+  "--- a/src/index.ts",
+  "+++ b/src/index.ts",
+  "@@ -1,0 +1,1 @@",
+  "+export const value = 1;",
+  "",
+].join("\n");
 
 describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => {
   const schemaName = `heimdall_review_${process.pid}_${Date.now()}`.replace(/[^A-Za-z0-9_]/g, "_");
@@ -79,6 +88,7 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
         (SELECT count(*)::int FROM review_artifacts) AS artifacts,
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'change_set') AS change_set_artifacts,
         (SELECT count(*)::int FROM review_artifacts WHERE kind = 'line_anchor_index') AS line_anchor_artifacts,
+        (SELECT count(*)::int FROM review_artifacts WHERE kind = 'raw_diff') AS raw_diff_artifacts,
         (SELECT count(*)::int FROM candidate_findings) AS candidate_findings,
         (SELECT count(*)::int FROM validated_findings) AS validated_findings,
         (SELECT count(*)::int FROM review_run_stage_events) AS stage_events,
@@ -93,11 +103,12 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     expect(counts).toEqual({
       full_snapshots: 1,
       completed_runs: 1,
-      artifacts: 9,
+      artifacts: 10,
       candidate_findings: 1,
       change_set_artifacts: 1,
       consumed_quota_reservations: 1,
       line_anchor_artifacts: 1,
+      raw_diff_artifacts: 1,
       validated_findings: 1,
       stage_events: 8,
       llm_calls: 1,
@@ -224,6 +235,25 @@ const fakeGitProvider: GitProvider = {
     changedFileCount: 1,
     fetchedAt: now,
   }),
+  fetchPullRequestSnapshotWithRawDiff: async () => {
+    const fetchedSnapshot = await fakeGitProvider.fetchPullRequestSnapshot({
+      provider: "github",
+      installationId: "inst_test",
+      owner: "octo-org",
+      repo: "heimdall-test",
+      providerRepoId: "98765",
+      pullRequestNumber: 7,
+    });
+    const rawDiffHash = hashRawDiff(rawDiff);
+    const snapshot = { ...fetchedSnapshot, diffHash: rawDiffHash };
+
+    return {
+      rawDiff,
+      rawDiffBytes: new TextEncoder().encode(rawDiff).byteLength,
+      rawDiffHash,
+      snapshot,
+    };
+  },
   fetchChangedFiles: async () => [],
   fetchBranchCommit: async () => ({ ref: "main", sha: "1111111", metadata: {} }),
   fetchExistingBotComments: async () => [],

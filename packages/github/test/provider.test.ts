@@ -210,6 +210,17 @@ describe("GitHubAppProvider", () => {
   });
 
   it("fetches pull request snapshots with changed files and raw diff hash", async () => {
+    const rawDiff = [
+      "diff --git a/src/index.ts b/src/index.ts",
+      "--- a/src/index.ts",
+      "+++ b/src/index.ts",
+      "@@ -1,2 +1,4 @@",
+      " export const oldValue = 1;",
+      "-export const removed = true;",
+      "+export const value = 2;",
+      "+export const smoke = true;",
+      "",
+    ].join("\n");
     const fetcher = createMockFetch([
       tokenRoute,
       {
@@ -259,32 +270,28 @@ describe("GitHubAppProvider", () => {
           url.endsWith("/repos/acme/api/pulls/7") &&
           (init?.headers as Record<string, string> | undefined)?.accept ===
             "application/vnd.github.v3.diff",
-        response: textResponse(
-          [
-            "diff --git a/src/index.ts b/src/index.ts",
-            "--- a/src/index.ts",
-            "+++ b/src/index.ts",
-            "@@ -1,2 +1,4 @@",
-            " export const oldValue = 1;",
-            "-export const removed = true;",
-            "+export const value = 2;",
-            "+export const smoke = true;",
-            "",
-          ].join("\n"),
-        ),
+        response: textResponse(rawDiff),
       },
     ]);
     const provider = createProvider(fetcher);
 
-    await expect(
-      provider.fetchPullRequestSnapshot({
-        provider: "github",
-        installationId: "99",
-        owner: "acme",
-        repo: "api",
-        pullRequestNumber: 7,
-      }),
-    ).resolves.toMatchObject({
+    if (!provider.fetchPullRequestSnapshotWithRawDiff) {
+      throw new Error("GitHub provider must expose raw diff snapshot fetching.");
+    }
+    const result = await provider.fetchPullRequestSnapshotWithRawDiff({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      pullRequestNumber: 7,
+    });
+
+    expect(result.rawDiff).toBe(rawDiff);
+    expect(result.rawDiffBytes).toBe(Buffer.byteLength(rawDiff, "utf8"));
+    expect(result.rawDiffHash).toBe(
+      "sha256:c1fb5e6c0fa1b437573372d5d629e605aacf62da27796f0516134135f699a70a",
+    );
+    expect(result.snapshot).toMatchObject({
       provider: "github",
       providerRepoId: "100",
       pullRequestNumber: 7,

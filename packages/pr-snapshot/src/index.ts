@@ -163,6 +163,38 @@ export type BuildSnapshotDerivedArtifactsInput = {
   readonly createdAt: string;
 };
 
+/** Review artifact payload containing the provider raw unified diff text. */
+export type RawDiffArtifact = {
+  /** Artifact schema version. */
+  readonly schemaVersion: "raw_diff.v1";
+  /** Pull request snapshot that owns the raw diff. */
+  readonly snapshotId: PullRequestSnapshot["snapshotId"];
+  /** Repository that owns the pull request. */
+  readonly repoId: PullRequestSnapshot["repoId"];
+  /** Provider pull request number. */
+  readonly pullRequestNumber: PullRequestSnapshot["pullRequestNumber"];
+  /** Reviewed head commit SHA. */
+  readonly headSha: PullRequestSnapshot["headSha"];
+  /** SHA-256 hash of the exact raw diff payload. */
+  readonly diffHash: `sha256:${string}`;
+  /** UTF-8 byte size of the raw diff payload. */
+  readonly sizeBytes: number;
+  /** Provider raw unified diff text. */
+  readonly rawDiff: string;
+  /** Timestamp when the artifact payload was created. */
+  readonly createdAt: string;
+};
+
+/** Input for building a raw-diff review artifact. */
+export type BuildRawDiffArtifactInput = {
+  /** Pull request snapshot that owns the raw diff. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Exact provider raw unified diff text. */
+  readonly rawDiff: string;
+  /** Timestamp to stamp onto the artifact payload. */
+  readonly createdAt: string;
+};
+
 type MutableChangedFile = {
   path: string;
   oldPath?: string;
@@ -448,6 +480,21 @@ export function buildSnapshotDerivedArtifacts(
       schemaVersion: "line_anchor_index.v1",
       snapshotId: snapshot.snapshotId,
     },
+  };
+}
+
+/** Builds a review artifact payload for the exact provider raw unified diff. */
+export function buildRawDiffArtifact(input: BuildRawDiffArtifactInput): RawDiffArtifact {
+  return {
+    createdAt: input.createdAt,
+    diffHash: hashRawDiff(input.rawDiff),
+    headSha: input.snapshot.headSha,
+    pullRequestNumber: input.snapshot.pullRequestNumber,
+    rawDiff: input.rawDiff,
+    repoId: input.snapshot.repoId,
+    schemaVersion: "raw_diff.v1",
+    sizeBytes: new TextEncoder().encode(input.rawDiff).byteLength,
+    snapshotId: input.snapshot.snapshotId,
   };
 }
 
