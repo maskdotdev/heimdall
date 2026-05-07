@@ -300,24 +300,104 @@ type PublisherReconciliationIssue = {
   readonly message: string;
 };
 
+/** Publish run summary shown in the publisher inspector. */
+type AdminPublishRunDebugSummary = {
+  /** Durable publish run row ID. */
+  readonly publishRunId: string;
+  /** Review run that owns the publish run. */
+  readonly reviewRunId: string;
+  /** Repository that owns the publish run. */
+  readonly repoId: string;
+  /** Publisher idempotency key. */
+  readonly idempotencyKey: string;
+  /** Current publish status. */
+  readonly status: string;
+  /** ISO timestamp when publishing started. */
+  readonly startedAt?: string;
+  /** ISO timestamp when publishing completed. */
+  readonly completedAt?: string;
+  /** ISO timestamp when the publish run row was created. */
+  readonly createdAt: string;
+  /** Publish metadata captured by the worker. */
+  readonly metadata?: unknown;
+  /** Structured publish failure when available. */
+  readonly failure?: AdminFailureDetail;
+};
+
+/** Low-level publish operation summary shown in the publisher inspector. */
+type AdminPublishOperationDebugSummary = {
+  /** Publish operation row ID. */
+  readonly publishOperationId: string;
+  /** Publish run that owns the operation. */
+  readonly publishRunId: string;
+  /** Operation type. */
+  readonly operationType: string;
+  /** Current operation status. */
+  readonly status: string;
+  /** Request hash when available. */
+  readonly requestHash?: string;
+  /** Response hash when available. */
+  readonly responseHash?: string;
+  /** ISO timestamp when the operation row was created. */
+  readonly createdAt: string;
+  /** Structured operation failure when available. */
+  readonly failure?: AdminFailureDetail;
+};
+
+/** Durable publisher output row shown in the publisher inspector. */
+type AdminPublisherOutputDebugRow = {
+  /** Additional row fields returned by the debug API. */
+  readonly [key: string]: unknown;
+  /** Durable publish run that owns the output row. */
+  readonly publishRunId?: string;
+  /** Output provider name. */
+  readonly provider?: string;
+  /** Output publication status. */
+  readonly status?: string;
+  /** Provider check-run ID when this row represents a check run. */
+  readonly providerCheckRunId?: string;
+  /** Provider review ID when this row represents an inline review. */
+  readonly providerReviewId?: string;
+  /** Provider comment ID when this row represents a comment or finding. */
+  readonly providerCommentId?: string;
+  /** Published finding row ID when this row represents a finding. */
+  readonly findingId?: string;
+  /** Validated finding row ID when this row represents a finding. */
+  readonly validatedFindingId?: string;
+  /** Finding title when this row represents a finding. */
+  readonly title?: string;
+  /** Check-run conclusion when this row represents a check run. */
+  readonly conclusion?: string;
+  /** Summary comment body hash when this row represents a summary comment. */
+  readonly bodyHash?: string;
+  /** ISO timestamp when the output row was created. */
+  readonly createdAt?: string;
+  /** ISO timestamp when the finding was published. */
+  readonly publishedAt?: string;
+  /** Output metadata captured by the publisher. */
+  readonly metadata?: unknown;
+  /** Structured output failure when available. */
+  readonly failure?: AdminFailureDetail;
+};
+
 /** Publisher debug response consumed by the dashboard. */
 type AdminPublisherDebugDetails = {
   /** Repository that owns the review run. */
   readonly repoId: string;
   /** Publish run summaries. */
-  readonly publishRuns: readonly unknown[];
+  readonly publishRuns: readonly AdminPublishRunDebugSummary[];
   /** Low-level publisher operation summaries. */
-  readonly operations: readonly unknown[];
+  readonly operations: readonly AdminPublishOperationDebugSummary[];
   /** Durable publisher output rows. */
   readonly outputs: {
     /** Provider check runs. */
-    readonly checkRuns: readonly unknown[];
+    readonly checkRuns: readonly AdminPublisherOutputDebugRow[];
     /** Provider reviews. */
-    readonly reviews: readonly unknown[];
+    readonly reviews: readonly AdminPublisherOutputDebugRow[];
     /** Fallback summary comments. */
-    readonly summaryComments: readonly unknown[];
+    readonly summaryComments: readonly AdminPublisherOutputDebugRow[];
     /** Published findings. */
-    readonly findings: readonly unknown[];
+    readonly findings: readonly AdminPublisherOutputDebugRow[];
   };
   /** Related durable jobs. */
   readonly relatedJobs: readonly AdminBackgroundJobDebugSummary[];
@@ -8151,6 +8231,9 @@ function renderPublisherDetails(details: AdminPublisherDebugDetails): string {
       ${renderMetric("Failures", String(details.failures.length), details.failures.length > 0)}
     </section>
     ${renderReconciliation(details.reconciliation)}
+    ${renderPublishRuns(details.publishRuns)}
+    ${renderPublishOperations(details.operations)}
+    ${renderPublisherOutputs(details.outputs)}
     ${renderFailures(details.failures)}
     ${renderJobs(details.relatedJobs)}
     ${renderAudits(details.replayAudits)}
@@ -8580,6 +8663,166 @@ function renderReconciliation(
       ${renderIssueList(reconciliation.issues)}
     </section>
   `;
+}
+
+/** Renders durable publish run rows. */
+function renderPublishRuns(publishRuns: readonly AdminPublishRunDebugSummary[]): string {
+  if (publishRuns.length === 0) {
+    return renderEmptyState("No durable publish run rows were found.");
+  }
+
+  return `
+    <section class="panel">
+      <h3>Publish Runs</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Status</th><th>Publish run</th><th>Idempotency</th><th>Started</th><th>Completed</th><th>Metadata</th></tr>
+          </thead>
+          <tbody>
+            ${publishRuns
+              .map(
+                (publishRun) => `
+                  <tr>
+                    <td><span class="status ${statusClass(publishRun.status)}">${escapeHtml(publishRun.status)}</span></td>
+                    <td><code>${escapeHtml(shortHash(publishRun.publishRunId))}</code></td>
+                    <td><code>${escapeHtml(shortHash(publishRun.idempotencyKey))}</code></td>
+                    <td>${publishRun.startedAt ? formatTime(publishRun.startedAt) : "n/a"}</td>
+                    <td>${publishRun.completedAt ? formatTime(publishRun.completedAt) : "n/a"}</td>
+                    <td><code>${escapeHtml(compactJson(publishRun.metadata))}</code></td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders low-level publisher operation rows. */
+function renderPublishOperations(operations: readonly AdminPublishOperationDebugSummary[]): string {
+  if (operations.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>Publish Operations</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Status</th><th>Operation</th><th>Publish run</th><th>Request</th><th>Response</th><th>Created</th></tr>
+          </thead>
+          <tbody>
+            ${operations
+              .map(
+                (operation) => `
+                  <tr>
+                    <td><span class="status ${statusClass(operation.status)}">${escapeHtml(operation.status)}</span></td>
+                    <td>${escapeHtml(operation.operationType)}</td>
+                    <td><code>${escapeHtml(shortHash(operation.publishRunId))}</code></td>
+                    <td>${operation.requestHash ? `<code>${escapeHtml(shortHash(operation.requestHash))}</code>` : "n/a"}</td>
+                    <td>${operation.responseHash ? `<code>${escapeHtml(shortHash(operation.responseHash))}</code>` : "n/a"}</td>
+                    <td>${formatTime(operation.createdAt)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Renders durable publisher output rows. */
+function renderPublisherOutputs(outputs: AdminPublisherDebugDetails["outputs"]): string {
+  const totalRows =
+    outputs.checkRuns.length +
+    outputs.reviews.length +
+    outputs.summaryComments.length +
+    outputs.findings.length;
+  if (totalRows === 0) {
+    return renderEmptyState("No durable publisher output rows were found.");
+  }
+
+  return [
+    renderPublisherOutputTable("Check Runs", outputs.checkRuns),
+    renderPublisherOutputTable("Inline Reviews", outputs.reviews),
+    renderPublisherOutputTable("Summary Comments", outputs.summaryComments),
+    renderPublisherOutputTable("Published Findings", outputs.findings),
+  ].join("");
+}
+
+/** Renders one publisher output table. */
+function renderPublisherOutputTable(
+  title: string,
+  rows: readonly AdminPublisherOutputDebugRow[],
+): string {
+  if (rows.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="panel">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Status</th><th>Provider</th><th>Provider ID</th><th>Publish run</th><th>Details</th><th>When</th></tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td><span class="status ${statusClass(row.status ?? "unknown")}">${escapeHtml(row.status ?? "unknown")}</span></td>
+                    <td>${escapeHtml(row.provider ?? "github")}</td>
+                    <td><code>${escapeHtml(shortHash(publisherOutputProviderId(row)))}</code></td>
+                    <td>${row.publishRunId ? `<code>${escapeHtml(shortHash(row.publishRunId))}</code>` : "n/a"}</td>
+                    <td>${escapeHtml(publisherOutputDetails(row))}</td>
+                    <td>${publisherOutputTime(row)}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+/** Returns the provider-visible ID for one publisher output row. */
+function publisherOutputProviderId(row: AdminPublisherOutputDebugRow): string {
+  return (
+    row.providerCheckRunId ??
+    row.providerReviewId ??
+    row.providerCommentId ??
+    row.findingId ??
+    "n/a"
+  );
+}
+
+/** Returns compact operator-facing details for one publisher output row. */
+function publisherOutputDetails(row: AdminPublisherOutputDebugRow): string {
+  const details = [
+    row.title,
+    row.conclusion ? `conclusion: ${row.conclusion}` : undefined,
+    row.bodyHash ? `body: ${shortHash(row.bodyHash)}` : undefined,
+    row.validatedFindingId ? `validated: ${shortHash(row.validatedFindingId)}` : undefined,
+    row.failure ? `failure: ${row.failure.code}` : undefined,
+  ].filter((detail): detail is string => detail !== undefined && detail.length > 0);
+
+  return details.length > 0 ? details.join(" | ") : compactJson(row.metadata);
+}
+
+/** Returns the most relevant timestamp for one publisher output row. */
+function publisherOutputTime(row: AdminPublisherOutputDebugRow): string {
+  const timestamp = row.publishedAt ?? row.createdAt;
+  return timestamp ? formatTime(timestamp) : "n/a";
 }
 
 /** Renders replay plan details. */
