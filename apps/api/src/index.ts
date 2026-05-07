@@ -1,11 +1,43 @@
-import { createConsoleObservabilitySink } from "@repo/observability";
+import { createObservabilityRuntime } from "@repo/observability";
 import { createApiApp } from "./app";
 
+const observability = createObservabilityRuntime({
+  defaultServiceName: "code-review-api",
+});
 const app = createApiApp({
-  adminObservabilitySink: createConsoleObservabilitySink(),
+  adminObservabilitySink: observability.adminControlPlaneSink,
 }).listen({
   hostname: process.env.HOST ?? "0.0.0.0",
   port: Number(process.env.PORT ?? 3000),
 });
 
 console.log(`api listening on ${app.server?.hostname}:${app.server?.port}`);
+observability.logger.info("api service started", {
+  attributes: {
+    "event.name": "api.service.started",
+    "http.host": app.server?.hostname,
+    "http.port": app.server?.port,
+  },
+});
+
+/** Flushes observability providers before process shutdown. */
+const shutdown = async (): Promise<void> => {
+  observability.logger.info("api service stopping", {
+    attributes: { "event.name": "api.service.stopping" },
+  });
+  await observability.shutdown();
+  process.exit(0);
+};
+
+process.on("SIGTERM", () => {
+  shutdown().catch((error: unknown) => {
+    console.error("api shutdown failed", error);
+    process.exit(1);
+  });
+});
+process.on("SIGINT", () => {
+  shutdown().catch((error: unknown) => {
+    console.error("api shutdown failed", error);
+    process.exit(1);
+  });
+});

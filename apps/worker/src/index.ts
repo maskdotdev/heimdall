@@ -72,6 +72,7 @@ import {
   type MemoryScope,
   MemoryScopeSchema,
 } from "@repo/memory";
+import { createObservabilityRuntime } from "@repo/observability";
 import {
   normalizePublishThrottleLimits,
   PUBLISH_THROTTLE_HOUR_WINDOW_MS,
@@ -529,6 +530,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
 
 /** Starts BullMQ workers and a polling outbox dispatcher. */
 export async function startWorkerRuntime(): Promise<WorkerRuntime> {
+  const observability = createObservabilityRuntime({
+    defaultServiceName: "code-review-worker",
+  });
   const config = loadRuntimeConfig();
   const githubPrivateKey = process.env.GITHUB_PRIVATE_KEY?.replaceAll("\\n", "\n");
   if (!config.githubAppId || !githubPrivateKey) {
@@ -598,14 +602,24 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   }, 5_000);
 
   await dispatch();
+  observability.logger.info("worker service started", {
+    attributes: {
+      "event.name": "worker.service.started",
+      "queue.count": workers.length,
+    },
+  });
 
   return {
     close: async () => {
       clearInterval(dispatchInterval);
+      observability.logger.info("worker service stopping", {
+        attributes: { "event.name": "worker.service.stopping" },
+      });
       await Promise.all(workers.map((worker) => worker.close()));
       await queueProducer.close();
       await workerConnection.quit();
       await databaseClient.close();
+      await observability.shutdown();
     },
   };
 }

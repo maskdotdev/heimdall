@@ -255,6 +255,8 @@ export type ObservabilityRuntimeOptions = {
   readonly config?: ObservabilityConfig;
   /** Optional console implementation for console-mode sinks. */
   readonly consoleLogger?: ObservabilityConsoleLogger;
+  /** Default service name used when config and environment do not provide one. */
+  readonly defaultServiceName?: string;
   /** Optional environment record for config and resource attributes. */
   readonly env?: EnvironmentRecord;
 };
@@ -698,7 +700,15 @@ export function createObservabilityRuntime(
   options: ObservabilityRuntimeOptions = {},
 ): ObservabilityRuntime {
   const env = options.env ?? getProcessEnvironment();
-  const config = options.config ?? loadObservabilityConfig(env);
+  const defaultServiceName = emptyToUndefined(options.defaultServiceName);
+  const config =
+    options.config ??
+    loadObservabilityConfig(
+      env,
+      emptyToUndefined(env.OBSERVABILITY_SERVICE_NAME) === undefined && defaultServiceName
+        ? { serviceName: defaultServiceName }
+        : {},
+    );
   const consoleLogger = options.consoleLogger ?? console;
   const adminControlPlaneSink =
     config.enabled && config.exporter === "console"

@@ -201,6 +201,24 @@ describe("observability runtime bootstrap", () => {
     expect(lines).toEqual([]);
   });
 
+  it("uses a service default only when the environment does not name a service", () => {
+    const defaultedRuntime = createObservabilityRuntime({
+      defaultServiceName: "code-review-api",
+      env: {},
+    });
+    const environmentRuntime = createObservabilityRuntime({
+      defaultServiceName: "code-review-api",
+      env: {
+        OBSERVABILITY_SERVICE_NAME: "custom-api",
+      },
+    });
+
+    expect(defaultedRuntime.config.serviceName).toBe("code-review-api");
+    expect(defaultedRuntime.resourceAttributes["service.name"]).toBe("code-review-api");
+    expect(environmentRuntime.config.serviceName).toBe("custom-api");
+    expect(environmentRuntime.resourceAttributes["service.name"]).toBe("custom-api");
+  });
+
   it("creates console runtime handles with shared resource attributes", () => {
     const lines: string[] = [];
     const runtime = createObservabilityRuntime({
