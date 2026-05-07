@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
+  findingValidationEvents,
   reviewArtifacts,
   reviewRunStageEvents,
   reviewRuns,
@@ -22,6 +23,32 @@ const requireReturnedRow = <T>(row: T | undefined): T => {
   }
 
   return row;
+};
+
+/** Product-safe validation event row to persist for review replay and debugging. */
+export type FindingValidationEventInsert = {
+  /** Stable validation event ID. */
+  readonly findingValidationEventId: string;
+  /** Review run that owns the event. */
+  readonly reviewRunId: string;
+  /** Validated finding produced from the candidate, when one exists. */
+  readonly findingId?: string | null;
+  /** Candidate finding inspected by the validation event. */
+  readonly candidateFindingId: string;
+  /** Validation stage that produced the event. */
+  readonly stage: string;
+  /** Stage result, such as passed or rejected. */
+  readonly status: string;
+  /** Primary rejection reason for quick filtering, when the stage rejected the candidate. */
+  readonly reason?: string | null;
+  /** All rejection reasons associated with the stage. */
+  readonly reasons: readonly string[];
+  /** Optional product-safe event message. */
+  readonly message?: string;
+  /** Optional product-safe event metadata. */
+  readonly metadata?: Record<string, unknown>;
+  /** Event creation time. */
+  readonly createdAt?: Date | string;
 };
 
 /** Query helper for review runs and candidate findings. */
@@ -112,6 +139,34 @@ export class ReviewRepository {
       .where(eq(validatedFindings.reviewRunId, reviewRunId));
 
     return rows.map(toValidatedFinding);
+  }
+
+  /** Inserts product-safe validation events and preserves existing event IDs. */
+  public async insertFindingValidationEvents(
+    events: readonly FindingValidationEventInsert[],
+  ): Promise<void> {
+    if (events.length === 0) {
+      return;
+    }
+
+    await this.db
+      .insert(findingValidationEvents)
+      .values(
+        events.map((event) => ({
+          candidateFindingId: event.candidateFindingId,
+          createdAt: event.createdAt ? new Date(event.createdAt) : undefined,
+          findingId: event.findingId ?? undefined,
+          findingValidationEventId: event.findingValidationEventId,
+          message: event.message,
+          metadata: event.metadata,
+          reason: event.reason ?? undefined,
+          reasons: [...event.reasons],
+          reviewRunId: event.reviewRunId,
+          stage: event.stage,
+          status: event.status,
+        })),
+      )
+      .onConflictDoNothing();
   }
 
   /** Inserts a review artifact row and preserves existing run/kind/name rows. */

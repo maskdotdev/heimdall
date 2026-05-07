@@ -71,6 +71,13 @@
       "when": 1778134862179,
       "tag": "0009_high_sphinx",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1778154029912,
+      "tag": "0010_easy_tusk",
+      "breakpoints": true
     }
   ]
 }

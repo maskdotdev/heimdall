@@ -643,6 +643,33 @@ export const validatedFindings = pgTable("validated_findings", {
   metadata: jsonb("metadata"),
 });
 
+/** Product-safe validation events emitted for each candidate finding stage. */
+export const findingValidationEvents = pgTable(
+  "finding_validation_events",
+  {
+    findingValidationEventId: text("finding_validation_event_id").primaryKey(),
+    reviewRunId: text("review_run_id")
+      .notNull()
+      .references(() => reviewRuns.reviewRunId),
+    findingId: text("finding_id").references(() => validatedFindings.findingId),
+    candidateFindingId: text("candidate_finding_id")
+      .notNull()
+      .references(() => candidateFindings.findingId),
+    stage: text("stage").notNull(),
+    status: text("status").notNull(),
+    reason: text("reason"),
+    reasons: jsonb("reasons").notNull().default(sql`'[]'::jsonb`),
+    message: text("message"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("finding_validation_events_review_run_idx").on(table.reviewRunId),
+    index("finding_validation_events_candidate_idx").on(table.candidateFindingId),
+    index("finding_validation_events_finding_idx").on(table.findingId),
+  ],
+);
+
 /** Provider publication state for validated findings. */
 export const publishedFindings = pgTable("published_findings", {
   findingId: text("finding_id").primaryKey(),

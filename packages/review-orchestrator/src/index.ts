@@ -621,6 +621,27 @@ export async function runPullRequestReview(
     for (const finding of validatedFindings) {
       await reviewRepository.insertValidatedFinding(finding);
     }
+    const findingIdByCandidateFindingId = new Map(
+      validatedFindings.map((finding) => [finding.candidateFindingId, finding.findingId]),
+    );
+    await reviewRepository.insertFindingValidationEvents(
+      validationResult.trace.events.map((event) => ({
+        candidateFindingId: event.candidateFindingId,
+        createdAt: validationResult.trace.completedAt,
+        findingId: findingIdByCandidateFindingId.get(event.candidateFindingId) ?? null,
+        findingValidationEventId: event.eventId,
+        metadata: {
+          traceCompletedAt: validationResult.trace.completedAt,
+          traceStartedAt: validationResult.trace.startedAt,
+          validatorVersion: validationResult.trace.validatorVersion,
+        },
+        reason: event.reasons[0] ?? null,
+        reasons: event.reasons,
+        reviewRunId,
+        stage: event.stage,
+        status: event.status,
+      })),
+    );
 
     const candidateArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
@@ -680,6 +701,7 @@ export async function runPullRequestReview(
         rejectedFindingCount,
         validatedFindingCount: validatedFindings.length,
         memoryFactCount: reviewMemoryFacts.length,
+        validationEventCount: validationResult.trace.events.length,
         validationStats: validationResult.stats,
       },
     });
