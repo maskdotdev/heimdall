@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,8 +19,16 @@ const execFileAsync = promisify(execFile);
 /** Git command runner used by repo sync and tests. */
 export type GitCommandRunner = (
   args: readonly string[],
-  options: { readonly cwd?: string },
+  options: GitCommandRunnerOptions,
 ) => Promise<string>;
+
+/** Options passed to one Git command execution. */
+export type GitCommandRunnerOptions = {
+  /** Working directory for the Git command. */
+  readonly cwd?: string;
+  /** Environment overrides for the Git command. */
+  readonly env?: Readonly<Record<string, string | undefined>>;
+};
 
 /** Input required to sync one repository workspace. */
 export type SyncRepositoryWorkspaceInput = GitHubRepositoryRef & {
@@ -81,18 +89,20 @@ export async function syncRepositoryWorkspace(
   const workspacePath = await mkdtemp(join(input.workspaceRoot ?? tmpdir(), "heimdall-repo-"));
   const git = dependencies.gitRunner ?? runGit;
   let cleanedUp = false;
+  let askPassPath: string | undefined;
 
   try {
     const cloneAuth = await dependencies.gitProvider.getCloneAuth(input);
-    const authenticatedUrl = createAuthenticatedCloneUrl({
-      cloneUrl: cloneAuth.cloneUrl,
-      username: cloneAuth.username,
-      password: cloneAuth.password,
-    });
 
     await git(["init"], { cwd: workspacePath });
-    await git(["remote", "add", "origin", authenticatedUrl], { cwd: workspacePath });
-    await git(["fetch", "--depth=1", "origin", input.commitSha], { cwd: workspacePath });
+    await git(["remote", "add", "origin", cloneAuth.cloneUrl], { cwd: workspacePath });
+    askPassPath = await createGitAskPassScript(workspacePath);
+    await git(["fetch", "--depth=1", "origin", input.commitSha], {
+      cwd: workspacePath,
+      env: gitAskPassEnvironment(cloneAuth, askPassPath),
+    });
+    await removeGitAskPassScript(askPassPath);
+    askPassPath = undefined;
     await git(["checkout", "--detach", input.commitSha], { cwd: workspacePath });
 
     const checkedOutSha = (await git(["rev-parse", "HEAD"], { cwd: workspacePath })).trim();
@@ -118,6 +128,9 @@ export async function syncRepositoryWorkspace(
     });
     return result;
   } catch (error) {
+    if (askPassPath) {
+      await removeGitAskPassScript(askPassPath);
+    }
     if (!cleanedUp) {
       await rm(workspacePath, { force: true, recursive: true });
     }
@@ -214,12 +227,62 @@ export function createAuthenticatedCloneUrl(input: {
   return url.toString();
 }
 
-async function runGit(
-  args: readonly string[],
-  options: { readonly cwd?: string },
-): Promise<string> {
+/** Returns a product-safe display form for a potentially credentialed Git remote URL. */
+export function redactGitRemoteUrl(input: string): string {
+  try {
+    const url = new URL(input);
+    if (url.password) {
+      url.password = "***";
+    }
+
+    return url.toString();
+  } catch {
+    return input.replace(/(https?:\/\/[^:\s/]+:)[^@\s/]+(@)/giu, "$1***$2");
+  }
+}
+
+/** Creates a temporary Git askpass helper that reads credentials from process environment. */
+async function createGitAskPassScript(workspacePath: string): Promise<string> {
+  const askPassPath = join(workspacePath, ".heimdall-git-askpass.sh");
+  await writeFile(
+    askPassPath,
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      '*Username*) printf "%s\\n" "$GIT_USERNAME" ;;',
+      '*Password*) printf "%s\\n" "$GIT_PASSWORD" ;;',
+      '*) printf "\\n" ;;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  await chmod(askPassPath, 0o700);
+  return askPassPath;
+}
+
+/** Removes the temporary Git askpass helper after the authenticated fetch finishes. */
+async function removeGitAskPassScript(askPassPath: string): Promise<void> {
+  await rm(askPassPath, { force: true });
+}
+
+/** Builds environment overrides for a Git fetch that needs short-lived credentials. */
+function gitAskPassEnvironment(
+  cloneAuth: Awaited<ReturnType<GitProvider["getCloneAuth"]>>,
+  askPassPath: string,
+): Readonly<Record<string, string>> {
+  return {
+    GIT_ASKPASS: askPassPath,
+    GIT_PASSWORD: cloneAuth.password,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_USERNAME: cloneAuth.username,
+  };
+}
+
+async function runGit(args: readonly string[], options: GitCommandRunnerOptions): Promise<string> {
   const { stdout } = await execFileAsync("git", [...args], {
     cwd: options.cwd,
+    env: options.env ? { ...process.env, ...options.env } : process.env,
     maxBuffer: 1024 * 1024 * 50,
   });
   return stdout;

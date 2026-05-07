@@ -15,6 +15,7 @@ import {
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   type GitCommandRunner,
+  redactGitRemoteUrl,
   syncRepositoryWorkspace,
 } from "../src";
 
@@ -60,8 +61,12 @@ describe("repo sync workspace", () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
     const mutableCommands: string[][] = [];
-    const gitRunner: GitCommandRunner = async (args) => {
+    const fetchEnvironments: Readonly<Record<string, string | undefined>>[] = [];
+    const gitRunner: GitCommandRunner = async (args, options) => {
       mutableCommands.push([...args]);
+      if (args[0] === "fetch") {
+        fetchEnvironments.push(options.env ?? {});
+      }
       if (args[0] === "rev-parse") {
         return `${commitSha}\n`;
       }
@@ -100,11 +105,19 @@ describe("repo sync workspace", () => {
     });
     expect(mutableCommands).toEqual([
       ["init"],
-      ["remote", "add", "origin", "https://x-access-token:token-123@github.com/acme/api.git"],
+      ["remote", "add", "origin", "https://github.com/acme/api.git"],
       ["fetch", "--depth=1", "origin", commitSha],
       ["checkout", "--detach", commitSha],
       ["rev-parse", "HEAD"],
     ]);
+    expect(fetchEnvironments).toEqual([
+      expect.objectContaining({
+        GIT_PASSWORD: "token-123",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_USERNAME: "x-access-token",
+      }),
+    ]);
+    expect(JSON.stringify(mutableCommands)).not.toContain("token-123");
     await expect(access(result.workspacePath)).rejects.toThrow();
     expect(metrics).toEqual(
       expect.arrayContaining([
@@ -145,6 +158,52 @@ describe("repo sync workspace", () => {
     ]);
     expect(JSON.stringify(metrics)).not.toContain("token-123");
     expect(JSON.stringify(spans)).not.toContain("token-123");
+  });
+
+  it("removes temporary Git askpass helpers from retained workspaces", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-askpass-test-"));
+    workspaceRoots.push(workspaceRoot);
+    let askPassPath: string | undefined;
+    const gitRunner: GitCommandRunner = async (args, options) => {
+      if (args[0] === "fetch") {
+        askPassPath = options.env?.GIT_ASKPASS;
+      }
+      if (args[0] === "rev-parse") {
+        return `${commitSha}\n`;
+      }
+      return "";
+    };
+
+    const result = await syncRepositoryWorkspace(
+      {
+        provider: "github",
+        installationId: "inst_test",
+        providerInstallationId: "99",
+        owner: "acme",
+        repo: "api",
+        commitSha,
+        keepWorkspace: true,
+        repoId: "repo_sync_test",
+        workspaceRoot,
+      },
+      {
+        gitProvider: {
+          getCloneAuth: async () => ({
+            cloneUrl: "https://github.com/acme/api.git",
+            username: "x-access-token",
+            password: "token-123",
+            expiresAt: "2026-01-01T01:00:00.000Z",
+          }),
+        },
+        gitRunner,
+      },
+    );
+
+    expect(result.cleanedUp).toBe(false);
+    if (!askPassPath) {
+      throw new Error("Expected repo sync to create a temporary Git askpass helper.");
+    }
+    await expect(access(askPassPath)).rejects.toThrow();
   });
 
   it("records failed repo sync telemetry without leaking clone credentials", async () => {
@@ -218,6 +277,12 @@ describe("repo sync workspace", () => {
         password: "token:with@chars",
       }),
     ).toBe("https://x-access-token:token%3Awith%40chars@github.com/acme/api.git");
+  });
+
+  it("redacts credentialed Git remote URLs for product-safe display", () => {
+    expect(redactGitRemoteUrl("https://x-access-token:token-123@github.com/acme/api.git")).toBe(
+      "https://x-access-token:***@github.com/acme/api.git",
+    );
   });
 
   it("removes a retained workspace", async () => {
