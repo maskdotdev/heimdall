@@ -1,11 +1,14 @@
 import { JOB_TYPES } from "@repo/contracts";
 import { validBillingReconcileJobPayloadFixture } from "@repo/contracts/fixtures/jobs.fixture";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
+import type { PublishOperationType, PublishThrottleSlotInput } from "@repo/publisher";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createRedisPublishThrottle,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
   createWorkerReviewSmokeGateway,
+  type RedisPublishThrottleClient,
   verifyWorkerIndexerCapabilities,
 } from "./index";
 
@@ -68,6 +71,100 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validBillingReconcileJobPayloadFixture]);
+  });
+});
+
+describe("createRedisPublishThrottle", () => {
+  it("coordinates repository write limits through shared Redis state", async () => {
+    let nowMs = Date.parse("2026-05-07T12:00:00.000Z");
+    let slotId = 0;
+    const sleeps: number[] = [];
+    const redis = new InMemoryRedisPublishThrottleClient();
+    const firstThrottle = createRedisPublishThrottle(redis, {
+      keyPrefix: "test:publish-throttle",
+      limits: {
+        maxPublishOperationsPerInstallationPerMinute: 10,
+        maxPublishOperationsPerRepoPerMinute: 1,
+        maxSummaryCommentsPerPrPerHour: 10,
+      },
+      now: () => new Date(nowMs),
+      randomId: () => `slot_${++slotId}`,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+    const secondThrottle = createRedisPublishThrottle(redis, {
+      keyPrefix: "test:publish-throttle",
+      limits: {
+        maxPublishOperationsPerInstallationPerMinute: 10,
+        maxPublishOperationsPerRepoPerMinute: 1,
+        maxSummaryCommentsPerPrPerHour: 10,
+      },
+      now: () => new Date(nowMs),
+      randomId: () => `slot_${++slotId}`,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+
+    await firstThrottle.waitForSlot(publishThrottleSlot("check_run.upsert"));
+    const decision = await secondThrottle.waitForSlot(
+      publishThrottleSlot("review.inline_comments"),
+    );
+
+    expect(decision).toMatchObject({
+      limitReason: "publish_operations_per_repo_per_minute",
+      waitedMs: 60_000,
+    });
+    expect(sleeps).toEqual([60_000]);
+  });
+
+  it("coordinates PR summary comment limits through shared Redis state", async () => {
+    let nowMs = Date.parse("2026-05-07T12:00:00.000Z");
+    let slotId = 0;
+    const sleeps: number[] = [];
+    const redis = new InMemoryRedisPublishThrottleClient();
+    const firstThrottle = createRedisPublishThrottle(redis, {
+      keyPrefix: "test:publish-throttle",
+      limits: {
+        maxPublishOperationsPerInstallationPerMinute: 10,
+        maxPublishOperationsPerRepoPerMinute: 10,
+        maxSummaryCommentsPerPrPerHour: 1,
+      },
+      now: () => new Date(nowMs),
+      randomId: () => `slot_${++slotId}`,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+    const secondThrottle = createRedisPublishThrottle(redis, {
+      keyPrefix: "test:publish-throttle",
+      limits: {
+        maxPublishOperationsPerInstallationPerMinute: 10,
+        maxPublishOperationsPerRepoPerMinute: 10,
+        maxSummaryCommentsPerPrPerHour: 1,
+      },
+      now: () => new Date(nowMs),
+      randomId: () => `slot_${++slotId}`,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+    });
+
+    await firstThrottle.waitForSlot(publishThrottleSlot("summary_comment.configured"));
+    const decision = await secondThrottle.waitForSlot(
+      publishThrottleSlot("summary_comment.fallback"),
+    );
+
+    expect(decision).toMatchObject({
+      limitReason: "summary_comments_per_pr_per_hour",
+      waitedMs: 3_600_000,
+    });
+    expect(sleeps).toEqual([3_600_000]);
   });
 });
 
@@ -159,3 +256,79 @@ describe("verifyWorkerIndexerCapabilities", () => {
     info.mockRestore();
   });
 });
+
+/** In-memory Redis script harness shared by cross-process throttle unit tests. */
+class InMemoryRedisPublishThrottleClient implements RedisPublishThrottleClient {
+  /** Sorted-set state keyed by Redis key, then member. */
+  private readonly sortedSets = new Map<string, Map<string, number>>();
+
+  /** Runs the Redis throttle script against the in-memory sorted-set state. */
+  public async eval(
+    _script: string,
+    keyCount: number,
+    ...args: readonly (string | number)[]
+  ): Promise<unknown> {
+    const keys = args.slice(0, keyCount).map(String);
+    const nowMs = Number(args[keyCount]);
+    const member = String(args[keyCount + 1]);
+    const scopeCount = Number(args[keyCount + 2]);
+    if (scopeCount !== keyCount) {
+      throw new Error("Unexpected Redis throttle scope count.");
+    }
+
+    for (let index = 0; index < scopeCount; index += 1) {
+      const argOffset = keyCount + 3 + index * 3;
+      const limit = Number(args[argOffset]);
+      const windowMs = Number(args[argOffset + 1]);
+      const reason = String(args[argOffset + 2]);
+      const sortedSet = this.sortedSet(keys[index] ?? "");
+      this.prune(sortedSet, nowMs - windowMs);
+
+      if (sortedSet.size >= limit) {
+        const oldestMs = Math.min(...sortedSet.values());
+        const waitMs = Math.max(1, windowMs - (nowMs - oldestMs));
+
+        return [0, waitMs, reason];
+      }
+    }
+
+    for (let index = 0; index < scopeCount; index += 1) {
+      const sortedSet = this.sortedSet(keys[index] ?? "");
+      sortedSet.set(`${member}:${index + 1}`, nowMs);
+    }
+
+    return [1, 0, ""];
+  }
+
+  /** Returns the sorted set for a Redis key, creating it when needed. */
+  private sortedSet(key: string): Map<string, number> {
+    const existing = this.sortedSets.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const created = new Map<string, number>();
+    this.sortedSets.set(key, created);
+
+    return created;
+  }
+
+  /** Removes entries at or before the Redis sorted-set cutoff score. */
+  private prune(sortedSet: Map<string, number>, cutoffMs: number): void {
+    for (const [member, score] of sortedSet) {
+      if (score <= cutoffMs) {
+        sortedSet.delete(member);
+      }
+    }
+  }
+}
+
+/** Creates one shared publisher throttle slot fixture. */
+function publishThrottleSlot(operationType: PublishOperationType): PublishThrottleSlotInput {
+  return {
+    installationId: "inst_1",
+    operationType,
+    pullRequestNumber: 7,
+    repositoryKey: "repo_1",
+  };
+}

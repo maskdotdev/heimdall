@@ -54,8 +54,14 @@ import {
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 import type { LLMGateway } from "@repo/llm-gateway";
 import {
-  createInMemoryPublishThrottle,
+  normalizePublishThrottleLimits,
+  PUBLISH_THROTTLE_HOUR_WINDOW_MS,
+  PUBLISH_THROTTLE_MINUTE_WINDOW_MS,
+  type PublishOperationType,
   type PublishThrottle,
+  type PublishThrottleLimitReason,
+  type PublishThrottleLimits,
+  type PublishThrottleSlotInput,
   publishReviewRun,
 } from "@repo/publisher";
 import {
@@ -120,6 +126,232 @@ export type WorkerRuntime = {
   /** Stops workers, dispatcher resources, Redis, and database connections. */
   readonly close: () => Promise<void>;
 };
+
+/** Redis commands required by the cross-process publisher throttle. */
+export type RedisPublishThrottleClient = {
+  /** Runs the atomic throttle reservation script. */
+  readonly eval: (
+    script: string,
+    keyCount: number,
+    ...args: readonly (string | number)[]
+  ) => Promise<unknown>;
+};
+
+/** Options used to create a Redis-backed publisher throttle. */
+export type CreateRedisPublishThrottleOptions = {
+  /** Optional limit overrides. */
+  readonly limits?: Partial<PublishThrottleLimits>;
+  /** Optional clock for deterministic tests. */
+  readonly now?: () => Date;
+  /** Optional sleep implementation for deterministic tests. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Optional Redis key prefix. */
+  readonly keyPrefix?: string;
+  /** Optional member ID generator for deterministic tests. */
+  readonly randomId?: () => string;
+};
+
+/** One Redis sorted-set scope used for a publish throttle window. */
+type RedisPublishThrottleScope = {
+  /** Redis key storing recent reservations for the scope. */
+  readonly key: string;
+  /** Maximum reservations allowed inside the window. */
+  readonly limit: number;
+  /** Rolling window duration in milliseconds. */
+  readonly windowMs: number;
+  /** Stable reason returned when the scope blocks a reservation. */
+  readonly limitReason: PublishThrottleLimitReason;
+};
+
+/** Parsed result returned by the Redis throttle script. */
+type RedisPublishThrottleScriptResult = {
+  /** Whether the script reserved the requested publish slot. */
+  readonly allowed: boolean;
+  /** Milliseconds to wait before retrying when the slot was not reserved. */
+  readonly waitMs: number;
+  /** First throttle limit that required waiting. */
+  readonly limitReason?: PublishThrottleLimitReason;
+};
+
+/** Redis key prefix for provider-visible publish throttle reservations. */
+const REDIS_PUBLISH_THROTTLE_KEY_PREFIX = "heimdall:publish-throttle";
+
+/** Atomic Redis script that prunes, checks, and reserves publish throttle slots. */
+const REDIS_PUBLISH_THROTTLE_SCRIPT = `
+local now_ms = tonumber(ARGV[1])
+local member = ARGV[2]
+local scope_count = tonumber(ARGV[3])
+
+for index = 1, scope_count do
+  local arg_offset = 3 + ((index - 1) * 3)
+  local limit = tonumber(ARGV[arg_offset + 1])
+  local window_ms = tonumber(ARGV[arg_offset + 2])
+  local reason = ARGV[arg_offset + 3]
+  local cutoff = now_ms - window_ms
+
+  redis.call("ZREMRANGEBYSCORE", KEYS[index], "-inf", cutoff)
+
+  if tonumber(redis.call("ZCARD", KEYS[index])) >= limit then
+    local oldest = redis.call("ZRANGE", KEYS[index], 0, 0, "WITHSCORES")
+    local oldest_ms = tonumber(oldest[2])
+    local wait_ms = window_ms - (now_ms - oldest_ms)
+    if wait_ms < 1 then
+      wait_ms = 1
+    end
+
+    return {0, wait_ms, reason}
+  end
+end
+
+for index = 1, scope_count do
+  local arg_offset = 3 + ((index - 1) * 3)
+  local window_ms = tonumber(ARGV[arg_offset + 2])
+
+  redis.call("ZADD", KEYS[index], now_ms, member .. ":" .. index)
+  redis.call("PEXPIRE", KEYS[index], window_ms + 1000)
+end
+
+return {1, 0, ""}
+`;
+
+/** Creates a Redis-backed throttle shared by every worker process using the same Redis prefix. */
+export function createRedisPublishThrottle(
+  client: RedisPublishThrottleClient,
+  options: CreateRedisPublishThrottleOptions = {},
+): PublishThrottle {
+  const limits = normalizePublishThrottleLimits(options.limits);
+  const now = options.now ?? (() => new Date());
+  const sleep = options.sleep ?? defaultSleep;
+  const keyPrefix = options.keyPrefix ?? REDIS_PUBLISH_THROTTLE_KEY_PREFIX;
+  const randomId = options.randomId ?? randomUUID;
+
+  return {
+    waitForSlot: async (input) => {
+      let waitedMs = 0;
+      let limitReason: PublishThrottleLimitReason | undefined;
+
+      while (true) {
+        const scopes = redisPublishThrottleScopes(input, limits, keyPrefix);
+        const scriptResult = asRedisPublishThrottleScriptResult(
+          await client.eval(
+            REDIS_PUBLISH_THROTTLE_SCRIPT,
+            scopes.length,
+            ...scopes.map((scope) => scope.key),
+            now().getTime(),
+            randomId(),
+            scopes.length,
+            ...scopes.flatMap((scope) => [scope.limit, scope.windowMs, scope.limitReason]),
+          ),
+        );
+
+        if (scriptResult.allowed) {
+          return {
+            waitedMs,
+            ...(limitReason ? { limitReason } : {}),
+            limits,
+          };
+        }
+
+        limitReason ??= scriptResult.limitReason;
+        waitedMs += scriptResult.waitMs;
+        await sleep(scriptResult.waitMs);
+      }
+    },
+  };
+}
+
+/** Returns the Redis throttle scopes that must all have capacity for one operation. */
+function redisPublishThrottleScopes(
+  input: PublishThrottleSlotInput,
+  limits: PublishThrottleLimits,
+  keyPrefix: string,
+): readonly RedisPublishThrottleScope[] {
+  const scopes: RedisPublishThrottleScope[] = [
+    {
+      key: redisPublishThrottleKey(keyPrefix, "repo", input.repositoryKey),
+      limit: limits.maxPublishOperationsPerRepoPerMinute,
+      windowMs: PUBLISH_THROTTLE_MINUTE_WINDOW_MS,
+      limitReason: "publish_operations_per_repo_per_minute",
+    },
+    {
+      key: redisPublishThrottleKey(keyPrefix, "installation", input.installationId),
+      limit: limits.maxPublishOperationsPerInstallationPerMinute,
+      windowMs: PUBLISH_THROTTLE_MINUTE_WINDOW_MS,
+      limitReason: "publish_operations_per_installation_per_minute",
+    },
+  ];
+
+  if (isSummaryPublishOperation(input.operationType)) {
+    scopes.push({
+      key: redisPublishThrottleKey(
+        keyPrefix,
+        "summary",
+        input.repositoryKey,
+        String(input.pullRequestNumber),
+      ),
+      limit: limits.maxSummaryCommentsPerPrPerHour,
+      windowMs: PUBLISH_THROTTLE_HOUR_WINDOW_MS,
+      limitReason: "summary_comments_per_pr_per_hour",
+    });
+  }
+
+  return scopes;
+}
+
+/** Builds a Redis key for one publish throttle scope. */
+function redisPublishThrottleKey(
+  keyPrefix: string,
+  scope: string,
+  ...parts: readonly string[]
+): string {
+  return [keyPrefix, scope, ...parts.map((part) => encodeURIComponent(part))].join(":");
+}
+
+/** Returns true when an operation publishes or updates a PR summary comment. */
+function isSummaryPublishOperation(operationType: PublishOperationType): boolean {
+  return (
+    operationType === "summary_comment.configured" || operationType === "summary_comment.fallback"
+  );
+}
+
+/** Parses the atomic Redis throttle script result. */
+function asRedisPublishThrottleScriptResult(value: unknown): RedisPublishThrottleScriptResult {
+  if (!Array.isArray(value) || value.length < 2) {
+    throw new Error("Redis publish throttle returned an invalid result.");
+  }
+
+  const allowed = Number(value[0]) === 1;
+  const waitMs = Number(value[1]);
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new Error("Redis publish throttle returned an invalid wait duration.");
+  }
+
+  const rawReason = value[2];
+  return {
+    allowed,
+    waitMs,
+    ...(typeof rawReason === "string" && rawReason.length > 0
+      ? { limitReason: asPublishThrottleLimitReason(rawReason) }
+      : {}),
+  };
+}
+
+/** Parses a Redis script reason into a known publish throttle reason. */
+function asPublishThrottleLimitReason(value: string): PublishThrottleLimitReason {
+  switch (value) {
+    case "publish_operations_per_installation_per_minute":
+    case "publish_operations_per_repo_per_minute":
+    case "summary_comments_per_pr_per_hour":
+      return value;
+    default:
+      throw new Error(`Redis publish throttle returned unsupported limit reason: ${value}`);
+  }
+}
+
+/** Sleeps for the requested duration. */
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Creates real handlers for durable job types consumed by this worker app. */
 export function createWorkerHandlers(options: CreateWorkerHandlersOptions): DurableJobHandlerMap {
@@ -257,7 +489,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ? createWorkerReviewSmokeGateway()
       : undefined;
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
-  const publishThrottle = createInMemoryPublishThrottle();
+  const publishThrottle = createRedisPublishThrottle(workerConnection);
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;

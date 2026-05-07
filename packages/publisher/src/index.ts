@@ -44,10 +44,10 @@ export const PUBLISH_LIMITS = {
 } as const satisfies PublishThrottleLimits;
 
 /** Rolling window used for per-repository and per-installation publish throttles. */
-const PUBLISH_THROTTLE_MINUTE_WINDOW_MS = 60_000;
+export const PUBLISH_THROTTLE_MINUTE_WINDOW_MS = 60_000;
 
 /** Rolling window used for per-PR summary comment throttles. */
-const PUBLISH_THROTTLE_HOUR_WINDOW_MS = 3_600_000;
+export const PUBLISH_THROTTLE_HOUR_WINDOW_MS = 3_600_000;
 
 /** Limits applied before provider-visible publish writes. */
 export type PublishThrottleLimits = {
@@ -1093,7 +1093,8 @@ function summaryPublishedFindingsForPlan(input: {
   );
 }
 
-function normalizePublishThrottleLimits(
+/** Normalizes partial publish throttle overrides into bounded runtime limits. */
+export function normalizePublishThrottleLimits(
   overrides: Partial<PublishThrottleLimits> | undefined,
 ): PublishThrottleLimits {
   return {
