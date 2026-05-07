@@ -78,6 +78,14 @@ describe("observability config", () => {
     ).toThrow(ObservabilityConfigValidationError);
   });
 
+  it("rejects invalid OTLP endpoint URLs", () => {
+    expect(() =>
+      loadObservabilityConfig({
+        OBSERVABILITY_OTLP_ENDPOINT: "localhost:4318",
+      }),
+    ).toThrow(ObservabilityConfigValidationError);
+  });
+
   it("builds stable service resource attributes without customer identifiers", () => {
     const config = loadObservabilityConfig({
       APP_VERSION: "sha-123",
@@ -509,6 +517,60 @@ describe("observability runtime bootstrap", () => {
     expect(lines[1]).toContain('"target":"heimdall.admin_control_plane"');
     expect(lines[2]).toContain('"target":"heimdall.metrics"');
     expect(lines[2]).not.toContain("rrun_1");
+  });
+
+  it("creates OTLP runtime handles without writing console telemetry", () => {
+    const lines: string[] = [];
+    const runtime = createObservabilityRuntime({
+      consoleLogger: {
+        info: (line) => lines.push(String(line)),
+        warn: (line) => lines.push(String(line)),
+      },
+      env: {
+        APP_VERSION: "sha-otlp",
+        HOSTNAME: "worker-otlp",
+        OBSERVABILITY_ENABLED: "true",
+        OBSERVABILITY_EXPORTER: "otlp",
+        OBSERVABILITY_METRICS_INTERVAL_MS: "60000",
+        OBSERVABILITY_OTLP_ENDPOINT: "http://otel-collector:4318",
+        OBSERVABILITY_SERVICE_NAME: "heimdall-worker",
+      },
+      registerGlobalOpenTelemetry: false,
+    });
+
+    runtime.logger.info("Handled OTLP request", {
+      attributes: { "http.status_code": 200 },
+      timestamp: "2026-05-07T12:05:00.000Z",
+    });
+    runtime.metrics.count(OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal, {
+      labels: { status: "started" },
+      timestamp: "2026-05-07T12:05:01.000Z",
+    });
+    runtime.adminControlPlaneSink.record({
+      name: "admin.replay.dispatched",
+      timestamp: "2026-05-07T12:05:02.000Z",
+    });
+    const span = runtime.traces
+      .startSpan(OBSERVABILITY_SPAN_NAMES.durableJobProcess, {
+        attributes: { "job.type": "github.review_pull_request.v1" },
+        kind: "consumer",
+        startTime: "2026-05-07T12:05:03.000Z",
+      })
+      .end({ timestamp: "2026-05-07T12:05:03.125Z" });
+
+    expect(runtime.config.exporter).toBe("otlp");
+    expect(runtime.resourceAttributes).toMatchObject({
+      "host.name": "worker-otlp",
+      "service.name": "heimdall-worker",
+      "service.version": "sha-otlp",
+    });
+    expect(span).toMatchObject({
+      durationMs: 125,
+      kind: "consumer",
+      name: OBSERVABILITY_SPAN_NAMES.durableJobProcess,
+      status: "ok",
+    });
+    expect(lines).toEqual([]);
   });
 });
 

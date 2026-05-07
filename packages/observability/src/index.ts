@@ -1,3 +1,40 @@
+import {
+  createTraceState,
+  type Attributes as OpenTelemetryAttributes,
+  type Context as OpenTelemetryContext,
+  type Counter as OpenTelemetryCounter,
+  type Gauge as OpenTelemetryGauge,
+  type Histogram as OpenTelemetryHistogram,
+  type Meter as OpenTelemetryMeter,
+  type Span as OpenTelemetrySpan,
+  type SpanContext as OpenTelemetrySpanContext,
+  SpanKind as OpenTelemetrySpanKind,
+  type Tracer as OpenTelemetryTracer,
+  metrics as openTelemetryMetrics,
+  trace as openTelemetryTrace,
+  ROOT_CONTEXT,
+  SpanStatusCode,
+} from "@opentelemetry/api";
+import {
+  type Logger as OpenTelemetryLogger,
+  logs as openTelemetryLogs,
+  SeverityNumber,
+} from "@opentelemetry/api-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
+import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import {
+  BatchLogRecordProcessor,
+  LoggerProvider as OpenTelemetryLoggerProvider,
+} from "@opentelemetry/sdk-logs";
+import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
+import {
+  BatchSpanProcessor,
+  NodeTracerProvider,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
+} from "@opentelemetry/sdk-trace-node";
 import { type EnvironmentRecord, getProcessEnvironment } from "@repo/config";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -466,6 +503,8 @@ export type ObservabilityRuntimeOptions = {
   readonly defaultServiceName?: string;
   /** Optional environment record for config and resource attributes. */
   readonly env?: EnvironmentRecord;
+  /** Whether OTLP mode registers OpenTelemetry providers globally. Defaults to true. */
+  readonly registerGlobalOpenTelemetry?: boolean;
 };
 
 /** Runtime observability handles shared by services. */
@@ -484,6 +523,20 @@ export type ObservabilityRuntime = {
   readonly resourceAttributes: ObservabilityResourceAttributes;
   /** Flushes and closes observability providers. No-op until OTel providers are wired. */
   readonly shutdown: () => Promise<void>;
+};
+
+/** OpenTelemetry-backed runtime handles selected when the OTLP exporter is enabled. */
+type OpenTelemetryRuntimeHandles = {
+  /** Admin control-plane telemetry sink backed by OpenTelemetry logs. */
+  readonly adminControlPlaneSink: ObservabilitySink;
+  /** Structured logger backed by OpenTelemetry logs. */
+  readonly logger: StructuredTelemetryLogger;
+  /** Metric recorder backed by OpenTelemetry metrics. */
+  readonly metrics: TelemetryMetricRecorder;
+  /** Flushes and closes OpenTelemetry providers. */
+  readonly shutdown: () => Promise<void>;
+  /** Span recorder backed by OpenTelemetry traces. */
+  readonly traces: TelemetrySpanRecorder;
 };
 
 /** Summary of admin control-plane telemetry used by release audits. */
@@ -541,6 +594,10 @@ export const OBSERVABILITY_SPAN_NAMES = {
   pullRequestReview: "code_review_agent.review.pull_request",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
 } as const;
+
+const OPEN_TELEMETRY_EXPORT_TIMEOUT_MS = 5_000;
+
+let hasRegisteredOpenTelemetryProviders = false;
 
 /** Error raised when observability configuration is invalid. */
 export class ObservabilityConfigValidationError extends Error {
@@ -648,6 +705,11 @@ export function loadObservabilityConfig(
       ...(overrides.redaction ?? {}),
     },
   };
+  const configuredOtlpEndpoint =
+    typeof mergedConfig.otlpEndpoint === "string" ? mergedConfig.otlpEndpoint : undefined;
+  if (configuredOtlpEndpoint && !isAbsoluteHttpUrl(configuredOtlpEndpoint)) {
+    issues.push("OBSERVABILITY_OTLP_ENDPOINT must be an absolute http(s) URL");
+  }
 
   if (issues.length > 0) {
     throw new ObservabilityConfigValidationError(issues);
@@ -1198,6 +1260,289 @@ export function createTelemetrySpanRecorder(
   };
 }
 
+/** Creates OpenTelemetry-backed runtime handles for OTLP exporter mode. */
+function createOpenTelemetryRuntimeHandles(
+  config: ObservabilityConfig,
+  env: EnvironmentRecord,
+  registerGlobalOpenTelemetry: boolean,
+): OpenTelemetryRuntimeHandles {
+  const resource = resourceFromAttributes({
+    ...createObservabilityResourceAttributes(config, env),
+  });
+  const exportTimeoutMillis = createOpenTelemetryExportTimeoutMs(config);
+  const scheduledDelayMillis = Math.min(OPEN_TELEMETRY_EXPORT_TIMEOUT_MS, config.metricsIntervalMs);
+  const traceExporter = new OTLPTraceExporter(
+    createOpenTelemetryExporterConfig(config, "v1/traces"),
+  );
+  const metricExporter = new OTLPMetricExporter(
+    createOpenTelemetryExporterConfig(config, "v1/metrics"),
+  );
+  const logExporter = new OTLPLogExporter(createOpenTelemetryExporterConfig(config, "v1/logs"));
+  const meterProvider = new MeterProvider({
+    readers: [
+      new PeriodicExportingMetricReader({
+        exportIntervalMillis: config.metricsIntervalMs,
+        exportTimeoutMillis,
+        exporter: metricExporter,
+      }),
+    ],
+    resource,
+  });
+  const tracerProvider = new NodeTracerProvider({
+    meterProvider,
+    resource,
+    sampler: new ParentBasedSampler({
+      root: new TraceIdRatioBasedSampler(config.traceSampleRate),
+    }),
+    spanProcessors: [
+      new BatchSpanProcessor(traceExporter, {
+        exportTimeoutMillis,
+        scheduledDelayMillis,
+      }),
+    ],
+  });
+  const loggerProvider = new OpenTelemetryLoggerProvider({
+    meterProvider,
+    processors: [
+      new BatchLogRecordProcessor(logExporter, {
+        exportTimeoutMillis,
+        scheduledDelayMillis,
+      }),
+    ],
+    resource,
+  });
+
+  if (registerGlobalOpenTelemetry && !hasRegisteredOpenTelemetryProviders) {
+    tracerProvider.register();
+    openTelemetryMetrics.setGlobalMeterProvider(meterProvider);
+    openTelemetryLogs.setGlobalLoggerProvider(loggerProvider);
+    hasRegisteredOpenTelemetryProviders = true;
+  }
+
+  const meter = meterProvider.getMeter(config.serviceName, config.version);
+  const tracer = tracerProvider.getTracer(config.serviceName, config.version);
+  const logger = loggerProvider.getLogger(config.serviceName, config.version);
+
+  return {
+    adminControlPlaneSink: createOpenTelemetryObservabilitySink(config, logger),
+    logger: createStructuredTelemetryLogger(
+      config,
+      createOpenTelemetryStructuredTelemetryLogSink(logger),
+      env,
+    ),
+    metrics: createOpenTelemetryMetricRecorder(config, meter, env),
+    shutdown: async () => {
+      await Promise.allSettled([
+        loggerProvider.forceFlush(),
+        meterProvider.forceFlush(),
+        tracerProvider.forceFlush(),
+      ]);
+      await Promise.allSettled([
+        loggerProvider.shutdown(),
+        tracerProvider.shutdown(),
+        meterProvider.shutdown(),
+      ]);
+    },
+    traces: createOpenTelemetrySpanRecorder(config, tracer, env),
+  };
+}
+
+/** Creates an OpenTelemetry sink for structured telemetry log entries. */
+function createOpenTelemetryStructuredTelemetryLogSink(
+  logger: OpenTelemetryLogger,
+): StructuredTelemetryLogSink {
+  return {
+    write: (entry) => {
+      logger.emit({
+        attributes: toOpenTelemetryAttributes({
+          ...(entry.attributes ?? {}),
+          ...telemetryErrorAttributes(entry.error),
+          "log.target": entry.target,
+        }),
+        body: entry.message,
+        severityNumber: toOpenTelemetrySeverityNumber(entry.level),
+        severityText: entry.level.toUpperCase(),
+        timestamp: toOpenTelemetryTime(entry.timestamp),
+      });
+    },
+  };
+}
+
+/** Creates an OpenTelemetry log sink for admin control-plane telemetry events. */
+function createOpenTelemetryObservabilitySink(
+  config: ObservabilityConfig,
+  logger: OpenTelemetryLogger,
+): ObservabilitySink {
+  return {
+    record: (event) => {
+      const normalizedEvent = normalizeAdminControlPlaneTelemetryEvent(event);
+      const level = telemetryLogLevel(normalizedEvent);
+      logger.emit({
+        attributes: toOpenTelemetryAttributes(
+          createOpenTelemetryAdminEventAttributes(config, normalizedEvent),
+        ),
+        body: normalizedEvent.name,
+        severityNumber: toOpenTelemetrySeverityNumber(level),
+        severityText: level.toUpperCase(),
+        timestamp: toOpenTelemetryTime(normalizedEvent.timestamp),
+      });
+    },
+  };
+}
+
+/** Creates a metric recorder backed by OpenTelemetry synchronous instruments. */
+function createOpenTelemetryMetricRecorder(
+  config: ObservabilityConfig,
+  meter: OpenTelemetryMeter,
+  env: EnvironmentRecord = getProcessEnvironment(),
+): TelemetryMetricRecorder {
+  const counters = new Map<string, OpenTelemetryCounter>();
+  const gauges = new Map<string, OpenTelemetryGauge>();
+  const histograms = new Map<string, OpenTelemetryHistogram>();
+  const record = (
+    kind: TelemetryMetricKind,
+    name: string,
+    value: number,
+    options?: TelemetryMetricOptions,
+  ) => {
+    if (!config.enabled || config.exporter !== "otlp") {
+      return;
+    }
+
+    try {
+      const point = createTelemetryMetricPoint(
+        config,
+        {
+          ...options,
+          kind,
+          name,
+          value,
+        },
+        env,
+      );
+      const attributes = toOpenTelemetryAttributes(point.labels ?? {});
+      const key = telemetryMetricInstrumentKey(point);
+      const metricOptions = point.unit ? { unit: point.unit } : {};
+
+      if (point.kind === "counter") {
+        const counter = counters.get(key) ?? meter.createCounter(point.name, metricOptions);
+        counters.set(key, counter);
+        counter.add(point.value, attributes);
+        return;
+      }
+      if (point.kind === "gauge") {
+        const gauge = gauges.get(key) ?? meter.createGauge(point.name, metricOptions);
+        gauges.set(key, gauge);
+        gauge.record(point.value, attributes);
+        return;
+      }
+
+      const histogram = histograms.get(key) ?? meter.createHistogram(point.name, metricOptions);
+      histograms.set(key, histogram);
+      histogram.record(point.value, attributes);
+    } catch {
+      return;
+    }
+  };
+
+  return {
+    count: (name, options) => record("counter", name, options?.value ?? 1, options),
+    gauge: (name, value, options) => record("gauge", name, value, options),
+    histogram: (name, value, options) => record("histogram", name, value, options),
+  };
+}
+
+/** Creates a span recorder backed by an OpenTelemetry tracer. */
+function createOpenTelemetrySpanRecorder(
+  config: ObservabilityConfig,
+  tracer: OpenTelemetryTracer,
+  env: EnvironmentRecord = getProcessEnvironment(),
+): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options = {}) => {
+      const startTime = options.startTime ?? new Date().toISOString();
+      const openTelemetrySpan = startOpenTelemetrySpan(config, tracer, name, startTime, options);
+      let ended = false;
+
+      return {
+        end: (endOptions = {}) => {
+          if (ended) {
+            return undefined;
+          }
+          ended = true;
+          if (!config.enabled || config.exporter !== "otlp") {
+            return undefined;
+          }
+
+          try {
+            const span = createTelemetrySpanRecord(
+              config,
+              {
+                attributes: {
+                  ...(options.attributes ?? {}),
+                  ...(endOptions.attributes ?? {}),
+                },
+                endTime: endOptions.timestamp ?? new Date().toISOString(),
+                name,
+                startTime,
+                ...(endOptions.error !== undefined ? { error: endOptions.error } : {}),
+                ...(options.kind ? { kind: options.kind } : {}),
+                ...(endOptions.status ? { status: endOptions.status } : {}),
+                ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+              },
+              env,
+            );
+            openTelemetrySpan?.setAttributes(toOpenTelemetryAttributes(span.attributes ?? {}));
+            if (span.error) {
+              openTelemetrySpan?.recordException(
+                new Error(span.error.message),
+                toOpenTelemetryTime(span.endTime),
+              );
+            }
+            openTelemetrySpan?.setStatus(toOpenTelemetrySpanStatus(span.status, span.error));
+            openTelemetrySpan?.end(toOpenTelemetryTime(span.endTime));
+            return span;
+          } catch {
+            openTelemetrySpan?.setStatus({ code: SpanStatusCode.ERROR });
+            openTelemetrySpan?.end();
+            return undefined;
+          }
+        },
+      };
+    },
+  };
+}
+
+/** Starts an OpenTelemetry span without letting provider failures escape application code. */
+function startOpenTelemetrySpan(
+  config: ObservabilityConfig,
+  tracer: OpenTelemetryTracer,
+  name: string,
+  startTime: string,
+  options: TelemetrySpanOptions,
+): OpenTelemetrySpan | undefined {
+  if (!config.enabled || config.exporter !== "otlp") {
+    return undefined;
+  }
+
+  try {
+    const attributes = options.attributes
+      ? sanitizeTelemetryAttributes(options.attributes, config.redaction)
+      : undefined;
+    return tracer.startSpan(
+      name,
+      {
+        ...(attributes ? { attributes: toOpenTelemetryAttributes(attributes) } : {}),
+        kind: toOpenTelemetrySpanKind(options.kind ?? "internal"),
+        startTime: toOpenTelemetryTime(startTime),
+      },
+      createOpenTelemetryParentContext(options.traceContext),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 /** Normalizes product-safe trace context fields for propagation. */
 export function normalizeTelemetryTraceContext(
   input: TelemetryTraceContextInput,
@@ -1266,6 +1611,24 @@ export function createObservabilityRuntime(
         : {},
     );
   const consoleLogger = options.consoleLogger ?? console;
+  if (config.enabled && config.exporter === "otlp") {
+    const openTelemetryRuntime = createOpenTelemetryRuntimeHandles(
+      config,
+      env,
+      options.registerGlobalOpenTelemetry ?? true,
+    );
+
+    return {
+      adminControlPlaneSink: openTelemetryRuntime.adminControlPlaneSink,
+      config,
+      logger: openTelemetryRuntime.logger,
+      metrics: openTelemetryRuntime.metrics,
+      resourceAttributes: createObservabilityResourceAttributes(config, env),
+      shutdown: openTelemetryRuntime.shutdown,
+      traces: openTelemetryRuntime.traces,
+    };
+  }
+
   const adminControlPlaneSink =
     config.enabled && config.exporter === "console"
       ? createConsoleObservabilitySink(consoleLogger)
@@ -1416,6 +1779,199 @@ export function summarizeAdminControlPlaneTelemetry(
     settingsUpdateCount: eventsByName["admin.settings.updated"],
     totalEvents: normalizedEvents.length,
   };
+}
+
+/** Converts sanitized telemetry attributes to OpenTelemetry attributes. */
+function toOpenTelemetryAttributes(
+  attributes: Readonly<Record<string, TelemetryAttributeValue>>,
+): OpenTelemetryAttributes {
+  return { ...attributes };
+}
+
+/** Converts a structured telemetry log level to an OpenTelemetry severity. */
+function toOpenTelemetrySeverityNumber(level: ObservabilityLogLevel): SeverityNumber {
+  switch (level) {
+    case "debug":
+      return SeverityNumber.DEBUG;
+    case "error":
+      return SeverityNumber.ERROR;
+    case "warn":
+      return SeverityNumber.WARN;
+    case "info":
+      return SeverityNumber.INFO;
+  }
+}
+
+/** Converts a structured span kind to an OpenTelemetry span kind. */
+function toOpenTelemetrySpanKind(kind: TelemetrySpanKind): OpenTelemetrySpanKind {
+  switch (kind) {
+    case "client":
+      return OpenTelemetrySpanKind.CLIENT;
+    case "consumer":
+      return OpenTelemetrySpanKind.CONSUMER;
+    case "producer":
+      return OpenTelemetrySpanKind.PRODUCER;
+    case "server":
+      return OpenTelemetrySpanKind.SERVER;
+    case "internal":
+      return OpenTelemetrySpanKind.INTERNAL;
+  }
+}
+
+/** Converts a product-safe span status to an OpenTelemetry span status. */
+function toOpenTelemetrySpanStatus(
+  status: TelemetrySpanStatus,
+  error: SerializedTelemetryError | undefined,
+): { readonly code: SpanStatusCode; readonly message?: string } {
+  if (status === "error") {
+    return error
+      ? { code: SpanStatusCode.ERROR, message: error.message }
+      : { code: SpanStatusCode.ERROR };
+  }
+  if (status === "ok") {
+    return { code: SpanStatusCode.OK };
+  }
+
+  return { code: SpanStatusCode.UNSET };
+}
+
+/** Converts an ISO timestamp to the OpenTelemetry time input used by SDK calls. */
+function toOpenTelemetryTime(timestamp: string): Date {
+  return new Date(timestamp);
+}
+
+/** Builds OpenTelemetry attributes for a serialized telemetry error. */
+function telemetryErrorAttributes(
+  error: SerializedTelemetryError | undefined,
+): Record<string, TelemetryAttributeValue> {
+  if (!error) {
+    return {};
+  }
+
+  const attributes: Record<string, TelemetryAttributeValue> = {
+    "error.class": error.class,
+    "error.message": error.message,
+  };
+  if (error.code) {
+    attributes["error.code"] = error.code;
+  }
+  if (error.name) {
+    attributes["error.name"] = error.name;
+  }
+  if (error.retryable !== undefined) {
+    attributes["error.retryable"] = error.retryable;
+  }
+
+  return attributes;
+}
+
+/** Builds product-safe OpenTelemetry attributes for an admin telemetry event. */
+function createOpenTelemetryAdminEventAttributes(
+  config: ObservabilityConfig,
+  event: AdminControlPlaneTelemetryEvent,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  const attributes: Record<string, TelemetryAttributeValue> = {
+    "event.name": event.name,
+    ...sanitizeTelemetryAttributes(event.attributes ?? {}, config.redaction),
+  };
+
+  if (event.actorUserId) {
+    attributes["heimdall.actor_user_id"] = redactTelemetryText(event.actorUserId, config.redaction);
+  }
+  if (event.orgId) {
+    attributes["heimdall.org_id"] = redactTelemetryText(event.orgId, config.redaction);
+  }
+  if (event.repoId) {
+    attributes["heimdall.repo_id"] = redactTelemetryText(event.repoId, config.redaction);
+  }
+  if (event.requestId) {
+    attributes["heimdall.request_id"] = redactTelemetryText(event.requestId, config.redaction);
+  }
+  if (event.route) {
+    attributes["http.route"] = redactTelemetryText(event.route, config.redaction);
+  }
+  if (event.statusCode !== undefined) {
+    attributes["http.status_code"] = event.statusCode;
+  }
+
+  return attributes;
+}
+
+/** Builds an OpenTelemetry parent context from propagated W3C trace context. */
+function createOpenTelemetryParentContext(
+  traceContext: TelemetryTraceContextInput | undefined,
+): OpenTelemetryContext | undefined {
+  if (!traceContext) {
+    return undefined;
+  }
+
+  const spanContext = createOpenTelemetrySpanContext(traceContext);
+  return spanContext ? openTelemetryTrace.setSpanContext(ROOT_CONTEXT, spanContext) : undefined;
+}
+
+/** Builds an OpenTelemetry span context from normalized product-safe trace context. */
+function createOpenTelemetrySpanContext(
+  traceContext: TelemetryTraceContextInput,
+): OpenTelemetrySpanContext | undefined {
+  const normalizedContext = normalizeTelemetryTraceContext(traceContext);
+  if (!normalizedContext.traceparent) {
+    return undefined;
+  }
+
+  const [, traceId, spanId, traceFlags] = normalizedContext.traceparent.split("-");
+  if (!traceId || !spanId || !traceFlags) {
+    return undefined;
+  }
+
+  return {
+    isRemote: true,
+    spanId,
+    traceFlags: Number.parseInt(traceFlags, 16),
+    traceId,
+    ...(normalizedContext.tracestate
+      ? { traceState: createTraceState(normalizedContext.tracestate) }
+      : {}),
+  };
+}
+
+/** Builds a stable metric instrument cache key. */
+function telemetryMetricInstrumentKey(point: TelemetryMetricPoint): string {
+  return `${point.kind}:${point.name}:${point.unit ?? ""}`;
+}
+
+/** Builds OTLP HTTP exporter config for one OpenTelemetry signal. */
+function createOpenTelemetryExporterConfig(
+  config: ObservabilityConfig,
+  signalResourcePath: "v1/logs" | "v1/metrics" | "v1/traces",
+): { readonly timeoutMillis: number; readonly url?: string } {
+  const timeoutMillis = createOpenTelemetryExportTimeoutMs(config);
+  if (!config.otlpEndpoint) {
+    return { timeoutMillis };
+  }
+
+  return {
+    timeoutMillis,
+    url: createOpenTelemetrySignalUrl(config.otlpEndpoint, signalResourcePath),
+  };
+}
+
+/** Builds the per-signal OTLP HTTP endpoint URL from a collector base endpoint. */
+function createOpenTelemetrySignalUrl(
+  endpoint: string,
+  signalResourcePath: "v1/logs" | "v1/metrics" | "v1/traces",
+): string {
+  const url = new URL(endpoint);
+  const basePath = url.pathname
+    .replace(/\/v1\/(?:logs|metrics|traces)\/?$/u, "")
+    .replace(/\/+$/u, "");
+  const nextPath = [basePath, signalResourcePath].filter(Boolean).join("/");
+  url.pathname = nextPath.startsWith("/") ? nextPath : `/${nextPath}`;
+  return url.href;
+}
+
+/** Returns the bounded OpenTelemetry export timeout for runtime shutdown and flush paths. */
+function createOpenTelemetryExportTimeoutMs(config: ObservabilityConfig): number {
+  return Math.max(1, Math.min(OPEN_TELEMETRY_EXPORT_TIMEOUT_MS, config.metricsIntervalMs));
 }
 
 /** Returns an empty event-count map with all known event names initialized. */
@@ -1743,6 +2299,16 @@ function parseRateEnv(
 
   issues.push(`${name} must be a number between 0 and 1`);
   return fallback;
+}
+
+/** Returns whether a value is an absolute HTTP(S) URL. */
+function isAbsoluteHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /** Converts empty strings to undefined. */
