@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDockerSandboxCommand,
   createDefaultSandboxEnvironment,
   createFakeSandboxRunner,
   createLocalProcessSandboxRunner,
@@ -8,6 +9,7 @@ import {
   DEFAULT_SANDBOX_OUTPUT_POLICY,
   DEFAULT_SANDBOX_RESOURCE_LIMITS,
   DEFAULT_SANDBOX_SECURITY_POLICY,
+  DockerSandboxCommandPolicyError,
   evaluateSandboxRequestSafety,
   evaluateToolSandboxPolicy,
   parseSandboxRunRequest,
@@ -207,6 +209,91 @@ describe("evaluateToolSandboxPolicy", () => {
     expect(result.decisions.map((decision) => decision.code)).toEqual(
       expect.arrayContaining(["resource_limit_exceeds_policy", "unsafe_command_argument"]),
     );
+  });
+});
+
+describe("buildDockerSandboxCommand", () => {
+  it("builds hardened shell-free docker argv data", () => {
+    const command = buildDockerSandboxCommand(createRequest(), {
+      containerNamePrefix: "heimdall-test",
+      dockerExecutable: "docker",
+    });
+
+    expect(command.executable).toBe("docker");
+    expect(command.args).toEqual(
+      expect.arrayContaining([
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--user",
+        "65532:65532",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--pids-limit",
+        "128",
+        "--memory",
+        "536870912b",
+        "--cpus",
+        "1",
+        "--workdir",
+        "/workspace",
+        "reviewer-tools-node@sha256:abc123",
+        "eslint",
+        "src/example.ts",
+        "--format",
+        "json",
+      ]),
+    );
+    expect(command.args.some((argument) => argument.startsWith("heimdall-test-run_"))).toBe(true);
+    expect(command.args).toContain("type=bind,src=/tmp/workspace,dst=/workspace,readonly");
+    expect(command.args).toContain("CI");
+    expect(command.env.CI).toBe("true");
+    expect(command.displayCommand).not.toContain("top-secret");
+  });
+
+  it("keeps docker environment values out of argv", () => {
+    const command = buildDockerSandboxCommand(
+      createRequest({
+        environment: {
+          env: { SECRET_VALUE: "top-secret" },
+          inheritHostEnv: false,
+          redactedEnvKeys: ["SECRET_VALUE"],
+        },
+      }),
+    );
+
+    expect(command.args).toContain("SECRET_VALUE");
+    expect(command.args).not.toContain("top-secret");
+    expect(command.env.SECRET_VALUE).toBe("top-secret");
+    expect(command.displayCommand).not.toContain("top-secret");
+  });
+
+  it("rejects docker commands for unsupported network policies", () => {
+    const request = createRequest({
+      network: {
+        ...DEFAULT_SANDBOX_NETWORK_POLICY,
+        allowedHosts: ["example.com"],
+        allowedPorts: [443],
+        mode: "allowlist",
+      },
+    });
+
+    try {
+      buildDockerSandboxCommand(request);
+      throw new Error("Expected Docker command builder to reject the request.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(DockerSandboxCommandPolicyError);
+      const policyError = error as DockerSandboxCommandPolicyError;
+      expect(policyError.decisions).toContainEqual({
+        code: "docker_network_policy_unsupported",
+        message: "Docker sandbox command builder only supports no-network requests.",
+        status: "denied",
+      });
+    }
   });
 });
 

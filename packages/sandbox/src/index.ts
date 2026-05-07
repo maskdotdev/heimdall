@@ -475,6 +475,28 @@ export type EvaluateToolSandboxPolicyResult = {
   readonly decisions: readonly SandboxPolicyDecision[];
 };
 
+/** Options for building a Docker sandbox command. */
+export type DockerSandboxCommandBuilderOptions = {
+  /** Docker executable name or absolute path. */
+  readonly dockerExecutable?: string | undefined;
+  /** Optional OCI runtime name, such as runsc for gVisor. */
+  readonly runtime?: string | undefined;
+  /** Prefix used for deterministic container names. */
+  readonly containerNamePrefix?: string | undefined;
+};
+
+/** Shell-free Docker command data for a sandbox request. */
+export type DockerSandboxCommand = {
+  /** Docker executable to spawn. */
+  readonly executable: string;
+  /** Docker argv arguments. */
+  readonly args: readonly string[];
+  /** Explicit environment passed to the Docker process. */
+  readonly env: Readonly<Record<string, string>>;
+  /** Product-safe display command without environment values. */
+  readonly displayCommand: string;
+};
+
 /** Sandbox run result boundary schema. */
 export const SandboxRunResultSchema = Type.Object(
   {
@@ -674,6 +696,19 @@ export class LocalProcessSandboxRunner implements SandboxRunner {
   /** Runs one sandbox request as a local child process with bounded output. */
   public async run(request: SandboxRunRequest): Promise<SandboxRunResult> {
     return runLocalProcessSandbox(request, this.options);
+  }
+}
+
+/** Error thrown when a Docker command cannot be built safely. */
+export class DockerSandboxCommandPolicyError extends Error {
+  /** Product-safe policy decisions explaining why command building failed. */
+  public readonly decisions: readonly SandboxPolicyDecision[];
+
+  /** Creates a Docker command policy error. */
+  public constructor(decisions: readonly SandboxPolicyDecision[]) {
+    super("Docker sandbox command request failed policy validation.");
+    this.name = "DockerSandboxCommandPolicyError";
+    this.decisions = decisions;
   }
 }
 
@@ -1211,9 +1246,154 @@ export function evaluateToolSandboxPolicy(
   };
 }
 
+/** Builds a shell-free Docker command for one sandbox request. */
+export function buildDockerSandboxCommand(
+  request: SandboxRunRequest,
+  options: DockerSandboxCommandBuilderOptions = {},
+): DockerSandboxCommand {
+  const parsedRequest = parseSandboxRunRequest(request);
+  const policyDecisions = dockerSandboxCommandPolicyDecisions(parsedRequest);
+  const deniedDecision = policyDecisions.find((decision) => decision.status === "denied");
+  if (deniedDecision) {
+    throw new DockerSandboxCommandPolicyError(policyDecisions);
+  }
+
+  const executable = options.dockerExecutable ?? "docker";
+  const containerName = dockerContainerName(
+    options.containerNamePrefix ?? "heimdall-sandbox",
+    parsedRequest,
+  );
+  const environmentKeys = Object.keys(parsedRequest.environment.env).sort();
+  const args = [
+    "run",
+    "--rm",
+    "--name",
+    containerName,
+    "--network",
+    "none",
+    "--user",
+    `${parsedRequest.security.runAsUser}:${parsedRequest.security.runAsGroup}`,
+    "--read-only",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges:true",
+    "--security-opt",
+    dockerSeccompSecurityOption(parsedRequest.security.seccompProfile),
+    "--pids-limit",
+    String(parsedRequest.limits.maxPids),
+    "--memory",
+    `${parsedRequest.limits.maxMemoryBytes}b`,
+    "--cpus",
+    String(parsedRequest.limits.maxCpuCount),
+    ...dockerOptionalSecurityArguments(parsedRequest),
+    ...dockerMountArguments(parsedRequest),
+    ...environmentKeys.flatMap((key) => ["--env", key]),
+    "--workdir",
+    parsedRequest.command.workingDirectory,
+    dockerImageReference(parsedRequest.image),
+    ...parsedRequest.command.argv,
+  ];
+
+  return {
+    executable,
+    args,
+    env: { ...parsedRequest.environment.env },
+    displayCommand: [executable, ...args].join(" "),
+  };
+}
+
 /** Returns true when a sandbox result is terminal and successful. */
 export function isSuccessfulSandboxResult(result: SandboxRunResult): boolean {
   return result.status === "succeeded" && result.exitCode !== null;
+}
+
+/** Evaluates Docker command builder policy decisions before argv creation. */
+function dockerSandboxCommandPolicyDecisions(request: SandboxRunRequest): SandboxPolicyDecision[] {
+  const decisions = [
+    ...evaluateSandboxRequestSafety(request),
+    {
+      code: "docker_command_builder_loaded",
+      message: "Docker sandbox command builder loaded hardened defaults.",
+      status: "allowed",
+    } satisfies SandboxPolicyDecision,
+  ];
+
+  if (request.network.mode !== "none") {
+    decisions.push({
+      code: "docker_network_policy_unsupported",
+      message: "Docker sandbox command builder only supports no-network requests.",
+      status: "denied",
+    });
+  }
+
+  if (request.command.workingDirectory.length === 0) {
+    decisions.push({
+      code: "docker_workdir_required",
+      message: "Docker sandbox command requires a working directory.",
+      status: "denied",
+    });
+  }
+
+  return decisions;
+}
+
+/** Creates a deterministic Docker container name for one sandbox request. */
+function dockerContainerName(prefix: string, request: SandboxRunRequest): string {
+  const safePrefix = prefix.replace(/[^A-Za-z0-9_.-]+/gu, "-").replace(/^-+|-+$/gu, "");
+  const normalizedPrefix = safePrefix.length > 0 ? safePrefix : "heimdall-sandbox";
+
+  return `${normalizedPrefix}-${stableSandboxId("run", request.requestId).slice(0, 28)}`;
+}
+
+/** Returns a Docker image reference with digest when available. */
+function dockerImageReference(image: SandboxImageSpec): string {
+  return image.digest ? `${image.image}@${image.digest}` : image.image;
+}
+
+/** Returns Docker seccomp security option for a sandbox security policy. */
+function dockerSeccompSecurityOption(profile: SandboxSecurityPolicy["seccompProfile"]): string {
+  if (profile === "strict") return "seccomp=default";
+  if (profile === "custom") return "seccomp=default";
+
+  return "seccomp=default";
+}
+
+/** Returns optional Docker security arguments supported by request policy. */
+function dockerOptionalSecurityArguments(request: SandboxRunRequest): string[] {
+  return [
+    ...(request.security.appArmorProfile
+      ? ["--security-opt", `apparmor=${request.security.appArmorProfile}`]
+      : []),
+    ...(request.security.selinuxType
+      ? ["--security-opt", `label=type:${request.security.selinuxType}`]
+      : []),
+    ...(request.security.allowHostPid ? ["--pid", "host"] : []),
+    ...(request.security.allowHostIpc ? ["--ipc", "host"] : []),
+    ...(request.security.privileged ? ["--privileged"] : []),
+  ];
+}
+
+/** Returns Docker mount arguments for bind, tmpfs, and volume mounts. */
+function dockerMountArguments(request: SandboxRunRequest): string[] {
+  return request.mounts.flatMap((mount) => {
+    if (mount.type === "tmpfs") {
+      return [
+        "--tmpfs",
+        `${mount.target}:rw,noexec,nosuid,nodev,size=${mount.sizeBytes ?? request.limits.maxDiskBytes}`,
+      ];
+    }
+
+    return ["--mount", dockerMountValue(mount)];
+  });
+}
+
+/** Returns a Docker --mount value for bind and volume mounts. */
+function dockerMountValue(mount: SandboxMountSpec): string {
+  const mountType = mount.type === "volume" ? "volume" : "bind";
+  const readonlySuffix = mount.readOnly ? ",readonly" : "";
+
+  return `type=${mountType},src=${mount.source},dst=${mount.target}${readonlySuffix}`;
 }
 
 /** Evaluates tool-specific policy decisions for one request. */
