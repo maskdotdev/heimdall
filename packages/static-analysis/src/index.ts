@@ -381,8 +381,42 @@ export type CreateDiagnosticInput = {
   readonly location: ToolDiagnosticLocation;
   /** Optional tool rule ID. */
   readonly ruleId?: string | undefined;
+  /** Optional tool rule name. */
+  readonly ruleName?: string | undefined;
+  /** Optional rule documentation URL. */
+  readonly ruleUrl?: string | undefined;
+  /** Raw tool message before normalization. */
+  readonly rawMessage?: string | undefined;
+  /** Trust level of the parsed source. */
+  readonly sourceTrust?: NormalizedToolDiagnostic["sourceTrust"] | undefined;
+  /** Product-safe diagnostic metadata. */
+  readonly metadata?: Readonly<Record<string, unknown>> | undefined;
   /** Pull request snapshot used for diff mapping. */
   readonly snapshot: PullRequestSnapshot;
+};
+
+/** Input for parsing diagnostics from one tool runner output. */
+export type ParseToolOutputDiagnosticsInput = {
+  /** Source tool. */
+  readonly tool: StaticToolName;
+  /** Tool run ID. */
+  readonly toolRunId: string;
+  /** Tool runner result with captured output. */
+  readonly result: ToolRunnerResult;
+  /** Pull request snapshot used for diff mapping. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Filesystem path for the analyzed workspace. */
+  readonly workspacePath: string;
+  /** Maximum diagnostics returned by the parser. */
+  readonly maxDiagnostics: number;
+};
+
+/** Result from parsing one tool runner output. */
+export type ParseToolOutputDiagnosticsResult = {
+  /** Normalized diagnostics parsed from tool output. */
+  readonly diagnostics: readonly NormalizedToolDiagnostic[];
+  /** Product-safe parse warnings. */
+  readonly warnings: readonly StaticAnalysisWarning[];
 };
 
 /** Input for running a deterministic static-analysis report. */
@@ -391,9 +425,43 @@ export type RunStaticAnalysisInput = {
   readonly request: StaticAnalysisRequest;
   /** Tool runner implementation. */
   readonly runner: ToolRunner;
-  /** Diagnostics emitted by fake adapters, keyed by tool name. */
+  /** Additional deterministic diagnostic fixtures, keyed by tool name. */
   readonly diagnosticsByTool?: Partial<Record<StaticToolName, readonly CreateDiagnosticInput[]>>;
 };
+
+/** ESLint JSON formatter message. */
+const EslintJsonMessageSchema = Type.Object(
+  {
+    column: Type.Optional(Type.Integer({ minimum: 0 })),
+    endColumn: Type.Optional(Type.Integer({ minimum: 0 })),
+    endLine: Type.Optional(Type.Integer({ minimum: 0 })),
+    fatal: Type.Optional(Type.Boolean()),
+    line: Type.Optional(Type.Integer({ minimum: 0 })),
+    message: Type.String(),
+    messageId: Type.Optional(Type.String()),
+    ruleId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    severity: Type.Integer({ minimum: 0, maximum: 2 }),
+  },
+  { additionalProperties: true },
+);
+
+/** ESLint JSON formatter file result. */
+const EslintJsonFileResultSchema = Type.Object(
+  {
+    filePath: Type.String(),
+    messages: Type.Array(EslintJsonMessageSchema),
+  },
+  { additionalProperties: true },
+);
+
+/** ESLint JSON formatter output. */
+const EslintJsonOutputSchema = Type.Array(EslintJsonFileResultSchema);
+
+/** ESLint JSON formatter message. */
+type EslintJsonMessage = Static<typeof EslintJsonMessageSchema>;
+
+/** ESLint JSON formatter file result. */
+type EslintJsonFileResult = Static<typeof EslintJsonFileResultSchema>;
 
 /** Built-in tool descriptors for MVP planning. */
 export const STATIC_TOOL_DESCRIPTORS = [
@@ -491,14 +559,32 @@ export function createNormalizedToolDiagnostic(
     isInChangedFile: Boolean(file),
     isOnChangedLine,
     location: input.location,
+    metadata: input.metadata ?? {},
     message: input.message,
-    metadata: {},
+    ...(input.rawMessage ? { rawMessage: input.rawMessage } : {}),
     ...(input.ruleId ? { ruleId: input.ruleId } : {}),
+    ...(input.ruleName ? { ruleName: input.ruleName } : {}),
+    ...(input.ruleUrl ? { ruleUrl: input.ruleUrl } : {}),
     severity: input.severity ?? "warning",
-    sourceTrust: "tool_output",
+    sourceTrust: input.sourceTrust ?? "tool_output",
     tool: input.tool,
     toolRunId: input.toolRunId,
   };
+}
+
+/** Parses supported tool outputs into normalized diagnostics. */
+export function parseToolOutputDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  if (input.maxDiagnostics <= 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  if (input.tool === "eslint") {
+    return parseEslintJsonDiagnostics(input);
+  }
+
+  return { diagnostics: [], warnings: [] };
 }
 
 /** Runs planned static-analysis tools through a runner and builds a report. */
@@ -509,9 +595,13 @@ export async function runStaticAnalysis(
   const plan = planStaticAnalysis(input.request);
   const toolRuns: ToolRunResultSummary[] = [];
   const diagnostics: NormalizedToolDiagnostic[] = [];
+  const warnings: StaticAnalysisWarning[] = [...plan.warnings];
 
   for (const runPlan of plan.toolRuns) {
     const toolRunId = stableId("str", [input.request.reviewRunId, runPlan.planId]);
+    const maxDiagnosticsPerTool =
+      input.request.budgets?.maxDiagnosticsPerTool ??
+      DEFAULT_STATIC_ANALYSIS_BUDGETS.maxDiagnosticsPerTool;
     const result = await input.runner.run({
       command: runPlan.command,
       maxOutputBytes: runPlan.maxOutputBytes,
@@ -519,18 +609,34 @@ export async function runStaticAnalysis(
       startedAt,
       timeoutMs: runPlan.timeoutMs,
     });
-    const runDiagnostics = (input.diagnosticsByTool?.[runPlan.tool] ?? [])
-      .slice(
-        0,
-        input.request.budgets?.maxDiagnosticsPerTool ??
-          DEFAULT_STATIC_ANALYSIS_BUDGETS.maxDiagnosticsPerTool,
-      )
-      .map((diagnostic) =>
-        createNormalizedToolDiagnostic({
-          ...diagnostic,
+    const parsedOutput = parseToolOutputDiagnostics({
+      maxDiagnostics: maxDiagnosticsPerTool,
+      result,
+      snapshot: input.request.snapshot,
+      tool: runPlan.tool,
+      toolRunId,
+      workspacePath: input.request.workspace.path,
+    });
+    warnings.push(...parsedOutput.warnings);
+    const fixtureDiagnostics = (input.diagnosticsByTool?.[runPlan.tool] ?? []).map((diagnostic) =>
+      createNormalizedToolDiagnostic({
+        ...diagnostic,
+        toolRunId,
+      }),
+    );
+    const runDiagnostics = [...parsedOutput.diagnostics, ...fixtureDiagnostics].slice(
+      0,
+      maxDiagnosticsPerTool,
+    );
+    if (parsedOutput.diagnostics.length + fixtureDiagnostics.length > runDiagnostics.length) {
+      warnings.push(
+        warning("tool_diagnostic_budget_truncated", "Static analysis diagnostics were truncated.", {
+          maxDiagnosticsPerTool,
+          tool: runPlan.tool,
           toolRunId,
         }),
       );
+    }
 
     diagnostics.push(...runDiagnostics);
     toolRuns.push(
@@ -548,7 +654,7 @@ export async function runStaticAnalysis(
     request: input.request,
     startedAt,
     toolRuns,
-    warnings: plan.warnings,
+    warnings,
   });
 }
 
@@ -559,6 +665,196 @@ export function parseStaticAnalysisBudgets(value: unknown): StaticAnalysisBudget
   }
 
   return value as StaticAnalysisBudgets;
+}
+
+/** Parses ESLint JSON formatter output into normalized diagnostics. */
+function parseEslintJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = input.result.stdout.trim();
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedOutput = parseJson(rawOutput);
+  if (!parsedOutput.ok) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+          format: "eslint_json",
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ],
+    };
+  }
+  if (!Value.Check(EslintJsonOutputSchema, parsedOutput.value)) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning(
+          "tool_output_schema_mismatch",
+          "Static analysis tool output did not match the expected schema.",
+          {
+            format: "eslint_json",
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          },
+        ),
+      ],
+    };
+  }
+
+  const parsedDiagnostics = (parsedOutput.value as readonly EslintJsonFileResult[])
+    .flatMap((fileResult) =>
+      fileResult.messages.map((message) =>
+        eslintMessageToDiagnostic({ fileResult, input, message }),
+      ),
+    )
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings =
+    parsedDiagnostics.length > diagnostics.length
+      ? [
+          warning(
+            "tool_output_diagnostic_budget_truncated",
+            "Static analysis tool output diagnostics were truncated.",
+            {
+              diagnosticCount: parsedDiagnostics.length,
+              maxDiagnostics: input.maxDiagnostics,
+              tool: input.tool,
+              toolRunId: input.toolRunId,
+            },
+          ),
+        ]
+      : [];
+
+  return { diagnostics, warnings };
+}
+
+/** Converts one ESLint JSON message into a normalized diagnostic. */
+function eslintMessageToDiagnostic(input: {
+  readonly fileResult: EslintJsonFileResult;
+  readonly input: ParseToolOutputDiagnosticsInput;
+  readonly message: EslintJsonMessage;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.message.message.trim();
+  if (message.length === 0) {
+    return undefined;
+  }
+
+  const severity = eslintSeverity(input.message);
+  const filePath = normalizeToolFilePath(input.fileResult.filePath, input.input.workspacePath);
+  const ruleUrl = eslintRuleUrl(input.message.ruleId ?? undefined);
+  return createNormalizedToolDiagnostic({
+    category: categoryForEslintRule(input.message.ruleId ?? undefined, severity),
+    location: {
+      filePath,
+      ...(input.message.column !== undefined
+        ? { startColumn: Math.max(1, input.message.column) }
+        : {}),
+      startLine: Math.max(1, input.message.line ?? 1),
+      ...(input.message.endColumn !== undefined
+        ? { endColumn: Math.max(1, input.message.endColumn) }
+        : {}),
+      ...(input.message.endLine !== undefined
+        ? { endLine: Math.max(1, input.message.endLine) }
+        : {}),
+      ...(filePath === input.fileResult.filePath
+        ? {}
+        : { originalPath: input.fileResult.filePath }),
+    },
+    message,
+    metadata: eslintMessageMetadata(input.message),
+    rawMessage: input.message.message,
+    ...(input.message.ruleId ? { ruleId: input.message.ruleId } : {}),
+    ...(ruleUrl ? { ruleUrl } : {}),
+    severity,
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "eslint",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
+/** Parses JSON without throwing into the report builder. */
+function parseJson(
+  value: string,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(value) as unknown };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Maps ESLint severity numbers to normalized diagnostic severities. */
+function eslintSeverity(message: EslintJsonMessage): ToolDiagnosticSeverity {
+  if (message.fatal || message.severity === 2) return "error";
+  if (message.severity === 1) return "warning";
+  return "info";
+}
+
+/** Returns a product category for an ESLint rule. */
+function categoryForEslintRule(
+  ruleId: string | undefined,
+  severity: ToolDiagnosticSeverity,
+): FindingCategory {
+  const normalizedRule = ruleId?.toLowerCase() ?? "";
+  if (normalizedRule.includes("security")) return "security";
+  if (
+    normalizedRule.includes("import/no-extraneous-dependencies") ||
+    normalizedRule.includes("node/no-missing-import")
+  ) {
+    return "dependency";
+  }
+  if (
+    /(?:style|stylistic|prettier|quotes|semi|indent|spacing|space|comma|eol|max-len)/u.test(
+      normalizedRule,
+    )
+  ) {
+    return "style";
+  }
+  if (/(?:performance|no-await-in-loop)/u.test(normalizedRule)) return "performance";
+
+  return categoryForSeverity(severity);
+}
+
+/** Builds a documentation URL for core ESLint rules. */
+function eslintRuleUrl(ruleId: string | undefined): string | undefined {
+  if (!ruleId || ruleId.includes("/") || ruleId.startsWith("@")) {
+    return undefined;
+  }
+
+  return `https://eslint.org/docs/latest/rules/${encodeURIComponent(ruleId)}`;
+}
+
+/** Returns product-safe metadata for an ESLint message. */
+function eslintMessageMetadata(message: EslintJsonMessage): Readonly<Record<string, unknown>> {
+  return {
+    ...(message.fatal !== undefined ? { fatal: message.fatal } : {}),
+    ...(message.messageId ? { messageId: message.messageId } : {}),
+  };
+}
+
+/** Normalizes a tool-emitted file path to a repository-relative path when possible. */
+function normalizeToolFilePath(filePath: string, workspacePath: string): string {
+  const normalizedFilePath = filePath.replaceAll("\\", "/");
+  const normalizedWorkspacePath = workspacePath.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (
+    normalizedWorkspacePath.length > 0 &&
+    normalizedFilePath.startsWith(`${normalizedWorkspacePath}/`)
+  ) {
+    return normalizedFilePath.slice(normalizedWorkspacePath.length + 1);
+  }
+
+  return normalizedFilePath.replace(/^\/+/u, "");
+}
+
+/** Returns true when a value is not undefined. */
+function isPresent<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }
 
 /** Creates one tool descriptor. */
