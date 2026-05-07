@@ -34,6 +34,7 @@ import {
   validEmbeddingBatchJobPayloadFixture,
   validIndexRepoCommitJobPayloadFixture,
   validPublishReviewJobPayloadFixture,
+  validReviewArtifactCleanupJobPayloadFixture,
   validReviewPullRequestJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
   validSyncInstallationJobPayloadFixture,
@@ -94,6 +95,7 @@ import {
   EmbeddingBatchJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
   PublishReviewJobPayloadSchema,
+  ReviewArtifactCleanupJobPayloadSchema,
   ReviewPullRequestJobPayloadSchema,
   SandboxCleanupJobPayloadSchema,
   SyncInstallationJobPayloadSchema,
@@ -380,6 +382,13 @@ describe("contract validation", () => {
         validSandboxCleanupJobPayloadFixture,
       ),
     ).toEqual(validSandboxCleanupJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "ReviewArtifactCleanupJobPayload",
+        ReviewArtifactCleanupJobPayloadSchema,
+        validReviewArtifactCleanupJobPayloadFixture,
+      ),
+    ).toEqual(validReviewArtifactCleanupJobPayloadFixture);
 
     const envelope = {
       jobId: "job_01HXAMPLE",

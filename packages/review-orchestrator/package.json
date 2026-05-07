@@ -33,6 +33,7 @@
     "@repo/review-engine": "workspace:*",
     "@repo/repo-sync": "workspace:*",
     "@repo/rules": "workspace:*",
+    "@repo/security": "workspace:*",
     "@repo/static-analysis": "workspace:*",
     "@repo/tool-runner": "workspace:*",
     "@repo/usage": "workspace:*",

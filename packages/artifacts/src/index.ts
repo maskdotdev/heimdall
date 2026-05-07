@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -8,6 +8,9 @@ export const REVIEW_ARTIFACT_INLINE_PAYLOAD_METADATA_KEY = "payload" as const;
 
 /** Metadata key that describes where a review artifact payload is stored. */
 export const REVIEW_ARTIFACT_PAYLOAD_STORAGE_METADATA_KEY = "payloadStorage" as const;
+
+/** Metadata key that records payload deletion without retaining payload bytes. */
+export const REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY = "payloadDeletion" as const;
 
 /** Storage mode used by the database-backed JSON payload fallback. */
 export const INLINE_REVIEW_ARTIFACT_STORAGE_MODE = "inline_db" as const;
@@ -128,6 +131,14 @@ export type CreateSignedReviewArtifactPayloadUrlInput = {
   readonly responseContentType?: string;
 };
 
+/** Input used to delete a JSON review artifact payload. */
+export type DeleteJsonReviewArtifactPayloadInput = {
+  /** Durable artifact URI from the review_artifacts row. */
+  readonly uri: string;
+  /** Metadata from the review_artifacts row. */
+  readonly metadata: unknown;
+};
+
 /** Result returned when reading a JSON review artifact payload. */
 export type ReadJsonReviewArtifactPayloadResult =
   | {
@@ -156,6 +167,12 @@ export type CreateSignedReviewArtifactPayloadUrlResult =
       readonly exists: false;
     };
 
+/** Result returned when deleting a JSON review artifact payload. */
+export type DeleteJsonReviewArtifactPayloadResult = {
+  /** Whether payload bytes or inline metadata were present and removed. */
+  readonly deleted: boolean;
+};
+
 /** Storage boundary for review artifact JSON payloads. */
 export type ReviewArtifactPayloadStore = {
   /** Stores a JSON payload and returns DB metadata plus the durable descriptor. */
@@ -166,6 +183,10 @@ export type ReviewArtifactPayloadStore = {
   readonly getJson: (
     input: ReadJsonReviewArtifactPayloadInput,
   ) => Promise<ReadJsonReviewArtifactPayloadResult>;
+  /** Deletes a JSON payload from the backing store when payload bytes are present. */
+  readonly deleteJson: (
+    input: DeleteJsonReviewArtifactPayloadInput,
+  ) => Promise<DeleteJsonReviewArtifactPayloadResult>;
   /** Creates a short-lived direct download URL when the backing store supports it. */
   readonly createSignedGetUrl?: (
     input: CreateSignedReviewArtifactPayloadUrlInput,
@@ -202,6 +223,13 @@ export class InlineReviewArtifactPayloadStore implements ReviewArtifactPayloadSt
     input: ReadJsonReviewArtifactPayloadInput,
   ): Promise<ReadJsonReviewArtifactPayloadResult> {
     return readInlineReviewArtifactPayload(input.metadata);
+  }
+
+  /** Reports whether inline payload metadata exists so callers can scrub the DB row. */
+  public async deleteJson(
+    input: DeleteJsonReviewArtifactPayloadInput,
+  ): Promise<DeleteJsonReviewArtifactPayloadResult> {
+    return { deleted: readInlineReviewArtifactPayload(input.metadata).exists };
   }
 }
 
@@ -262,6 +290,27 @@ export class FileSystemReviewArtifactPayloadStore implements ReviewArtifactPaylo
     } catch (error) {
       if (isMissingFileError(error)) {
         return { exists: false };
+      }
+
+      throw error;
+    }
+  }
+
+  /** Deletes a filesystem-backed payload only when it remains inside the configured root. */
+  public async deleteJson(
+    input: DeleteJsonReviewArtifactPayloadInput,
+  ): Promise<DeleteJsonReviewArtifactPayloadResult> {
+    const payloadPath = payloadPathFromFileUri(input.uri);
+    if (!payloadPath || !isPathInsideRoot(this.rootDir, payloadPath)) {
+      return { deleted: false };
+    }
+
+    try {
+      await rm(payloadPath, { force: false });
+      return { deleted: true };
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        return { deleted: false };
       }
 
       throw error;
@@ -375,6 +424,34 @@ export class S3CompatibleReviewArtifactPayloadStore implements ReviewArtifactPay
     return { exists: true, payload: JSON.parse(new TextDecoder().decode(bytes)) as unknown };
   }
 
+  /** Deletes a JSON payload from S3-compatible object storage. */
+  public async deleteJson(
+    input: DeleteJsonReviewArtifactPayloadInput,
+  ): Promise<DeleteJsonReviewArtifactPayloadResult> {
+    const parsed = parseS3ArtifactUri(input.uri);
+    if (!parsed || parsed.bucket !== this.bucket) {
+      return { deleted: false };
+    }
+
+    const url = this.objectUrl(parsed.key);
+    const response = await this.fetch(url, {
+      headers: this.signHeaders({
+        contentHash: SHA256_EMPTY_PAYLOAD,
+        method: "DELETE",
+        url,
+      }),
+      method: "DELETE",
+    });
+    if (response.status === 404) {
+      return { deleted: false };
+    }
+    if (!response.ok) {
+      throw new Error(`Object storage artifact delete failed with HTTP ${response.status}.`);
+    }
+
+    return { deleted: true };
+  }
+
   /** Creates a short-lived signed GET URL for an S3-compatible object. */
   public async createSignedGetUrl(
     input: CreateSignedReviewArtifactPayloadUrlInput,
@@ -429,7 +506,7 @@ export class S3CompatibleReviewArtifactPayloadStore implements ReviewArtifactPay
   /** Returns SigV4-signed request headers for one object operation. */
   private signHeaders(input: {
     /** HTTP method. */
-    readonly method: "GET" | "PUT";
+    readonly method: "DELETE" | "GET" | "PUT";
     /** Request URL. */
     readonly url: URL;
     /** SHA-256 hash for the request payload. */
@@ -533,6 +610,28 @@ export function hasReviewArtifactPayloadStorage(metadata: unknown): boolean {
   }
 
   return isReviewArtifactPayloadDescriptor(record[REVIEW_ARTIFACT_PAYLOAD_STORAGE_METADATA_KEY]);
+}
+
+/** Returns metadata with payload bytes removed and a deletion tombstone added. */
+export function reviewArtifactPayloadDeletedMetadata(input: {
+  /** Metadata from the review_artifacts row before cleanup. */
+  readonly metadata: unknown;
+  /** ISO timestamp when cleanup removed the payload. */
+  readonly deletedAt: string;
+  /** Product-safe cleanup reason. */
+  readonly reason: string;
+}): Record<string, unknown> {
+  const metadata = { ...(asRecord(input.metadata) ?? {}) };
+  delete metadata[REVIEW_ARTIFACT_INLINE_PAYLOAD_METADATA_KEY];
+  delete metadata[REVIEW_ARTIFACT_PAYLOAD_STORAGE_METADATA_KEY];
+
+  return {
+    ...metadata,
+    [REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY]: {
+      deletedAt: input.deletedAt,
+      reason: input.reason,
+    },
+  };
 }
 
 /** Reads an inline JSON payload from review artifact metadata. */
@@ -745,7 +844,7 @@ function signS3Request(input: {
   /** AWS-compatible region. */
   readonly region: string;
   /** HTTP method. */
-  readonly method: "GET" | "PUT";
+  readonly method: "DELETE" | "GET" | "PUT";
   /** Request URL. */
   readonly url: URL;
   /** Request timestamp. */
@@ -803,7 +902,7 @@ function normalizePresignedUrlExpires(value: number | undefined): number {
 /** Builds a canonical request string and signed header list for SigV4. */
 function canonicalS3Request(input: {
   /** HTTP method. */
-  readonly method: "GET" | "PUT";
+  readonly method: "DELETE" | "GET" | "PUT";
   /** Request URL. */
   readonly url: URL;
   /** Request headers other than host. */

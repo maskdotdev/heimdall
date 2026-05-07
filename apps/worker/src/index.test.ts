@@ -1,6 +1,8 @@
+import { REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY } from "@repo/artifacts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
   validBillingReconcileJobPayloadFixture,
+  validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
@@ -12,6 +14,7 @@ import {
 import type { PublishOperationType, PublishThrottleSlotInput } from "@repo/publisher";
 import { describe, expect, it, vi } from "vitest";
 import {
+  cleanupExpiredReviewArtifacts,
   createRedisPublishThrottle,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
@@ -139,6 +142,105 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validSandboxCleanupJobPayloadFixture]);
+  });
+
+  it("dispatches review artifact cleanup jobs through the configured cleaner", async () => {
+    const payloads: unknown[] = [];
+    const handlers = createWorkerHandlers({
+      db: {} as never,
+      gitProvider: {} as never,
+      reviewArtifactCleaner: async (payload) => {
+        payloads.push(payload);
+      },
+    });
+
+    await handlers[JOB_TYPES.ReviewArtifactCleanup]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "review-artifact:cleanup:repo_01HXAMPLE:2026-05-01",
+      jobId: "job_review_artifact_cleanup",
+      jobType: JOB_TYPES.ReviewArtifactCleanup,
+      maxAttempts: 3,
+      payload: validReviewArtifactCleanupJobPayloadFixture,
+      schemaVersion: "review_artifact_cleanup_job.v1",
+    });
+
+    expect(payloads).toEqual([validReviewArtifactCleanupJobPayloadFixture]);
+  });
+
+  it("scrubs expired review artifact payload metadata during cleanup", async () => {
+    const updates: unknown[] = [];
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: async () => [
+                {
+                  metadata: {
+                    payload: { snippets: ["src/index.ts"] },
+                    payloadStorage: {
+                      hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      mediaType: "application/json",
+                      mode: "inline_db",
+                      sizeBytes: 31,
+                      uri: "db://review_artifacts/rrn_1/context_bundle/context-bundle.json",
+                    },
+                    redactionLevel: "contains_code",
+                  },
+                  reviewArtifactId: "art_expired",
+                  uri: "db://review_artifacts/rrn_1/context_bundle/context-bundle.json",
+                },
+              ],
+            }),
+          }),
+        }),
+      }),
+      update: () => ({
+        set: (value: unknown) => {
+          updates.push(value);
+          return {
+            where: async () => undefined,
+          };
+        },
+      }),
+    };
+
+    await expect(
+      cleanupExpiredReviewArtifacts(
+        db as never,
+        {
+          before: "2026-05-07T12:00:00.000Z",
+          limit: 100,
+          reason: "retention_policy",
+        },
+        undefined,
+        new Date("2026-05-07T12:15:00.000Z"),
+      ),
+    ).resolves.toEqual({
+      cutoff: "2026-05-07T12:00:00.000Z",
+      deletedPayloadCount: 1,
+      dryRun: false,
+      failedPayloadCount: 0,
+      missingPayloadCount: 0,
+      selectedArtifactCount: 1,
+      updatedArtifactCount: 1,
+    });
+
+    expect(updates).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          [REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY]: {
+            deletedAt: "2026-05-07T12:15:00.000Z",
+            reason: "retention_policy",
+          },
+          redactionLevel: "contains_code",
+        }),
+        sizeBytes: 0,
+        uri: "deleted://review_artifacts/art_expired",
+      }),
+    ]);
+    expect(JSON.stringify(updates)).not.toContain("src/index.ts");
   });
 
   it("creates pending memory candidates from rejected finding outcome jobs", async () => {

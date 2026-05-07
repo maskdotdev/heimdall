@@ -384,6 +384,8 @@ export class ReviewRepository {
     readonly sizeBytes: number;
     /** Optional artifact metadata. */
     readonly metadata?: Record<string, unknown>;
+    /** Optional retention expiration for payload cleanup. */
+    readonly retentionUntil?: Date | string | undefined;
   }): Promise<void> {
     await this.db
       .insert(reviewArtifacts)
@@ -398,6 +400,7 @@ export class ReviewRepository {
         ...(input.classification ? { classification: input.classification } : {}),
         sizeBytes: input.sizeBytes,
         metadata: input.metadata ?? input.artifact.metadata,
+        ...(input.retentionUntil ? { retentionUntil: new Date(input.retentionUntil) } : {}),
       })
       .onConflictDoNothing();
   }

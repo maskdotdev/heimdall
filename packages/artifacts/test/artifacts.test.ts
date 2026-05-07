@@ -12,9 +12,11 @@ import {
   isReviewArtifactPayloadDescriptor,
   OBJECT_REVIEW_ARTIFACT_STORAGE_MODE,
   REVIEW_ARTIFACT_JSON_MEDIA_TYPE,
+  REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY,
   REVIEW_ARTIFACT_PAYLOAD_STORAGE_METADATA_KEY,
   readInlineReviewArtifactPayload,
   reviewArtifactDatabaseUri,
+  reviewArtifactPayloadDeletedMetadata,
   reviewArtifactPayloadDescriptor,
   S3CompatibleReviewArtifactPayloadStore,
 } from "../src";
@@ -86,6 +88,34 @@ describe("InlineReviewArtifactPayloadStore", () => {
     ).toBe(true);
     expect(hasReviewArtifactPayloadStorage({ source: "metadata-only" })).toBe(false);
   });
+
+  it("marks inline payloads as deleted so callers can scrub database metadata", async () => {
+    const store = new InlineReviewArtifactPayloadStore();
+    const record = await store.putJson({
+      reviewRunId: "rrn_test",
+      kind: "context_bundle",
+      name: "context-bundle.json",
+      payload: { snippets: ["src/index.ts"] },
+    });
+
+    await expect(store.deleteJson({ uri: record.uri, metadata: record.metadata })).resolves.toEqual(
+      {
+        deleted: true,
+      },
+    );
+
+    const metadata = reviewArtifactPayloadDeletedMetadata({
+      deletedAt: "2026-05-07T12:00:00.000Z",
+      metadata: record.metadata,
+      reason: "retention_policy",
+    });
+    expect(metadata).not.toHaveProperty("payload");
+    expect(metadata).not.toHaveProperty(REVIEW_ARTIFACT_PAYLOAD_STORAGE_METADATA_KEY);
+    expect(metadata[REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY]).toEqual({
+      deletedAt: "2026-05-07T12:00:00.000Z",
+      reason: "retention_policy",
+    });
+  });
 });
 
 describe("FileSystemReviewArtifactPayloadStore", () => {
@@ -133,6 +163,26 @@ describe("FileSystemReviewArtifactPayloadStore", () => {
     await expect(
       store.getJson({ uri: outsideRecord.uri, metadata: outsideRecord.metadata }),
     ).resolves.toEqual({ exists: false });
+  });
+
+  it("deletes filesystem payloads within the configured artifact root", async () => {
+    const root = await createTempRoot();
+    const store = new FileSystemReviewArtifactPayloadStore(root);
+    const record = await store.putJson({
+      reviewRunId: "rrn_test",
+      kind: "debug_log",
+      name: "debug-log.json",
+      payload: { leak: false },
+    });
+
+    await expect(store.deleteJson({ uri: record.uri, metadata: record.metadata })).resolves.toEqual(
+      {
+        deleted: true,
+      },
+    );
+    await expect(store.getJson({ uri: record.uri, metadata: record.metadata })).resolves.toEqual({
+      exists: false,
+    });
   });
 });
 
@@ -277,6 +327,41 @@ describe("S3CompatibleReviewArtifactPayloadStore", () => {
         uri: "s3://heimdall-artifacts/missing.json",
       }),
     ).resolves.toEqual({ exists: false });
+  });
+
+  it("deletes object-storage payloads with signed DELETE requests", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit | undefined }[] = [];
+    const fetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ init, url: input.toString() });
+      return new Response(null, { status: init?.method === "DELETE" ? 204 : 404 });
+    };
+    const store = new S3CompatibleReviewArtifactPayloadStore({
+      accessKeyId: "AKIA_TEST",
+      bucket: "heimdall-artifacts",
+      endpoint: "https://objects.example.test",
+      fetch,
+      now: () => new Date("2026-05-07T12:00:00.000Z"),
+      region: "auto",
+      secretAccessKey: "secret",
+    });
+
+    await expect(
+      store.deleteJson({
+        metadata: {},
+        uri: "s3://heimdall-artifacts/rrn_test/context_bundle/context-bundle.json",
+      }),
+    ).resolves.toEqual({ deleted: true });
+
+    expect(requests[0]).toMatchObject({
+      init: {
+        method: "DELETE",
+        headers: expect.objectContaining({
+          authorization: expect.stringContaining("AWS4-HMAC-SHA256 Credential=AKIA_TEST/"),
+          "x-amz-date": "20260507T120000Z",
+        }),
+      },
+      url: "https://objects.example.test/heimdall-artifacts/rrn_test/context_bundle/context-bundle.json",
+    });
   });
 });
 

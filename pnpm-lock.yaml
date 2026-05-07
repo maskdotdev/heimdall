@@ -983,6 +983,9 @@ importers:
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../security
       '@repo/static-analysis':
         specifier: workspace:*
         version: link:../static-analysis

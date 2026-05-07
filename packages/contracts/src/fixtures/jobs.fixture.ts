@@ -3,6 +3,7 @@ import type {
   EmbeddingBatchJobPayload,
   IndexRepoCommitJobPayload,
   PublishReviewJobPayload,
+  ReviewArtifactCleanupJobPayload,
   ReviewPullRequestJobPayload,
   SandboxCleanupJobPayload,
   SyncInstallationJobPayload,
@@ -71,3 +72,11 @@ export const validSandboxCleanupJobPayloadFixture = {
   reason: "scheduled",
   repoId: ids.repoId,
 } satisfies SandboxCleanupJobPayload;
+
+export const validReviewArtifactCleanupJobPayloadFixture = {
+  before: "2026-05-01T00:00:00.000Z",
+  dryRun: false,
+  limit: 100,
+  reason: "retention_policy",
+  repoId: ids.repoId,
+} satisfies ReviewArtifactCleanupJobPayload;

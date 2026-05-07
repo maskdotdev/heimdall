@@ -6,6 +6,7 @@ import {
   createReviewArtifactPayloadStoreFromEnvironment,
   InlineReviewArtifactPayloadStore,
   type ReviewArtifactPayloadStore,
+  reviewArtifactPayloadDeletedMetadata,
 } from "@repo/artifacts";
 import {
   type BillingProvider,
@@ -24,6 +25,7 @@ import {
   type LLMFindingOutput,
   type PublishReviewJobPayload,
   parseWithSchema,
+  type ReviewArtifactCleanupJobPayload,
   type ReviewPullRequestJobPayload,
   type SandboxCleanupJobPayload,
   type SyncInstallationJobPayload,
@@ -38,6 +40,7 @@ import {
   providerInstallations,
   publishedFindings,
   repositories,
+  reviewArtifacts,
   reviewRuns,
   sandboxArtifacts,
   sandboxPolicyDecisions,
@@ -116,13 +119,15 @@ import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } fro
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
 import { Worker } from "bullmq";
-import { and, asc, eq, inArray, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
 const DEFAULT_INDEX_ARTIFACT_ROOT = ".heimdall/index-artifacts";
 /** Default maximum time allowed for one indexer run. */
 const DEFAULT_INDEXER_TIMEOUT_MS = 120_000;
+/** URI prefix used after retention cleanup removes review artifact payload bytes. */
+const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
 
 /** Environment map used by worker runtime secret resolution. */
 type WorkerSecretEnvironment = Readonly<Record<string, string | undefined>>;
@@ -145,6 +150,8 @@ export type CreateWorkerHandlersOptions = {
   readonly billingReconciler?: (payload: BillingReconcileJobPayload) => Promise<void>;
   /** Optional test hook for sandbox cleanup jobs. */
   readonly sandboxCleaner?: (payload: SandboxCleanupJobPayload) => Promise<void>;
+  /** Optional test hook for review artifact cleanup jobs. */
+  readonly reviewArtifactCleaner?: (payload: ReviewArtifactCleanupJobPayload) => Promise<void>;
   /** Git provider used by repo sync handlers. */
   readonly gitProvider: GitProvider;
   /** Optional model gateway used by review jobs. */
@@ -574,6 +581,19 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
 
       await cleanupSandboxRuns(options.db, payload);
     },
+    [JOB_TYPES.ReviewArtifactCleanup]: async (envelope) => {
+      const payload = asReviewArtifactCleanupPayload(envelope.payload);
+      if (options.reviewArtifactCleaner) {
+        await options.reviewArtifactCleaner(payload);
+        return;
+      }
+
+      await cleanupExpiredReviewArtifacts(
+        options.db,
+        payload,
+        options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
+      );
+    },
   };
 }
 
@@ -968,6 +988,113 @@ export async function cleanupSandboxRuns(
   };
 }
 
+/** Summary returned after one review artifact cleanup pass. */
+export type ReviewArtifactCleanupSummary = {
+  /** Cutoff used to select expired review artifacts. */
+  readonly cutoff: string;
+  /** Whether the cleanup only planned work. */
+  readonly dryRun: boolean;
+  /** Number of review artifact rows selected. */
+  readonly selectedArtifactCount: number;
+  /** Number of payloads removed from backing storage or inline metadata. */
+  readonly deletedPayloadCount: number;
+  /** Number of payloads that were already missing from backing storage. */
+  readonly missingPayloadCount: number;
+  /** Number of review artifact rows updated with a deletion tombstone. */
+  readonly updatedArtifactCount: number;
+  /** Number of payloads skipped because deletion failed and should be retried. */
+  readonly failedPayloadCount: number;
+};
+
+/** Deletes expired review artifact payload bytes and leaves product-safe tombstone metadata. */
+export async function cleanupExpiredReviewArtifacts(
+  db: HeimdallDatabase,
+  payload: ReviewArtifactCleanupJobPayload,
+  artifactPayloadStore: ReviewArtifactPayloadStore = new InlineReviewArtifactPayloadStore(),
+  now: Date = new Date(),
+): Promise<ReviewArtifactCleanupSummary> {
+  const cutoff = reviewArtifactCleanupCutoff(payload, now);
+  const dryRun = payload.dryRun ?? false;
+  const conditions = [
+    isNotNull(reviewArtifacts.retentionUntil),
+    lte(reviewArtifacts.retentionUntil, cutoff),
+    not(like(reviewArtifacts.uri, `${DELETED_REVIEW_ARTIFACT_URI_PREFIX}%`)),
+  ];
+  if (payload.repoId) {
+    conditions.push(eq(reviewArtifacts.repoId, payload.repoId));
+  }
+
+  const artifactRows = await db
+    .select({
+      metadata: reviewArtifacts.metadata,
+      reviewArtifactId: reviewArtifacts.reviewArtifactId,
+      uri: reviewArtifacts.uri,
+    })
+    .from(reviewArtifacts)
+    .where(and(...conditions))
+    .orderBy(asc(reviewArtifacts.retentionUntil), asc(reviewArtifacts.reviewArtifactId))
+    .limit(payload.limit ?? 100);
+
+  if (dryRun || artifactRows.length === 0) {
+    return {
+      cutoff: cutoff.toISOString(),
+      deletedPayloadCount: 0,
+      dryRun,
+      failedPayloadCount: 0,
+      missingPayloadCount: 0,
+      selectedArtifactCount: artifactRows.length,
+      updatedArtifactCount: 0,
+    };
+  }
+
+  let deletedPayloadCount = 0;
+  let missingPayloadCount = 0;
+  let updatedArtifactCount = 0;
+  let failedPayloadCount = 0;
+  const deletedAt = now.toISOString();
+  const reason = payload.reason ?? "retention_policy";
+
+  for (const artifact of artifactRows) {
+    try {
+      const result = await artifactPayloadStore.deleteJson({
+        metadata: artifact.metadata,
+        uri: artifact.uri,
+      });
+      if (result.deleted) {
+        deletedPayloadCount += 1;
+      } else {
+        missingPayloadCount += 1;
+      }
+
+      await db
+        .update(reviewArtifacts)
+        .set({
+          metadata: reviewArtifactPayloadDeletedMetadata({
+            deletedAt,
+            metadata: artifact.metadata,
+            reason,
+          }),
+          sizeBytes: 0,
+          uri: deletedReviewArtifactUri(artifact.reviewArtifactId),
+        })
+        .where(eq(reviewArtifacts.reviewArtifactId, artifact.reviewArtifactId));
+      updatedArtifactCount += 1;
+    } catch {
+      failedPayloadCount += 1;
+    }
+  }
+
+  return {
+    cutoff: cutoff.toISOString(),
+    deletedPayloadCount,
+    dryRun,
+    failedPayloadCount,
+    missingPayloadCount,
+    selectedArtifactCount: artifactRows.length,
+    updatedArtifactCount,
+  };
+}
+
 /** Computes the sandbox cleanup cutoff date. */
 function sandboxCleanupCutoff(payload: SandboxCleanupJobPayload, now: Date): Date {
   if (payload.before) {
@@ -975,6 +1102,16 @@ function sandboxCleanupCutoff(payload: SandboxCleanupJobPayload, now: Date): Dat
   }
 
   return new Date(now.getTime() - (payload.olderThanDays ?? 30) * 24 * 60 * 60 * 1000);
+}
+
+/** Computes the review artifact cleanup cutoff date. */
+function reviewArtifactCleanupCutoff(payload: ReviewArtifactCleanupJobPayload, now: Date): Date {
+  return payload.before ? new Date(payload.before) : now;
+}
+
+/** Returns a non-readable URI for a payload that retention cleanup removed. */
+function deletedReviewArtifactUri(reviewArtifactId: string): string {
+  return `${DELETED_REVIEW_ARTIFACT_URI_PREFIX}${reviewArtifactId}`;
 }
 
 /** Local artifact file cleanup counters. */
@@ -2080,6 +2217,11 @@ function asBillingReconcilePayload(payload: JobPayload): BillingReconcileJobPayl
 /** Narrows a generic job payload to a sandbox cleanup payload. */
 function asSandboxCleanupPayload(payload: JobPayload): SandboxCleanupJobPayload {
   return payload as SandboxCleanupJobPayload;
+}
+
+/** Narrows a generic job payload to a review artifact cleanup payload. */
+function asReviewArtifactCleanupPayload(payload: JobPayload): ReviewArtifactCleanupJobPayload {
+  return payload as ReviewArtifactCleanupJobPayload;
 }
 
 /** Requires billing provider configuration before provider-mutating billing jobs run. */

@@ -56,6 +56,7 @@ import {
   validateCandidateFindings,
 } from "@repo/review-engine";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
+import { type RetentionDecision, resolveArtifactRetention } from "@repo/security";
 import {
   runStaticAnalysis,
   type StaticAnalysisBudgets,
@@ -2354,12 +2355,20 @@ async function persistArtifact(
   },
 ): Promise<ReviewArtifactRef> {
   const redactionLevel = getReviewArtifactRedactionLevel(input.kind);
+  const retention = reviewArtifactRetentionDecision(input.kind, input.createdAt);
+  const retentionUntil = reviewArtifactRetentionUntil(retention, input.createdAt);
   const payloadRecord = await artifactPayloadStore.putJson({
     reviewRunId: input.reviewRunId,
     kind: input.kind,
     name: input.name,
     payload: input.payload,
-    metadata: { redactionLevel },
+    metadata: {
+      redactionLevel,
+      retentionClass: retention.retentionClass,
+      retentionReason: retention.reason,
+      retentionStorage: retention.storage,
+      ...(retentionUntil ? { retentionUntil } : {}),
+    },
   });
   const payloadDescriptor = reviewArtifactPayloadDescriptor(payloadRecord);
   const artifact: ReviewArtifactRef = {
@@ -2370,7 +2379,15 @@ async function persistArtifact(
     byteSize: payloadRecord.sizeBytes,
     redactionLevel,
     createdAt: input.createdAt,
-    metadata: { name: input.name, payloadStorage: payloadDescriptor, redactionLevel },
+    metadata: {
+      name: input.name,
+      payloadStorage: payloadDescriptor,
+      redactionLevel,
+      retentionClass: retention.retentionClass,
+      retentionReason: retention.reason,
+      retentionStorage: retention.storage,
+      ...(retentionUntil ? { retentionUntil } : {}),
+    },
   };
 
   await repository.insertReviewArtifact({
@@ -2381,9 +2398,54 @@ async function persistArtifact(
     name: input.name,
     sizeBytes: payloadRecord.sizeBytes,
     metadata: payloadRecord.metadata,
+    ...(retentionUntil ? { retentionUntil } : {}),
   });
 
   return artifact;
+}
+
+/** Resolves retention policy for one persisted review artifact kind. */
+function reviewArtifactRetentionDecision(
+  kind: ReviewArtifactKind,
+  createdAt: string,
+): RetentionDecision {
+  return resolveArtifactRetention({
+    artifactType: reviewArtifactRetentionType(kind),
+    createdAt,
+  });
+}
+
+/** Returns the security retention artifact type that maps to one review artifact kind. */
+function reviewArtifactRetentionType(kind: ReviewArtifactKind): string {
+  if (kind === "raw_diff") {
+    return "raw_diff";
+  }
+  if (kind === "context_bundle") {
+    return "context_bundle";
+  }
+  if (kind === "llm_prompt") {
+    return "prompt_artifact";
+  }
+  if (kind === "llm_response") {
+    return "llm_response_artifact";
+  }
+  if (kind === "static_analysis") {
+    return "static_analysis_output";
+  }
+
+  return "review_summary";
+}
+
+/** Returns the payload cleanup timestamp for one retention decision. */
+function reviewArtifactRetentionUntil(
+  decision: RetentionDecision,
+  createdAt: string,
+): string | undefined {
+  if (decision.storage === "disabled") {
+    return createdAt;
+  }
+
+  return decision.expiresAt;
 }
 
 /** Storage classifications used by review artifact rows. */
