@@ -1231,6 +1231,8 @@ type AdminReviewArtifactSummary = {
   readonly sizeBytes: number;
   /** Artifact classification. */
   readonly classification: string;
+  /** Artifact redaction level when supplied by the producer. */
+  readonly redactionLevel?: string | undefined;
   /** Retention expiration timestamp when configured. */
   readonly retentionUntil?: string | undefined;
   /** Artifact creation timestamp. */
@@ -9013,6 +9015,7 @@ function artifactAccessRef(artifact: AdminReviewArtifactSummary): Record<string,
     hash: artifact.hash,
     kind: artifact.kind,
     name: artifact.name,
+    ...(artifact.redactionLevel ? { redactionLevel: artifact.redactionLevel } : {}),
     reviewArtifactId: artifact.reviewArtifactId,
     reviewRunId: artifact.reviewRunId,
     sizeBytes: artifact.sizeBytes,
@@ -9060,6 +9063,8 @@ function toAdminReviewArtifactSummary(row: {
   readonly uri: string;
 }): AdminReviewArtifactSummary {
   const metadata = asOptionalRecord(row.metadata);
+  const redactionLevel =
+    metadata && typeof metadata.redactionLevel === "string" ? metadata.redactionLevel : undefined;
 
   return {
     classification: row.classification,
@@ -9069,6 +9074,7 @@ function toAdminReviewArtifactSummary(row: {
     kind: row.kind,
     metadataKeys: metadata ? Object.keys(metadata).sort() : [],
     name: row.name,
+    ...(redactionLevel ? { redactionLevel } : {}),
     repoId: row.repoId,
     ...(row.retentionUntil ? { retentionUntil: row.retentionUntil.toISOString() } : {}),
     reviewArtifactId: row.reviewArtifactId,

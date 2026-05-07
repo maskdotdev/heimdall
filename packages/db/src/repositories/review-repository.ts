@@ -378,6 +378,8 @@ export class ReviewRepository {
     readonly artifact: ReviewArtifactRef;
     /** Human-readable artifact name scoped to the review run and kind. */
     readonly name: string;
+    /** Artifact data classification used for access policy and dashboards. */
+    readonly classification?: string;
     /** Artifact payload size in bytes. */
     readonly sizeBytes: number;
     /** Optional artifact metadata. */
@@ -393,6 +395,7 @@ export class ReviewRepository {
         name: input.name,
         uri: input.artifact.uri,
         hash: input.artifact.contentHash ?? "",
+        ...(input.classification ? { classification: input.classification } : {}),
         sizeBytes: input.sizeBytes,
         metadata: input.metadata ?? input.artifact.metadata,
       })

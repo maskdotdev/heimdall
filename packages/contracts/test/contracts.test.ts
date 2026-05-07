@@ -109,6 +109,7 @@ import { ChangeSetSchema } from "#contracts/pull-request/change-set";
 import { PullRequestSnapshotSchema } from "#contracts/pull-request/pull-request";
 import { RepositorySchema } from "#contracts/repository/repository";
 import { RepositorySettingsSchema } from "#contracts/repository/settings";
+import { getReviewArtifactRedactionLevel } from "#contracts/review/artifacts";
 import { ContextBundleSchema } from "#contracts/review/context";
 import {
   CandidateFindingSchema,
@@ -242,6 +243,13 @@ describe("contract validation", () => {
     expect(
       parseWithSchema("PublishedFinding", PublishedFindingSchema, validPublishedFindingFixture),
     ).toEqual(validPublishedFindingFixture);
+  });
+
+  it("maps review artifact kinds to observability redaction levels", () => {
+    expect(getReviewArtifactRedactionLevel("context_bundle")).toBe("contains_code");
+    expect(getReviewArtifactRedactionLevel("llm_prompt")).toBe("contains_prompt");
+    expect(getReviewArtifactRedactionLevel("policy_snapshot")).toBe("safe");
+    expect(getReviewArtifactRedactionLevel("pull_request_snapshot")).toBe("contains_sensitive");
   });
 
   it("validates memory, LLM, usage, and webhook fixtures", () => {

@@ -10,11 +10,12 @@ import type {
   PublishReviewJobPayload,
   PullRequestSnapshot,
   ReviewArtifactKind,
+  ReviewArtifactRedactionLevel,
   ReviewArtifactRef,
   ReviewRun,
   ReviewTrigger,
 } from "@repo/contracts";
-import { JOB_TYPES } from "@repo/contracts";
+import { getReviewArtifactRedactionLevel, JOB_TYPES } from "@repo/contracts";
 import {
   backgroundJobs,
   codeIndexVersions,
@@ -2352,11 +2353,13 @@ async function persistArtifact(
     readonly createdAt: string;
   },
 ): Promise<ReviewArtifactRef> {
+  const redactionLevel = getReviewArtifactRedactionLevel(input.kind);
   const payloadRecord = await artifactPayloadStore.putJson({
     reviewRunId: input.reviewRunId,
     kind: input.kind,
     name: input.name,
     payload: input.payload,
+    metadata: { redactionLevel },
   });
   const payloadDescriptor = reviewArtifactPayloadDescriptor(payloadRecord);
   const artifact: ReviewArtifactRef = {
@@ -2364,20 +2367,37 @@ async function persistArtifact(
     kind: input.kind,
     uri: payloadRecord.uri,
     contentHash: payloadRecord.hash,
+    byteSize: payloadRecord.sizeBytes,
+    redactionLevel,
     createdAt: input.createdAt,
-    metadata: { name: input.name, payloadStorage: payloadDescriptor },
+    metadata: { name: input.name, payloadStorage: payloadDescriptor, redactionLevel },
   };
 
   await repository.insertReviewArtifact({
     reviewRunId: input.reviewRunId,
     repoId: input.repoId,
     artifact,
+    classification: reviewArtifactClassification(redactionLevel),
     name: input.name,
     sizeBytes: payloadRecord.sizeBytes,
     metadata: payloadRecord.metadata,
   });
 
   return artifact;
+}
+
+/** Storage classifications used by review artifact rows. */
+type ReviewArtifactStorageClassification = "customer_confidential" | "customer_code";
+
+/** Maps artifact redaction levels to persistent artifact data classifications. */
+function reviewArtifactClassification(
+  redactionLevel: ReviewArtifactRedactionLevel,
+): ReviewArtifactStorageClassification {
+  if (redactionLevel === "contains_code" || redactionLevel === "contains_prompt") {
+    return "customer_code";
+  }
+
+  return "customer_confidential";
 }
 
 async function enqueuePublishJob(
