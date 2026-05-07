@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createMemoryObservabilitySink,
   createObservabilityResourceAttributes,
+  createObservabilityRuntime,
   createStructuredTelemetryLogger,
   DEFAULT_OBSERVABILITY_CONFIG,
   loadObservabilityConfig,
@@ -172,6 +173,68 @@ describe("structured telemetry logging", () => {
     });
     expect(JSON.stringify(entry)).not.toContain("raw prompt");
     expect(JSON.stringify(entry)).not.toContain("ghp_1234567890");
+  });
+});
+
+describe("observability runtime bootstrap", () => {
+  it("creates no-op runtime handles when observability is disabled", async () => {
+    const lines: string[] = [];
+    const runtime = createObservabilityRuntime({
+      consoleLogger: {
+        info: (line) => lines.push(String(line)),
+        warn: (line) => lines.push(String(line)),
+      },
+      env: {
+        OBSERVABILITY_ENABLED: "false",
+        OBSERVABILITY_EXPORTER: "console",
+      },
+    });
+
+    runtime.logger.info("hidden");
+    runtime.adminControlPlaneSink.record({
+      name: "admin.auth.success",
+      timestamp: "2026-05-07T12:00:00.000Z",
+    });
+    await runtime.shutdown();
+
+    expect(runtime.config.enabled).toBe(false);
+    expect(lines).toEqual([]);
+  });
+
+  it("creates console runtime handles with shared resource attributes", () => {
+    const lines: string[] = [];
+    const runtime = createObservabilityRuntime({
+      consoleLogger: {
+        info: (line) => lines.push(String(line)),
+        warn: (line) => lines.push(String(line)),
+      },
+      env: {
+        APP_VERSION: "sha-runtime",
+        HOSTNAME: "worker-1",
+        OBSERVABILITY_ENABLED: "true",
+        OBSERVABILITY_EXPORTER: "console",
+        OBSERVABILITY_SERVICE_NAME: "heimdall-worker",
+      },
+    });
+
+    runtime.logger.warn("Queue depth is high", {
+      attributes: { "queue.name": "reviews", "queue.depth": 12 },
+      timestamp: "2026-05-07T12:01:00.000Z",
+    });
+    runtime.adminControlPlaneSink.record({
+      name: "admin.replay.dispatched",
+      timestamp: "2026-05-07T12:01:01.000Z",
+    });
+
+    expect(runtime.resourceAttributes).toMatchObject({
+      "host.name": "worker-1",
+      "service.name": "heimdall-worker",
+      "service.version": "sha-runtime",
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('"level":"warn"');
+    expect(lines[0]).toContain('"queue.name":"reviews"');
+    expect(lines[1]).toContain('"target":"heimdall.admin_control_plane"');
   });
 });
 

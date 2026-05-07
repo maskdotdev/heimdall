@@ -249,6 +249,30 @@ export type StructuredTelemetryLogger = {
   readonly warn: (message: string, options?: StructuredTelemetryLogOptions) => void;
 };
 
+/** Options accepted by the observability runtime bootstrap. */
+export type ObservabilityRuntimeOptions = {
+  /** Optional preloaded config. Defaults to environment parsing. */
+  readonly config?: ObservabilityConfig;
+  /** Optional console implementation for console-mode sinks. */
+  readonly consoleLogger?: ObservabilityConsoleLogger;
+  /** Optional environment record for config and resource attributes. */
+  readonly env?: EnvironmentRecord;
+};
+
+/** Runtime observability handles shared by services. */
+export type ObservabilityRuntime = {
+  /** Admin control-plane event sink selected by config. */
+  readonly adminControlPlaneSink: ObservabilitySink;
+  /** Loaded observability config. */
+  readonly config: ObservabilityConfig;
+  /** Structured telemetry logger selected by config. */
+  readonly logger: StructuredTelemetryLogger;
+  /** Stable resource attributes attached to logs, spans, and metrics. */
+  readonly resourceAttributes: ObservabilityResourceAttributes;
+  /** Flushes and closes observability providers. No-op until OTel providers are wired. */
+  readonly shutdown: () => Promise<void>;
+};
+
 /** Summary of admin control-plane telemetry used by release audits. */
 export type AdminControlPlaneTelemetrySummary = {
   /** Count of denied access events. */
@@ -666,6 +690,32 @@ export function createStructuredTelemetryLogger(
     error: (message, options) => log("error", message, options),
     info: (message, options) => log("info", message, options),
     warn: (message, options) => log("warn", message, options),
+  };
+}
+
+/** Creates service-level observability handles from config or environment variables. */
+export function createObservabilityRuntime(
+  options: ObservabilityRuntimeOptions = {},
+): ObservabilityRuntime {
+  const env = options.env ?? getProcessEnvironment();
+  const config = options.config ?? loadObservabilityConfig(env);
+  const consoleLogger = options.consoleLogger ?? console;
+  const adminControlPlaneSink =
+    config.enabled && config.exporter === "console"
+      ? createConsoleObservabilitySink(consoleLogger)
+      : createNoopObservabilitySink();
+  const logger = createStructuredTelemetryLogger(
+    config,
+    createConsoleStructuredTelemetryLogSink(consoleLogger),
+    env,
+  );
+
+  return {
+    adminControlPlaneSink,
+    config,
+    logger,
+    resourceAttributes: createObservabilityResourceAttributes(config, env),
+    shutdown: async () => undefined,
   };
 }
 
