@@ -736,7 +736,9 @@ describe("reconcileEmbeddingJob", () => {
       }),
     ).resolves.toEqual({
       embeddingJobId: "embjob_1",
+      incompatibleVectorCount: 0,
       missingChunkIds: [],
+      orphanedVectorCount: 0,
       repairedItemCount: 1,
       progress: {
         chunkCountEmbedded: 2,
@@ -781,7 +783,9 @@ describe("reconcileEmbeddingJob", () => {
       }),
     ).resolves.toEqual({
       embeddingJobId: "embjob_1",
+      incompatibleVectorCount: 0,
       missingChunkIds: ["chunk_1"],
+      orphanedVectorCount: 0,
       repairedItemCount: 0,
       progress: {
         chunkCountEmbedded: 0,
@@ -809,6 +813,44 @@ describe("reconcileEmbeddingJob", () => {
       ]),
     );
   });
+
+  it("detects incompatible and orphaned vector rows", async () => {
+    const updatedValues: unknown[] = [];
+    const now = new Date("2026-05-07T12:00:00.000Z");
+
+    await expect(
+      reconcileEmbeddingJob({
+        db: createEmbeddingIncompatibleVectorDatabaseStub({ updatedValues }),
+        embeddingJobId: "embjob_1",
+        now: () => now,
+      }),
+    ).resolves.toEqual({
+      embeddingJobId: "embjob_1",
+      incompatibleVectorCount: 1,
+      missingChunkIds: ["chunk_1"],
+      orphanedVectorCount: 1,
+      repairedItemCount: 0,
+      progress: {
+        chunkCountEmbedded: 0,
+        chunkCountFailed: 0,
+        chunkCountSkipped: 0,
+        chunkCountTotal: 1,
+        embeddingJobId: "embjob_1",
+        status: "running",
+      },
+      resetItemCount: 1,
+    });
+    expect(updatedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          finishedAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          status: "pending",
+        }),
+      ]),
+    );
+  });
 });
 
 describe("repairEmbeddingJobs", () => {
@@ -830,10 +872,13 @@ describe("repairEmbeddingJobs", () => {
       }),
     ).resolves.toEqual({
       embeddingJobCount: 1,
+      incompatibleVectorCount: 0,
       jobs: [
         {
           embeddingJobId: "embjob_1",
+          incompatibleVectorCount: 0,
           missingChunkIds: [],
+          orphanedVectorCount: 0,
           repairedItemCount: 1,
           progress: {
             chunkCountEmbedded: 2,
@@ -847,6 +892,7 @@ describe("repairEmbeddingJobs", () => {
         },
       ],
       missingChunkIds: [],
+      orphanedVectorCount: 0,
       repairedItemCount: 1,
       resetItemCount: 0,
     });
@@ -1142,6 +1188,21 @@ function createEmbeddingReconcileDatabaseStub(options: {
       { chunkId: "chunk_2", status: "embedded" },
     ],
     [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
+    [
+      {
+        chunkId: "chunk_1",
+        embeddingDimension: 2,
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        provider: "hash",
+      },
+      {
+        chunkId: "chunk_2",
+        embeddingDimension: 2,
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        provider: "hash",
+      },
+    ],
+    [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
     [{ embedded: 2, failed: 0, skipped: 0, total: 2 }],
   ];
   let selectIndex = 0;
@@ -1189,6 +1250,64 @@ function createEmbeddingMissingVectorDatabaseStub(options: {
     ],
     [{ chunkId: "chunk_1", status: "embedded" }],
     [],
+    [],
+    [],
+    [{ embedded: 0, failed: 0, skipped: 0, total: 1 }],
+  ];
+  let selectIndex = 0;
+
+  return {
+    select: () => ({
+      from: (_table: unknown) => ({
+        where: (_condition: unknown) => {
+          const rows = selectedRows[selectIndex] ?? [];
+          selectIndex += 1;
+
+          return Object.assign(Promise.resolve(rows), {
+            limit: async (count: number) => rows.slice(0, count),
+          });
+        },
+      }),
+    }),
+    update: (_table: unknown) => ({
+      set: (values: unknown) => {
+        options.updatedValues.push(values);
+
+        return {
+          where: async (_condition: unknown) => undefined,
+        };
+      },
+    }),
+  } as unknown as Pick<HeimdallDatabase, "select" | "update">;
+}
+
+function createEmbeddingIncompatibleVectorDatabaseStub(options: {
+  /** Captures values passed to fake update statements. */
+  readonly updatedValues: unknown[];
+}): Pick<HeimdallDatabase, "select" | "update"> {
+  const selectedRows: readonly (readonly unknown[])[] = [
+    [
+      {
+        dimensions: 2,
+        embeddingJobId: "embjob_1",
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        indexVersionId: "idx_01HREVIEW",
+        model: "text-embedding-3-small",
+        provider: "hash",
+        repoId: "repo_01HREVIEW",
+      },
+    ],
+    [{ chunkId: "chunk_1", status: "embedded" }],
+    [],
+    [
+      {
+        chunkId: "chunk_1",
+        embeddingDimension: 3,
+        embeddingProfileVersion: "code_embedding_profile.v0",
+        provider: "hash",
+      },
+    ],
+    [{ chunkId: "chunk_orphan" }],
     [{ embedded: 0, failed: 0, skipped: 0, total: 1 }],
   ];
   let selectIndex = 0;
@@ -1238,6 +1357,21 @@ function createEmbeddingRepairDatabaseStub(options: {
     [
       { chunkId: "chunk_1", status: "pending" },
       { chunkId: "chunk_2", status: "embedded" },
+    ],
+    [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
+    [
+      {
+        chunkId: "chunk_1",
+        embeddingDimension: 2,
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        provider: "hash",
+      },
+      {
+        chunkId: "chunk_2",
+        embeddingDimension: 2,
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        provider: "hash",
+      },
     ],
     [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
     [{ embedded: 2, failed: 0, skipped: 0, total: 2 }],

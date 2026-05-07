@@ -418,8 +418,12 @@ export type ReconcileEmbeddingJobInput = {
 export type ReconcileEmbeddingJobResult = {
   /** Durable embedding job row ID. */
   readonly embeddingJobId: string;
+  /** Stored vector rows for job chunks that do not match the job provider/model/profile scope. */
+  readonly incompatibleVectorCount: number;
   /** Chunk IDs that still lack matching stored vector rows after reconciliation. */
   readonly missingChunkIds: readonly string[];
+  /** Correctly scoped vector rows that are not referenced by any item in the repaired job. */
+  readonly orphanedVectorCount: number;
   /** Item rows changed from stale state to embedded. */
   readonly repairedItemCount: number;
   /** Recomputed parent progress after repairs. */
@@ -456,10 +460,14 @@ export type RepairEmbeddingJobsInput = {
 export type RepairEmbeddingJobsResult = {
   /** Number of durable embedding jobs inspected and refreshed. */
   readonly embeddingJobCount: number;
+  /** Total stored vector rows for job chunks that do not match the repaired job scope. */
+  readonly incompatibleVectorCount: number;
   /** Per-job reconciliation results. */
   readonly jobs: readonly ReconcileEmbeddingJobResult[];
   /** Chunk IDs that still lack matching stored vector rows after repair. */
   readonly missingChunkIds: readonly string[];
+  /** Total correctly scoped vector rows that are not referenced by repaired job items. */
+  readonly orphanedVectorCount: number;
   /** Total number of stale item rows repaired from stored vector rows. */
   readonly repairedItemCount: number;
   /** Total number of stale embedded item rows reset to pending. */
@@ -759,6 +767,8 @@ export async function reconcileEmbeddingJob(
   const chunkIds = items.map((item) => item.chunkId);
   const now = input.now?.() ?? new Date();
   let missingChunkIds: string[] = [];
+  let incompatibleVectorCount = 0;
+  let orphanedVectorCount = 0;
   let repairedItemCount = 0;
   let resetItemCount = 0;
 
@@ -768,6 +778,27 @@ export async function reconcileEmbeddingJob(
       .from(codeChunkEmbeddings)
       .where(embeddingRowsForJobCondition(job, chunkIds));
     const embeddedChunkIds = new Set(embeddedRows.map((row) => row.chunkId));
+    const sameModelRows = await input.db
+      .select({
+        chunkId: codeChunkEmbeddings.chunkId,
+        embeddingDimension: codeChunkEmbeddings.embeddingDimension,
+        embeddingProfileVersion: codeChunkEmbeddings.embeddingProfileVersion,
+        provider: codeChunkEmbeddings.provider,
+      })
+      .from(codeChunkEmbeddings)
+      .where(embeddingRowsForJobChunkScanCondition(job, chunkIds));
+    incompatibleVectorCount = sameModelRows.filter(
+      (row) =>
+        row.embeddingDimension !== job.dimensions ||
+        row.embeddingProfileVersion !== job.embeddingProfileVersion ||
+        row.provider !== job.provider,
+    ).length;
+    const scopedRows = await input.db
+      .select({ chunkId: codeChunkEmbeddings.chunkId })
+      .from(codeChunkEmbeddings)
+      .where(embeddingRowsForJobScopeCondition(job));
+    const plannedChunkIds = new Set(chunkIds);
+    orphanedVectorCount = scopedRows.filter((row) => !plannedChunkIds.has(row.chunkId)).length;
     const repairableChunkIds = items
       .filter((item) => item.status !== "embedded" && embeddedChunkIds.has(item.chunkId))
       .map((item) => item.chunkId);
@@ -816,7 +847,9 @@ export async function reconcileEmbeddingJob(
 
   return {
     embeddingJobId: input.embeddingJobId,
+    incompatibleVectorCount,
     missingChunkIds,
+    orphanedVectorCount,
     repairedItemCount,
     progress: await refreshEmbeddingJobProgress(input.db, input.embeddingJobId, now),
     resetItemCount,
@@ -847,8 +880,10 @@ export async function repairEmbeddingJobs(
 
   return {
     embeddingJobCount: jobs.length,
+    incompatibleVectorCount: jobs.reduce((sum, job) => sum + job.incompatibleVectorCount, 0),
     jobs,
     missingChunkIds: jobs.flatMap((job) => job.missingChunkIds),
+    orphanedVectorCount: jobs.reduce((sum, job) => sum + job.orphanedVectorCount, 0),
     repairedItemCount: jobs.reduce((sum, job) => sum + job.repairedItemCount, 0),
     resetItemCount: jobs.reduce((sum, job) => sum + job.resetItemCount, 0),
   };
@@ -890,13 +925,56 @@ function embeddingRowsForJobCondition(
   },
   chunkIds: readonly string[],
 ) {
+  return and(
+    embeddingRowsForJobScopeCondition(job),
+    inArray(codeChunkEmbeddings.chunkId, [...chunkIds]),
+  );
+}
+
+/** Builds the stored-embedding predicate used to detect incompatible vectors for job chunks. */
+function embeddingRowsForJobChunkScanCondition(
+  job: {
+    /** Imported index version associated with the embedding job. */
+    readonly indexVersionId: string | null;
+    /** Embedding model recorded on the embedding job. */
+    readonly model: string;
+    /** Repository associated with the embedding job. */
+    readonly repoId: string;
+  },
+  chunkIds: readonly string[],
+) {
+  const sharedCondition = and(
+    eq(codeChunkEmbeddings.repoId, job.repoId),
+    eq(codeChunkEmbeddings.embeddingModel, job.model),
+    inArray(codeChunkEmbeddings.chunkId, [...chunkIds]),
+  );
+
+  return job.indexVersionId
+    ? and(sharedCondition, eq(codeChunkEmbeddings.indexVersionId, job.indexVersionId))
+    : sharedCondition;
+}
+
+/** Builds the stored-embedding predicate for the exact embedding job scope. */
+function embeddingRowsForJobScopeCondition(job: {
+  /** Vector dimensions recorded on the embedding job. */
+  readonly dimensions: number;
+  /** Embedding profile version recorded on the embedding job. */
+  readonly embeddingProfileVersion: string;
+  /** Imported index version associated with the embedding job. */
+  readonly indexVersionId: string | null;
+  /** Embedding model recorded on the embedding job. */
+  readonly model: string;
+  /** Embedding provider recorded on the embedding job. */
+  readonly provider: string;
+  /** Repository associated with the embedding job. */
+  readonly repoId: string;
+}) {
   const sharedCondition = and(
     eq(codeChunkEmbeddings.repoId, job.repoId),
     eq(codeChunkEmbeddings.embeddingModel, job.model),
     eq(codeChunkEmbeddings.embeddingDimension, job.dimensions),
     eq(codeChunkEmbeddings.embeddingProfileVersion, job.embeddingProfileVersion),
     eq(codeChunkEmbeddings.provider, job.provider),
-    inArray(codeChunkEmbeddings.chunkId, [...chunkIds]),
   );
 
   return job.indexVersionId
