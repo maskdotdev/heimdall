@@ -261,6 +261,21 @@ describe("importIndexArtifact telemetry", () => {
     expect(JSON.stringify(spans)).not.toContain("index-artifact.json");
   });
 
+  it("writes normalized records in bounded insert batches", async () => {
+    const insertedRows: unknown[] = [];
+    const result = await importIndexArtifact(artifactWithFiles(5), {
+      artifactUri: "file:///tmp/index-artifact.json",
+      db: createRecordingImportDatabaseStub(insertedRows),
+      importRecordBatchSize: 2,
+    });
+
+    const batchLengths = insertedRows.filter(isUnknownArray).map((batch) => batch.length);
+    expect(result).toMatchObject({
+      fileCount: 5,
+    });
+    expect(batchLengths).toEqual([2, 2, 1]);
+  });
+
   it("creates durable embedding planner rows and queued batch jobs", async () => {
     const insertedRows: unknown[] = [];
     const result = await importIndexArtifact(artifactWithChunk(), {
@@ -484,14 +499,51 @@ function artifactWithChunk(): IndexArtifact {
   };
 }
 
+/** Creates a valid index artifact with only file records. */
+function artifactWithFiles(count: number): IndexArtifact {
+  return {
+    manifest: {
+      ...emptyArtifact().manifest,
+      fileCount: count,
+      languages: ["typescript"],
+      recordCount: count,
+    },
+    records: Array.from({ length: count }, (_, index) => ({
+      type: "file",
+      schemaVersion: "index_record.v1",
+      fileId: `file_${index + 1}`,
+      repoId: "repo_1",
+      commitSha: "abc1234",
+      path: `src/file-${index + 1}.ts`,
+      language: "typescript",
+      contentHash: `sha256:${index.toString(16).padStart(64, "0")}`,
+      sizeBytes: 42,
+      lineCount: 2,
+      isBinary: false,
+      isGenerated: false,
+      isTest: false,
+      isVendored: false,
+    })),
+  };
+}
+
 /** Creates the minimum DB surface needed by empty artifact imports. */
 function createImportDatabaseStub(): HeimdallDatabase {
+  return createRecordingImportDatabaseStub([]);
+}
+
+/** Creates the minimum DB surface and records transaction insert payloads. */
+function createRecordingImportDatabaseStub(insertedRows: unknown[]): HeimdallDatabase {
   const tx = {
     insert: (_table: unknown) => ({
-      values: (_values: unknown) => ({
-        onConflictDoNothing: async () => undefined,
-        onConflictDoUpdate: async (_input: unknown) => undefined,
-      }),
+      values: (values: unknown) => {
+        insertedRows.push(values);
+
+        return {
+          onConflictDoNothing: async () => undefined,
+          onConflictDoUpdate: async (_input: unknown) => undefined,
+        };
+      },
     }),
   };
   const db = {
@@ -499,6 +551,11 @@ function createImportDatabaseStub(): HeimdallDatabase {
   };
 
   return db as unknown as HeimdallDatabase;
+}
+
+/** Narrows an unknown value to an array for insert-batch assertions. */
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
 }
 
 /** Creates the DB surface needed by embedding planner import tests. */

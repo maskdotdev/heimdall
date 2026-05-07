@@ -46,6 +46,12 @@ const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 /** Delay before a scheduled embedding repair job checks for progress drift. */
 const EMBEDDING_REPAIR_DELAY_MS = 15 * 60 * 1000;
 
+/** Default number of normalized index records written per insert statement. */
+const DEFAULT_IMPORT_RECORD_BATCH_SIZE = 1_000;
+
+/** Maximum record batch size accepted from caller-provided import options. */
+const MAX_IMPORT_RECORD_BATCH_SIZE = 5_000;
+
 /** Resolver that loads an index artifact from a durable URI or local path. */
 export type IndexArtifactResolver = {
   /** Reads and parses an index artifact from the provided URI. */
@@ -101,6 +107,8 @@ export type ImportIndexArtifactOptions = {
   readonly embeddingDimensions?: number;
   /** Maximum chunk IDs per embedding job. */
   readonly embeddingBatchSize?: number;
+  /** Maximum normalized records written per database insert statement. */
+  readonly importRecordBatchSize?: number;
   /** Optional metric recorder for aggregate index-import telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional trace context propagated from the durable indexing job. */
@@ -266,6 +274,7 @@ export async function importIndexArtifact(
     const chunks = artifact.records.filter(
       (record): record is ChunkRecord => record.type === "chunk",
     );
+    const importRecordBatchSize = boundedImportRecordBatchSize(options.importRecordBatchSize);
 
     await options.db.transaction(async (tx) => {
       await tx
@@ -312,99 +321,91 @@ export async function importIndexArtifact(
         });
 
       if (files.length > 0) {
-        await tx
-          .insert(indexedFiles)
-          .values(
-            files.map((file) => ({
-              fileId: file.fileId,
-              indexVersionId,
-              repoId: file.repoId,
-              commitSha: file.commitSha,
-              path: file.path,
-              language: file.language,
-              contentHash: file.contentHash,
-              sizeBytes: file.sizeBytes,
-              lineCount: file.lineCount,
-              isBinary: file.isBinary,
-              isGenerated: file.isGenerated,
-              isTest: file.isTest,
-              isVendored: file.isVendored,
-              metadata: file.metadata,
-            })),
-          )
-          .onConflictDoNothing();
+        const fileRows = files.map((file) => ({
+          fileId: file.fileId,
+          indexVersionId,
+          repoId: file.repoId,
+          commitSha: file.commitSha,
+          path: file.path,
+          language: file.language,
+          contentHash: file.contentHash,
+          sizeBytes: file.sizeBytes,
+          lineCount: file.lineCount,
+          isBinary: file.isBinary,
+          isGenerated: file.isGenerated,
+          isTest: file.isTest,
+          isVendored: file.isVendored,
+          metadata: file.metadata,
+        }));
+        for (const batch of batchRecords(fileRows, importRecordBatchSize)) {
+          await tx.insert(indexedFiles).values(batch).onConflictDoNothing();
+        }
       }
 
       if (symbolRecords.length > 0) {
-        await tx
-          .insert(symbols)
-          .values(
-            symbolRecords.map((symbol) => ({
-              symbolId: symbol.symbolId,
-              indexVersionId,
-              fileId: symbol.fileId,
-              repoId: symbol.repoId,
-              commitSha: symbol.commitSha,
-              path: symbol.path,
-              language: symbol.language,
-              name: symbol.name,
-              qualifiedName: symbol.qualifiedName,
-              kind: symbol.kind,
-              startLine: symbol.range.startLine,
-              endLine: symbol.range.endLine,
-              contentHash: symbol.contentHash,
-              metadata: { ...symbol.metadata, signature: symbol.signature },
-            })),
-          )
-          .onConflictDoNothing();
+        const symbolRows = symbolRecords.map((symbol) => ({
+          symbolId: symbol.symbolId,
+          indexVersionId,
+          fileId: symbol.fileId,
+          repoId: symbol.repoId,
+          commitSha: symbol.commitSha,
+          path: symbol.path,
+          language: symbol.language,
+          name: symbol.name,
+          qualifiedName: symbol.qualifiedName,
+          kind: symbol.kind,
+          startLine: symbol.range.startLine,
+          endLine: symbol.range.endLine,
+          contentHash: symbol.contentHash,
+          metadata: { ...symbol.metadata, signature: symbol.signature },
+        }));
+        for (const batch of batchRecords(symbolRows, importRecordBatchSize)) {
+          await tx.insert(symbols).values(batch).onConflictDoNothing();
+        }
       }
 
       if (edgeRecords.length > 0) {
-        await tx
-          .insert(codeEdges)
-          .values(
-            edgeRecords.map((edge) => ({
-              edgeId: edge.edgeId,
-              indexVersionId,
-              repoId: edge.repoId,
-              commitSha: edge.commitSha,
-              fromId: edge.fromId,
-              toId: edge.toId,
-              fromKind: edge.fromKind,
-              toKind: edge.toKind,
-              kind: edge.kind,
-              confidence: edge.confidence,
-              metadata: edge.metadata,
-            })),
-          )
-          .onConflictDoNothing();
+        const edgeRows = edgeRecords.map((edge) => ({
+          edgeId: edge.edgeId,
+          indexVersionId,
+          repoId: edge.repoId,
+          commitSha: edge.commitSha,
+          fromId: edge.fromId,
+          toId: edge.toId,
+          fromKind: edge.fromKind,
+          toKind: edge.toKind,
+          kind: edge.kind,
+          confidence: edge.confidence,
+          metadata: edge.metadata,
+        }));
+        for (const batch of batchRecords(edgeRows, importRecordBatchSize)) {
+          await tx.insert(codeEdges).values(batch).onConflictDoNothing();
+        }
       }
 
       if (chunks.length > 0) {
-        await tx
-          .insert(codeChunks)
-          .values(
-            chunks.map((chunk) => ({
-              chunkId: chunk.chunkId,
-              indexVersionId,
-              fileId: chunk.fileId,
-              symbolId: chunk.symbolId,
-              repoId: chunk.repoId,
-              path: chunk.path,
-              startLine: chunk.range.startLine,
-              endLine: chunk.range.endLine,
-              contentHash: chunk.contentHash,
-              embeddingStatus: "pending",
-              metadata: {
-                ...chunk.metadata,
-                language: chunk.language,
-                kind: chunk.kind,
-                text: chunk.text,
-                tokenEstimate: chunk.tokenEstimate,
-              },
-            })),
-          )
-          .onConflictDoNothing();
+        const chunkRows = chunks.map((chunk) => ({
+          chunkId: chunk.chunkId,
+          indexVersionId,
+          fileId: chunk.fileId,
+          symbolId: chunk.symbolId,
+          repoId: chunk.repoId,
+          path: chunk.path,
+          startLine: chunk.range.startLine,
+          endLine: chunk.range.endLine,
+          contentHash: chunk.contentHash,
+          embeddingStatus: "pending",
+          metadata: {
+            ...chunk.metadata,
+            language: chunk.language,
+            kind: chunk.kind,
+            text: chunk.text,
+            tokenEstimate: chunk.tokenEstimate,
+          },
+        }));
+        for (const batch of batchRecords(chunkRows, importRecordBatchSize)) {
+          await tx.insert(codeChunks).values(batch).onConflictDoNothing();
+        }
       }
     });
 
@@ -554,6 +555,25 @@ function normalizeIndexImporterLabel(value: string): string {
     .slice(0, 80);
 
   return normalized.length > 0 ? normalized : "unknown";
+}
+
+/** Returns a bounded import record batch size for normalized row inserts. */
+function boundedImportRecordBatchSize(value: number | undefined): number {
+  if (value === undefined) {
+    return DEFAULT_IMPORT_RECORD_BATCH_SIZE;
+  }
+  if (!Number.isSafeInteger(value)) {
+    return DEFAULT_IMPORT_RECORD_BATCH_SIZE;
+  }
+
+  return Math.min(MAX_IMPORT_RECORD_BATCH_SIZE, Math.max(1, value));
+}
+
+/** Yields stable slices of row values for bounded batch inserts. */
+function* batchRecords<T>(records: readonly T[], batchSize: number): Generator<T[]> {
+  for (let offset = 0; offset < records.length; offset += batchSize) {
+    yield records.slice(offset, offset + batchSize);
+  }
 }
 
 /** Enqueues durable embedding batch jobs and records phase-specific embedding planner state. */
