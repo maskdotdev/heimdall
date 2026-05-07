@@ -1,11 +1,27 @@
+import { createDatabaseClient } from "@repo/db";
 import { createObservabilityRuntime, OBSERVABILITY_METRIC_NAMES } from "@repo/observability";
-import { createApiApp } from "./app";
+import { createApiApp, createPostgresSecurityEventSink } from "./app";
 
 const observability = createObservabilityRuntime({
   defaultServiceName: "code-review-api",
 });
+const databaseClient = createDatabaseClient();
 const app = createApiApp({
   adminObservabilitySink: observability.adminControlPlaneSink,
+  adminSecurityEventSink: createPostgresSecurityEventSink({
+    db: databaseClient.db,
+    onError: (error, event) => {
+      observability.logger.warn("security event persistence failed", {
+        attributes: {
+          "event.id": event.id,
+          "event.type": event.type,
+        },
+        error,
+        target: "api.security_events",
+      });
+    },
+  }),
+  databaseClient,
   metrics: observability.metrics,
   traces: observability.traces,
 }).listen({
@@ -33,6 +49,7 @@ const shutdown = async (): Promise<void> => {
   observability.metrics.count(OBSERVABILITY_METRIC_NAMES.apiServiceStopsTotal, {
     labels: { status: "stopping" },
   });
+  await databaseClient.close();
   await observability.shutdown();
   process.exit(0);
 };

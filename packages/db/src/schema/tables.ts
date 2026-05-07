@@ -1771,6 +1771,33 @@ export const artifactAccessEvents = pgTable(
   ],
 );
 
+/** Durable security events emitted by API, worker, provider, and system boundaries. */
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    securityEventId: text("security_event_id").primaryKey(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    type: text("type").notNull(),
+    severity: text("severity").notNull(),
+    source: text("source").notNull(),
+    status: text("status").notNull(),
+    actorId: text("actor_id"),
+    resourceType: text("resource_type"),
+    resourceId: text("resource_id"),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (table) => [
+    index("security_events_org_idx").on(table.orgId, table.createdAt),
+    index("security_events_repo_idx").on(table.repoId, table.createdAt),
+    index("security_events_severity_idx").on(table.severity, table.createdAt),
+    index("security_events_status_idx").on(table.status, table.createdAt),
+    index("security_events_type_idx").on(table.type, table.createdAt),
+    index("security_events_actor_idx").on(table.actorId, table.createdAt),
+  ],
+);
+
 /** Security/compliance audit trail for sensitive operations. */
 export const auditLogs = pgTable("audit_logs", {
   auditLogId: text("audit_log_id").primaryKey(),

@@ -9,6 +9,7 @@ import type {
   RepositorySettings,
   UpdateRepositoryControlPlaneSettingsRequest,
 } from "@repo/contracts";
+import type { HeimdallDatabase } from "@repo/db";
 import {
   createMemoryObservabilitySink,
   createMemoryTelemetrySpanSink,
@@ -20,12 +21,17 @@ import {
   type TelemetryMetricPoint,
 } from "@repo/observability";
 import { buildReviewPolicySnapshot } from "@repo/rules";
-import { createMemorySecurityEventSink, signAdminIdentityAssertion } from "@repo/security";
+import {
+  createMemorySecurityEventSink,
+  createSecurityEvent,
+  signAdminIdentityAssertion,
+} from "@repo/security";
 import { WebhookAuthenticationError } from "@repo/webhook-ingestion";
 import { describe, expect, it } from "vitest";
 import {
   type AdminControlPlaneService,
   createApiApp,
+  createPostgresSecurityEventSink,
   type ProductDashboardService,
   type ProductGitHubOAuthService,
   type ProductSessionService,
@@ -152,6 +158,58 @@ describe("api app", () => {
     secureCookies: false,
     sessionPepper: "product-session-pepper-with-at-least-32-chars",
   };
+
+  it("maps security events into durable Postgres rows", () => {
+    const insertedRows: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (row: unknown) => {
+          insertedRows.push(row);
+          return { onConflictDoNothing: () => Promise.resolve() };
+        },
+      }),
+    } as unknown as HeimdallDatabase;
+    const sink = createPostgresSecurityEventSink({ db });
+
+    sink.record(
+      createSecurityEvent({
+        actorId: "oidc:usr_support",
+        createdAt: "2026-05-07T12:00:00.000Z",
+        id: "secevt_test",
+        metadata: {
+          denialReason: "admin.scope_forbidden",
+          statusCode: 403,
+        },
+        orgId: "org_1",
+        repoId: "repo_1",
+        resourceId: "repo_1",
+        resourceType: "repository",
+        source: "api",
+        type: "cross_tenant_access_attempt",
+      }),
+    );
+
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        actorId: "oidc:usr_support",
+        createdAt: new Date("2026-05-07T12:00:00.000Z"),
+        metadata: expect.objectContaining({
+          denialReason: "admin.scope_forbidden",
+          statusCode: 403,
+        }),
+        orgId: "org_1",
+        repoId: "repo_1",
+        resourceId: "repo_1",
+        resourceType: "repository",
+        securityEventId: "secevt_test",
+        severity: "critical",
+        source: "api",
+        status: "new",
+        type: "cross_tenant_access_attempt",
+        updatedAt: new Date("2026-05-07T12:00:00.000Z"),
+      }),
+    ]);
+  });
 
   it("wires the GitHub webhook route to the handler", async () => {
     const app = createApiApp({

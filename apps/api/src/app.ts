@@ -108,6 +108,7 @@ import {
   reviewArtifacts,
   reviewRunMetrics,
   reviewRuns,
+  securityEvents,
   subscriptions,
   usageEvents,
   userProviderAccounts,
@@ -169,6 +170,7 @@ import {
   productCapabilities,
   productPermissionsForRole,
   recordSecurityEvent,
+  type SecurityEvent,
   type SecurityEventSeverity,
   type SecurityEventSink,
   verifyAdminIdentityAssertion,
@@ -2682,6 +2684,8 @@ export type CreateApiAppOptions = {
   readonly productSessionAuth?: ProductSessionAuthOptions;
   /** Product GitHub OAuth authentication override for tests or custom composition. */
   readonly productGitHubOAuth?: ProductGitHubOAuthOptions;
+  /** Shared database client for production composition or tests. */
+  readonly databaseClient?: DatabaseClient;
   /** Admin control-plane observability sink for structured telemetry. */
   readonly adminObservabilitySink?: ObservabilitySink;
   /** Admin control-plane security-event sink for high-risk access denials. */
@@ -2701,9 +2705,58 @@ function createNoopApiSecurityEventSink(): SecurityEventSink {
   };
 }
 
+/** Options used to create a Postgres-backed security event sink. */
+export type PostgresSecurityEventSinkOptions = {
+  /** Database facade that receives durable security events. */
+  readonly db: HeimdallDatabase;
+  /** Optional product-safe error hook for failed background writes. */
+  readonly onError?: (error: unknown, event: SecurityEvent) => void;
+};
+
+/** Creates a security event sink that writes normalized events to Postgres. */
+export function createPostgresSecurityEventSink(
+  options: PostgresSecurityEventSinkOptions,
+): SecurityEventSink {
+  return {
+    record: (event) => {
+      try {
+        const write = options.db
+          .insert(securityEvents)
+          .values(securityEventInsertFromEvent(event))
+          .onConflictDoNothing();
+        void Promise.resolve(write).catch((error: unknown) => {
+          options.onError?.(error, event);
+        });
+      } catch (error) {
+        options.onError?.(error, event);
+      }
+    },
+  };
+}
+
+/** Converts a normalized security event into a `security_events` insert row. */
+function securityEventInsertFromEvent(event: SecurityEvent): typeof securityEvents.$inferInsert {
+  const createdAt = new Date(event.createdAt);
+  return {
+    actorId: event.actorId ?? null,
+    createdAt,
+    metadata: event.metadata,
+    orgId: event.orgId ?? null,
+    repoId: event.repoId ?? null,
+    resourceId: event.resourceId ?? null,
+    resourceType: event.resourceType ?? null,
+    securityEventId: event.id,
+    severity: event.severity,
+    source: event.source,
+    status: event.status,
+    type: event.type,
+    updatedAt: createdAt,
+  };
+}
+
 /** Creates the Heimdall API app. */
 export function createApiApp(options: CreateApiAppOptions = {}) {
-  let databaseClient: DatabaseClient | undefined;
+  let databaseClient: DatabaseClient | undefined = options.databaseClient;
   let environmentBillingProvider: BillingProvider | undefined;
   let environmentBillingProviderLoaded = false;
   let environmentArtifactPayloadStore: ReviewArtifactPayloadStore | undefined;
