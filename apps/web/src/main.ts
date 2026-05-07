@@ -1476,6 +1476,38 @@ type ProductResourcesState = {
   readonly error?: string | undefined;
 };
 
+/** Sandbox runner kinds accepted by repository settings. */
+type SandboxRunnerSetting = "docker" | "gvisor" | "microvm";
+
+/** Minimum sandbox runner settings accepted for forked pull requests. */
+type SandboxForkRunnerSetting = SandboxRunnerSetting | "disabled";
+
+/** Repository-level sandbox policy overrides returned by settings APIs. */
+type SandboxPolicySettings = {
+  /** Whether sandbox execution is enabled. */
+  readonly enabled?: boolean | undefined;
+  /** Default sandbox runner kind. */
+  readonly defaultRunner?: SandboxRunnerSetting | undefined;
+  /** Minimum runner required for forked pull requests. */
+  readonly minimumRunnerForForks?: SandboxForkRunnerSetting | undefined;
+  /** Whether sandbox network access is requested. */
+  readonly allowNetwork?: boolean | undefined;
+  /** Whether dependency installation is requested. */
+  readonly allowDependencyInstall?: boolean | undefined;
+  /** Whether custom commands are requested. */
+  readonly allowCustomCommands?: boolean | undefined;
+  /** Maximum sandbox command timeout. */
+  readonly maxTimeoutMs?: number | undefined;
+  /** Maximum sandbox memory. */
+  readonly maxMemoryBytes?: number | undefined;
+  /** Maximum sandbox CPU count. */
+  readonly maxCpuCount?: number | undefined;
+  /** Maximum captured output. */
+  readonly maxOutputBytes?: number | undefined;
+  /** Maximum collected artifact bytes. */
+  readonly maxArtifactBytes?: number | undefined;
+};
+
 /** Repository settings returned by settings APIs. */
 type ControlPlaneSettings = {
   /** Review policy. */
@@ -1499,30 +1531,7 @@ type ControlPlaneSettings = {
   /** Custom instructions for this repository. */
   readonly customInstructions?: string | undefined;
   /** Optional repository-level sandbox policy overrides. */
-  readonly sandboxPolicy?: {
-    /** Whether sandbox execution is enabled. */
-    readonly enabled?: boolean | undefined;
-    /** Default sandbox runner kind. */
-    readonly defaultRunner?: string | undefined;
-    /** Minimum runner required for forked pull requests. */
-    readonly minimumRunnerForForks?: string | undefined;
-    /** Whether sandbox network access is requested. */
-    readonly allowNetwork?: boolean | undefined;
-    /** Whether dependency installation is requested. */
-    readonly allowDependencyInstall?: boolean | undefined;
-    /** Whether custom commands are requested. */
-    readonly allowCustomCommands?: boolean | undefined;
-    /** Maximum sandbox command timeout. */
-    readonly maxTimeoutMs?: number | undefined;
-    /** Maximum sandbox memory. */
-    readonly maxMemoryBytes?: number | undefined;
-    /** Maximum sandbox CPU count. */
-    readonly maxCpuCount?: number | undefined;
-    /** Maximum captured output. */
-    readonly maxOutputBytes?: number | undefined;
-    /** Maximum collected artifact bytes. */
-    readonly maxArtifactBytes?: number | undefined;
-  };
+  readonly sandboxPolicy?: SandboxPolicySettings | undefined;
 };
 
 /** Control-plane settings payload. */
@@ -1716,6 +1725,34 @@ type SettingsFormState = {
   skipDraftPullRequests: boolean;
   /** Custom instructions. */
   customInstructions: string;
+  /** Sandbox policy override fields. */
+  sandboxPolicy: SandboxPolicyFormState;
+};
+
+/** Mutable sandbox policy form state. */
+type SandboxPolicyFormState = {
+  /** Whether sandbox execution is enabled. */
+  enabled: boolean;
+  /** Default sandbox runner kind. */
+  defaultRunner: SandboxRunnerSetting;
+  /** Minimum runner required for forked pull requests. */
+  minimumRunnerForForks: SandboxForkRunnerSetting;
+  /** Whether sandbox network access is requested. */
+  allowNetwork: boolean;
+  /** Whether dependency installation is requested. */
+  allowDependencyInstall: boolean;
+  /** Whether custom commands are requested. */
+  allowCustomCommands: boolean;
+  /** Maximum sandbox command timeout in milliseconds. */
+  maxTimeoutMs: string;
+  /** Maximum sandbox memory in bytes. */
+  maxMemoryBytes: string;
+  /** Maximum sandbox CPU count. */
+  maxCpuCount: string;
+  /** Maximum captured sandbox output in bytes. */
+  maxOutputBytes: string;
+  /** Maximum collected sandbox artifact bytes. */
+  maxArtifactBytes: string;
 };
 
 /** Mutable repository rule form state. */
@@ -2512,6 +2549,24 @@ const DEFAULT_ENTITLEMENT_FEATURE_KEYS = [
   "static_analysis.enabled",
   "security.audit_logs",
 ].join("\n");
+/** Sandbox runner options shown in repository settings. */
+const SANDBOX_RUNNER_OPTIONS = ["docker", "gvisor", "microvm"] as const;
+/** Forked pull request runner options shown in repository settings. */
+const SANDBOX_FORK_RUNNER_OPTIONS = ["gvisor", "microvm", "docker", "disabled"] as const;
+/** Default editable sandbox policy values used when no repository override exists. */
+const DEFAULT_SANDBOX_POLICY_FORM: SandboxPolicyFormState = {
+  allowCustomCommands: false,
+  allowDependencyInstall: false,
+  allowNetwork: false,
+  defaultRunner: "docker",
+  enabled: true,
+  maxArtifactBytes: "25000000",
+  maxCpuCount: "2",
+  maxMemoryBytes: "1073741824",
+  maxOutputBytes: "10000000",
+  maxTimeoutMs: "45000",
+  minimumRunnerForForks: "gvisor",
+};
 const PRODUCT_FINDING_OUTCOME_ACTIONS: readonly ProductFindingOutcomeAction[] = [
   { outcome: "accepted", label: "Useful" },
   { outcome: "rejected", label: "False positive" },
@@ -7240,6 +7295,7 @@ function renderSettingsForm(
         ${renderTextarea(`${options.settingsFieldPrefix}.ignoredAuthors`, "Ignored authors", form.ignoredAuthors, !options.canManageSettings)}
         ${renderTextarea(`${options.settingsFieldPrefix}.ignoredLabels`, "Ignored labels", form.ignoredLabels, !options.canManageSettings)}
       </div>
+      ${renderSandboxPolicySettings(form.sandboxPolicy, options)}
       <label>
         <span>Custom instructions</span>
         <textarea
@@ -7250,6 +7306,86 @@ function renderSettingsForm(
       </label>
       ${renderPolicyPreview(preview)}
       ${renderRepositoryRules(rules, ruleForm, options)}
+    </section>
+  `;
+}
+
+/** Renders repository sandbox policy controls. */
+function renderSandboxPolicySettings(
+  sandboxPolicy: SandboxPolicyFormState,
+  options: SettingsFormRenderOptions,
+): string {
+  const disabled = !options.canManageSettings;
+  const prefix = `${options.settingsFieldPrefix}.sandboxPolicy`;
+  return `
+    <section class="settings-subsection">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Sandbox</p>
+          <h3>Execution Policy</h3>
+        </div>
+        <span class="status ${sandboxPolicy.enabled ? "ok" : "muted"}">
+          ${sandboxPolicy.enabled ? "enabled" : "disabled"}
+        </span>
+      </div>
+      <div class="form-grid">
+        ${renderCheckbox(`${prefix}.enabled`, "Sandbox execution", sandboxPolicy.enabled, disabled)}
+        ${renderSelect(
+          `${prefix}.defaultRunner`,
+          "Default runner",
+          sandboxPolicy.defaultRunner,
+          SANDBOX_RUNNER_OPTIONS,
+          disabled,
+        )}
+        ${renderSelect(
+          `${prefix}.minimumRunnerForForks`,
+          "Fork runner",
+          sandboxPolicy.minimumRunnerForForks,
+          SANDBOX_FORK_RUNNER_OPTIONS,
+          disabled,
+        )}
+        ${renderCheckbox(`${prefix}.allowNetwork`, "Network access", sandboxPolicy.allowNetwork, disabled)}
+        ${renderCheckbox(
+          `${prefix}.allowDependencyInstall`,
+          "Dependency installs",
+          sandboxPolicy.allowDependencyInstall,
+          disabled,
+        )}
+        ${renderCheckbox(
+          `${prefix}.allowCustomCommands`,
+          "Custom commands",
+          sandboxPolicy.allowCustomCommands,
+          disabled,
+        )}
+      </div>
+      <div class="form-grid">
+        ${renderNumberInput(`${prefix}.maxTimeoutMs`, "Timeout ms", sandboxPolicy.maxTimeoutMs, "1", "600000", disabled)}
+        ${renderNumberInput(
+          `${prefix}.maxMemoryBytes`,
+          "Memory bytes",
+          sandboxPolicy.maxMemoryBytes,
+          "1",
+          "8589934592",
+          disabled,
+        )}
+        ${renderNumberInput(`${prefix}.maxCpuCount`, "CPU count", sandboxPolicy.maxCpuCount, "1", "16", disabled)}
+        ${renderNumberInput(
+          `${prefix}.maxOutputBytes`,
+          "Output bytes",
+          sandboxPolicy.maxOutputBytes,
+          "0",
+          "100000000",
+          disabled,
+        )}
+        ${renderNumberInput(
+          `${prefix}.maxArtifactBytes`,
+          "Artifact bytes",
+          sandboxPolicy.maxArtifactBytes,
+          "0",
+          "250000000",
+          disabled,
+        )}
+      </div>
     </section>
   `;
 }
@@ -10243,6 +10379,30 @@ function renderCheckbox(field: string, label: string, checked: boolean, disabled
   `;
 }
 
+/** Renders a bounded number input for forms. */
+function renderNumberInput(
+  field: string,
+  label: string,
+  value: string,
+  min: string,
+  max: string,
+  disabled = false,
+): string {
+  return `
+    <label>
+      <span>${escapeHtml(label)}</span>
+      <input
+        data-field="${escapeAttribute(field)}"
+        min="${escapeAttribute(min)}"
+        max="${escapeAttribute(max)}"
+        type="number"
+        value="${escapeAttribute(value)}"
+        ${disabled ? "disabled" : ""}
+      />
+    </label>
+  `;
+}
+
 /** Renders a select control. */
 function renderSelect(
   field: string,
@@ -10326,9 +10486,13 @@ function updateSettingsFormField(
     state.settings.preview = undefined;
     return;
   }
+  if (field.startsWith("sandboxPolicy.")) {
+    updateSandboxPolicyFormField(form.sandboxPolicy, field.slice("sandboxPolicy.".length), target);
+    state.settings.preview = undefined;
+    return;
+  }
 
-  if (field in form) {
-    (form as Record<string, string | boolean>)[field] = target.value;
+  if (updateSettingsScalarFormField(form, field, target.value)) {
     state.settings.preview = undefined;
   }
 }
@@ -10375,10 +10539,82 @@ function updateProductSettingsFormField(
     settings.preview = undefined;
     return;
   }
+  if (field.startsWith("sandboxPolicy.")) {
+    updateSandboxPolicyFormField(form.sandboxPolicy, field.slice("sandboxPolicy.".length), target);
+    settings.preview = undefined;
+    return;
+  }
+
+  if (updateSettingsScalarFormField(form, field, target.value)) {
+    settings.preview = undefined;
+  }
+}
+
+/** Updates one scalar repository settings field. */
+function updateSettingsScalarFormField(
+  form: SettingsFormState,
+  field: string,
+  value: string,
+): boolean {
+  switch (field) {
+    case "reviewPolicy":
+      form.reviewPolicy = value;
+      return true;
+    case "severityThreshold":
+      form.severityThreshold = value;
+      return true;
+    case "maxCommentsPerReview":
+      form.maxCommentsPerReview = value;
+      return true;
+    case "ignoredPaths":
+      form.ignoredPaths = value;
+      return true;
+    case "ignoredAuthors":
+      form.ignoredAuthors = value;
+      return true;
+    case "ignoredLabels":
+      form.ignoredLabels = value;
+      return true;
+    case "requireLabel":
+      form.requireLabel = value;
+      return true;
+    case "customInstructions":
+      form.customInstructions = value;
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** Updates one sandbox policy form field from an input element. */
+function updateSandboxPolicyFormField(
+  form: SandboxPolicyFormState,
+  field: string,
+  target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+): void {
+  if (
+    (field === "enabled" ||
+      field === "allowNetwork" ||
+      field === "allowDependencyInstall" ||
+      field === "allowCustomCommands") &&
+    target instanceof HTMLInputElement
+  ) {
+    form[field] = target.checked;
+    return;
+  }
+
+  if (field === "defaultRunner") {
+    form.defaultRunner = sandboxRunnerSettingFromForm(target.value);
+    return;
+  }
+
+  if (field === "minimumRunnerForForks") {
+    form.minimumRunnerForForks = sandboxForkRunnerSettingFromForm(target.value);
+    return;
+  }
 
   if (field in form) {
     (form as Record<string, string | boolean>)[field] = target.value;
-    settings.preview = undefined;
   }
 }
 
@@ -10456,6 +10692,7 @@ function settingsFormFromResponse(data: ControlPlaneSettingsResponse): SettingsF
     skipGeneratedFiles: data.settings.skipGeneratedFiles,
     skipDraftPullRequests: data.settings.skipDraftPullRequests,
     customInstructions: data.settings.customInstructions ?? "",
+    sandboxPolicy: sandboxPolicyFormFromSettings(data.settings.sandboxPolicy),
   };
 }
 
@@ -10473,7 +10710,63 @@ function settingsPatchFromForm(form: SettingsFormState): Record<string, unknown>
     skipGeneratedFiles: form.skipGeneratedFiles,
     skipDraftPullRequests: form.skipDraftPullRequests,
     customInstructions: form.customInstructions.trim(),
+    sandboxPolicy: sandboxPolicyPatchFromForm(form.sandboxPolicy),
   };
+}
+
+/** Converts optional sandbox settings into editable form values. */
+function sandboxPolicyFormFromSettings(
+  settings: SandboxPolicySettings | undefined,
+): SandboxPolicyFormState {
+  return {
+    allowCustomCommands:
+      settings?.allowCustomCommands ?? DEFAULT_SANDBOX_POLICY_FORM.allowCustomCommands,
+    allowDependencyInstall:
+      settings?.allowDependencyInstall ?? DEFAULT_SANDBOX_POLICY_FORM.allowDependencyInstall,
+    allowNetwork: settings?.allowNetwork ?? DEFAULT_SANDBOX_POLICY_FORM.allowNetwork,
+    defaultRunner: settings?.defaultRunner ?? DEFAULT_SANDBOX_POLICY_FORM.defaultRunner,
+    enabled: settings?.enabled ?? DEFAULT_SANDBOX_POLICY_FORM.enabled,
+    maxArtifactBytes: String(
+      settings?.maxArtifactBytes ?? DEFAULT_SANDBOX_POLICY_FORM.maxArtifactBytes,
+    ),
+    maxCpuCount: String(settings?.maxCpuCount ?? DEFAULT_SANDBOX_POLICY_FORM.maxCpuCount),
+    maxMemoryBytes: String(settings?.maxMemoryBytes ?? DEFAULT_SANDBOX_POLICY_FORM.maxMemoryBytes),
+    maxOutputBytes: String(settings?.maxOutputBytes ?? DEFAULT_SANDBOX_POLICY_FORM.maxOutputBytes),
+    maxTimeoutMs: String(settings?.maxTimeoutMs ?? DEFAULT_SANDBOX_POLICY_FORM.maxTimeoutMs),
+    minimumRunnerForForks:
+      settings?.minimumRunnerForForks ?? DEFAULT_SANDBOX_POLICY_FORM.minimumRunnerForForks,
+  };
+}
+
+/** Converts sandbox form values into a repository settings patch. */
+function sandboxPolicyPatchFromForm(form: SandboxPolicyFormState): SandboxPolicySettings {
+  return {
+    allowCustomCommands: form.allowCustomCommands,
+    allowDependencyInstall: form.allowDependencyInstall,
+    allowNetwork: form.allowNetwork,
+    defaultRunner: form.defaultRunner,
+    enabled: form.enabled,
+    maxArtifactBytes: boundedNumber(form.maxArtifactBytes, 0, 250_000_000),
+    maxCpuCount: boundedNumber(form.maxCpuCount, 1, 16),
+    maxMemoryBytes: boundedNumber(form.maxMemoryBytes, 1, 8_589_934_592),
+    maxOutputBytes: boundedNumber(form.maxOutputBytes, 0, 100_000_000),
+    maxTimeoutMs: boundedNumber(form.maxTimeoutMs, 1, 600_000),
+    minimumRunnerForForks: form.minimumRunnerForForks,
+  };
+}
+
+/** Returns a valid sandbox runner setting from form input. */
+function sandboxRunnerSettingFromForm(value: string): SandboxRunnerSetting {
+  return SANDBOX_RUNNER_OPTIONS.includes(value as SandboxRunnerSetting)
+    ? (value as SandboxRunnerSetting)
+    : DEFAULT_SANDBOX_POLICY_FORM.defaultRunner;
+}
+
+/** Returns a valid fork runner setting from form input. */
+function sandboxForkRunnerSettingFromForm(value: string): SandboxForkRunnerSetting {
+  return SANDBOX_FORK_RUNNER_OPTIONS.includes(value as SandboxForkRunnerSetting)
+    ? (value as SandboxForkRunnerSetting)
+    : DEFAULT_SANDBOX_POLICY_FORM.minimumRunnerForForks;
 }
 
 /** Creates the default repository rule form state. */
