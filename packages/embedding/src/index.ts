@@ -4,6 +4,8 @@ import {
   codeChunkEmbeddings,
   codeChunks,
   codeIndexVersions,
+  embeddingJobItems,
+  embeddingJobs,
   type HeimdallDatabase,
   repositories,
 } from "@repo/db";
@@ -386,6 +388,7 @@ export async function embedChunkBatch(
   let telemetryStats: EmbeddingBatchTelemetryStats | undefined;
 
   try {
+    await markEmbeddingJobBatchStarted(payload, options);
     const rows = await options.db
       .select()
       .from(codeChunks)
@@ -537,6 +540,16 @@ export async function embedChunkBatch(
           .update(codeIndexVersions)
           .set({ embeddedChunkCount: progress?.embeddedChunkCount ?? 0 })
           .where(eq(codeIndexVersions.indexVersionId, payload.indexVersionId));
+
+        await markEmbeddingJobBatchSucceeded(tx, payload, {
+          embeddedChunkIds: chunkInputs.map((entry) => entry.row.chunkId),
+          skippedChunkIds,
+        });
+      });
+    } else {
+      await markEmbeddingJobBatchSucceeded(options.db, payload, {
+        embeddedChunkIds: [],
+        skippedChunkIds,
       });
     }
 
@@ -550,6 +563,7 @@ export async function embedChunkBatch(
     });
     return result;
   } catch (error) {
+    await markEmbeddingJobBatchFailed(payload, options, error);
     finishEmbeddingTelemetry(options.metrics, telemetry, {
       error,
       ...(telemetryStats ? { stats: telemetryStats } : {}),
@@ -1093,6 +1107,197 @@ async function loadEmbeddingRepositoryOrgId(db: HeimdallDatabase, repoId: string
   }
 
   return repository.orgId;
+}
+
+/** DB surface used to update embedding job progress inside or outside a transaction. */
+type EmbeddingJobProgressDatabase = Pick<HeimdallDatabase, "select" | "update">;
+
+/** Marks a durable embedding job as running before a worker handles one batch. */
+async function markEmbeddingJobBatchStarted(
+  payload: EmbeddingBatchJobPayload,
+  options: EmbedChunkBatchOptions,
+): Promise<void> {
+  if (!payload.embeddingJobId) {
+    return;
+  }
+
+  const now = embeddingNow(options);
+  await options.db
+    .update(embeddingJobs)
+    .set({
+      attempts: sql`${embeddingJobs.attempts} + 1`,
+      lockedAt: now,
+      startedAt: now,
+      status: "running",
+    })
+    .where(eq(embeddingJobs.embeddingJobId, payload.embeddingJobId));
+
+  await options.db
+    .update(embeddingJobItems)
+    .set({
+      attempts: sql`${embeddingJobItems.attempts} + 1`,
+      startedAt: now,
+      status: "running",
+    })
+    .where(
+      and(
+        eq(embeddingJobItems.embeddingJobId, payload.embeddingJobId),
+        inArray(embeddingJobItems.chunkId, payload.chunkIds),
+      ),
+    );
+}
+
+/** Marks completed chunk items and refreshes the parent embedding job progress counters. */
+async function markEmbeddingJobBatchSucceeded(
+  db: EmbeddingJobProgressDatabase,
+  payload: EmbeddingBatchJobPayload,
+  input: {
+    /** Chunk IDs whose embedding rows are ready after this batch. */
+    readonly embeddedChunkIds: readonly string[];
+    /** Chunk IDs skipped because the source text was missing or empty. */
+    readonly skippedChunkIds: readonly string[];
+  },
+): Promise<void> {
+  if (!payload.embeddingJobId) {
+    return;
+  }
+
+  const now = new Date();
+  if (input.embeddedChunkIds.length > 0) {
+    await db
+      .update(embeddingJobItems)
+      .set({
+        finishedAt: now,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        status: "embedded",
+      })
+      .where(
+        and(
+          eq(embeddingJobItems.embeddingJobId, payload.embeddingJobId),
+          inArray(embeddingJobItems.chunkId, input.embeddedChunkIds),
+        ),
+      );
+  }
+  if (input.skippedChunkIds.length > 0) {
+    await db
+      .update(embeddingJobItems)
+      .set({
+        finishedAt: now,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        status: "skipped",
+      })
+      .where(
+        and(
+          eq(embeddingJobItems.embeddingJobId, payload.embeddingJobId),
+          inArray(embeddingJobItems.chunkId, input.skippedChunkIds),
+        ),
+      );
+  }
+
+  await refreshEmbeddingJobProgress(db, payload.embeddingJobId, now);
+}
+
+/** Records a failed embedding batch without masking the original worker error. */
+async function markEmbeddingJobBatchFailed(
+  payload: EmbeddingBatchJobPayload,
+  options: EmbedChunkBatchOptions,
+  error: unknown,
+): Promise<void> {
+  if (!payload.embeddingJobId) {
+    return;
+  }
+
+  try {
+    const now = embeddingNow(options);
+    const failure = embeddingJobFailureSummary(error);
+    await options.db
+      .update(embeddingJobItems)
+      .set({
+        finishedAt: now,
+        lastErrorCode: failure.code,
+        lastErrorMessage: failure.message,
+        status: "failed",
+      })
+      .where(
+        and(
+          eq(embeddingJobItems.embeddingJobId, payload.embeddingJobId),
+          inArray(embeddingJobItems.chunkId, payload.chunkIds),
+        ),
+      );
+    await refreshEmbeddingJobProgress(options.db, payload.embeddingJobId, now, failure);
+  } catch (_progressError) {
+    return;
+  }
+}
+
+/** Recomputes durable embedding job counts from item rows. */
+async function refreshEmbeddingJobProgress(
+  db: EmbeddingJobProgressDatabase,
+  embeddingJobId: string,
+  now: Date,
+  failure?: {
+    /** Stable failure code for the job row. */
+    readonly code: string;
+    /** Product-safe failure message for the job row. */
+    readonly message: string;
+  },
+): Promise<void> {
+  const [progress] = await db
+    .select({
+      embedded: sql<number>`count(*) filter (where ${embeddingJobItems.status} = 'embedded')::int`,
+      failed: sql<number>`count(*) filter (where ${embeddingJobItems.status} = 'failed')::int`,
+      skipped: sql<number>`count(*) filter (where ${embeddingJobItems.status} = 'skipped')::int`,
+      total: sql<number>`count(*)::int`,
+    })
+    .from(embeddingJobItems)
+    .where(eq(embeddingJobItems.embeddingJobId, embeddingJobId));
+  const total = progress?.total ?? 0;
+  const embedded = progress?.embedded ?? 0;
+  const skipped = progress?.skipped ?? 0;
+  const failed = progress?.failed ?? 0;
+  const completed = total > 0 && embedded + skipped + failed >= total;
+  const status = completed ? (failed > 0 ? "failed" : "succeeded") : "running";
+
+  await db
+    .update(embeddingJobs)
+    .set({
+      chunkCountEmbedded: embedded,
+      chunkCountFailed: failed,
+      chunkCountSkipped: skipped,
+      finishedAt: completed ? now : null,
+      ...(failure
+        ? { lastErrorCode: failure.code, lastErrorMessage: failure.message }
+        : { lastErrorCode: null, lastErrorMessage: null }),
+      status,
+    })
+    .where(eq(embeddingJobs.embeddingJobId, embeddingJobId));
+}
+
+/** Builds a bounded product-safe failure summary for embedding job rows. */
+function embeddingJobFailureSummary(error: unknown): {
+  /** Stable failure code for support and retry policy. */
+  readonly code: string;
+  /** Bounded product-safe message. */
+  readonly message: string;
+} {
+  if (error instanceof EmbeddingProviderError) {
+    return {
+      code: error.code,
+      message: error.message.slice(0, 500),
+    };
+  }
+
+  return {
+    code: "embedding_batch_failed",
+    message: error instanceof Error ? error.message.slice(0, 500) : "Embedding batch failed.",
+  };
+}
+
+/** Returns the embedding worker clock for durable progress rows. */
+function embeddingNow(options: EmbedChunkBatchOptions): Date {
+  return options.now ? options.now() : new Date();
 }
 
 /** Records one idempotent embedding-token usage event for a successful provider batch call. */

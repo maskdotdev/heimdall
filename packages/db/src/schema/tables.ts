@@ -476,6 +476,73 @@ export const codeChunkEmbeddings = pgTable(
   ],
 );
 
+/** Durable embedding planning and progress rows for one index/profile run. */
+export const embeddingJobs = pgTable(
+  "embedding_jobs",
+  {
+    embeddingJobId: text("embedding_job_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    indexVersionId: text("index_version_id").references(() => codeIndexVersions.indexVersionId),
+    commitSha: text("commit_sha"),
+    status: text("status").notNull().default("pending"),
+    reason: text("reason").notNull(),
+    embeddingProfileVersion: text("embedding_profile_version")
+      .notNull()
+      .default("code_embedding_profile.v1"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    chunkCountPlanned: integer("chunk_count_planned").notNull().default(0),
+    chunkCountEmbedded: integer("chunk_count_embedded").notNull().default(0),
+    chunkCountSkipped: integer("chunk_count_skipped").notNull().default(0),
+    chunkCountFailed: integer("chunk_count_failed").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    lockedBy: text("locked_by"),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("embedding_jobs_repo_status_idx").on(table.repoId, table.status, table.createdAt),
+    index("embedding_jobs_index_version_idx").on(table.indexVersionId),
+  ],
+);
+
+/** Per-chunk embedding job state for precise progress, retry, and support debugging. */
+export const embeddingJobItems = pgTable(
+  "embedding_job_items",
+  {
+    embeddingJobItemId: text("embedding_job_item_id").primaryKey(),
+    embeddingJobId: text("embedding_job_id")
+      .notNull()
+      .references(() => embeddingJobs.embeddingJobId),
+    chunkId: text("chunk_id")
+      .notNull()
+      .references(() => codeChunks.chunkId),
+    status: text("status").notNull().default("pending"),
+    cacheKey: text("cache_key"),
+    attempts: integer("attempts").notNull().default(0),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("embedding_job_items_job_chunk_unique").on(table.embeddingJobId, table.chunkId),
+    index("embedding_job_items_status_idx").on(table.embeddingJobId, table.status),
+  ],
+);
+
 /** Immutable pull request snapshots keyed by provider PR state. */
 export const pullRequestSnapshots = pgTable(
   "pull_request_snapshots",

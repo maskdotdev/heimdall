@@ -15,6 +15,8 @@ import {
   codeIndexVersions,
   creditGrants,
   debugExports,
+  embeddingJobItems,
+  embeddingJobs,
   evalBaselines,
   evalCaseResults,
   evalCases,
@@ -84,6 +86,7 @@ const reviewRunMetricsMigrationPath = resolve(
   testDirectory,
   "../migrations/0017_secret_ironclad.sql",
 );
+const embeddingJobsMigrationPath = resolve(testDirectory, "../migrations/0020_luxuriant_zarda.sql");
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -145,6 +148,8 @@ describe("database schema foundation", () => {
     expect(evalCaseResults.evalCaseResultId.name).toBe("eval_case_result_id");
     expect(evalHumanLabels.evalHumanLabelId.name).toBe("eval_human_label_id");
     expect(evalBaselines.evalRunId.name).toBe("eval_run_id");
+    expect(embeddingJobs.embeddingJobId.name).toBe("embedding_job_id");
+    expect(embeddingJobItems.embeddingJobItemId.name).toBe("embedding_job_item_id");
   });
 
   it("defines pgvector storage for code chunk embeddings", () => {
@@ -168,6 +173,7 @@ describe("database schema foundation", () => {
     );
     const evalHistoryMigration = await readFile(evalHistoryMigrationPath, "utf8");
     const reviewRunMetricsMigration = await readFile(reviewRunMetricsMigrationPath, "utf8");
+    const embeddingJobsMigration = await readFile(embeddingJobsMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -221,6 +227,9 @@ describe("database schema foundation", () => {
     expect(evalHistoryMigration).toContain('CREATE TABLE "eval_baselines"');
     expect(reviewRunMetricsMigration).toContain('CREATE TABLE "review_run_metrics"');
     expect(reviewRunMetricsMigration).toContain('"estimated_cost_usd" numeric(12, 6)');
+    expect(embeddingJobsMigration).toContain('CREATE TABLE "embedding_jobs"');
+    expect(embeddingJobsMigration).toContain('CREATE TABLE "embedding_job_items"');
+    expect(embeddingJobsMigration).toContain('CREATE INDEX "embedding_jobs_repo_status_idx"');
   });
 });
 

@@ -508,6 +508,47 @@ describe("embedChunkBatch", () => {
     expect(JSON.stringify(usageEvents)).not.toContain("secondValue");
   });
 
+  it("updates durable embedding job item and progress rows", async () => {
+    const updatedValues: unknown[] = [];
+
+    await expect(
+      embedChunkBatch(
+        testEmbeddingPayload(["chunk_1", "chunk_missing"], { embeddingJobId: "embjob_1" }),
+        {
+          db: createEmbeddingDatabaseStub({
+            rows: [testCodeChunkRow("chunk_1")],
+            updatedValues,
+          }),
+          now: () => new Date("2026-05-07T12:00:00.000Z"),
+          provider: createHashEmbeddingProvider("text-embedding-3-small", 2, "hash"),
+        },
+      ),
+    ).resolves.toEqual({
+      embeddedChunkCount: 1,
+      skippedChunkIds: ["chunk_missing"],
+    });
+
+    expect(updatedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "running",
+        }),
+        expect.objectContaining({
+          status: "embedded",
+        }),
+        expect.objectContaining({
+          status: "skipped",
+        }),
+        expect.objectContaining({
+          chunkCountEmbedded: 1,
+          chunkCountFailed: 0,
+          chunkCountSkipped: 1,
+          status: "succeeded",
+        }),
+      ]),
+    );
+  });
+
   it("records failed embedding telemetry when vector validation fails", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -693,12 +734,16 @@ function testInput(inputId: string, tokenEstimate: number, charCount: number): B
   };
 }
 
-function testEmbeddingPayload(chunkIds: readonly string[]): EmbeddingBatchJobPayload {
+function testEmbeddingPayload(
+  chunkIds: readonly string[],
+  overrides: Partial<EmbeddingBatchJobPayload> = {},
+): EmbeddingBatchJobPayload {
   return {
     chunkIds: [...chunkIds],
     embeddingModel: "text-embedding-3-small",
     indexVersionId: "idx_01HREVIEW",
     repoId: "repo_01HREVIEW",
+    ...overrides,
   };
 }
 
@@ -729,9 +774,12 @@ function createEmbeddingDatabaseStub(options: {
   readonly rows: readonly TestCodeChunkRow[];
   /** Chunk IDs returned by the fake embedding insert. */
   readonly insertedChunkIds?: readonly string[];
+  /** Captures values passed to fake update statements. */
+  readonly updatedValues?: unknown[] | undefined;
 }): HeimdallDatabase {
   const insertedChunkIds = options.insertedChunkIds ?? options.rows.map((row) => row.chunkId);
   let rootSelectCount = 0;
+  let txSelectCount = 0;
   const tx = {
     insert: (_table: unknown) => ({
       values: (values: unknown) => {
@@ -749,13 +797,32 @@ function createEmbeddingDatabaseStub(options: {
     }),
     select: (_projection: unknown) => ({
       from: (_table: unknown) => ({
-        where: async (_condition: unknown) => [{ embeddedChunkCount: insertedChunkIds.length }],
+        where: async (_condition: unknown) => {
+          const rows =
+            txSelectCount === 0
+              ? [{ embeddedChunkCount: insertedChunkIds.length }]
+              : [
+                  {
+                    embedded: insertedChunkIds.length,
+                    failed: 0,
+                    skipped: Math.max(0, options.rows.length - insertedChunkIds.length + 1),
+                    total: options.rows.length + 1,
+                  },
+                ];
+          txSelectCount += 1;
+
+          return rows;
+        },
       }),
     }),
     update: (_table: unknown) => ({
-      set: (_values: unknown) => ({
-        where: async (_condition: unknown) => undefined,
-      }),
+      set: (values: unknown) => {
+        options.updatedValues?.push(values);
+
+        return {
+          where: async (_condition: unknown) => undefined,
+        };
+      },
     }),
   };
   const db = {
@@ -779,6 +846,15 @@ function createEmbeddingDatabaseStub(options: {
       }),
     }),
     transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+    update: (_table: unknown) => ({
+      set: (values: unknown) => {
+        options.updatedValues?.push(values);
+
+        return {
+          where: async (_condition: unknown) => undefined,
+        };
+      },
+    }),
   };
 
   return db as unknown as HeimdallDatabase;

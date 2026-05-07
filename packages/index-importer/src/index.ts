@@ -9,8 +9,11 @@ import {
   codeChunks,
   codeEdges,
   codeIndexVersions,
+  embeddingJobItems,
+  embeddingJobs,
   type HeimdallDatabase,
   indexedFiles,
+  repositories,
   symbols,
 } from "@repo/db";
 import type { ChunkRecord } from "@repo/index-schema";
@@ -26,8 +29,15 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
+import { eq } from "drizzle-orm";
 
 export const packageName = "@repo/index-importer" as const;
+
+/** Default embedding profile version used by the current code-chunk input builder. */
+const DEFAULT_CODE_EMBEDDING_PROFILE_VERSION = "code_embedding_profile.v1";
+
+/** Default embedding dimension used by the current pgvector storage schema. */
+const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 
 /** Resolver that loads an index artifact from a durable URI or local path. */
 export type IndexArtifactResolver = {
@@ -76,6 +86,12 @@ export type ImportIndexArtifactOptions = {
   readonly enqueueEmbeddings?: boolean;
   /** Embedding model to request for queued chunk batches. */
   readonly embeddingModel?: string;
+  /** Embedding provider expected to service queued chunks. */
+  readonly embeddingProvider?: string;
+  /** Embedding profile version recorded on durable embedding planning rows. */
+  readonly embeddingProfileVersion?: string;
+  /** Embedding vector dimension recorded on durable embedding planning rows. */
+  readonly embeddingDimensions?: number;
   /** Maximum chunk IDs per embedding job. */
   readonly embeddingBatchSize?: number;
   /** Optional metric recorder for aggregate index-import telemetry. */
@@ -387,7 +403,13 @@ export async function importIndexArtifact(
     });
 
     const embeddingJobCount = options.enqueueEmbeddings
-      ? await enqueueEmbeddingBatches(indexVersionId, artifact.manifest.repoId, chunks, options)
+      ? await enqueueEmbeddingBatches({
+          artifact,
+          chunks,
+          indexVersionId,
+          options,
+          repoId: artifact.manifest.repoId,
+        })
       : 0;
     const result = {
       indexVersionId,
@@ -528,22 +550,90 @@ function normalizeIndexImporterLabel(value: string): string {
   return normalized.length > 0 ? normalized : "unknown";
 }
 
-/** Enqueues durable embedding batch jobs for imported chunks. */
-async function enqueueEmbeddingBatches(
-  indexVersionId: string,
-  repoId: string,
-  chunks: readonly ChunkRecord[],
-  options: ImportIndexArtifactOptions,
-): Promise<number> {
+/** Enqueues durable embedding batch jobs and records phase-specific embedding planner state. */
+async function enqueueEmbeddingBatches(input: {
+  /** Imported artifact that created the embedding work. */
+  readonly artifact: IndexArtifact;
+  /** Chunks that need embedding work planned. */
+  readonly chunks: readonly ChunkRecord[];
+  /** Durable index version ID created for the artifact. */
+  readonly indexVersionId: string;
+  /** Import options that carry queue and profile settings. */
+  readonly options: ImportIndexArtifactOptions;
+  /** Repository that owns the chunks. */
+  readonly repoId: string;
+}): Promise<number> {
+  if (input.chunks.length === 0) {
+    return 0;
+  }
+
+  const options = input.options;
   const batchSize = options.embeddingBatchSize ?? 128;
   const embeddingModel = options.embeddingModel ?? "text-embedding-3-small";
+  const embeddingProfileVersion =
+    options.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION;
+  const embeddingProvider = options.embeddingProvider ?? "configured";
+  const embeddingDimensions = options.embeddingDimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
+  const orgId = await loadRepositoryOrgId(options.db, input.repoId);
+  const embeddingJobId = stableId("embjob", [
+    input.repoId,
+    input.indexVersionId,
+    embeddingProfileVersion,
+    embeddingProvider,
+    embeddingModel,
+    embeddingDimensions,
+  ]);
   let count = 0;
 
-  for (let index = 0; index < chunks.length; index += batchSize) {
-    const chunkIds = chunks.slice(index, index + batchSize).map((chunk) => chunk.chunkId);
-    const payload: EmbeddingBatchJobPayload = { repoId, indexVersionId, chunkIds, embeddingModel };
+  await options.db
+    .insert(embeddingJobs)
+    .values({
+      embeddingJobId,
+      orgId,
+      repoId: input.repoId,
+      indexVersionId: input.indexVersionId,
+      commitSha: input.artifact.manifest.commitSha,
+      status: "pending",
+      reason: "index_import",
+      embeddingProfileVersion,
+      provider: embeddingProvider,
+      model: embeddingModel,
+      dimensions: embeddingDimensions,
+      chunkCountPlanned: input.chunks.length,
+      metadata: {
+        artifactId: input.artifact.manifest.artifactId,
+        artifactUri: options.artifactUri,
+        batchSize,
+        indexerName: input.artifact.manifest.indexerName,
+        indexerVersion: input.artifact.manifest.indexerVersion,
+      },
+    })
+    .onConflictDoNothing();
+
+  await options.db
+    .insert(embeddingJobItems)
+    .values(
+      input.chunks.map((chunk) => ({
+        embeddingJobItemId: stableId("embitem", [embeddingJobId, chunk.chunkId]),
+        embeddingJobId,
+        chunkId: chunk.chunkId,
+        status: "pending",
+      })),
+    )
+    .onConflictDoNothing();
+
+  for (let index = 0; index < input.chunks.length; index += batchSize) {
+    const chunkIds = input.chunks.slice(index, index + batchSize).map((chunk) => chunk.chunkId);
+    const payload: EmbeddingBatchJobPayload = {
+      repoId: input.repoId,
+      indexVersionId: input.indexVersionId,
+      chunkIds,
+      embeddingModel,
+      embeddingJobId,
+      embeddingProfileVersion,
+    };
     const now = new Date().toISOString();
-    const jobKey = `embedding:${indexVersionId}:${embeddingModel}:${index / batchSize}`;
+    const jobKey = `embedding:${embeddingJobId}:${index / batchSize}`;
     await options.db
       .insert(backgroundJobs)
       .values({
@@ -552,7 +642,7 @@ async function enqueueEmbeddingBatches(
         jobKey,
         jobType: JOB_TYPES.EmbeddingBatch,
         status: "pending",
-        repoId,
+        repoId: input.repoId,
         payload: {
           jobId: stableId("job", [jobKey, "envelope"]),
           jobType: JOB_TYPES.EmbeddingBatch,
@@ -570,6 +660,21 @@ async function enqueueEmbeddingBatches(
   }
 
   return count;
+}
+
+/** Loads a repository owner org for embedding planner rows. */
+async function loadRepositoryOrgId(db: HeimdallDatabase, repoId: string): Promise<string> {
+  const [repository] = await db
+    .select({ orgId: repositories.orgId })
+    .from(repositories)
+    .where(eq(repositories.repoId, repoId))
+    .limit(1);
+
+  if (!repository) {
+    throw new Error(`Repository ${repoId} was not found for embedding planning.`);
+  }
+
+  return repository.orgId;
 }
 
 /** Resolves and bounds a local artifact path against an optional root directory. */

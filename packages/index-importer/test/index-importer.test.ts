@@ -248,6 +248,63 @@ describe("importIndexArtifact telemetry", () => {
     expect(JSON.stringify(spans)).not.toContain("index-artifact.json");
   });
 
+  it("creates durable embedding planner rows and queued batch jobs", async () => {
+    const insertedRows: unknown[] = [];
+    const result = await importIndexArtifact(artifactWithChunk(), {
+      artifactUri: "file:///tmp/index-artifact.json",
+      db: createEmbeddingPlanningImportDatabaseStub(insertedRows),
+      embeddingBatchSize: 1,
+      embeddingDimensions: 2,
+      embeddingModel: "text-embedding-3-small",
+      embeddingProvider: "hash",
+      enqueueEmbeddings: true,
+    });
+
+    expect(result).toMatchObject({
+      chunkCount: 1,
+      embeddingJobCount: 1,
+    });
+    expect(insertedRows).toHaveLength(3);
+    expect(insertedRows[0]).toEqual(
+      expect.objectContaining({
+        chunkCountPlanned: 1,
+        dimensions: 2,
+        embeddingJobId: expect.stringMatching(/^embjob_/u),
+        embeddingProfileVersion: "code_embedding_profile.v1",
+        model: "text-embedding-3-small",
+        orgId: "org_1",
+        provider: "hash",
+        reason: "index_import",
+        repoId: "repo_1",
+        status: "pending",
+      }),
+    );
+    expect(insertedRows[1]).toEqual([
+      expect.objectContaining({
+        chunkId: "chunk_1",
+        embeddingJobId: expect.stringMatching(/^embjob_/u),
+        embeddingJobItemId: expect.stringMatching(/^embitem_/u),
+        status: "pending",
+      }),
+    ]);
+    expect(insertedRows[2]).toEqual(
+      expect.objectContaining({
+        jobKey: expect.stringMatching(/^embedding:embjob_/u),
+        jobType: "embedding.batch.v1",
+        payload: expect.objectContaining({
+          payload: expect.objectContaining({
+            chunkIds: ["chunk_1"],
+            embeddingJobId: expect.stringMatching(/^embjob_/u),
+            embeddingProfileVersion: "code_embedding_profile.v1",
+          }),
+        }),
+        queueName: "embedding",
+        repoId: "repo_1",
+        status: "pending",
+      }),
+    );
+  });
+
   it("records validation failure telemetry without importing records", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -334,6 +391,52 @@ function emptyArtifact(): IndexArtifact {
   };
 }
 
+/** Creates a minimal valid index artifact with one file and one chunk. */
+function artifactWithChunk(): IndexArtifact {
+  return {
+    manifest: {
+      ...emptyArtifact().manifest,
+      chunkCount: 1,
+      fileCount: 1,
+      languages: ["typescript"],
+      recordCount: 2,
+    },
+    records: [
+      {
+        type: "file",
+        schemaVersion: "index_record.v1",
+        fileId: "file_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "src/index.ts",
+        language: "typescript",
+        contentHash: `sha256:${"a".repeat(64)}`,
+        sizeBytes: 42,
+        lineCount: 2,
+        isBinary: false,
+        isGenerated: false,
+        isTest: false,
+        isVendored: false,
+      },
+      {
+        type: "chunk",
+        schemaVersion: "index_record.v1",
+        chunkId: "chunk_1",
+        fileId: "file_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "src/index.ts",
+        language: "typescript",
+        range: { endLine: 2, startLine: 1 },
+        kind: "file",
+        text: "export const value = 1;",
+        contentHash: `sha256:${"b".repeat(64)}`,
+        tokenEstimate: 8,
+      },
+    ],
+  };
+}
+
 /** Creates the minimum DB surface needed by empty artifact imports. */
 function createImportDatabaseStub(): HeimdallDatabase {
   const tx = {
@@ -345,6 +448,40 @@ function createImportDatabaseStub(): HeimdallDatabase {
     }),
   };
   const db = {
+    transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+  };
+
+  return db as unknown as HeimdallDatabase;
+}
+
+/** Creates the DB surface needed by embedding planner import tests. */
+function createEmbeddingPlanningImportDatabaseStub(insertedRows: unknown[]): HeimdallDatabase {
+  const tx = {
+    insert: (_table: unknown) => ({
+      values: (_values: unknown) => ({
+        onConflictDoNothing: async () => undefined,
+        onConflictDoUpdate: async (_input: unknown) => undefined,
+      }),
+    }),
+  };
+  const db = {
+    insert: (_table: unknown) => ({
+      values: (values: unknown) => {
+        insertedRows.push(values);
+
+        return {
+          onConflictDoNothing: async () => undefined,
+        };
+      },
+    }),
+    select: () => ({
+      from: () => ({
+        where: () =>
+          Object.assign(Promise.resolve([{ orgId: "org_1" }]), {
+            limit: async (count: number) => [{ orgId: "org_1" }].slice(0, count),
+          }),
+      }),
+    }),
     transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
   };
 

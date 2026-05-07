@@ -62,6 +62,8 @@ export const EmbeddingBatchJobPayloadSchema = Type.Object(
     indexVersionId: IndexVersionIdSchema,
     chunkIds: Type.Array(ChunkIdSchema, { minItems: 1, maxItems: 512 }),
     embeddingModel: Type.String(),
+    embeddingJobId: Type.Optional(Type.String({ minLength: 1 })),
+    embeddingProfileVersion: Type.Optional(Type.String({ minLength: 1 })),
   },
   { additionalProperties: false },
 );
