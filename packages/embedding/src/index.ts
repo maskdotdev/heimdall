@@ -6,6 +6,15 @@ import {
   codeIndexVersions,
   type HeimdallDatabase,
 } from "@repo/db";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 export const packageName = "@repo/embedding" as const;
@@ -31,6 +40,8 @@ export const DEFAULT_EMBEDDING_PROVIDER = "hash";
 
 /** Provider boundary for chunk embeddings. */
 export type EmbeddingProvider = {
+  /** Low-cardinality provider ID used for telemetry. */
+  readonly providerId?: string;
   /** Embedding model name. */
   readonly model: string;
   /** Vector dimension returned by the provider. */
@@ -118,6 +129,41 @@ export type EmbedChunkBatchOptions = {
   readonly inputOptions?: CodeChunkEmbeddingInputOptions;
   /** Optional provider request batching policy. */
   readonly batchPolicy?: EmbeddingBatchPolicy;
+  /** Optional metric recorder for product-safe aggregate embedding telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional trace context propagated from the durable embedding job. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe embedding spans. */
+  readonly traces?: TelemetrySpanRecorder;
+};
+
+type EmbeddingTelemetryStatus = "failed" | "succeeded";
+
+type EmbeddingTelemetryState = {
+  /** Low-cardinality labels shared by embedding job and duration metrics. */
+  readonly labels: Readonly<{
+    readonly model_profile: string;
+    readonly provider: string;
+  }>;
+  /** Monotonic start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Product-safe span for this embedding batch. */
+  readonly span: TelemetrySpanHandle | undefined;
+};
+
+type EmbeddingBatchTelemetryStats = {
+  /** Provider request batches planned for the embedding job. */
+  readonly batchCount: number;
+  /** Number of chunks inserted into vector storage. */
+  readonly embeddedChunkCount: number;
+  /** Number of provider inputs built from chunk text. */
+  readonly inputCount: number;
+  /** Number of requested chunks skipped before provider calls. */
+  readonly skippedChunkCount: number;
+  /** Estimated tokens sent to the embedding provider. */
+  readonly tokenCount: number;
+  /** Number of provider inputs truncated to fit policy. */
+  readonly truncatedInputCount: number;
 };
 
 /** Embeds queued chunks and stores vectors idempotently for retrieval. */
@@ -125,120 +171,279 @@ export async function embedChunkBatch(
   payload: EmbeddingBatchJobPayload,
   options: EmbedChunkBatchOptions,
 ): Promise<EmbedChunkBatchResult> {
-  const rows = await options.db
-    .select()
-    .from(codeChunks)
-    .where(
-      and(
-        eq(codeChunks.indexVersionId, payload.indexVersionId),
-        inArray(codeChunks.chunkId, payload.chunkIds),
-      ),
-    );
-  const chunkInputs = rows
-    .map((row) => {
-      const text = textFromMetadata(row.metadata);
-      if (!text) {
-        return undefined;
-      }
+  const telemetry = startEmbeddingTelemetry(payload, options);
+  let telemetryStats: EmbeddingBatchTelemetryStats | undefined;
 
-      return {
-        input: buildCodeChunkEmbeddingInput(
-          {
-            chunkId: row.chunkId,
-            endLine: row.endLine,
-            path: row.path,
-            startLine: row.startLine,
-            text,
-            ...optionalStringProperty("kind", stringFromMetadata(row.metadata, "kind")),
-            ...optionalStringProperty("language", stringFromMetadata(row.metadata, "language")),
-            ...optionalStringProperty("symbolId", row.symbolId ?? undefined),
-          },
-          options.inputOptions,
+  try {
+    const rows = await options.db
+      .select()
+      .from(codeChunks)
+      .where(
+        and(
+          eq(codeChunks.indexVersionId, payload.indexVersionId),
+          inArray(codeChunks.chunkId, payload.chunkIds),
         ),
-        row,
-      };
-    })
-    .filter(
-      (
-        entry,
-      ): entry is {
-        readonly input: BuiltEmbeddingInput;
-        readonly row: (typeof rows)[number];
-      } => Boolean(entry),
-    );
-  const vectorsByInputId = new Map<string, readonly number[]>();
+      );
+    const chunkInputs = rows
+      .map((row) => {
+        const text = textFromMetadata(row.metadata);
+        if (!text) {
+          return undefined;
+        }
 
-  for (const inputBatch of buildEmbeddingInputBatches(
-    chunkInputs.map((entry) => entry.input),
-    options.batchPolicy,
-  )) {
-    const vectors = validateEmbeddingVectors(
-      await options.provider.embedTexts(inputBatch.map((input) => input.text)),
-      inputBatch.length,
-      options.provider.dimensions,
+        return {
+          input: buildCodeChunkEmbeddingInput(
+            {
+              chunkId: row.chunkId,
+              endLine: row.endLine,
+              path: row.path,
+              startLine: row.startLine,
+              text,
+              ...optionalStringProperty("kind", stringFromMetadata(row.metadata, "kind")),
+              ...optionalStringProperty("language", stringFromMetadata(row.metadata, "language")),
+              ...optionalStringProperty("symbolId", row.symbolId ?? undefined),
+            },
+            options.inputOptions,
+          ),
+          row,
+        };
+      })
+      .filter(
+        (
+          entry,
+        ): entry is {
+          readonly input: BuiltEmbeddingInput;
+          readonly row: (typeof rows)[number];
+        } => Boolean(entry),
+      );
+    const inputChunkIds = new Set(chunkInputs.map((entry) => entry.row.chunkId));
+    const skippedChunkIds = payload.chunkIds.filter((chunkId) => !inputChunkIds.has(chunkId));
+    const inputBatches = buildEmbeddingInputBatches(
+      chunkInputs.map((entry) => entry.input),
+      options.batchPolicy,
     );
-    for (const [index, input] of inputBatch.entries()) {
-      vectorsByInputId.set(input.inputId, vectors[index] ?? []);
+    telemetryStats = embeddingTelemetryStats(chunkInputs, inputBatches, skippedChunkIds.length);
+    const vectorsByInputId = new Map<string, readonly number[]>();
+
+    for (const inputBatch of inputBatches) {
+      const vectors = validateEmbeddingVectors(
+        await options.provider.embedTexts(inputBatch.map((input) => input.text)),
+        inputBatch.length,
+        options.provider.dimensions,
+      );
+      for (const [index, input] of inputBatch.entries()) {
+        vectorsByInputId.set(input.inputId, vectors[index] ?? []);
+      }
     }
-  }
 
-  let insertedChunkCount = 0;
+    let insertedChunkCount = 0;
 
-  if (chunkInputs.length > 0) {
-    await options.db.transaction(async (tx) => {
-      const insertedRows = await tx
-        .insert(codeChunkEmbeddings)
-        .values(
-          chunkInputs.map((entry) => ({
-            chunkEmbeddingId: stableId("emb", [entry.row.chunkId, payload.embeddingModel]),
-            chunkId: entry.row.chunkId,
-            repoId: payload.repoId,
-            indexVersionId: payload.indexVersionId,
-            embeddingModel: payload.embeddingModel,
-            embeddingDimension: options.provider.dimensions,
-            embedding: [...requiredVectorForInput(vectorsByInputId, entry.input.inputId)],
-            contentHash: entry.row.contentHash,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning({ chunkId: codeChunkEmbeddings.chunkId });
-      insertedChunkCount = insertedRows.length;
+    if (chunkInputs.length > 0) {
+      await options.db.transaction(async (tx) => {
+        const insertedRows = await tx
+          .insert(codeChunkEmbeddings)
+          .values(
+            chunkInputs.map((entry) => ({
+              chunkEmbeddingId: stableId("emb", [entry.row.chunkId, payload.embeddingModel]),
+              chunkId: entry.row.chunkId,
+              repoId: payload.repoId,
+              indexVersionId: payload.indexVersionId,
+              embeddingModel: payload.embeddingModel,
+              embeddingDimension: options.provider.dimensions,
+              embedding: [...requiredVectorForInput(vectorsByInputId, entry.input.inputId)],
+              contentHash: entry.row.contentHash,
+            })),
+          )
+          .onConflictDoNothing()
+          .returning({ chunkId: codeChunkEmbeddings.chunkId });
+        insertedChunkCount = insertedRows.length;
 
-      await tx
-        .update(codeChunks)
-        .set({ embeddingStatus: "ready" })
-        .where(
-          inArray(
-            codeChunks.chunkId,
-            chunkInputs.map((entry) => entry.row.chunkId),
-          ),
-        );
+        await tx
+          .update(codeChunks)
+          .set({ embeddingStatus: "ready" })
+          .where(
+            inArray(
+              codeChunks.chunkId,
+              chunkInputs.map((entry) => entry.row.chunkId),
+            ),
+          );
 
-      const [progress] = await tx
-        .select({
-          embeddedChunkCount: sql<number>`count(distinct ${codeChunkEmbeddings.chunkId})::int`,
-        })
-        .from(codeChunkEmbeddings)
-        .where(
-          and(
-            eq(codeChunkEmbeddings.indexVersionId, payload.indexVersionId),
-            eq(codeChunkEmbeddings.embeddingModel, payload.embeddingModel),
-          ),
-        );
+        const [progress] = await tx
+          .select({
+            embeddedChunkCount: sql<number>`count(distinct ${codeChunkEmbeddings.chunkId})::int`,
+          })
+          .from(codeChunkEmbeddings)
+          .where(
+            and(
+              eq(codeChunkEmbeddings.indexVersionId, payload.indexVersionId),
+              eq(codeChunkEmbeddings.embeddingModel, payload.embeddingModel),
+            ),
+          );
 
-      await tx
-        .update(codeIndexVersions)
-        .set({ embeddedChunkCount: progress?.embeddedChunkCount ?? 0 })
-        .where(eq(codeIndexVersions.indexVersionId, payload.indexVersionId));
+        await tx
+          .update(codeIndexVersions)
+          .set({ embeddedChunkCount: progress?.embeddedChunkCount ?? 0 })
+          .where(eq(codeIndexVersions.indexVersionId, payload.indexVersionId));
+      });
+    }
+
+    const result = {
+      embeddedChunkCount: insertedChunkCount,
+      skippedChunkIds,
+    } satisfies EmbedChunkBatchResult;
+    finishEmbeddingTelemetry(options.metrics, telemetry, {
+      stats: { ...telemetryStats, embeddedChunkCount: insertedChunkCount },
+      status: "succeeded",
     });
+    return result;
+  } catch (error) {
+    finishEmbeddingTelemetry(options.metrics, telemetry, {
+      error,
+      ...(telemetryStats ? { stats: telemetryStats } : {}),
+      status: "failed",
+    });
+    throw error;
   }
+}
+
+/** Starts product-safe embedding telemetry and returns shared metric labels. */
+function startEmbeddingTelemetry(
+  payload: EmbeddingBatchJobPayload,
+  options: EmbedChunkBatchOptions,
+): EmbeddingTelemetryState {
+  const labels = embeddingMetricLabels(payload, options.provider);
+  const span = options.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.embeddingEmbedBatch, {
+    attributes: {
+      "app.index_version_id": payload.indexVersionId,
+      "app.repo_id": payload.repoId,
+      "embedding.model_profile": labels.model_profile,
+      "embedding.provider": labels.provider,
+      "embedding.requested_chunk_count": payload.chunkIds.length,
+    },
+    kind: "internal",
+    ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+  });
 
   return {
-    embeddedChunkCount: insertedChunkCount,
-    skippedChunkIds: payload.chunkIds.filter(
-      (chunkId) => !chunkInputs.some((entry) => entry.row.chunkId === chunkId),
-    ),
+    labels,
+    span,
+    startedAtMs: Date.now(),
   };
+}
+
+/** Ends an embedding span and emits aggregate embedding pipeline metrics. */
+function finishEmbeddingTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: EmbeddingTelemetryState,
+  input: {
+    /** Error raised while embedding chunks, when the batch failed. */
+    readonly error?: unknown;
+    /** Provider input and vector-write stats when planning reached chunk input construction. */
+    readonly stats?: EmbeddingBatchTelemetryStats;
+    /** Final embedding batch status. */
+    readonly status: EmbeddingTelemetryStatus;
+  },
+): void {
+  const durationMs = Date.now() - telemetry.startedAtMs;
+  const labels = {
+    ...telemetry.labels,
+    ...(input.error === undefined ? {} : { error_class: classifyTelemetryError(input.error) }),
+    status: input.status,
+  };
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.embeddingJobsTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.embeddingBatchDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+
+  if (input.stats) {
+    recordEmbeddingInputMetrics(metrics, telemetry.labels, input.stats);
+  }
+
+  telemetry.span?.end({
+    ...(input.error === undefined ? {} : { error: input.error }),
+    attributes: {
+      "embedding.duration_ms": Math.max(0, durationMs),
+      ...(input.stats
+        ? {
+            "embedding.batch_count": input.stats.batchCount,
+            "embedding.embedded_chunk_count": input.stats.embeddedChunkCount,
+            "embedding.input_count": input.stats.inputCount,
+            "embedding.skipped_chunk_count": input.stats.skippedChunkCount,
+            "embedding.token_count": input.stats.tokenCount,
+            "embedding.truncated_input_count": input.stats.truncatedInputCount,
+          }
+        : {}),
+      ...(input.error === undefined
+        ? {}
+        : { "embedding.error_class": classifyTelemetryError(input.error) }),
+      "embedding.status": input.status,
+    },
+    status: input.status === "succeeded" ? "ok" : "error",
+  });
+}
+
+/** Records provider input and estimated token metrics grouped by safe labels. */
+function recordEmbeddingInputMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  labels: EmbeddingTelemetryState["labels"],
+  stats: EmbeddingBatchTelemetryStats,
+): void {
+  if (stats.inputCount > 0) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.embeddingInputsTotal, {
+      labels: { ...labels, input_kind: "code_chunk" },
+      value: stats.inputCount,
+    });
+  }
+  if (stats.tokenCount > 0) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.embeddingTokensTotal, {
+      labels,
+      value: stats.tokenCount,
+    });
+  }
+}
+
+/** Builds aggregate telemetry stats from planned provider inputs. */
+function embeddingTelemetryStats(
+  chunkInputs: readonly {
+    readonly input: BuiltEmbeddingInput;
+    readonly row: { readonly chunkId: string };
+  }[],
+  inputBatches: readonly (readonly BuiltEmbeddingInput[])[],
+  skippedChunkCount: number,
+): EmbeddingBatchTelemetryStats {
+  return {
+    batchCount: inputBatches.length,
+    embeddedChunkCount: 0,
+    inputCount: chunkInputs.length,
+    skippedChunkCount,
+    tokenCount: chunkInputs.reduce((total, entry) => total + entry.input.tokenEstimate, 0),
+    truncatedInputCount: chunkInputs.filter((entry) => entry.input.wasTruncated).length,
+  };
+}
+
+/** Returns low-cardinality labels shared by embedding pipeline metrics. */
+function embeddingMetricLabels(
+  payload: EmbeddingBatchJobPayload,
+  provider: EmbeddingProvider,
+): EmbeddingTelemetryState["labels"] {
+  return {
+    model_profile: normalizeEmbeddingLabel(payload.embeddingModel || provider.model, "default"),
+    provider: normalizeEmbeddingLabel(provider.providerId, "unknown"),
+  };
+}
+
+/** Normalizes bounded embedding telemetry label values. */
+function normalizeEmbeddingLabel(value: string | undefined, fallback: string): string {
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized && normalized.length > 0 ? normalized : fallback;
 }
 
 /** Builds a stable provider input for one code chunk. */
@@ -322,8 +527,10 @@ export function roughTokenEstimate(text: string): number {
 export function createHashEmbeddingProvider(
   model = "heimdall-hash-embedding",
   dimensions = DEFAULT_EMBEDDING_DIMENSIONS,
+  providerId = DEFAULT_EMBEDDING_PROVIDER,
 ): EmbeddingProvider {
   return {
+    providerId,
     model,
     dimensions,
     embedTexts: async (texts) => texts.map((text) => hashVector(text, dimensions)),
@@ -351,7 +558,7 @@ export function createEmbeddingProviderFromEnvironment(
     DEFAULT_EMBEDDING_DIMENSIONS;
 
   if (providerName === "hash" || providerName === "fake" || providerName === "local") {
-    return createHashEmbeddingProvider(model, dimensions);
+    return createHashEmbeddingProvider(model, dimensions, providerName);
   }
   if (providerName === "openai") {
     throw new Error("OpenAI embedding provider is not implemented yet.");

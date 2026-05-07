@@ -23,6 +23,7 @@
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
+    "@repo/observability": "workspace:*",
     "drizzle-orm": "catalog:"
   },
   "devDependencies": {

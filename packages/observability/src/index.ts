@@ -586,6 +586,10 @@ export const OBSERVABILITY_METRIC_NAMES = {
   apiRequestsTotal: "code_review_agent.api.requests_total",
   apiServiceStartsTotal: "code_review_agent.api.service_starts_total",
   apiServiceStopsTotal: "code_review_agent.api.service_stops_total",
+  embeddingBatchDurationMs: "code_review_agent.embedding.batch_duration_ms",
+  embeddingInputsTotal: "code_review_agent.embedding.inputs_total",
+  embeddingJobsTotal: "code_review_agent.embedding.jobs_total",
+  embeddingTokensTotal: "code_review_agent.embedding.tokens_total",
   llmCallsTotal: "code_review_agent.llm.calls_total",
   llmDurationMs: "code_review_agent.llm.duration_ms",
   llmRateLimitedTotal: "code_review_agent.llm.rate_limited_total",
@@ -613,6 +617,7 @@ export const OBSERVABILITY_METRIC_NAMES = {
 export const OBSERVABILITY_SPAN_NAMES = {
   apiRequest: "code_review_agent.api.request",
   durableJobProcess: "code_review_agent.durable_job.process",
+  embeddingEmbedBatch: "code_review_agent.embedding.embed_batch",
   llmGenerateObject: "code_review_agent.llm.generate_object",
   pullRequestReview: "code_review_agent.review.pull_request",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",

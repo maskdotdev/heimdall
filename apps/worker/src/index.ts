@@ -479,6 +479,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         provider: createEmbeddingProviderFromEnvironment(process.env, {
           model: payload.embeddingModel,
         }),
+        ...(options.metrics ? { metrics: options.metrics } : {}),
+        ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+        ...(options.traces ? { traces: options.traces } : {}),
       });
     },
     [JOB_TYPES.ReviewPullRequest]: async (envelope) => {

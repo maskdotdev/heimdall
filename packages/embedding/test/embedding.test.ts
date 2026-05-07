@@ -1,3 +1,14 @@
+import type { EmbeddingBatchJobPayload } from "@repo/contracts";
+import type { HeimdallDatabase } from "@repo/db";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricOptions,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanEndOptions,
+  type TelemetrySpanOptions,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import {
   type BuiltEmbeddingInput,
@@ -6,8 +17,53 @@ import {
   createEmbeddingProviderFromEnvironment,
   createHashEmbeddingProvider,
   DEFAULT_EMBEDDING_DIMENSIONS,
+  type EmbeddingProvider,
+  embedChunkBatch,
   roughTokenEstimate,
 } from "../src";
+
+type RecordedMetric = {
+  /** Metric instrument kind recorded by the fake recorder. */
+  readonly kind: "counter" | "histogram";
+  /** Low-cardinality metric labels. */
+  readonly labels?: TelemetryMetricOptions["labels"] | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+type RecordedSpan = {
+  /** Attributes attached when the span ended. */
+  readonly endAttributes?: TelemetrySpanEndOptions["attributes"] | undefined;
+  /** Error attached when the span ended. */
+  readonly error?: unknown;
+  /** Span name. */
+  readonly name: string;
+  /** Attributes attached when the span started. */
+  readonly startAttributes?: TelemetrySpanOptions["attributes"] | undefined;
+  /** Span status attached when the span ended. */
+  readonly status?: TelemetrySpanEndOptions["status"] | undefined;
+};
+
+type TestCodeChunkRow = {
+  /** Stable chunk ID returned by the fake chunk query. */
+  readonly chunkId: string;
+  /** Immutable chunk content hash persisted with embeddings. */
+  readonly contentHash: string;
+  /** Last source line covered by the chunk. */
+  readonly endLine: number;
+  /** Importer-owned metadata containing optional source text. */
+  readonly metadata: unknown;
+  /** Repository-relative path used only to build provider input. */
+  readonly path: string;
+  /** First source line covered by the chunk. */
+  readonly startLine: number;
+  /** Optional symbol ID attached to the chunk. */
+  readonly symbolId: string | null;
+};
 
 describe("createHashEmbeddingProvider", () => {
   it("matches the pgvector storage dimension by default", async () => {
@@ -51,6 +107,155 @@ describe("createEmbeddingProviderFromEnvironment", () => {
     expect(() => createEmbeddingProviderFromEnvironment({ EMBEDDING_PROVIDER: "bogus" })).toThrow(
       "Unsupported embedding provider: bogus",
     );
+  });
+});
+
+describe("embedChunkBatch", () => {
+  it("records product-safe embedding metrics and spans", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const payload = testEmbeddingPayload(["chunk_1", "chunk_empty", "chunk_missing"]);
+    const db = createEmbeddingDatabaseStub({
+      insertedChunkIds: ["chunk_1"],
+      rows: [
+        testCodeChunkRow("chunk_1", {
+          metadata: {
+            language: "typescript",
+            text: "export const secretToken = process.env.SECRET_TOKEN;",
+          },
+          path: "src/secret.ts",
+        }),
+        testCodeChunkRow("chunk_empty", {
+          metadata: { text: "   " },
+          path: "src/empty.ts",
+        }),
+      ],
+    });
+
+    const result = await embedChunkBatch(payload, {
+      db,
+      metrics: createRecordingMetrics(metrics),
+      provider: createHashEmbeddingProvider("text-embedding-3-small", 4, "hash"),
+      traceContext: {
+        traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+      },
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(result).toEqual({
+      embeddedChunkCount: 1,
+      skippedChunkIds: ["chunk_empty", "chunk_missing"],
+    });
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: {
+            model_profile: "text-embedding-3-small",
+            provider: "hash",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.embeddingJobsTotal,
+          value: 1,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: {
+            model_profile: "text-embedding-3-small",
+            provider: "hash",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.embeddingBatchDurationMs,
+          unit: "ms",
+        }),
+        expect.objectContaining({
+          labels: {
+            input_kind: "code_chunk",
+            model_profile: "text-embedding-3-small",
+            provider: "hash",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.embeddingInputsTotal,
+          value: 1,
+        }),
+        expect.objectContaining({
+          labels: {
+            model_profile: "text-embedding-3-small",
+            provider: "hash",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.embeddingTokensTotal,
+        }),
+      ]),
+    );
+    expect(spans).toEqual([
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "embedding.embedded_chunk_count": 1,
+          "embedding.input_count": 1,
+          "embedding.skipped_chunk_count": 2,
+          "embedding.status": "succeeded",
+        }),
+        name: OBSERVABILITY_SPAN_NAMES.embeddingEmbedBatch,
+        startAttributes: expect.objectContaining({
+          "app.index_version_id": "idx_01HREVIEW",
+          "app.repo_id": "repo_01HREVIEW",
+          "embedding.model_profile": "text-embedding-3-small",
+          "embedding.provider": "hash",
+          "embedding.requested_chunk_count": 3,
+        }),
+        status: "ok",
+      }),
+    ]);
+    expect(JSON.stringify(metrics)).not.toContain("src/secret.ts");
+    expect(JSON.stringify(spans)).not.toContain("src/secret.ts");
+    expect(JSON.stringify(spans)).not.toContain("SECRET_TOKEN");
+  });
+
+  it("records failed embedding telemetry when vector validation fails", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const provider = {
+      dimensions: 2,
+      embedTexts: async (texts) => texts.map(() => [1]),
+      model: "text-embedding-3-small",
+      providerId: "fake",
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      embedChunkBatch(testEmbeddingPayload(["chunk_1"]), {
+        db: createEmbeddingDatabaseStub({
+          rows: [testCodeChunkRow("chunk_1", { path: "src/private.ts" })],
+        }),
+        metrics: createRecordingMetrics(metrics),
+        provider,
+        traces: createRecordingTraces(spans),
+      }),
+    ).rejects.toThrow("Embedding provider returned 1 dimensions for vector 0; expected 2.");
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: {
+            error_class: "provider_error",
+            model_profile: "text-embedding-3-small",
+            provider: "fake",
+            status: "failed",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.embeddingJobsTotal,
+        }),
+      ]),
+    );
+    expect(spans).toEqual([
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "embedding.error_class": "provider_error",
+          "embedding.input_count": 1,
+          "embedding.status": "failed",
+        }),
+        status: "error",
+      }),
+    ]);
+    expect(JSON.stringify(metrics)).not.toContain("src/private.ts");
+    expect(JSON.stringify(spans)).not.toContain("src/private.ts");
   });
 });
 
@@ -151,5 +356,110 @@ function testInput(inputId: string, tokenEstimate: number, charCount: number): B
     text: "x".repeat(charCount),
     tokenEstimate,
     wasTruncated: false,
+  };
+}
+
+function testEmbeddingPayload(chunkIds: readonly string[]): EmbeddingBatchJobPayload {
+  return {
+    chunkIds: [...chunkIds],
+    embeddingModel: "text-embedding-3-small",
+    indexVersionId: "idx_01HREVIEW",
+    repoId: "repo_01HREVIEW",
+  };
+}
+
+function testCodeChunkRow(
+  chunkId: string,
+  overrides: Partial<TestCodeChunkRow> = {},
+): TestCodeChunkRow {
+  return {
+    chunkId,
+    contentHash: `sha256:${"b".repeat(64)}`,
+    endLine: 4,
+    metadata: { text: "export function run() { return true; }" },
+    path: "src/index.ts",
+    startLine: 1,
+    symbolId: null,
+    ...overrides,
+  };
+}
+
+function createEmbeddingDatabaseStub(options: {
+  /** Chunk rows returned by the fake initial chunk lookup. */
+  readonly rows: readonly TestCodeChunkRow[];
+  /** Chunk IDs returned by the fake embedding insert. */
+  readonly insertedChunkIds?: readonly string[];
+}): HeimdallDatabase {
+  const insertedChunkIds = options.insertedChunkIds ?? options.rows.map((row) => row.chunkId);
+  const tx = {
+    insert: (_table: unknown) => ({
+      values: (_values: unknown) => ({
+        onConflictDoNothing: () => ({
+          returning: async (_projection: unknown) =>
+            insertedChunkIds.map((chunkId) => ({ chunkId })),
+        }),
+      }),
+    }),
+    select: (_projection: unknown) => ({
+      from: (_table: unknown) => ({
+        where: async (_condition: unknown) => [{ embeddedChunkCount: insertedChunkIds.length }],
+      }),
+    }),
+    update: (_table: unknown) => ({
+      set: (_values: unknown) => ({
+        where: async (_condition: unknown) => undefined,
+      }),
+    }),
+  };
+  const db = {
+    select: () => ({
+      from: (_table: unknown) => ({
+        where: async (_condition: unknown) => options.rows,
+      }),
+    }),
+    transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+  };
+
+  return db as unknown as HeimdallDatabase;
+}
+
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          error: endOptions.error,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
   };
 }
