@@ -5,6 +5,7 @@ import {
   reviewArtifactPayloadDescriptor,
 } from "@repo/artifacts";
 import type {
+  ChangeSet,
   JobEnvelope,
   PlanSnapshot,
   PullRequestSnapshot,
@@ -28,6 +29,11 @@ import {
 } from "@repo/db";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import { createStaticLLMGateway, type LLMGateway } from "@repo/llm-gateway";
+import {
+  buildCommentableLineIndex,
+  buildFileAnchorIndex,
+  extractChangeSet,
+} from "@repo/pr-snapshot";
 import { type SyncRepositoryWorkspaceResult, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import {
@@ -108,6 +114,36 @@ export type ReviewOrchestratorDependencies = {
   readonly now?: () => Date;
 };
 
+/** Review artifact payload containing provider-neutral line and file anchor indexes. */
+type LineAnchorIndexArtifact = {
+  /** Artifact schema version. */
+  readonly schemaVersion: "line_anchor_index.v1";
+  /** Pull request snapshot that produced this index. */
+  readonly snapshotId: PullRequestSnapshot["snapshotId"];
+  /** Repository that owns the pull request. */
+  readonly repoId: PullRequestSnapshot["repoId"];
+  /** Provider pull request number. */
+  readonly pullRequestNumber: PullRequestSnapshot["pullRequestNumber"];
+  /** Reviewed head commit SHA. */
+  readonly headSha: PullRequestSnapshot["headSha"];
+  /** Hash of the raw provider diff used for anchoring. */
+  readonly diffHash: PullRequestSnapshot["diffHash"];
+  /** File-level fallback anchor metadata. */
+  readonly files: ReturnType<typeof buildFileAnchorIndex>;
+  /** Line-level anchors that are safe to pass to review-comment conversion. */
+  readonly lines: ReturnType<typeof buildCommentableLineIndex>;
+  /** Timestamp when the artifact payload was created. */
+  readonly createdAt: string;
+};
+
+/** Snapshot-derived artifacts persisted before retrieval and review work. */
+type SnapshotDerivedArtifacts = {
+  /** Deterministic changed ranges and path sets derived from the parsed snapshot diff. */
+  readonly changeSet: ChangeSet;
+  /** Provider-neutral line and file anchor indexes derived from the parsed snapshot diff. */
+  readonly lineAnchorIndex: LineAnchorIndexArtifact;
+};
+
 /** Workspace sync function used by review orchestration. */
 export type SyncWorkspace = (
   input: GitHubRepositoryRef & {
@@ -181,6 +217,7 @@ export async function runPullRequestReview(
   ]);
   await pullRequestRepository.insertSnapshot(snapshot);
   const startedAt = now().toISOString();
+  const snapshotDerivedArtifacts = buildSnapshotDerivedArtifacts(snapshot, startedAt);
   const repositorySettings = await repositoryRepository.getSettings(input.repoId);
   const activeRules = await new RepoRuleRepository(dependencies.db).listEffectiveRules({
     orgId: repositoryRecord.orgId,
@@ -271,7 +308,14 @@ export async function runPullRequestReview(
       reviewRunId,
       stage: "snapshot",
       status: "completed",
-      metadata: { snapshotId: snapshot.snapshotId, diffHash: snapshot.diffHash },
+      metadata: {
+        changedFileCount: snapshot.changedFileCount,
+        changedPathCount: snapshotDerivedArtifacts.changeSet.changedPathSet.length,
+        diffHash: snapshot.diffHash,
+        fileAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.files.length,
+        lineAnchorCount: snapshotDerivedArtifacts.lineAnchorIndex.lines.length,
+        snapshotId: snapshot.snapshotId,
+      },
     });
 
     const syncWorkspace =
@@ -311,6 +355,22 @@ export async function runPullRequestReview(
       await persistArtifact(reviewRepository, artifactPayloadStore, {
         reviewRunId,
         repoId: snapshot.repoId,
+        kind: "line_anchor_index",
+        name: "line-anchor-index.json",
+        payload: snapshotDerivedArtifacts.lineAnchorIndex,
+        createdAt: now().toISOString(),
+      }),
+      await persistArtifact(reviewRepository, artifactPayloadStore, {
+        reviewRunId,
+        repoId: snapshot.repoId,
+        kind: "change_set",
+        name: "change-set.json",
+        payload: snapshotDerivedArtifacts.changeSet,
+        createdAt: now().toISOString(),
+      }),
+      await persistArtifact(reviewRepository, artifactPayloadStore, {
+        reviewRunId,
+        repoId: snapshot.repoId,
         kind: "policy_snapshot",
         name: "policy-snapshot.json",
         payload: policyResult,
@@ -333,6 +393,15 @@ export async function runPullRequestReview(
           schemaVersion: "orchestrator_trace.v1",
           reviewRunId,
           snapshotId: snapshot.snapshotId,
+          changeSet: {
+            changedPathCount: snapshotDerivedArtifacts.changeSet.changedPathSet.length,
+            totalAddedLines: snapshotDerivedArtifacts.changeSet.totalAddedLines,
+            totalDeletedLines: snapshotDerivedArtifacts.changeSet.totalDeletedLines,
+          },
+          lineAnchors: {
+            fileCount: snapshotDerivedArtifacts.lineAnchorIndex.files.length,
+            lineCount: snapshotDerivedArtifacts.lineAnchorIndex.lines.length,
+          },
           workspace: {
             checkedOutSha: workspace.checkedOutSha,
             cleanedUp: workspace.cleanedUp,
@@ -747,6 +816,35 @@ async function loadGitHubRepositoryRef(
     owner: repository.owner,
     repo: repository.repo,
     providerRepoId: repository.providerRepoId,
+  };
+}
+
+/** Builds snapshot-derived artifacts that downstream retrieval, validation, and debug tools share. */
+function buildSnapshotDerivedArtifacts(
+  snapshot: PullRequestSnapshot,
+  createdAt: string,
+): SnapshotDerivedArtifacts {
+  return {
+    changeSet: extractChangeSet({
+      baseSha: snapshot.baseSha,
+      createdAt,
+      files: snapshot.changedFiles,
+      headSha: snapshot.headSha,
+      ...(snapshot.mergeBaseSha !== undefined ? { mergeBaseSha: snapshot.mergeBaseSha } : {}),
+      pullRequestNumber: snapshot.pullRequestNumber,
+      repoId: snapshot.repoId,
+    }),
+    lineAnchorIndex: {
+      createdAt,
+      diffHash: snapshot.diffHash,
+      files: buildFileAnchorIndex(snapshot.changedFiles),
+      headSha: snapshot.headSha,
+      lines: buildCommentableLineIndex(snapshot.changedFiles),
+      pullRequestNumber: snapshot.pullRequestNumber,
+      repoId: snapshot.repoId,
+      schemaVersion: "line_anchor_index.v1",
+      snapshotId: snapshot.snapshotId,
+    },
   };
 }
 

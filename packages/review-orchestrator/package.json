@@ -25,6 +25,7 @@
     "@repo/db": "workspace:*",
     "@repo/github": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
+    "@repo/pr-snapshot": "workspace:*",
     "@repo/retrieval": "workspace:*",
     "@repo/review-engine": "workspace:*",
     "@repo/repo-sync": "workspace:*",
