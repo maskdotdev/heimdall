@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "finding_validation_fixture.v1",
+  "name": "invalid line outside the diff",
+  "snapshot": {
+    "addedLines": [2]
+  },
+  "findings": [
+    {
+      "findingId": "fnd_FIX_LINE_NOT_IN_DIFF",
+      "fingerprint": "fp_fixture_line_not_in_diff",
+      "severity": "medium",
+      "title": "Handle unreachable arithmetic path",
+      "body": "The finding points at a line that is not part of the pull request diff.",
+      "location": { "line": 99 }
+    }
+  ],
+  "expected": {
+    "acceptedCandidateFindingIds": [],
+    "rankOrderCandidateFindingIds": [],
+    "rejected": {
+      "fnd_FIX_LINE_NOT_IN_DIFF": ["line_not_in_diff"]
+    },
+    "duplicateGroups": [],
+    "publishPlan": {
+      "checkAnnotationCandidateFindingIds": [],
+      "inlineCandidateFindingIds": [],
+      "summaryCandidateFindingIds": []
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "finding_validation_fixture.v1",
+  "name": "duplicate root cause across multiple lines",
+  "snapshot": {
+    "addedLines": [2, 40]
+  },
+  "findings": [
+    {
+      "findingId": "fnd_FIX_ROOT_CORRECTNESS",
+      "fingerprint": "fp_fixture_root_correctness",
+      "category": "correctness",
+      "severity": "medium",
+      "title": "Reject invalid session token requests",
+      "body": "The changed request path can continue with an invalid session token and grant permissions.",
+      "location": { "line": 2 },
+      "confidence": 0.86
+    },
+    {
+      "findingId": "fnd_FIX_ROOT_SECURITY",
+      "fingerprint": "fp_fixture_root_security",
+      "category": "security",
+      "severity": "high",
+      "title": "Validate session token permissions",
+      "body": "The changed session token path no longer validates the request before granting permissions.",
+      "location": { "line": 40 },
+      "confidence": 0.9
+    }
+  ],
+  "expected": {
+    "acceptedCandidateFindingIds": ["fnd_FIX_ROOT_SECURITY"],
+    "rankOrderCandidateFindingIds": ["fnd_FIX_ROOT_SECURITY"],
+    "rejected": {
+      "fnd_FIX_ROOT_CORRECTNESS": ["duplicate_root_cause"]
+    },
+    "duplicateGroups": [
+      {
+        "groupKind": "root_cause",
+        "canonicalCandidateFindingId": "fnd_FIX_ROOT_SECURITY",
+        "duplicateCandidateFindingIds": ["fnd_FIX_ROOT_CORRECTNESS"]
+      }
+    ],
+    "publishPlan": {
+      "checkAnnotationCandidateFindingIds": [],
+      "inlineCandidateFindingIds": ["fnd_FIX_ROOT_SECURITY"],
+      "summaryCandidateFindingIds": ["fnd_FIX_ROOT_SECURITY"]
+    }
+  }
+}

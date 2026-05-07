@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "finding_validation_fixture.v1",
+  "name": "summary-only high severity finding",
+  "snapshot": {
+    "addedLines": [2]
+  },
+  "findings": [
+    {
+      "findingId": "fnd_FIX_SUMMARY_ONLY_SECURITY",
+      "fingerprint": "fp_fixture_summary_only_security",
+      "category": "security",
+      "severity": "high",
+      "title": "Validate session token permissions",
+      "body": "The changed session token path no longer validates the request before granting permissions.",
+      "location": { "line": 2 },
+      "confidence": 0.9
+    }
+  ],
+  "config": {
+    "policy": {
+      "reviewPolicy": "summary_only"
+    }
+  },
+  "expected": {
+    "acceptedCandidateFindingIds": ["fnd_FIX_SUMMARY_ONLY_SECURITY"],
+    "rankOrderCandidateFindingIds": ["fnd_FIX_SUMMARY_ONLY_SECURITY"],
+    "rejected": {},
+    "duplicateGroups": [],
+    "publishPlan": {
+      "checkAnnotationCandidateFindingIds": [],
+      "inlineCandidateFindingIds": [],
+      "summaryCandidateFindingIds": ["fnd_FIX_SUMMARY_ONLY_SECURITY"]
+    }
+  }
+}
