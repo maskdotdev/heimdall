@@ -19,6 +19,16 @@ import {
 import { safeParseWithSchema } from "@repo/contracts/validation/parse";
 import type { LLMGateway } from "@repo/llm-gateway";
 import { evaluateSuppression, type MemoryFact, type SuppressionDecision } from "@repo/memory";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { type EffectiveReviewPolicy, evaluateFindingPolicy } from "@repo/rules";
 import type { NormalizedToolDiagnostic, StaticAnalysisReport } from "@repo/static-analysis";
 
@@ -80,6 +90,16 @@ type NormalizedCandidateFindingForValidation = {
   readonly finding: CandidateFinding;
   /** Rejection reasons discovered while normalizing schema-invalid boundary data. */
   readonly reasons: readonly FindingRejectionReason[];
+};
+
+/** Optional telemetry dependencies used by review-engine operations. */
+export type ReviewEngineTelemetryOptions = {
+  /** Optional metric recorder for review pass and validation counters. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Optional trace context propagated from the parent review job. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe review-engine spans. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
 };
 
 /** Context provided to every deterministic or model-backed review pass. */
@@ -202,17 +222,256 @@ export const staticAnalysisReviewPass: ReviewPass = {
   run: async (context) => staticAnalysisFindingsFromReport(context),
 };
 
-/** Runs review passes in order and returns all emitted candidate findings. */
-export async function runReviewPasses(input: {
-  /** Passes to execute. */
+/** Input for executing selected review passes with optional telemetry. */
+export type RunReviewPassesInput = ReviewEngineTelemetryOptions & {
+  /** Passes to execute. Defaults to the deterministic boundary pass. */
   readonly passes?: readonly ReviewPass[];
   /** Review pass context shared across passes. */
   readonly context: ReviewPassContext;
-}): Promise<readonly CandidateFinding[]> {
-  const passes = input.passes ?? [deterministicBoundaryPass];
-  const findingSets = await Promise.all(passes.map((pass) => pass.run(input.context)));
+};
 
-  return findingSets.flat();
+/** Runs review passes in order and returns all emitted candidate findings. */
+export async function runReviewPasses(
+  input: RunReviewPassesInput,
+): Promise<readonly CandidateFinding[]> {
+  const passes = input.passes ?? [deterministicBoundaryPass];
+  const telemetry = startReviewEngineRunTelemetry(input, passes.length);
+
+  try {
+    const findingSets = await Promise.all(
+      passes.map((pass, index) => runReviewPassWithTelemetry(input, pass, index)),
+    );
+    const findings = recordCandidateNormalizationTelemetry(input, findingSets.flat());
+    recordCandidateJudgeTelemetry(input, passes, findings);
+    finishReviewEngineRunTelemetry(telemetry, {
+      candidateCount: findings.length,
+      passCount: passes.length,
+      status: "succeeded",
+    });
+
+    return findings;
+  } catch (error) {
+    finishReviewEngineRunTelemetry(telemetry, {
+      error,
+      errorClass: classifyTelemetryError(error),
+      passCount: passes.length,
+      status: "failed",
+    });
+    throw error;
+  }
+}
+
+/** Final status attached to pass-level review metrics. */
+type ReviewPassTelemetryStatus = "failed" | "succeeded";
+
+/** Low-cardinality labels shared by review pass metrics. */
+type ReviewPassTelemetryLabels = Readonly<{
+  /** Stable pass identifier. */
+  readonly pass_name: string;
+  /** Final pass execution status. */
+  readonly status: ReviewPassTelemetryStatus;
+}>;
+
+/** Mutable state carried while the review-engine run span is open. */
+type ReviewEngineRunTelemetryState = {
+  /** Product-safe run span, when tracing is configured. */
+  readonly span?: TelemetrySpanHandle | undefined;
+  /** Monotonic start time used for duration attributes. */
+  readonly startedAtMs: number;
+};
+
+/** Starts product-safe telemetry for one review-engine pass set. */
+function startReviewEngineRunTelemetry(
+  input: RunReviewPassesInput,
+  passCount: number,
+): ReviewEngineRunTelemetryState {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewEngineRun, {
+    attributes: {
+      "app.repo_id": input.context.snapshot.repoId,
+      "app.review_run_id": input.context.reviewRunId,
+      "review.context_item_count": input.context.contextBundle?.items.length ?? 0,
+      "review.pass_count": passCount,
+      "review.static_analysis_reported": input.context.staticAnalysisReport !== undefined,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  return {
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Runs one review pass and records bounded pass metrics and spans. */
+async function runReviewPassWithTelemetry(
+  input: RunReviewPassesInput,
+  pass: ReviewPass,
+  passIndex: number,
+): Promise<readonly CandidateFinding[]> {
+  const startedAtMs = Date.now();
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewEnginePass, {
+    attributes: {
+      "app.repo_id": input.context.snapshot.repoId,
+      "app.review_run_id": input.context.reviewRunId,
+      "review.pass_index": passIndex,
+      "review.pass_name": sanitizeReviewTelemetryLabel(pass.name),
+      "review.pass_version": sanitizeReviewTelemetryLabel(pass.version),
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  try {
+    const findings = await pass.run(input.context);
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    const labels = reviewPassTelemetryLabels(pass, "succeeded");
+
+    input.metrics?.histogram(OBSERVABILITY_METRIC_NAMES.reviewPassDurationMs, durationMs, {
+      labels,
+      unit: "ms",
+    });
+    input.metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewPassCandidatesTotal, {
+      labels,
+      value: findings.length,
+    });
+    span?.end({
+      attributes: {
+        "review.candidate_count": findings.length,
+        "review.pass_duration_ms": durationMs,
+        "review.pass_status": "succeeded",
+      },
+    });
+
+    return findings;
+  } catch (error) {
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    const errorClass = classifyTelemetryError(error);
+    const labels = reviewPassTelemetryLabels(pass, "failed");
+
+    input.metrics?.histogram(OBSERVABILITY_METRIC_NAMES.reviewPassDurationMs, durationMs, {
+      labels,
+      unit: "ms",
+    });
+    input.metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewPassFailuresTotal, {
+      labels: { ...labels, error_class: errorClass },
+    });
+    span?.end({
+      attributes: {
+        "review.error_class": errorClass,
+        "review.pass_duration_ms": durationMs,
+        "review.pass_status": "failed",
+      },
+      error,
+    });
+    throw error;
+  }
+}
+
+/** Records the candidate normalization step without inspecting candidate text. */
+function recordCandidateNormalizationTelemetry(
+  input: RunReviewPassesInput,
+  findings: readonly CandidateFinding[],
+): readonly CandidateFinding[] {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewEngineNormalizeCandidates, {
+    attributes: {
+      "app.repo_id": input.context.snapshot.repoId,
+      "app.review_run_id": input.context.reviewRunId,
+      "review.input_candidate_count": findings.length,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  span?.end({
+    attributes: {
+      "review.normalized_candidate_count": findings.length,
+      "review.normalized_schema": "candidate_finding.v1",
+    },
+  });
+
+  return findings;
+}
+
+/** Records the current judge step state without storing prompt or finding content. */
+function recordCandidateJudgeTelemetry(
+  input: RunReviewPassesInput,
+  passes: readonly ReviewPass[],
+  findings: readonly CandidateFinding[],
+): void {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewEngineJudgeCandidates, {
+    attributes: {
+      "app.repo_id": input.context.snapshot.repoId,
+      "app.review_run_id": input.context.reviewRunId,
+      "review.input_candidate_count": findings.length,
+      "review.judge_pass_count": 0,
+      "review.pass_version_count": new Set(passes.map((pass) => pass.version)).size,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  span?.end({
+    attributes: {
+      "review.judge_enabled": false,
+      "review.output_candidate_count": findings.length,
+    },
+  });
+}
+
+/** Ends the review-engine run span with aggregate candidate counts. */
+function finishReviewEngineRunTelemetry(
+  telemetry: ReviewEngineRunTelemetryState,
+  context: {
+    /** Candidate count emitted by all completed passes. */
+    readonly candidateCount?: number | undefined;
+    /** Optional error raised by pass execution. */
+    readonly error?: unknown;
+    /** Product-safe error class for failed runs. */
+    readonly errorClass?: string | undefined;
+    /** Number of selected passes. */
+    readonly passCount: number;
+    /** Final run status. */
+    readonly status: "failed" | "succeeded";
+  },
+): void {
+  const durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
+
+  telemetry.span?.end({
+    ...(context.error ? { error: context.error } : {}),
+    attributes: {
+      ...(context.candidateCount !== undefined
+        ? { "review.candidate_count": context.candidateCount }
+        : {}),
+      ...(context.errorClass ? { "review.error_class": context.errorClass } : {}),
+      "review.duration_ms": durationMs,
+      "review.pass_count": context.passCount,
+      "review.run_status": context.status,
+    },
+    status: context.status === "succeeded" ? "ok" : "error",
+  });
+}
+
+/** Creates bounded labels for pass-level review metrics. */
+function reviewPassTelemetryLabels(
+  pass: ReviewPass,
+  status: ReviewPassTelemetryStatus,
+): ReviewPassTelemetryLabels {
+  return {
+    pass_name: sanitizeReviewTelemetryLabel(pass.name),
+    status,
+  };
+}
+
+/** Converts externally provided names into bounded telemetry label values. */
+function sanitizeReviewTelemetryLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .slice(0, 80);
+
+  return normalized.length > 0 ? normalized : "unknown";
 }
 
 /** Selects review passes from mode, changed files, retrieved context, and pass budgets. */
@@ -393,7 +652,7 @@ export type FindingValidationResult = {
 };
 
 /** Input for candidate validation, dedupe, suppression, and ranking. */
-export type ValidateAndRankCandidateFindingsInput = {
+export type ValidateAndRankCandidateFindingsInput = ReviewEngineTelemetryOptions & {
   /** Pull request snapshot used for anchor validation. */
   readonly snapshot: PullRequestSnapshot;
   /** Candidate findings emitted by review passes. */
@@ -413,6 +672,26 @@ export function validateAndRankCandidateFindings(
 
 /** Validates, suppresses, deduplicates, ranks, and explains candidate findings. */
 export function validateCandidateFindings(
+  input: ValidateAndRankCandidateFindingsInput,
+): FindingValidationResult {
+  const telemetry = startFindingValidationTelemetry(input);
+
+  try {
+    const result = validateCandidateFindingsCore(input);
+    finishFindingValidationTelemetry(input, telemetry, { result });
+
+    return result;
+  } catch (error) {
+    finishFindingValidationTelemetry(input, telemetry, {
+      error,
+      errorClass: classifyTelemetryError(error),
+    });
+    throw error;
+  }
+}
+
+/** Runs deterministic candidate validation without telemetry side effects. */
+function validateCandidateFindingsCore(
   input: ValidateAndRankCandidateFindingsInput,
 ): FindingValidationResult {
   const config = normalizeFindingValidationConfig(input.config);
@@ -476,6 +755,274 @@ export function validateCandidateFindings(
     trace: buildValidationTrace(input.timestamp, validated),
     validated,
   };
+}
+
+/** Mutable state carried while the finding-validation run span is open. */
+type FindingValidationTelemetryState = {
+  /** Product-safe validation run span, when tracing is configured. */
+  readonly span?: TelemetrySpanHandle | undefined;
+  /** Monotonic start time used for duration attributes. */
+  readonly startedAtMs: number;
+};
+
+/** Starts product-safe telemetry for one finding-validation run. */
+function startFindingValidationTelemetry(
+  input: ValidateAndRankCandidateFindingsInput,
+): FindingValidationTelemetryState {
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.findingValidationRun, {
+    attributes: {
+      ...findingValidationBaseAttributes(input),
+      "finding_validation.candidate_count": input.findings.length,
+      "finding_validation.context_item_count": input.config?.contextBundle?.items.length ?? 0,
+      "finding_validation.memory_fact_count":
+        input.config?.memorySuppression?.memoryFacts.length ?? 0,
+      "finding_validation.previous_published_count":
+        input.config?.previousPublishedFindings?.length ?? 0,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  return {
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Finishes finding-validation telemetry after completion or failure. */
+function finishFindingValidationTelemetry(
+  input: ValidateAndRankCandidateFindingsInput,
+  telemetry: FindingValidationTelemetryState,
+  context: {
+    /** Optional error raised during validation. */
+    readonly error?: unknown;
+    /** Product-safe error class for failed validation. */
+    readonly errorClass?: string | undefined;
+    /** Completed validation result. */
+    readonly result?: FindingValidationResult;
+  },
+): void {
+  const durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
+  const status = context.result ? "succeeded" : "failed";
+
+  if (context.result) {
+    recordFindingValidationMetrics(input.metrics, context.result);
+    recordFindingValidationStageSpans(input, context.result);
+  }
+
+  telemetry.span?.end({
+    ...(context.error ? { error: context.error } : {}),
+    attributes: findingValidationRunEndAttributes(input, durationMs, status, context),
+    status: status === "succeeded" ? "ok" : "error",
+  });
+}
+
+/** Records aggregate validation counters without candidate text or paths. */
+function recordFindingValidationMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  result: FindingValidationResult,
+): void {
+  if (result.accepted.length > 0) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewFindingsValidatedTotal, {
+      labels: { decision: "publish" },
+      value: result.accepted.length,
+    });
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewFindingsPublishedTotal, {
+      labels: { status: "published" },
+      value: result.accepted.length,
+    });
+  }
+
+  if (result.rejected.length > 0) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewFindingsValidatedTotal, {
+      labels: { decision: "reject" },
+      value: result.rejected.length,
+    });
+  }
+
+  for (const [reason, count] of Object.entries(result.stats.rejectionReasonCounts) as [
+    FindingRejectionReason,
+    number,
+  ][]) {
+    if (count <= 0) {
+      continue;
+    }
+
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewFindingsRejectedTotal, {
+      labels: {
+        reason,
+        stage: validationStageForReason(reason),
+      },
+      value: count,
+    });
+  }
+}
+
+/** Records product-safe spans for validation sub-steps. */
+function recordFindingValidationStageSpans(
+  input: ValidateAndRankCandidateFindingsInput,
+  result: FindingValidationResult,
+): void {
+  recordFindingValidationStageSpan(input, OBSERVABILITY_SPAN_NAMES.findingValidationAnchorCheck, {
+    "finding_validation.checked_count": result.stats.candidateCount,
+    "finding_validation.rejected_count": rejectedFindingCountForStage(result, "anchor"),
+    "finding_validation.stage": "anchor",
+  });
+  recordFindingValidationStageSpan(input, OBSERVABILITY_SPAN_NAMES.findingValidationEvidenceCheck, {
+    "finding_validation.checked_count": result.stats.candidateCount,
+    "finding_validation.rejected_count": rejectedFindingCountForStage(result, "evidence"),
+    "finding_validation.stage": "evidence",
+  });
+  recordFindingValidationStageSpan(
+    input,
+    OBSERVABILITY_SPAN_NAMES.findingValidationSuppressionCheck,
+    {
+      "finding_validation.checked_count": result.stats.candidateCount,
+      "finding_validation.rejected_count": rejectedFindingCountForStage(result, "suppression"),
+      "finding_validation.stage": "suppression",
+    },
+  );
+  recordFindingValidationStageSpan(input, OBSERVABILITY_SPAN_NAMES.findingValidationDedupe, {
+    "finding_validation.duplicate_group_count": result.duplicateGroups.length,
+    "finding_validation.duplicate_removed_count": result.stats.duplicateCount,
+    "finding_validation.rejected_count": rejectedFindingCountForStage(result, "dedupe"),
+    "finding_validation.stage": "dedupe",
+  });
+  recordFindingValidationStageSpan(input, OBSERVABILITY_SPAN_NAMES.findingValidationRank, {
+    "finding_validation.budget_truncated_count": rejectionReasonCount(result, "budget_exceeded"),
+    "finding_validation.published_count": result.accepted.length,
+    "finding_validation.rejected_count": rejectedFindingCountForStage(result, "ranking"),
+    "finding_validation.stage": "ranking",
+  });
+}
+
+/** Records one instantaneous finding-validation stage span. */
+function recordFindingValidationStageSpan(
+  input: ValidateAndRankCandidateFindingsInput,
+  name: string,
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+): void {
+  const span = input.traces?.startSpan(name, {
+    attributes: {
+      ...findingValidationBaseAttributes(input),
+      ...attributes,
+    },
+    kind: "internal",
+    traceContext: input.traceContext,
+  });
+
+  span?.end({
+    attributes: { "finding_validation.status": "completed" },
+  });
+}
+
+/** Builds product-safe shared validation span attributes. */
+function findingValidationBaseAttributes(
+  input: ValidateAndRankCandidateFindingsInput,
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  return {
+    "app.repo_id": input.snapshot.repoId,
+    ...(reviewRunIdFromCandidateInput(input.findings)
+      ? { "app.review_run_id": reviewRunIdFromCandidateInput(input.findings) }
+      : {}),
+  };
+}
+
+/** Builds aggregate validation run completion attributes. */
+function findingValidationRunEndAttributes(
+  input: ValidateAndRankCandidateFindingsInput,
+  durationMs: number,
+  status: "failed" | "succeeded",
+  context: {
+    /** Product-safe error class for failed validation. */
+    readonly errorClass?: string | undefined;
+    /** Completed validation result. */
+    readonly result?: FindingValidationResult;
+  },
+): Readonly<Record<string, TelemetryAttributeValue | undefined>> {
+  const result = context.result;
+
+  return {
+    ...findingValidationBaseAttributes(input),
+    ...(context.errorClass ? { "finding_validation.error_class": context.errorClass } : {}),
+    ...(result
+      ? {
+          "finding_validation.anchor_invalid_count": rejectedFindingCountForStage(result, "anchor"),
+          "finding_validation.budget_truncated_count": rejectionReasonCount(
+            result,
+            "budget_exceeded",
+          ),
+          "finding_validation.candidate_count": result.stats.candidateCount,
+          "finding_validation.duplicate_group_count": result.duplicateGroups.length,
+          "finding_validation.duplicate_removed_count": result.stats.duplicateCount,
+          "finding_validation.evidence_invalid_count": rejectedFindingCountForStage(
+            result,
+            "evidence",
+          ),
+          "finding_validation.published_count": result.accepted.length,
+          "finding_validation.rejected_count": result.rejected.length,
+          "finding_validation.schema_invalid_count": schemaInvalidCount(result),
+          "finding_validation.schema_valid_count": Math.max(
+            0,
+            result.stats.candidateCount - schemaInvalidCount(result),
+          ),
+          "finding_validation.suppressed_count": rejectedFindingCountForStage(
+            result,
+            "suppression",
+          ),
+          "finding_validation.validated_count": result.validated.length,
+        }
+      : { "finding_validation.candidate_count": input.findings.length }),
+    "finding_validation.duration_ms": durationMs,
+    "finding_validation.status": status,
+  };
+}
+
+/** Counts rejected findings with at least one reason for the requested stage. */
+function rejectedFindingCountForStage(
+  result: FindingValidationResult,
+  stage: FindingValidationEventStage,
+): number {
+  const stageReasons = reasonsForValidationStage(stage);
+
+  return result.rejected.filter((finding) =>
+    finding.validation.reasons.some((reason) => stageReasons.has(reason)),
+  ).length;
+}
+
+/** Counts occurrences of one validation rejection reason. */
+function rejectionReasonCount(
+  result: FindingValidationResult,
+  reason: FindingRejectionReason,
+): number {
+  return result.stats.rejectionReasonCounts[reason] ?? 0;
+}
+
+/** Counts schema-invalid candidates using canonical schema rejection reasons. */
+function schemaInvalidCount(result: FindingValidationResult): number {
+  return (
+    rejectionReasonCount(result, "invalid_schema") +
+    rejectionReasonCount(result, "unsupported_schema_version")
+  );
+}
+
+/** Returns the canonical validation stage for a rejection reason. */
+function validationStageForReason(reason: FindingRejectionReason): FindingValidationEventStage {
+  return (
+    VALIDATION_EVENT_STAGES.find((stage) => reasonsForValidationStage(stage).has(reason)) ??
+    "policy"
+  );
+}
+
+/** Extracts a review run ID from boundary data without trusting candidate shape. */
+function reviewRunIdFromCandidateInput(findings: readonly unknown[]): string | undefined {
+  for (const finding of findings) {
+    if (isRecord(finding) && typeof finding.reviewRunId === "string" && finding.reviewRunId) {
+      return finding.reviewRunId;
+    }
+  }
+
+  return undefined;
 }
 
 function normalizeFindingValidationConfig(

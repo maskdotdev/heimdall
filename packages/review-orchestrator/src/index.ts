@@ -789,9 +789,12 @@ export async function runPullRequestReview(
       "review",
       () =>
         runReviewPasses({
+          metrics: dependencies.metrics,
           passes: staticAnalysisReport
             ? [staticAnalysisReviewPass, llmReviewPass]
             : [llmReviewPass],
+          traceContext: dependencies.traceContext,
+          traces: dependencies.traces,
           context: {
             reviewRunId,
             snapshot,
@@ -874,6 +877,9 @@ export async function runPullRequestReview(
           findings: candidateFindings,
           timestamp: now().toISOString(),
           config: validationConfig,
+          metrics: dependencies.metrics,
+          traceContext: dependencies.traceContext,
+          traces: dependencies.traces,
         });
 
         return {

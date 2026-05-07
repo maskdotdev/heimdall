@@ -9,6 +9,13 @@ import type { ContextBundle } from "@repo/contracts/review/context";
 import type { CandidateFinding, Evidence } from "@repo/contracts/review/finding";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
 import type { MemoryFact } from "@repo/memory";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { createPolicyFixture } from "@repo/rules";
 import type { StaticAnalysisReport } from "@repo/static-analysis";
 import { describe, expect, it } from "vitest";
@@ -101,6 +108,97 @@ describe("staticAnalysisReviewPass", () => {
     });
 
     expect(findings).toEqual([]);
+  });
+});
+
+describe("runReviewPasses telemetry", () => {
+  it("records pass metrics and spans without candidate content or paths", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const pass = {
+      name: "fixture-telemetry-pass",
+      version: "2026.05",
+      run: async () => [
+        candidateFindingFixture({
+          body: "Leaky body text from a model response.",
+          evidence: [
+            evidenceFixture({
+              path: "src/private-path.ts",
+              summary: "Leaky evidence summary from a model response.",
+            }),
+          ],
+          location: {
+            ...validCandidateFindingFixture.location,
+            path: "src/private-path.ts",
+          },
+          title: "Leaky candidate title",
+        }),
+      ],
+    };
+
+    const findings = await runReviewPasses({
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        timestamp: validCandidateFindingFixture.createdAt,
+      },
+      metrics: createRecordingMetrics(metrics),
+      passes: [pass],
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(metrics).toContainEqual(
+      expect.objectContaining({
+        kind: "counter",
+        labels: {
+          pass_name: "fixture-telemetry-pass",
+          status: "succeeded",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.reviewPassCandidatesTotal,
+        value: 1,
+      }),
+    );
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "histogram",
+          labels: {
+            pass_name: "fixture-telemetry-pass",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.reviewPassDurationMs,
+          unit: "ms",
+        }),
+      ]),
+    );
+    expect(spans.map((span) => span.name)).toEqual(
+      expect.arrayContaining([
+        OBSERVABILITY_SPAN_NAMES.reviewEngineRun,
+        OBSERVABILITY_SPAN_NAMES.reviewEnginePass,
+        OBSERVABILITY_SPAN_NAMES.reviewEngineNormalizeCandidates,
+        OBSERVABILITY_SPAN_NAMES.reviewEngineJudgeCandidates,
+      ]),
+    );
+    expect(spans).toContainEqual(
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "review.candidate_count": 1,
+          "review.pass_status": "succeeded",
+        }),
+        name: OBSERVABILITY_SPAN_NAMES.reviewEnginePass,
+        startAttributes: expect.objectContaining({
+          "review.pass_name": "fixture-telemetry-pass",
+          "review.pass_version": "2026.05",
+        }),
+      }),
+    );
+
+    const serializedTelemetry = JSON.stringify({ metrics, spans });
+    expect(serializedTelemetry).not.toContain("Leaky candidate title");
+    expect(serializedTelemetry).not.toContain("Leaky body text");
+    expect(serializedTelemetry).not.toContain("Leaky evidence summary");
+    expect(serializedTelemetry).not.toContain("src/private-path.ts");
   });
 });
 
@@ -327,6 +425,92 @@ describe("validateAndRankCandidateFindings", () => {
         }),
       ]),
     );
+  });
+
+  it("records validation metrics and spans without finding content or paths", () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const offPullRequestFinding = candidateFindingFixture({
+      body: "Leaky validation body text.",
+      evidence: [
+        evidenceFixture({
+          path: "src/private-validation-path.ts",
+          summary: "Leaky validation evidence summary.",
+        }),
+      ],
+      findingId: "fnd_VALIDATION_TELEMETRY",
+      fingerprint: "fp_validation_telemetry",
+      location: {
+        ...validCandidateFindingFixture.location,
+        path: "src/private-validation-path.ts",
+      },
+      title: "Leaky validation title",
+    });
+
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [validCandidateFindingFixture, offPullRequestFinding],
+      timestamp: validCandidateFindingFixture.createdAt,
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(result.accepted).toHaveLength(1);
+    expect(result.rejected).toHaveLength(1);
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "counter",
+          labels: { decision: "publish" },
+          name: OBSERVABILITY_METRIC_NAMES.reviewFindingsValidatedTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: { decision: "reject" },
+          name: OBSERVABILITY_METRIC_NAMES.reviewFindingsValidatedTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: { status: "published" },
+          name: OBSERVABILITY_METRIC_NAMES.reviewFindingsPublishedTotal,
+          value: 1,
+        },
+        {
+          kind: "counter",
+          labels: { reason: "file_not_in_pr", stage: "anchor" },
+          name: OBSERVABILITY_METRIC_NAMES.reviewFindingsRejectedTotal,
+          value: 1,
+        },
+      ]),
+    );
+    expect(spans.map((span) => span.name)).toEqual(
+      expect.arrayContaining([
+        OBSERVABILITY_SPAN_NAMES.findingValidationRun,
+        OBSERVABILITY_SPAN_NAMES.findingValidationAnchorCheck,
+        OBSERVABILITY_SPAN_NAMES.findingValidationEvidenceCheck,
+        OBSERVABILITY_SPAN_NAMES.findingValidationSuppressionCheck,
+        OBSERVABILITY_SPAN_NAMES.findingValidationDedupe,
+        OBSERVABILITY_SPAN_NAMES.findingValidationRank,
+      ]),
+    );
+    expect(spans).toContainEqual(
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "finding_validation.published_count": 1,
+          "finding_validation.rejected_count": 1,
+          "finding_validation.status": "succeeded",
+        }),
+        name: OBSERVABILITY_SPAN_NAMES.findingValidationRun,
+      }),
+    );
+
+    const serializedTelemetry = JSON.stringify({ metrics, spans });
+    expect(serializedTelemetry).not.toContain("Leaky validation title");
+    expect(serializedTelemetry).not.toContain("Leaky validation body");
+    expect(serializedTelemetry).not.toContain("Leaky validation evidence");
+    expect(serializedTelemetry).not.toContain("src/private-validation-path.ts");
   });
 
   it("rejects semantic duplicates without requiring exact fingerprints or locations", () => {
@@ -820,6 +1004,78 @@ describe("validateAndRankCandidateFindings", () => {
     );
   });
 });
+
+/** Metric record captured by telemetry assertions. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels attached to the record. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Span record captured by telemetry assertions. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric records in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}
 
 /** Creates a candidate finding with deterministic defaults for validation tests. */
 function candidateFindingFixture(overrides: Partial<CandidateFinding> = {}): CandidateFinding {
