@@ -1,8 +1,11 @@
 import { ChangedFileSchema, ChangeSetSchema, parseWithSchema } from "@repo/contracts";
+import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
 import { describe, expect, it } from "vitest";
 import {
   buildCommentableLineIndex,
+  computeSnapshotHash,
   extractChangeSet,
+  hashCanonicalJson,
   hashRawDiff,
   isLineCommentable,
   parseUnifiedDiff,
@@ -186,6 +189,34 @@ describe("line anchors", () => {
 describe("hashRawDiff", () => {
   it("hashes raw diff text with the repository hash prefix", () => {
     expect(hashRawDiff("diff --git a/a b/a\n")).toMatch(/^sha256:[a-f0-9]{64}$/u);
+  });
+});
+
+describe("snapshot hashing", () => {
+  it("hashes canonical JSON independent of object key order", () => {
+    expect(hashCanonicalJson({ b: 1, a: { d: 2, c: undefined } })).toBe(
+      hashCanonicalJson({ a: { d: 2 }, b: 1 }),
+    );
+  });
+
+  it("keeps equivalent snapshots stable while hashing semantic changes", () => {
+    const first = {
+      ...validPullRequestSnapshotFixture,
+      fetchedAt: "2026-05-07T00:00:00.000Z",
+      snapshotId: "prs_first",
+    };
+    const second = {
+      ...validPullRequestSnapshotFixture,
+      fetchedAt: "2026-05-07T01:00:00.000Z",
+      snapshotId: "prs_second",
+    };
+    const changedHead = {
+      ...second,
+      headSha: "3333333",
+    };
+
+    expect(computeSnapshotHash(first)).toBe(computeSnapshotHash(second));
+    expect(computeSnapshotHash(changedHead)).not.toBe(computeSnapshotHash(second));
   });
 });
 

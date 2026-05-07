@@ -9,6 +9,7 @@ import type {
   FileChangeStatus,
   LineRange,
   ModifiedBlock,
+  PullRequestSnapshot,
 } from "@repo/contracts";
 
 export const packageName = "@repo/pr-snapshot" as const;
@@ -155,7 +156,19 @@ export function parseUnifiedDiff(diff: string): readonly ChangedFile[] {
 
 /** Hashes raw diff text with the repository hash format. */
 export function hashRawDiff(diff: string): `sha256:${string}` {
-  return `sha256:${createHash("sha256").update(diff).digest("hex")}`;
+  return hashString(diff);
+}
+
+/** Hashes JSON data after sorting object keys and omitting undefined object fields. */
+export function hashCanonicalJson(value: unknown): `sha256:${string}` {
+  return hashString(canonicalJson(value));
+}
+
+/** Hashes the stable semantic content of a pull request snapshot. */
+export function computeSnapshotHash(snapshot: PullRequestSnapshot): `sha256:${string}` {
+  const { fetchedAt: _fetchedAt, snapshotId: _snapshotId, ...stableSnapshot } = snapshot;
+
+  return hashCanonicalJson(stableSnapshot);
 }
 
 /** Returns all provider-commentable lines from parsed changed files. */
@@ -622,4 +635,31 @@ function stableId(prefix: string, parts: readonly unknown[]): string {
     .slice(0, 26);
 
   return `${prefix}_${hash}`;
+}
+
+/** Serializes a value as canonical JSON with sorted object keys. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(toCanonicalValue(value));
+}
+
+/** Converts a value into a JSON-safe structure with sorted object keys. */
+function toCanonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(toCanonicalValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, entryValue]) => entryValue !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => [key, toCanonicalValue(entryValue)]),
+    );
+  }
+
+  return value;
+}
+
+/** Returns a sha256 content hash. */
+function hashString(value: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
