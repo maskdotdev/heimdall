@@ -116,6 +116,39 @@ describe("GitHub admin gateway", () => {
     });
   });
 
+  it("permits allowlisted GitHub users when user owner fallback is explicitly enabled", async () => {
+    const fetchCalls: string[] = [];
+    const gateway = createGitHubAdminGateway(
+      {
+        ...baseConfig(),
+        allowUserLoginWithoutOrg: true,
+        githubOrg: "allowed-admin",
+      },
+      {
+        ...deterministicDependencies(),
+        fetch: async (input) => {
+          fetchCalls.push(input.toString());
+          return githubResponse(input.toString(), "allowed-admin", "active");
+        },
+      },
+    );
+    const start = await gateway.handle(new Request("https://gateway.test/auth/github/start"));
+    const state = requiredOAuthState(start);
+
+    const callback = await gateway.handle(
+      new Request(`https://gateway.test/auth/github/callback?code=oauth-code&state=${state}`, {
+        headers: { cookie: cookiePair(start, "heimdall_admin_gateway_oauth_state") },
+      }),
+    );
+
+    expect(callback.status).toBe(302);
+    expect(fetchCalls).toEqual([
+      "https://github.com/login/oauth/access_token",
+      "https://api.github.com/user",
+      "https://api.github.com/user/memberships/orgs/allowed-admin",
+    ]);
+  });
+
   it("rejects assertion scope requests outside the gateway session scope", async () => {
     const gateway = createGitHubAdminGateway(baseConfig(), {
       ...deterministicDependencies(),
@@ -259,6 +292,7 @@ describe("GitHub admin gateway", () => {
 function baseConfig(): GitHubAdminGatewayConfig {
   return {
     allowAllOrgMembers: false,
+    allowUserLoginWithoutOrg: false,
     allowedGithubLogins: ["allowed-admin"],
     allowedOrigins: ["https://admin.test"],
     assertionSecret: "assertion-secret-with-at-least-32-chars",

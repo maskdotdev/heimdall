@@ -147,6 +147,8 @@ export type GitHubAdminGatewayConfig = {
   readonly allowedGithubLogins: readonly string[];
   /** Whether active members of the configured GitHub org are allowed without a login allowlist. */
   readonly allowAllOrgMembers: boolean;
+  /** Whether allowlisted GitHub users may authenticate when the configured owner is not an org. */
+  readonly allowUserLoginWithoutOrg: boolean;
   /** Heimdall organization scope IDs granted to admitted operators. */
   readonly orgIds: readonly string[];
   /** Heimdall repository scope IDs granted to admitted operators. */
@@ -247,6 +249,7 @@ export function readGitHubAdminGatewayConfig(
 
   return {
     allowAllOrgMembers: env.HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS === "true",
+    allowUserLoginWithoutOrg: env.HEIMDALL_ADMIN_GATEWAY_ALLOW_USER_LOGIN_WITHOUT_ORG === "true",
     allowedGithubLogins: normalizeGithubLogins(
       parseStringList(env.HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS) ?? [],
     ),
@@ -408,12 +411,12 @@ async function finishGitHubLogin(
   const statePayload = verifyOAuthState(state, config, runtime.now());
   const token = await exchangeGitHubOAuthCode(code, config, runtime.fetch);
   const user = await getGitHubUser(token.access_token, runtime.fetch);
-  const membership = await getGitHubMembership(config.githubOrg, token.access_token, runtime.fetch);
+  const membership = await getGitHubMembershipForLogin(user, token.access_token, config, runtime);
   assertAdmittedGitHubMember(user, membership, config);
   const session = createGatewaySession(user, membership, config, runtime);
   runtime.logger.info?.("admin gateway login succeeded", {
     githubLogin: user.login,
-    githubOrg: membership.organization.login,
+    githubOrg: membership?.organization.login ?? config.githubOrg,
     providerSubject: session.providerSubject,
   });
 
@@ -580,6 +583,34 @@ async function getGitHubMembership(
   return json;
 }
 
+/** Fetches GitHub org membership or permits an explicit local user-owner fallback. */
+async function getGitHubMembershipForLogin(
+  user: GitHubUser,
+  accessToken: string,
+  config: GitHubAdminGatewayConfig,
+  runtime: Required<GitHubAdminGatewayDependencies>,
+): Promise<GitHubMembership | undefined> {
+  try {
+    return await getGitHubMembership(config.githubOrg, accessToken, runtime.fetch);
+  } catch (error) {
+    const mayUseUserOwnerFallback =
+      config.allowUserLoginWithoutOrg &&
+      config.allowedGithubLogins.includes(user.login.toLowerCase()) &&
+      error instanceof GatewayHttpError &&
+      error.code === "admin_gateway.github_api_failed" &&
+      error.status === 403;
+    if (mayUseUserOwnerFallback) {
+      runtime.logger.warn?.("admin gateway using allowlisted GitHub user owner fallback", {
+        githubLogin: user.login,
+        githubOrg: config.githubOrg,
+      });
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
 /** Fetches one GitHub REST API JSON document with standard headers. */
 async function fetchGitHubJson(
   url: string,
@@ -609,9 +640,22 @@ async function fetchGitHubJson(
 /** Validates that a GitHub user is an admitted active member of the configured organization. */
 function assertAdmittedGitHubMember(
   user: GitHubUser,
-  membership: GitHubMembership,
+  membership: GitHubMembership | undefined,
   config: GitHubAdminGatewayConfig,
 ): void {
+  if (!membership) {
+    const normalizedLogin = user.login.toLowerCase();
+    if (config.allowedGithubLogins.includes(normalizedLogin)) {
+      return;
+    }
+
+    throw new GatewayHttpError(
+      403,
+      "admin_gateway.github_login_forbidden",
+      "This GitHub login is not allowed to administer Heimdall.",
+    );
+  }
+
   if (
     membership.state !== "active" ||
     membership.organization.login.toLowerCase() !== config.githubOrg.toLowerCase()
@@ -636,7 +680,7 @@ function assertAdmittedGitHubMember(
 /** Creates a gateway session from verified GitHub identity and configured Heimdall grants. */
 function createGatewaySession(
   user: GitHubUser,
-  membership: GitHubMembership,
+  membership: GitHubMembership | undefined,
   config: GitHubAdminGatewayConfig,
   runtime: Required<GitHubAdminGatewayDependencies>,
 ): GatewaySession {
@@ -649,8 +693,8 @@ function createGatewaySession(
     ...(email ? { email } : {}),
     expiresAt: expiresAt.toISOString(),
     githubLogin: user.login,
-    githubOrg: membership.organization.login,
-    ...(membership.role ? { githubRole: membership.role } : {}),
+    githubOrg: membership?.organization.login ?? config.githubOrg,
+    ...(membership?.role ? { githubRole: membership.role } : {}),
     issuedAt: issuedAt.toISOString(),
     orgIds: [...config.orgIds],
     permissions: [...config.permissions],
