@@ -29,3 +29,16 @@ Run this audit before promoting or changing the production admin control plane:
 ```sh
 pnpm audit:control-plane:deployment
 ```
+
+Run the full Railway release gate sequence from one command after `.env.smoke.local` contains the
+deployed API, dashboard, gateway, OAuth, CDP, replay, and proof values:
+
+```sh
+pnpm release:control-plane:railway
+```
+
+Use local-only mode before the deployed browser/OAuth proof inputs are ready:
+
+```sh
+pnpm release:control-plane:railway -- --local-only
+```

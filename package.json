@@ -27,6 +27,7 @@
     "boundaries:check": "bun run scripts/check-boundaries.ts",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries:check",
     "ci:control-plane:release": "pnpm audit:control-plane:deployment && pnpm readiness:control-plane:production && pnpm check && pnpm build",
+    "release:control-plane:railway": "bun run scripts/control-plane-railway-release.ts",
     "clean": "turbo clean && pnpm clean:local",
     "clean:local": "rm -rf .turbo node_modules apps/*/node_modules packages/*/node_modules apps/*/dist packages/*/dist coverage",
     "infra:up": "docker compose up -d",

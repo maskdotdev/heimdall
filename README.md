@@ -61,6 +61,7 @@ packages/admin-tools
 pnpm dev
 pnpm check
 pnpm ci:control-plane:release
+pnpm release:control-plane:railway -- --local-only
 pnpm build
 pnpm typecheck
 pnpm lint
@@ -114,6 +115,19 @@ auth configuration.
 Run `pnpm proof:control-plane:staging` with `HEIMDALL_CONTROL_PLANE_MANUAL_DRILL_EVIDENCE` and
 `HEIMDALL_CONTROL_PLANE_ROLLBACK_NOTES` set to execute the full proof sequence and write a JSON
 evidence record with top-level actor, scope, gateway, and audit summaries.
+
+For the Railway rollout path, use one wrapper command after `.env.smoke.local` contains the deployed
+API, dashboard, gateway, OAuth, CDP, replay, and proof values:
+
+```bash
+pnpm release:control-plane:railway
+```
+
+Before deployed OAuth/CDP inputs are ready, run the same sequence in local-only mode:
+
+```bash
+pnpm release:control-plane:railway -- --local-only
+```
 
 For local development, run the localhost-only dev gateway when you do not need real GitHub auth:
 

@@ -109,6 +109,7 @@ function validManifest() {
     },
     provider: "railway",
     releaseGates: [
+      gate("pnpm release:control-plane:railway"),
       gate("pnpm check"),
       gate("pnpm preflight:control-plane:staging"),
       gate("pnpm smoke:control-plane:staging"),
@@ -183,6 +184,7 @@ function validPackageJson() {
       "preflight:control-plane:staging": "bun run scripts/control-plane-staging-preflight.ts",
       "proof:control-plane:staging": "bun run scripts/control-plane-staging-proof.ts",
       "readiness:control-plane:production": "bun run scripts/control-plane-production-readiness.ts",
+      "release:control-plane:railway": "bun run scripts/control-plane-railway-release.ts",
       "smoke:control-plane:staging": "bun run scripts/control-plane-staging-smoke.ts",
     },
   };

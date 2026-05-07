@@ -133,6 +133,20 @@ Use this checklist for production and for every gateway configuration change:
 
 Run these gates before enabling or changing the admin control plane in production:
 
+The preferred Railway release command runs the local release gates first, then the deployed
+preflight, smoke, dashboard E2E, and proof gates in order:
+
+```sh
+pnpm release:control-plane:railway
+```
+
+Use local-only mode before Railway deploys or when fresh gateway OAuth/CDP proof inputs are not
+available:
+
+```sh
+pnpm release:control-plane:railway -- --local-only
+```
+
 1. Validate environment configuration:
 
    ```sh

@@ -30,6 +30,7 @@ const REQUIRED_PACKAGE_SCRIPTS = [
   "e2e:dashboard",
   "proof:control-plane:staging",
   "readiness:control-plane:production",
+  "release:control-plane:railway",
 ];
 
 /** Required release-gate commands in the production deployment manifest. */

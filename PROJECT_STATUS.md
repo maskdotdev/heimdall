@@ -77,6 +77,9 @@ tracked milestone.
   and `docs/releases/admin-control-plane-production-release.md` define the controlled production
   release ticket, and `infra/railway/*.railway.json` codifies Railway build/deploy settings for
   the API, dashboard, admin gateway, and worker services.
+- Latest deployment-streamlining milestone: `pnpm release:control-plane:railway` wraps the local
+  release gates and deployed Railway proof gates in one operator command, with `--local-only`
+  available before fresh deployed OAuth/CDP inputs are ready.
 - Latest verification: `pnpm smoke:review:github` completed with webhook event
   `webhook_zcXI0Oj5qVyrmzFMO2ufYUqHVh`, review run
   `rrn_YjVZfH70cGNJCMEQgKalTf7WIb`, index job `job_ae39170509eb4097ba1aed094fabc031`,

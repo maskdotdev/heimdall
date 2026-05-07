@@ -626,6 +626,12 @@ type OverviewViewState = {
   reviews: readonly AdminReviewRunSummary[];
   /** Loaded recent audit entries. */
   auditLogs: readonly AdminAuditLogSummary[];
+  /** Whether the overview route has returned at least once in this session. */
+  loaded: boolean;
+  /** Whether repository discovery has returned at least once in this session. */
+  repositoriesLoaded: boolean;
+  /** Whether review discovery has returned at least once in this session. */
+  reviewsLoaded: boolean;
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -832,6 +838,9 @@ const state: AppState = {
     repositories: [],
     reviews: [],
     auditLogs: [],
+    loaded: false,
+    repositoriesLoaded: false,
+    reviewsLoaded: false,
   },
   settings: { repoId: "", rules: [] },
   audit: {
@@ -926,6 +935,8 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "clear-review-filter") {
     state.overview.reviewRepoId = "";
+    state.overview.reviewStatus = "";
+    state.overview.reviewSearch = "";
     await loadReviewHistory();
     return;
   }
@@ -1095,6 +1106,7 @@ async function connectAdminSession(): Promise<void> {
   } catch (error) {
     state.session = undefined;
     state.authError = errorMessage(error);
+    sessionStorage.removeItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY);
   } finally {
     state.authLoading = undefined;
     render();
@@ -1134,6 +1146,17 @@ async function clearAuth(): Promise<void> {
   } finally {
     sessionStorage.removeItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY);
     state.session = undefined;
+    state.overview = {
+      ...state.overview,
+      auditLogs: [],
+      error: undefined,
+      loaded: false,
+      loading: undefined,
+      repositories: [],
+      repositoriesLoaded: false,
+      reviews: [],
+      reviewsLoaded: false,
+    };
     state.authLoading = undefined;
     render();
   }
@@ -1232,6 +1255,9 @@ async function loadOverview(): Promise<void> {
     state.overview.repositories = data.repositories;
     state.overview.reviews = data.recentReviews;
     state.overview.auditLogs = data.recentAuditLogs;
+    state.overview.loaded = true;
+    state.overview.repositoriesLoaded = true;
+    state.overview.reviewsLoaded = true;
   } catch (error) {
     state.overview.error = errorMessage(error);
   } finally {
@@ -1252,6 +1278,7 @@ async function loadRepositories(): Promise<void> {
       readonly repositories: readonly AdminRepositorySummary[];
     }>(`/admin/repos?${params.toString()}`);
     state.overview.repositories = data.repositories;
+    state.overview.repositoriesLoaded = true;
   } catch (error) {
     state.overview.error = errorMessage(error);
   } finally {
@@ -1274,6 +1301,7 @@ async function loadReviewHistory(): Promise<void> {
       `/admin/reviews?${params.toString()}`,
     );
     state.overview.reviews = data.reviews;
+    state.overview.reviewsLoaded = true;
   } catch (error) {
     state.overview.error = errorMessage(error);
   } finally {
@@ -1550,14 +1578,15 @@ function render(): void {
     <div class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Heimdall Admin</p>
+          <p class="eyebrow">Heimdall</p>
           <h1>Operator Console</h1>
         </div>
         ${renderSessionBadge()}
       </header>
       ${renderAuthPanel()}
-      ${renderPrimaryNav()}
-      ${renderActiveView()}
+      ${
+        state.session ? `${renderPrimaryNav()}${renderActiveView()}` : renderDisconnectedWorkspace()
+      }
     </div>
   `;
 }
@@ -1565,7 +1594,7 @@ function render(): void {
 /** Renders the current session badge. */
 function renderSessionBadge(): string {
   if (!state.session) {
-    return `<span class="status muted">Disconnected</span>`;
+    return "";
   }
 
   const actor = state.session.actor;
@@ -1581,29 +1610,180 @@ function renderSessionBadge(): string {
 /** Renders the authentication controls. */
 function renderAuthPanel(): string {
   const disabled = state.authLoading ? "disabled" : "";
-  const sessionLabel = state.authLoading ?? (state.session ? "Active" : "No session cookie");
+
+  // Connected state - minimal inline status
+  if (state.session) {
+    return `
+      <section class="auth-panel connected">
+        <div class="session-info">
+          <span class="connection-dot"></span>
+          <span>Connected to <strong>${escapeHtml(formatApiHost())}</strong></span>
+        </div>
+        <div class="session-actions">
+          <button class="ghost small" data-action="refresh-session" type="button" ${disabled}>
+            Refresh
+          </button>
+          <button class="ghost small" data-action="clear-auth" type="button" ${disabled}>
+            Disconnect
+          </button>
+        </div>
+        ${state.authError ? `<p class="error-line">${escapeHtml(state.authError)}</p>` : ""}
+      </section>
+    `;
+  }
+
+  // Disconnected state - guided onboarding flow
+  const loadingMessage = state.authLoading
+    ? `<p class="notice">${escapeHtml(state.authLoading)}...</p>`
+    : "";
+
   return `
-    <section class="auth-panel">
-      <label>
-        <span>API URL</span>
-        <input data-field="api-base-url" value="${escapeAttribute(state.apiBaseUrl)}" />
-      </label>
-      <label>
-        <span>Gateway URL</span>
-        <input data-field="gateway-base-url" value="${escapeAttribute(state.gatewayBaseUrl)}" />
-      </label>
-      <div class="session-copy">
-        <span>Identity session</span>
-        <strong>${escapeHtml(sessionLabel)}</strong>
+    <section class="auth-panel disconnected">
+      <div class="auth-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 20c0-4 4-6 8-6s8 2 8 6" />
+        </svg>
       </div>
-      <button data-action="login-github" type="button" ${disabled}>Login with GitHub</button>
-      <button class="primary" data-action="connect-admin-session" type="button" ${disabled}>
-        Connect admin session
-      </button>
-      <button class="ghost" data-action="refresh-session" type="button" ${disabled}>Refresh</button>
-      <button class="ghost" data-action="clear-auth" type="button" ${disabled}>Logout</button>
+      <h3>Connect to Heimdall</h3>
+      <p>Authenticate with GitHub to access repository controls, review inspectors, and audit history.</p>
+
+      ${loadingMessage}
       ${state.authError ? `<p class="error-line">${escapeHtml(state.authError)}</p>` : ""}
+
+      <div class="auth-actions">
+        <button class="primary" data-action="login-github" type="button" ${disabled}>
+          Sign in with GitHub
+        </button>
+        <button data-action="connect-admin-session" type="button" ${disabled}>
+          Connect existing session
+        </button>
+      </div>
+
+      <details class="auth-advanced">
+        <summary>Advanced configuration</summary>
+        <div class="auth-advanced-content">
+          <label>
+            <span>API URL</span>
+            <input
+              data-field="api-base-url"
+              placeholder="https://api.heimdall.example.com"
+              value="${escapeAttribute(state.apiBaseUrl)}"
+            />
+          </label>
+          <label>
+            <span>Gateway URL</span>
+            <input
+              data-field="gateway-base-url"
+              placeholder="https://gateway.heimdall.example.com"
+              value="${escapeAttribute(state.gatewayBaseUrl)}"
+            />
+          </label>
+        </div>
+      </details>
     </section>
+  `;
+}
+
+/** Formats the API host for display in the connection status. */
+function formatApiHost(): string {
+  const url = state.apiBaseUrl.trim();
+  if (!url) {
+    return `${window.location.host} (same origin)`;
+  }
+  try {
+    return new URL(url).host;
+  } catch {
+    return url.slice(0, 40);
+  }
+}
+
+/** Formats the gateway host for display in the connection status. */
+function formatGatewayHost(): string {
+  const url = state.gatewayBaseUrl.trim();
+  if (!url) {
+    return `${window.location.host} (same origin)`;
+  }
+  try {
+    return new URL(url, window.location.origin).host;
+  } catch {
+    return url.slice(0, 40);
+  }
+}
+
+/** Renders the disconnected landing workspace. */
+function renderDisconnectedWorkspace(): string {
+  const pendingLogin = sessionStorage.getItem(PENDING_GATEWAY_LOGIN_STORAGE_KEY) === "true";
+  const statuses: readonly {
+    readonly label: string;
+    readonly value: string;
+    readonly state: "ok" | "warn" | "muted";
+  }[] = [
+    {
+      label: "API",
+      state: state.apiBaseUrl.trim() ? "ok" : "muted",
+      value: formatApiHost(),
+    },
+    {
+      label: "Gateway",
+      state: state.gatewayBaseUrl.trim() ? "ok" : "muted",
+      value: formatGatewayHost(),
+    },
+    {
+      label: "Session",
+      state: pendingLogin || state.authLoading ? "warn" : "muted",
+      value: pendingLogin ? "OAuth return pending" : (state.authLoading ?? "Not connected"),
+    },
+  ];
+
+  return `
+    <main class="preflight-workspace">
+      <section class="operator-brief">
+        <div>
+          <p class="eyebrow">Operator Path</p>
+          <h2>Connect once, then work from the overview.</h2>
+        </div>
+        <p>
+          Use the overview to open repositories, review runs, settings, and audit history without
+          copying internal IDs.
+        </p>
+      </section>
+      <section class="connection-grid" aria-label="Connection readiness">
+        ${statuses
+          .map(
+            (item) => `
+              <article class="connection-card">
+                <span class="status ${item.state}">${escapeHtml(item.label)}</span>
+                <strong>${escapeHtml(item.value)}</strong>
+              </article>
+            `,
+          )
+          .join("")}
+      </section>
+      <section class="guided-path" aria-label="Operator workflow">
+        ${renderPathStep("1", "GitHub login", "Authenticate through the admin gateway.", "active")}
+        ${renderPathStep("2", "Admin session", "Exchange the gateway assertion for API access.", "pending")}
+        ${renderPathStep("3", "Overview", "Load scoped repositories, reviews, and audit events.", "pending")}
+      </section>
+    </main>
+  `;
+}
+
+/** Renders one step in the disconnected operator path. */
+function renderPathStep(
+  number: string,
+  title: string,
+  body: string,
+  stateName: "active" | "pending",
+): string {
+  return `
+    <article class="path-step ${stateName}">
+      <span>${escapeHtml(number)}</span>
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(body)}</p>
+      </div>
+    </article>
   `;
 }
 
@@ -1661,6 +1841,8 @@ function renderActiveView(): string {
 /** Renders the dashboard overview with discovery and activity. */
 function renderOverviewView(): string {
   const overview = state.overview;
+  const stats = computeOverviewStats(overview);
+
   return `
     <main class="inspector overview-view">
       <section class="inspector-header">
@@ -1671,6 +1853,7 @@ function renderOverviewView(): string {
         <button class="primary" data-action="load-overview" type="button">Refresh</button>
       </section>
       ${renderOverviewNotice(overview)}
+      ${renderOverviewStats(stats)}
       <section class="overview-grid">
         ${renderRepositoryDiscovery(overview)}
         ${renderReviewHistoryDiscovery(overview)}
@@ -1680,16 +1863,59 @@ function renderOverviewView(): string {
   `;
 }
 
+/** Overview statistics computed from loaded data. */
+type OverviewStats = {
+  readonly totalRepos: number;
+  readonly enabledRepos: number;
+  readonly recentReviews: number;
+  readonly failedReviews: number;
+  readonly totalFindings: number;
+  readonly publishedFindings: number;
+};
+
+/** Computes statistics for the overview dashboard. */
+function computeOverviewStats(overview: OverviewViewState): OverviewStats {
+  const enabledRepos = overview.repositories.filter((r) => r.enabled).length;
+  const failedReviews = overview.reviews.filter((r) => r.status === "failed").length;
+  const totalFindings = overview.reviews.reduce((sum, r) => sum + r.counts.validatedFindings, 0);
+  const publishedFindings = overview.reviews.reduce(
+    (sum, r) => sum + r.counts.publishedFindings,
+    0,
+  );
+
+  return {
+    totalRepos: overview.repositories.length,
+    enabledRepos,
+    recentReviews: overview.reviews.length,
+    failedReviews,
+    totalFindings,
+    publishedFindings,
+  };
+}
+
+/** Renders overview statistics cards. */
+function renderOverviewStats(stats: OverviewStats): string {
+  if (stats.totalRepos === 0 && stats.recentReviews === 0) {
+    return "";
+  }
+
+  return `
+    <section class="summary-grid">
+      ${renderMetric("Repositories", `${stats.enabledRepos}/${stats.totalRepos} enabled`)}
+      ${renderMetric("Recent Reviews", String(stats.recentReviews))}
+      ${renderMetric("Failed", String(stats.failedReviews), stats.failedReviews > 0)}
+      ${renderMetric("Findings", `${stats.publishedFindings} published`)}
+    </section>
+  `;
+}
+
 /** Renders overview loading and error state. */
 function renderOverviewNotice(overview: OverviewViewState): string {
   if (overview.loading) {
-    return `<p class="notice">${escapeHtml(overview.loading)}</p>`;
+    return `<p class="notice">${escapeHtml(overview.loading)}...</p>`;
   }
   if (overview.error) {
     return `<p class="error-line">${escapeHtml(overview.error)}</p>`;
-  }
-  if (!state.session) {
-    return `<p class="notice">Refresh the identity session to load repositories and reviews.</p>`;
   }
 
   return "";
@@ -1702,62 +1928,68 @@ function renderRepositoryDiscovery(overview: OverviewViewState): string {
       <div class="section-heading">
         <div>
           <p class="eyebrow">Repositories</p>
-          <h3>Repository Discovery</h3>
+          <h3>Monitored Repos</h3>
         </div>
-        <div class="inline-controls">
-          <label>
-            <span>Search</span>
-            <input
-              data-field="overview.repositorySearch"
-              placeholder="owner/name"
-              value="${escapeAttribute(overview.repositorySearch)}"
-            />
-          </label>
-          <button data-action="search-repositories" type="button">Search</button>
-        </div>
+      </div>
+      <div class="inline-controls">
+        <label>
+          <span>Search</span>
+          <input
+            data-field="overview.repositorySearch"
+            placeholder="owner/name"
+            value="${escapeAttribute(overview.repositorySearch)}"
+          />
+        </label>
+        <button data-action="search-repositories" type="button">Search</button>
       </div>
       ${
         overview.repositories.length === 0
-          ? `<p class="inline-empty">No repositories loaded.</p>`
+          ? renderRepositoryEmptyState(overview)
           : `<div class="repo-list">${overview.repositories.map(renderRepositoryCard).join("")}</div>`
       }
     </section>
   `;
 }
 
+/** Renders the repository discovery empty state. */
+function renderRepositoryEmptyState(overview: OverviewViewState): string {
+  if (!overview.repositoriesLoaded) {
+    return `<p class="inline-empty">Refresh loads the repositories granted to this admin session.</p>`;
+  }
+
+  if (overview.repositorySearch.trim()) {
+    return `<p class="inline-empty">No repositories matched this search.</p>`;
+  }
+
+  return `<p class="inline-empty">No repositories are available for this admin scope.</p>`;
+}
+
 /** Renders one repository discovery card. */
 function renderRepositoryCard(repository: AdminRepositorySummary): string {
+  const hasRecentReview = Boolean(repository.latestReviewRunId);
+  const reviewStatusClass = repository.latestReviewStatus
+    ? statusClass(repository.latestReviewStatus)
+    : "muted";
+
   return `
     <article class="repo-card">
       <div>
         <div class="repo-title">
           <strong>${escapeHtml(repository.fullName)}</strong>
           <span class="status ${repository.enabled ? "ok" : "muted"}">
-            ${repository.enabled ? "enabled" : "disabled"}
+            ${repository.enabled ? "active" : "paused"}
           </span>
         </div>
         <p class="muted-text">
-          ${escapeHtml(repository.visibility)}
-          ${repository.defaultBranch ? ` / ${escapeHtml(repository.defaultBranch)}` : ""}
+          ${escapeHtml(repository.visibility)}${repository.defaultBranch ? ` · ${escapeHtml(repository.defaultBranch)}` : ""}${hasRecentReview ? ` · <span class="status ${reviewStatusClass}">${escapeHtml(repository.latestReviewStatus ?? "unknown")}</span>` : ""}
         </p>
-        ${
-          repository.latestReviewRunId
-            ? `<p class="muted-text">
-                Latest review ${escapeHtml(repository.latestReviewRunId)}
-                ${repository.latestReviewStatus ? ` / ${escapeHtml(repository.latestReviewStatus)}` : ""}
-              </p>`
-            : `<p class="muted-text">No review runs found.</p>`
-        }
       </div>
       <div class="card-actions">
-        <button data-action="open-settings" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
-          Settings
-        </button>
-        <button data-action="filter-reviews-repo" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
+        <button class="small" data-action="filter-reviews-repo" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
           Reviews
         </button>
-        <button data-action="open-repository-audit" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
-          Audit
+        <button class="small" data-action="open-settings" data-repo-id="${escapeAttribute(repository.repoId)}" type="button">
+          Settings
         </button>
       </div>
     </article>
@@ -1766,23 +1998,29 @@ function renderRepositoryCard(repository: AdminRepositorySummary): string {
 
 /** Renders review history search and rows. */
 function renderReviewHistoryDiscovery(overview: OverviewViewState): string {
+  const hasFilter = overview.reviewRepoId || overview.reviewStatus || overview.reviewSearch;
+
   return `
     <section class="panel discovery-panel">
       <div class="section-heading">
         <div>
           <p class="eyebrow">Reviews</p>
-          <h3>Review History</h3>
+          <h3>Recent Activity</h3>
         </div>
-        <button data-action="search-reviews" type="button">Refresh</button>
+        <button class="small" data-action="search-reviews" type="button">Refresh</button>
       </div>
       <div class="form-grid compact-form">
         ${renderTextInput("overview.reviewSearch", "Search", overview.reviewSearch, "PR title, author, #")}
-        ${renderTextInput("overview.reviewRepoId", "Repository filter", overview.reviewRepoId, "selected repository")}
         ${renderReviewStatusSelect(overview.reviewStatus)}
+        <button data-action="search-reviews" type="button">Filter</button>
       </div>
       ${
-        overview.reviewRepoId
-          ? `<button class="ghost" data-action="clear-review-filter" type="button">Clear repository filter</button>`
+        hasFilter
+          ? `<div class="filter-chips">
+              ${overview.reviewRepoId ? `<span class="status muted">repo: ${escapeHtml(overview.reviewRepoId.slice(0, 16))}</span>` : ""}
+              ${overview.reviewStatus ? `<span class="status muted">status: ${escapeHtml(overview.reviewStatus)}</span>` : ""}
+              <button class="ghost small" data-action="clear-review-filter" type="button">Clear filters</button>
+            </div>`
           : ""
       }
       ${renderReviewRows(overview.reviews)}
@@ -1814,7 +2052,7 @@ function renderReviewStatusSelect(value: string): string {
 /** Renders review history rows. */
 function renderReviewRows(rows: readonly AdminReviewRunSummary[]): string {
   if (rows.length === 0) {
-    return `<p class="inline-empty">No review history loaded.</p>`;
+    return `<p class="inline-empty">${escapeHtml(reviewEmptyStateText())}</p>`;
   }
 
   return `
@@ -1837,31 +2075,49 @@ function renderReviewRows(rows: readonly AdminReviewRunSummary[]): string {
   `;
 }
 
+/** Returns the review history empty-state text. */
+function reviewEmptyStateText(): string {
+  if (!state.overview.reviewsLoaded) {
+    return "Refresh loads the latest review runs for this session.";
+  }
+  if (
+    state.overview.reviewRepoId.trim() ||
+    state.overview.reviewSearch.trim() ||
+    state.overview.reviewStatus.trim()
+  ) {
+    return "No review runs matched the current filters.";
+  }
+
+  return "No review runs are available for this admin scope.";
+}
+
 /** Renders one review history row. */
 function renderReviewRow(review: AdminReviewRunSummary): string {
+  const title =
+    review.pullRequestTitle ?? review.summary ?? `Review ${review.reviewRunId.slice(0, 12)}`;
+  const findingsLabel =
+    review.counts.publishedFindings > 0
+      ? `${review.counts.publishedFindings} published`
+      : review.counts.validatedFindings > 0
+        ? `${review.counts.validatedFindings} validated`
+        : "—";
+
   return `
     <tr>
       <td>
         <strong>${escapeHtml(review.repoFullName)} #${review.pullRequestNumber}</strong>
-        <p class="muted-text">${escapeHtml(review.pullRequestTitle ?? review.summary ?? review.reviewRunId)}</p>
-        <code>${escapeHtml(formatSha(review.headSha))}</code>
+        <p class="muted-text">${escapeHtml(title.slice(0, 60))}${title.length > 60 ? "…" : ""}</p>
       </td>
       <td><span class="status ${statusClass(review.status)}">${escapeHtml(review.status)}</span></td>
-      <td>
-        ${review.counts.validatedFindings} validated /
-        ${review.counts.publishedFindings} published
-      </td>
-      <td>${formatTime(review.updatedAt)}</td>
+      <td>${findingsLabel}</td>
+      <td><span class="muted-text">${formatTime(review.updatedAt)}</span></td>
       <td>
         <div class="row-actions">
           <button data-action="open-review-inspector" data-review-run-id="${escapeAttribute(review.reviewRunId)}" type="button">
             Inspect
           </button>
           <button data-action="open-publisher-inspector" data-review-run-id="${escapeAttribute(review.reviewRunId)}" type="button">
-            Publisher
-          </button>
-          <button data-action="open-review-audit" data-review-run-id="${escapeAttribute(review.reviewRunId)}" type="button">
-            Audit
+            Publish
           </button>
         </div>
       </td>
@@ -1871,20 +2127,20 @@ function renderReviewRow(review: AdminReviewRunSummary): string {
 
 /** Renders recent audit activity from the overview. */
 function renderRecentActivity(rows: readonly AdminAuditLogSummary[]): string {
+  if (rows.length === 0) {
+    return "";
+  }
+
   return `
     <section class="panel">
       <div class="section-heading">
         <div>
           <p class="eyebrow">Activity</p>
-          <h3>Recent Audit Entries</h3>
+          <h3>Recent Audit Events</h3>
         </div>
-        <button data-view="audit" type="button">Open audit search</button>
+        <button class="small" data-view="audit" type="button">View all</button>
       </div>
-      ${
-        rows.length === 0
-          ? `<p class="inline-empty">No recent audit entries loaded.</p>`
-          : renderAuditActivityRows(rows)
-      }
+      ${renderAuditActivityRows(rows)}
     </section>
   `;
 }
@@ -1948,19 +2204,18 @@ function renderSettingsView(): string {
               value="${escapeAttribute(settings.repoId)}"
             />
           </label>
-          <button data-action="load-settings" type="button">Load</button>
+          <button class="primary" data-action="load-settings" type="button">Load</button>
           <button
-            class="primary"
             data-action="save-settings"
             type="button"
             ${canSave ? "" : "disabled"}
           >
-            Save
+            Save Changes
           </button>
         </div>
       </section>
       ${renderSettingsNotice(settings)}
-      ${form ? renderSettingsForm(form, settings.data, settings.rules) : renderEmptyState()}
+      ${form ? renderSettingsForm(form, settings.data, settings.rules) : renderEmptyState("Enter a repository ID and click Load to view settings.")}
     </main>
   `;
 }
@@ -1968,13 +2223,13 @@ function renderSettingsView(): string {
 /** Renders settings loading, error, or saved state. */
 function renderSettingsNotice(settings: SettingsViewState): string {
   if (settings.loading) {
-    return `<p class="notice">${escapeHtml(settings.loading)}</p>`;
+    return `<p class="notice">${escapeHtml(settings.loading)}...</p>`;
   }
   if (settings.error) {
     return `<p class="error-line">${escapeHtml(settings.error)}</p>`;
   }
   if (settings.saved) {
-    return `<p class="notice">${escapeHtml(settings.saved)}</p>`;
+    return `<p class="notice success">${escapeHtml(settings.saved)}</p>`;
   }
 
   return "";
@@ -2130,16 +2385,17 @@ function renderAuditView(): string {
         </div>
         <button class="primary" data-action="load-audit" type="button">Search</button>
       </section>
-      ${audit.loading ? `<p class="notice">${escapeHtml(audit.loading)}</p>` : ""}
+      ${audit.loading ? `<p class="notice">${escapeHtml(audit.loading)}...</p>` : ""}
       ${audit.error ? `<p class="error-line">${escapeHtml(audit.error)}</p>` : ""}
       <section class="panel">
+        <h3>Filters</h3>
         <div class="form-grid">
-          ${renderTextInput("audit.orgId", "Organization ID", audit.orgId, "org_...")}
-          ${renderTextInput("audit.search", "Search", audit.search, "request, actor, action")}
+          ${renderTextInput("audit.search", "Search", audit.search, "keyword search")}
           ${renderTextInput("audit.action", "Action", audit.action, "repo.settings.updated")}
           ${renderTextInput("audit.resourceType", "Resource type", audit.resourceType, "repository")}
           ${renderTextInput("audit.resourceId", "Resource ID", audit.resourceId, "repo_...")}
           ${renderTextInput("audit.actorUserId", "Actor", audit.actorUserId, "oidc:...")}
+          ${renderTextInput("audit.orgId", "Organization ID", audit.orgId, "org_...")}
         </div>
       </section>
       ${renderAuditRows(audit.rows)}
@@ -2201,12 +2457,15 @@ function renderTab(config: InspectorConfig): string {
 function renderInspector(): string {
   const config = inspectorConfigs[state.activeKind];
   const inspector = currentInspectorState();
+  const hasDetails = Boolean(inspector.details);
+  const canPlanReplay = state.session?.capabilities.canPlanReplay && hasDetails;
+
   return `
     <main class="inspector">
       <section class="inspector-header">
         <div>
-          <p class="eyebrow">${escapeHtml(config.label)}</p>
-          <h2>${escapeHtml(config.title)}</h2>
+          <p class="eyebrow">${escapeHtml(config.label)} Inspector</p>
+          <h2>Debug & Replay</h2>
         </div>
         <div class="resource-controls">
           <label>
@@ -2217,12 +2476,18 @@ function renderInspector(): string {
               value="${escapeAttribute(inspector.id)}"
             />
           </label>
-          <button data-action="load-details" type="button">Load</button>
-          <button data-action="create-plan" type="button">Plan replay</button>
+          <button class="primary" data-action="load-details" type="button">Load</button>
+          <button
+            data-action="create-plan"
+            type="button"
+            ${canPlanReplay ? "" : "disabled"}
+          >
+            Plan Replay
+          </button>
         </div>
       </section>
       ${renderInspectorNotice(inspector)}
-      ${inspector.details ? renderDetails(inspector.details) : renderEmptyState()}
+      ${inspector.details ? renderDetails(inspector.details) : renderEmptyState("Enter an ID and click Load to inspect debug details.")}
       ${inspector.plan ? renderReplayPlan(inspector.plan) : ""}
       ${inspector.result ? renderReplayResult(inspector.result) : ""}
     </main>
@@ -2232,7 +2497,7 @@ function renderInspector(): string {
 /** Renders current loading or error state for an inspector. */
 function renderInspectorNotice(inspector: InspectorViewState): string {
   if (inspector.loading) {
-    return `<p class="notice">${escapeHtml(inspector.loading)}</p>`;
+    return `<p class="notice">${escapeHtml(inspector.loading)}...</p>`;
   }
   if (inspector.error) {
     return `<p class="error-line">${escapeHtml(inspector.error)}</p>`;
@@ -2242,11 +2507,11 @@ function renderInspectorNotice(inspector: InspectorViewState): string {
 }
 
 /** Renders the empty inspector state. */
-function renderEmptyState(message = "No inspector data loaded."): string {
+function renderEmptyState(message = "No data loaded."): string {
   return `
     <section class="empty-state">
       <div class="empty-mark"></div>
-      <p>${escapeHtml(message)}</p>
+      <p class="muted-text">${escapeHtml(message)}</p>
     </section>
   `;
 }
@@ -2928,6 +3193,7 @@ function updateOverviewField(field: string, value: string): void {
         | readonly AdminRepositorySummary[]
         | readonly AdminReviewRunSummary[]
         | readonly AdminAuditLogSummary[]
+        | boolean
         | undefined
       >
     )[field] = value;
@@ -3119,11 +3385,6 @@ function formatTime(value: string): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
-}
-
-/** Formats a commit SHA for compact tables. */
-function formatSha(value: string): string {
-  return value.length > 12 ? value.slice(0, 12) : value;
 }
 
 /** Returns the message for an unknown error. */

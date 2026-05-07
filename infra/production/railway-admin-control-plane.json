@@ -49,6 +49,10 @@
   "provider": "railway",
   "releaseGates": [
     {
+      "command": "pnpm release:control-plane:railway",
+      "name": "single-command Railway release sequence"
+    },
+    {
       "command": "pnpm check",
       "name": "workspace check"
     },
