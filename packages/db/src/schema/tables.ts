@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   customType,
   index,
@@ -587,6 +588,87 @@ export const reviewArtifacts = pgTable(
       table.name,
     ),
   ],
+);
+
+/** Sandbox command executions attached to review and static-analysis work. */
+export const sandboxRuns = pgTable(
+  "sandbox_runs",
+  {
+    sandboxRunId: text("sandbox_run_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    reviewRunId: text("review_run_id").references(() => reviewRuns.reviewRunId),
+    staticAnalysisRunId: text("static_analysis_run_id"),
+    toolRunId: text("tool_run_id"),
+    requestId: text("request_id").notNull(),
+    runnerKind: text("runner_kind").notNull(),
+    trustLevel: text("trust_level").notNull(),
+    category: text("category").notNull(),
+    image: text("image").notNull(),
+    imageDigest: text("image_digest"),
+    commandJson: jsonb("command_json").notNull(),
+    policyJson: jsonb("policy_json").notNull(),
+    limitsJson: jsonb("limits_json").notNull(),
+    status: text("status").notNull(),
+    exitCode: integer("exit_code"),
+    signal: text("signal"),
+    stdoutHash: text("stdout_hash"),
+    stderrHash: text("stderr_hash"),
+    stdoutTruncated: boolean("stdout_truncated").notNull().default(false),
+    stderrTruncated: boolean("stderr_truncated").notNull().default(false),
+    resourceUsageJson: jsonb("resource_usage_json"),
+    errorJson: jsonb("error_json"),
+    warningsJson: jsonb("warnings_json").notNull().default(sql`'[]'::jsonb`),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("sandbox_runs_request_id_unique").on(table.requestId),
+    index("sandbox_runs_review_run_idx").on(table.reviewRunId),
+    index("sandbox_runs_repo_created_idx").on(table.repoId, table.createdAt),
+    index("sandbox_runs_status_idx").on(table.status),
+  ],
+);
+
+/** Artifacts collected from sandbox output directories. */
+export const sandboxArtifacts = pgTable(
+  "sandbox_artifacts",
+  {
+    sandboxArtifactId: text("sandbox_artifact_id").primaryKey(),
+    sandboxRunId: text("sandbox_run_id")
+      .notNull()
+      .references(() => sandboxRuns.sandboxRunId, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    uri: text("uri").notNull(),
+    sha256: text("sha256").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    contentType: text("content_type"),
+    truncated: boolean("truncated").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("sandbox_artifacts_run_name_unique").on(table.sandboxRunId, table.name)],
+);
+
+/** Product-safe sandbox policy decisions emitted during planning or execution. */
+export const sandboxPolicyDecisions = pgTable(
+  "sandbox_policy_decisions",
+  {
+    sandboxPolicyDecisionId: text("sandbox_policy_decision_id").primaryKey(),
+    sandboxRunId: text("sandbox_run_id")
+      .notNull()
+      .references(() => sandboxRuns.sandboxRunId, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    code: text("code").notNull(),
+    message: text("message").notNull(),
+    details: jsonb("details").notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("sandbox_policy_decisions_run_idx").on(table.sandboxRunId)],
 );
 
 /** Candidate findings emitted by review passes. */

@@ -33,6 +33,9 @@ import {
   replayStageRuns,
   repositories,
   reviewArtifacts,
+  sandboxArtifacts,
+  sandboxPolicyDecisions,
+  sandboxRuns,
   subscriptionItems,
   subscriptions,
   usageEvents,
@@ -62,6 +65,7 @@ const memoryCandidatesMigrationPath = resolve(
   testDirectory,
   "../migrations/0013_glossy_proemial_gods.sql",
 );
+const sandboxRunsMigrationPath = resolve(testDirectory, "../migrations/0014_polite_mesmero.sql");
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -81,6 +85,9 @@ describe("database schema foundation", () => {
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
     expect(indexedFiles.fileId.name).toBe("file_id");
     expect(reviewArtifacts.reviewArtifactId.name).toBe("review_artifact_id");
+    expect(sandboxRuns.sandboxRunId.name).toBe("sandbox_run_id");
+    expect(sandboxArtifacts.sandboxArtifactId.name).toBe("sandbox_artifact_id");
+    expect(sandboxPolicyDecisions.sandboxPolicyDecisionId.name).toBe("sandbox_policy_decision_id");
     expect(findingValidationEvents.findingValidationEventId.name).toBe(
       "finding_validation_event_id",
     );
@@ -126,6 +133,7 @@ describe("database schema foundation", () => {
     const duplicateGroupsMigration = await readFile(duplicateGroupsMigrationPath, "utf8");
     const publishPlansMigration = await readFile(publishPlansMigrationPath, "utf8");
     const memoryCandidatesMigration = await readFile(memoryCandidatesMigrationPath, "utf8");
+    const sandboxRunsMigration = await readFile(sandboxRunsMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -164,6 +172,9 @@ describe("database schema foundation", () => {
     expect(duplicateGroupsMigration).toContain('CREATE TABLE "finding_duplicate_groups"');
     expect(publishPlansMigration).toContain('CREATE TABLE "publish_plans"');
     expect(memoryCandidatesMigration).toContain('CREATE TABLE "memory_candidates"');
+    expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_runs"');
+    expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_artifacts"');
+    expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_policy_decisions"');
   });
 });
 
@@ -316,6 +327,9 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('memory_candidates')::text) AS memory_candidates_table,
         (SELECT to_regclass('publish_plans')::text) AS publish_plans_table,
         (SELECT to_regclass('replay_runs')::text) AS replay_runs_table,
+        (SELECT to_regclass('sandbox_artifacts')::text) AS sandbox_artifacts_table,
+        (SELECT to_regclass('sandbox_policy_decisions')::text) AS sandbox_policy_decisions_table,
+        (SELECT to_regclass('sandbox_runs')::text) AS sandbox_runs_table,
         (SELECT to_regclass('users')::text) AS users_table,
         (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
     `;
@@ -331,6 +345,9 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       publish_plans_table: "publish_plans",
       oauth_states_table: "oauth_states",
       replay_runs_table: "replay_runs",
+      sandbox_artifacts_table: "sandbox_artifacts",
+      sandbox_policy_decisions_table: "sandbox_policy_decisions",
+      sandbox_runs_table: "sandbox_runs",
       users_table: "users",
     });
   });
