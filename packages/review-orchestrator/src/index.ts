@@ -1769,6 +1769,7 @@ function policySnapshotMetadata(snapshot: ReviewPolicySnapshot): Record<string, 
     policySnapshotId: snapshot.policySnapshotId,
     publishing: snapshot.effectivePolicy.publishing,
     reviewPolicy: snapshot.effectivePolicy.reviewPolicy,
+    sandbox: snapshot.effectivePolicy.sandbox,
   };
 }
 

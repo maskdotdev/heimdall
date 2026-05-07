@@ -20,7 +20,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 /** Default policy compiler version used for policy snapshot hashing and debugging. */
-export const RULES_ENGINE_VERSION = "rules-engine.v1";
+export const RULES_ENGINE_VERSION = "rules-engine.v2";
 
 /** Default PR actions that can trigger review work in the MVP policy. */
 export const DEFAULT_ENABLED_PR_ACTIONS = [
@@ -112,6 +112,21 @@ export const DEFAULT_MEMORY_POLICY = {
   requireApprovalForMemoryFacts: true,
   trustedFeedbackRoles: ["org_admin", "repo_admin", "maintainer"],
 } as const satisfies EffectiveMemoryPolicy;
+
+/** Default sandbox policy compiled into review policy snapshots. */
+export const DEFAULT_SANDBOX_POLICY = {
+  allowCustomCommands: false,
+  allowDependencyInstall: false,
+  allowNetwork: false,
+  defaultRunner: "docker",
+  enabled: true,
+  maxArtifactBytes: 25_000_000,
+  maxCpuCount: 2,
+  maxMemoryBytes: 1_073_741_824,
+  maxOutputBytes: 10_000_000,
+  maxTimeoutMs: 45_000,
+  minimumRunnerForForks: "gvisor",
+} as const satisfies EffectiveSandboxPolicy;
 
 /** Policy decision kinds emitted by the rule evaluator. */
 export const PolicyDecisionTypeSchema = Type.Union([
@@ -238,6 +253,46 @@ export const EffectiveMemoryPolicySchema = Type.Object(
 /** Memory settings compiled into immutable review policy snapshots. */
 export type EffectiveMemoryPolicy = Static<typeof EffectiveMemoryPolicySchema>;
 
+/** Supported sandbox runners that policy can request for production review work. */
+export const EffectiveSandboxRunnerSchema = Type.Union([
+  Type.Literal("docker"),
+  Type.Literal("gvisor"),
+  Type.Literal("microvm"),
+]);
+
+/** Supported sandbox runner that policy can request for production review work. */
+export type EffectiveSandboxRunner = Static<typeof EffectiveSandboxRunnerSchema>;
+
+/** Minimum sandbox runner policy for untrusted forked pull requests. */
+export const MinimumForkSandboxRunnerSchema = Type.Union([
+  EffectiveSandboxRunnerSchema,
+  Type.Literal("disabled"),
+]);
+
+/** Minimum sandbox runner policy for untrusted forked pull requests. */
+export type MinimumForkSandboxRunner = Static<typeof MinimumForkSandboxRunnerSchema>;
+
+/** Sandbox settings compiled into immutable review policy snapshots. */
+export const EffectiveSandboxPolicySchema = Type.Object(
+  {
+    allowCustomCommands: Type.Boolean(),
+    allowDependencyInstall: Type.Boolean(),
+    allowNetwork: Type.Boolean(),
+    defaultRunner: EffectiveSandboxRunnerSchema,
+    enabled: Type.Boolean(),
+    maxArtifactBytes: Type.Integer({ minimum: 0 }),
+    maxCpuCount: Type.Integer({ minimum: 1 }),
+    maxMemoryBytes: Type.Integer({ minimum: 1 }),
+    maxOutputBytes: Type.Integer({ minimum: 0 }),
+    maxTimeoutMs: Type.Integer({ minimum: 1 }),
+    minimumRunnerForForks: MinimumForkSandboxRunnerSchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Sandbox settings compiled into immutable review policy snapshots. */
+export type EffectiveSandboxPolicy = Static<typeof EffectiveSandboxPolicySchema>;
+
 /** Safety settings that clamp weaker repository-level settings. */
 export const SafetyFloorPolicySchema = Type.Object(
   {
@@ -268,6 +323,7 @@ export const EffectiveReviewPolicySchema = Type.Object(
     repoId: RepoIdSchema,
     reviewPolicy: ReviewPolicySchema,
     rules: Type.Array(RepoRuleSchema),
+    sandbox: EffectiveSandboxPolicySchema,
     safetyFloor: SafetyFloorPolicySchema,
     trigger: EffectiveTriggerPolicySchema,
   },
@@ -335,6 +391,8 @@ export type BuildReviewPolicySnapshotInput = {
   readonly settings?: RepositorySettings;
   /** Active organization and repository rules. */
   readonly activeRules?: readonly RepoRule[];
+  /** Optional sandbox policy overrides from higher-level settings or deployment defaults. */
+  readonly sandboxPolicyOverrides?: Partial<EffectiveSandboxPolicy>;
   /** Review run that will consume the snapshot. */
   readonly reviewRunId?: string;
   /** Optional deterministic timestamp for tests. */
@@ -491,7 +549,7 @@ export type MemoryPolicyDecision = {
 /** Nested policy fixture overrides for unit tests and local rule testing. */
 export type PolicyFixtureOverrides = Omit<
   Partial<EffectiveReviewPolicy>,
-  "findings" | "memory" | "paths" | "publishing" | "safetyFloor" | "trigger"
+  "findings" | "memory" | "paths" | "publishing" | "safetyFloor" | "sandbox" | "trigger"
 > & {
   /** Optional finding-policy overrides. */
   readonly findings?: Partial<EffectiveFindingPolicy>;
@@ -501,6 +559,8 @@ export type PolicyFixtureOverrides = Omit<
   readonly paths?: Partial<EffectivePathPolicy>;
   /** Optional publishing-policy overrides. */
   readonly publishing?: Partial<EffectivePublishingPolicy>;
+  /** Optional sandbox-policy overrides. */
+  readonly sandbox?: Partial<EffectiveSandboxPolicy>;
   /** Optional safety-floor overrides. */
   readonly safetyFloor?: Partial<SafetyFloorPolicy>;
   /** Optional trigger-policy overrides. */
@@ -575,6 +635,7 @@ export function buildReviewPolicySnapshot(
     });
   }
 
+  const sandbox = compileSandboxPolicy(input.sandboxPolicyOverrides ?? {}, warnings);
   const effectivePolicy = parseEffectiveReviewPolicy({
     schemaVersion: "effective_review_policy.v1",
     compilerVersion: RULES_ENGINE_VERSION,
@@ -609,6 +670,7 @@ export function buildReviewPolicySnapshot(
     repoId: input.repository.repoId,
     reviewPolicy: settings.reviewPolicy,
     rules: activeRules,
+    sandbox,
     safetyFloor,
     trigger: {
       enabledActions: [...DEFAULT_ENABLED_PR_ACTIONS],
@@ -656,6 +718,7 @@ export function buildReviewPolicySnapshot(
       evaluatedRuleCount: activeRules.length,
       details: {
         policyHash,
+        sandboxRunner: sandbox.defaultRunner,
         warningCodes: warnings.map((warning) => warning.code),
       },
     }),
@@ -979,6 +1042,7 @@ export function createPolicyFixture(overrides: PolicyFixtureOverrides = {}): Eff
     memory: { ...base.memory, ...overrides.memory },
     paths: { ...base.paths, ...overrides.paths },
     publishing,
+    sandbox: { ...base.sandbox, ...overrides.sandbox },
     safetyFloor: { ...base.safetyFloor, ...overrides.safetyFloor },
     trigger: { ...base.trigger, ...overrides.trigger },
   });
@@ -1101,6 +1165,125 @@ function publishingPolicyFromReviewPolicy(
         publishSummaryComment: true,
       };
   }
+}
+
+/** Compiles sandbox settings with MVP safety clamps. */
+function compileSandboxPolicy(
+  overrides: Partial<EffectiveSandboxPolicy>,
+  warnings: PolicyWarning[],
+): EffectiveSandboxPolicy {
+  const requestedNetwork = overrides.allowNetwork ?? DEFAULT_SANDBOX_POLICY.allowNetwork;
+  const requestedDependencyInstall =
+    overrides.allowDependencyInstall ?? DEFAULT_SANDBOX_POLICY.allowDependencyInstall;
+  const requestedCustomCommands =
+    overrides.allowCustomCommands ?? DEFAULT_SANDBOX_POLICY.allowCustomCommands;
+
+  if (requestedNetwork) {
+    warnings.push({
+      code: "sandbox_network_disabled_by_mvp_policy",
+      message: "Sandbox network access was disabled by the MVP safety policy.",
+    });
+  }
+  if (requestedDependencyInstall) {
+    warnings.push({
+      code: "sandbox_dependency_install_disabled_by_mvp_policy",
+      message: "Sandbox dependency installation was disabled by the MVP safety policy.",
+    });
+  }
+  if (requestedCustomCommands) {
+    warnings.push({
+      code: "sandbox_custom_commands_disabled_by_mvp_policy",
+      message: "Sandbox custom commands were disabled by the MVP safety policy.",
+    });
+  }
+
+  return {
+    allowCustomCommands: false,
+    allowDependencyInstall: false,
+    allowNetwork: false,
+    defaultRunner: overrides.defaultRunner ?? DEFAULT_SANDBOX_POLICY.defaultRunner,
+    enabled: overrides.enabled ?? DEFAULT_SANDBOX_POLICY.enabled,
+    maxArtifactBytes: clampedSandboxLimit({
+      defaultValue: DEFAULT_SANDBOX_POLICY.maxArtifactBytes,
+      field: "maxArtifactBytes",
+      maximum: 50_000_000,
+      minimum: 0,
+      requested: overrides.maxArtifactBytes,
+      warnings,
+    }),
+    maxCpuCount: clampedSandboxLimit({
+      defaultValue: DEFAULT_SANDBOX_POLICY.maxCpuCount,
+      field: "maxCpuCount",
+      maximum: 4,
+      minimum: 1,
+      requested: overrides.maxCpuCount,
+      warnings,
+    }),
+    maxMemoryBytes: clampedSandboxLimit({
+      defaultValue: DEFAULT_SANDBOX_POLICY.maxMemoryBytes,
+      field: "maxMemoryBytes",
+      maximum: 4_294_967_296,
+      minimum: 1,
+      requested: overrides.maxMemoryBytes,
+      warnings,
+    }),
+    maxOutputBytes: clampedSandboxLimit({
+      defaultValue: DEFAULT_SANDBOX_POLICY.maxOutputBytes,
+      field: "maxOutputBytes",
+      maximum: 25_000_000,
+      minimum: 0,
+      requested: overrides.maxOutputBytes,
+      warnings,
+    }),
+    maxTimeoutMs: clampedSandboxLimit({
+      defaultValue: DEFAULT_SANDBOX_POLICY.maxTimeoutMs,
+      field: "maxTimeoutMs",
+      maximum: 120_000,
+      minimum: 1,
+      requested: overrides.maxTimeoutMs,
+      warnings,
+    }),
+    minimumRunnerForForks:
+      overrides.minimumRunnerForForks ?? DEFAULT_SANDBOX_POLICY.minimumRunnerForForks,
+  };
+}
+
+/** Input for sandbox limit clamping. */
+type SandboxLimitClampInput = {
+  /** Default value used when no override was supplied. */
+  readonly defaultValue: number;
+  /** Policy field being clamped. */
+  readonly field: keyof Pick<
+    EffectiveSandboxPolicy,
+    "maxArtifactBytes" | "maxCpuCount" | "maxMemoryBytes" | "maxOutputBytes" | "maxTimeoutMs"
+  >;
+  /** Maximum value allowed by the MVP safety policy. */
+  readonly maximum: number;
+  /** Minimum value allowed by the policy schema. */
+  readonly minimum: number;
+  /** Requested override when available. */
+  readonly requested?: number | undefined;
+  /** Mutable warning accumulator for the current compiler run. */
+  readonly warnings: PolicyWarning[];
+};
+
+/** Clamps one numeric sandbox policy limit and records a warning when it changes. */
+function clampedSandboxLimit(input: SandboxLimitClampInput): number {
+  const requested = input.requested ?? input.defaultValue;
+  const clamped = Math.min(input.maximum, Math.max(input.minimum, Math.floor(requested)));
+  if (clamped !== requested) {
+    input.warnings.push({
+      code: `sandbox_${input.field}_clamped`,
+      message: "Sandbox limit was clamped by the MVP safety policy.",
+      details: {
+        effective: clamped,
+        field: input.field,
+        requested,
+      },
+    });
+  }
+
+  return clamped;
 }
 
 /** Returns the stricter severity according to finding severity ranking. */

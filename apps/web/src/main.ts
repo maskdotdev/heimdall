@@ -1611,6 +1611,31 @@ type ControlPlaneEffectivePolicy = {
     /** Effective comment budget. */
     readonly maxCommentsPerReview: number;
   };
+  /** Sandbox policy when returned by the compiler. */
+  readonly sandbox?: {
+    /** Whether sandbox execution is enabled. */
+    readonly enabled: boolean;
+    /** Default sandbox runner kind. */
+    readonly defaultRunner: string;
+    /** Minimum runner required for forked pull requests. */
+    readonly minimumRunnerForForks: string;
+    /** Whether sandbox network access is allowed. */
+    readonly allowNetwork: boolean;
+    /** Whether dependency installation is allowed in sandbox runs. */
+    readonly allowDependencyInstall: boolean;
+    /** Whether custom commands are allowed in sandbox runs. */
+    readonly allowCustomCommands: boolean;
+    /** Maximum sandbox command timeout. */
+    readonly maxTimeoutMs: number;
+    /** Maximum sandbox memory. */
+    readonly maxMemoryBytes: number;
+    /** Maximum sandbox CPU count. */
+    readonly maxCpuCount: number;
+    /** Maximum captured output. */
+    readonly maxOutputBytes: number;
+    /** Maximum collected artifact bytes. */
+    readonly maxArtifactBytes: number;
+  };
   /** Trigger policy. */
   readonly trigger: {
     /** Enabled pull request actions. */
@@ -7269,6 +7294,7 @@ function renderPolicyPreviewDetails(preview: ControlPlanePolicyPreview): string 
     ["Required label", policy.trigger.requireLabel ?? "none"],
     ["Draft PRs", policy.trigger.skipDraftPullRequests ? "skipped" : "reviewed"],
     ["Instructions", String(policy.instructions.length)],
+    ...sandboxPolicyPreviewRows(policy.sandbox),
     ["Trace", `${preview.trace.decisionType}:${preview.trace.reasonCode}`],
   ] as const;
 
@@ -7291,6 +7317,26 @@ function renderPolicyPreviewDetails(preview: ControlPlanePolicyPreview): string 
     </div>
     ${renderPolicyWarnings(preview.warnings)}
   `;
+}
+
+/** Builds sandbox policy rows for the settings preview table. */
+function sandboxPolicyPreviewRows(
+  sandbox: ControlPlaneEffectivePolicy["sandbox"],
+): readonly (readonly [string, string])[] {
+  if (!sandbox) {
+    return [];
+  }
+
+  return [
+    ["Sandbox", sandbox.enabled ? sandbox.defaultRunner : "disabled"],
+    ["Fork sandbox", sandbox.minimumRunnerForForks],
+    ["Sandbox network", sandbox.allowNetwork ? "allowed" : "blocked"],
+    ["Sandbox installs", sandbox.allowDependencyInstall ? "allowed" : "blocked"],
+    ["Sandbox custom commands", sandbox.allowCustomCommands ? "allowed" : "blocked"],
+    ["Sandbox timeout", `${sandbox.maxTimeoutMs} ms`],
+    ["Sandbox memory", formatBytes(sandbox.maxMemoryBytes)],
+    ["Sandbox output", formatBytes(sandbox.maxOutputBytes)],
+  ];
 }
 
 /** Renders policy compiler warnings. */

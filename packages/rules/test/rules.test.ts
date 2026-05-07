@@ -45,10 +45,53 @@ describe("buildReviewPolicySnapshot", () => {
       maxMemoryFactsInContext: 6,
       requireApprovalForMemoryFacts: true,
     });
+    expect(first.snapshot.effectivePolicy.sandbox).toMatchObject({
+      allowNetwork: false,
+      defaultRunner: "docker",
+      maxTimeoutMs: 45_000,
+      minimumRunnerForForks: "gvisor",
+    });
     expect(first.snapshot.effectivePolicy.paths.ignoredPaths).toContain("**/fixtures/**");
     expect(first.warnings.map((warning) => warning.code)).toEqual([
       "severity_clamped_by_safety_floor",
       "comment_budget_clamped_by_safety_floor",
+    ]);
+  });
+
+  it("compiles sandbox policy overrides with MVP safety clamps", () => {
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      sandboxPolicyOverrides: {
+        allowCustomCommands: true,
+        allowDependencyInstall: true,
+        allowNetwork: true,
+        defaultRunner: "gvisor",
+        maxCpuCount: 32,
+        maxOutputBytes: 100_000_000,
+        maxTimeoutMs: 600_000,
+        minimumRunnerForForks: "microvm",
+      },
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+
+    expect(result.snapshot.effectivePolicy.sandbox).toMatchObject({
+      allowCustomCommands: false,
+      allowDependencyInstall: false,
+      allowNetwork: false,
+      defaultRunner: "gvisor",
+      maxCpuCount: 4,
+      maxOutputBytes: 25_000_000,
+      maxTimeoutMs: 120_000,
+      minimumRunnerForForks: "microvm",
+    });
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "sandbox_network_disabled_by_mvp_policy",
+      "sandbox_dependency_install_disabled_by_mvp_policy",
+      "sandbox_custom_commands_disabled_by_mvp_policy",
+      "sandbox_maxCpuCount_clamped",
+      "sandbox_maxOutputBytes_clamped",
+      "sandbox_maxTimeoutMs_clamped",
     ]);
   });
 
