@@ -38,6 +38,7 @@ import {
   providerInstallations,
   publishedFindings,
   repositories,
+  reviewRuns,
   validatedFindings,
 } from "@repo/db";
 import { createEmbeddingProviderFromEnvironment, embedChunkBatch } from "@repo/embedding";
@@ -459,6 +460,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     [JOB_TYPES.UpdateMemory]: async (envelope) => {
       const payload = asUpdateMemoryPayload(envelope.payload);
       await updateMemoryFromFindingOutcome(options.db, payload);
+      await recordOutcomeFromProviderFeedback(options.db, payload);
     },
     [JOB_TYPES.BillingReconcile]: async (envelope) => {
       const payload = asBillingReconcilePayload(envelope.payload);
@@ -947,6 +949,162 @@ async function findPublishedFindingIdForValidatedFinding(
     .limit(1);
 
   return published?.findingId;
+}
+
+/** Records a provider-webhook outcome after feedback has been correlated by provider comment ID. */
+async function recordOutcomeFromProviderFeedback(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+): Promise<void> {
+  if (
+    (payload.reason !== "comment_reply" && payload.reason !== "provider_reaction") ||
+    (!payload.externalCommentId && !payload.externalParentCommentId)
+  ) {
+    return;
+  }
+
+  const outcome = outcomeFromProviderFeedbackKind(payload.feedbackKind);
+  if (!outcome) {
+    return;
+  }
+
+  const published = await findPublishedFindingForProviderFeedback(db, payload);
+  if (!published) {
+    return;
+  }
+
+  await db
+    .insert(findingOutcomes)
+    .values({
+      candidateFindingId: published.candidateFindingId,
+      findingOutcomeId: stableWorkerId("out", [
+        "provider_feedback",
+        payload.externalEventId ??
+          payload.externalReactionId ??
+          payload.externalParentCommentId ??
+          payload.externalCommentId,
+      ]),
+      metadata: providerFeedbackOutcomeMetadata(payload),
+      occurredAt: new Date(),
+      orgId: published.orgId,
+      outcome,
+      publishedFindingId: published.publishedFindingId,
+      repoId: published.repoId,
+      source: "provider_webhook",
+    })
+    .onConflictDoNothing();
+}
+
+/** Finds a published finding row from provider feedback metadata. */
+async function findPublishedFindingForProviderFeedback(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+): Promise<
+  | {
+      readonly candidateFindingId: string;
+      readonly orgId: string;
+      readonly publishedFindingId: string;
+      readonly repoId: string;
+    }
+  | undefined
+> {
+  const commentIds = uniqueStrings([payload.externalParentCommentId, payload.externalCommentId]);
+
+  for (const commentId of commentIds) {
+    const [published] = await db
+      .select({
+        publishedFindingId: publishedFindings.findingId,
+        reviewRunId: publishedFindings.reviewRunId,
+        validatedFindingId: publishedFindings.validatedFindingId,
+      })
+      .from(publishedFindings)
+      .where(
+        and(
+          eq(publishedFindings.provider, payload.provider ?? "github"),
+          eq(publishedFindings.providerCommentId, commentId),
+        ),
+      )
+      .limit(1);
+
+    if (!published) {
+      continue;
+    }
+
+    const [finding] = await db
+      .select({ candidateFindingId: validatedFindings.candidateFindingId })
+      .from(validatedFindings)
+      .where(eq(validatedFindings.findingId, published.validatedFindingId))
+      .limit(1);
+    const [reviewRun] = await db
+      .select({ repoId: reviewRuns.repoId })
+      .from(reviewRuns)
+      .where(eq(reviewRuns.reviewRunId, published.reviewRunId))
+      .limit(1);
+
+    if (!finding || !reviewRun) {
+      return undefined;
+    }
+
+    const [repository] = await db
+      .select({ orgId: repositories.orgId })
+      .from(repositories)
+      .where(eq(repositories.repoId, reviewRun.repoId))
+      .limit(1);
+
+    if (!repository) {
+      return undefined;
+    }
+
+    return {
+      candidateFindingId: finding.candidateFindingId,
+      orgId: repository.orgId,
+      publishedFindingId: published.publishedFindingId,
+      repoId: reviewRun.repoId,
+    };
+  }
+
+  return undefined;
+}
+
+/** Maps provider feedback kind to the durable finding outcome vocabulary. */
+function outcomeFromProviderFeedbackKind(feedbackKind: string | undefined): string | undefined {
+  if (feedbackKind === "positive_reaction") {
+    return "positive_reaction";
+  }
+  if (feedbackKind === "negative_reaction") {
+    return "negative_reaction";
+  }
+  if (
+    feedbackKind === "comment_reply" ||
+    feedbackKind === "comment_edited" ||
+    feedbackKind === "comment_deleted"
+  ) {
+    return "commented";
+  }
+  return undefined;
+}
+
+/** Builds redacted metadata for provider feedback outcome rows. */
+function providerFeedbackOutcomeMetadata(payload: UpdateMemoryJobPayload): Record<string, unknown> {
+  return {
+    ...(payload.actorLogin ? { actorLogin: payload.actorLogin } : {}),
+    ...(payload.bodyHash ? { bodyHash: payload.bodyHash } : {}),
+    ...(payload.externalCommentId ? { externalCommentId: payload.externalCommentId } : {}),
+    ...(payload.externalEventId ? { externalEventId: payload.externalEventId } : {}),
+    ...(payload.externalParentCommentId
+      ? { externalParentCommentId: payload.externalParentCommentId }
+      : {}),
+    ...(payload.externalReactionId ? { externalReactionId: payload.externalReactionId } : {}),
+    ...(payload.feedbackKind ? { feedbackKind: payload.feedbackKind } : {}),
+    ...(payload.provider ? { provider: payload.provider } : {}),
+    ...(payload.pullRequestNumber ? { pullRequestNumber: payload.pullRequestNumber } : {}),
+    reason: payload.reason,
+  };
+}
+
+/** Returns unique non-empty strings in input order. */
+function uniqueStrings(values: readonly (string | undefined)[]): readonly string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
 /** Builds a pending suppression candidate from a rejected finding outcome. */

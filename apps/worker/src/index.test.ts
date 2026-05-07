@@ -155,6 +155,84 @@ describe("createWorkerHandlers", () => {
       }),
     ]);
   });
+
+  it("records provider webhook outcomes from correlated feedback jobs", async () => {
+    const selectRows: unknown[][] = [
+      [
+        {
+          publishedFindingId: "pub_1",
+          reviewRunId: "rrn_1",
+          validatedFindingId: "vf_1",
+        },
+      ],
+      [{ candidateFindingId: "cf_1" }],
+      [{ repoId: "repo_1" }],
+      [{ orgId: "org_1" }],
+    ];
+    const insertedOutcomes: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedOutcomes.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => selectRows.shift() ?? [],
+          }),
+        }),
+      }),
+    };
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.UpdateMemory]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "github:memory:fb_1",
+      jobId: "job_memory_feedback",
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      payload: {
+        actorLogin: "maintainer",
+        externalCommentId: "888",
+        externalEventId: "fb_1",
+        feedbackKind: "negative_reaction",
+        provider: "github",
+        reason: "provider_reaction",
+        repoId: "repo_1",
+      },
+      schemaVersion: "job_envelope.v1",
+    });
+
+    expect(insertedOutcomes).toEqual([
+      expect.objectContaining({
+        candidateFindingId: "cf_1",
+        orgId: "org_1",
+        outcome: "negative_reaction",
+        publishedFindingId: "pub_1",
+        repoId: "repo_1",
+        source: "provider_webhook",
+      }),
+    ]);
+    expect(insertedOutcomes[0]).toEqual(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          actorLogin: "maintainer",
+          externalCommentId: "888",
+          externalEventId: "fb_1",
+          feedbackKind: "negative_reaction",
+          reason: "provider_reaction",
+        }),
+      }),
+    );
+  });
 });
 
 describe("createRedisPublishThrottle", () => {
