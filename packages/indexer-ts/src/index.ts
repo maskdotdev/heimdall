@@ -27,6 +27,8 @@ const INDEXER_NAME = "heimdall-typescript-indexer";
 const INDEXER_VERSION = "0.1.0";
 const CHUNKER_VERSION = "line-symbol-v1";
 const MAX_FILE_BYTES = 1_000_000;
+const BINARY_CONTENT_SAMPLE_BYTES = 8_192;
+const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
 const GENERATED_CONTENT_HEADER_BYTES = 8_192;
 const generatedPathSegments = new Set(["generated", "__generated__"]);
 const vendoredPathSegments = new Set([
@@ -106,12 +108,17 @@ export async function indexTypeScriptRepository(input: {
   const languages = new Set<CodeLanguage>();
 
   for (const path of paths) {
-    const rawContent = await readFile(join(input.workspacePath, path), "utf8");
-    if (shouldSkipSourceFile(path, rawContent)) {
+    const rawContent = await readFile(join(input.workspacePath, path));
+    if (isBinarySourceContent(rawContent)) {
       continue;
     }
 
-    const content = normalizeSourceText(rawContent);
+    const rawText = rawContent.toString("utf8");
+    if (shouldSkipSourceFile(path, rawText)) {
+      continue;
+    }
+
+    const content = normalizeSourceText(rawText);
     const language = languageForPath(path);
     const file = fileRecord(input.repoId, input.commitSha, path, language, content);
     const sourceFile = ts.createSourceFile(
@@ -204,6 +211,25 @@ async function findSourceFiles(root: string, directory = ""): Promise<string[]> 
 /** Normalizes source text for deterministic parsing, ranges, chunks, and hashes. */
 function normalizeSourceText(content: string): string {
   return content.replace(/\r\n?/g, "\n");
+}
+
+/** Returns whether file bytes look like binary content rather than source text. */
+function isBinarySourceContent(content: Buffer): boolean {
+  const sample = content.subarray(0, Math.min(content.length, BINARY_CONTENT_SAMPLE_BYTES));
+  if (sample.includes(0)) {
+    return true;
+  }
+  if (sample.length === 0) {
+    return false;
+  }
+
+  const controlCharacters = sample.filter((byte) => isUnexpectedControlCharacter(byte)).length;
+  return controlCharacters / sample.length > MAX_BINARY_CONTROL_CHARACTER_RATIO;
+}
+
+/** Returns whether a byte is an unexpected control character for source text. */
+function isUnexpectedControlCharacter(byte: number): boolean {
+  return byte < 32 && byte !== 9 && byte !== 10 && byte !== 12 && byte !== 13;
 }
 
 function fileRecord(

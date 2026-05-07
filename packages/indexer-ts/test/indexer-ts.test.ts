@@ -114,6 +114,29 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("skips binary-looking source files before decoding them", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await Promise.all([
+      writeFile(join(workspacePath, "safe.ts"), "export const safe = true;\n"),
+      writeFile(join(workspacePath, "binary.ts"), Buffer.from([0, 159, 146, 150, 0, 1, 2, 3])),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const filePaths = artifact.records.flatMap((record) =>
+      record.type === "file" ? [record.path] : [],
+    );
+    expect(filePaths).toEqual(["safe.ts"]);
+    expect(artifact.records.some((record) => JSON.stringify(record).includes("binary.ts"))).toBe(
+      false,
+    );
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("skips symlinked source files before resolving them", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     const outsidePath = join(await mkdtemp(join(tmpdir(), "heimdall-indexer-outside-")), "leak.ts");
