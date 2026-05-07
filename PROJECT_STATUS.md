@@ -509,9 +509,10 @@ tracked milestone.
   Docker in CI. `DockerContainerSandboxRunner` and `GVisorSandboxRunner` now materialize host
   output binds, execute through an injectable Docker process executor or the Docker CLI, map
   timeout/output/status results back to `SandboxRunResult`, collect declared artifacts into durable
-  local file-URI roots, and clean transient output directories. Worker runtime selection now accepts
-  `SANDBOX_RUNNER=docker` and `SANDBOX_RUNNER=gvisor` with optional Docker executable, runtime,
-  temp-root, and artifact-root environment overrides.
+  local file-URI roots, deny symlink escape artifacts before copying, and clean transient output
+  directories. Worker runtime selection now accepts `SANDBOX_RUNNER=docker` and
+  `SANDBOX_RUNNER=gvisor` with optional Docker executable, runtime, temp-root, and artifact-root
+  environment overrides.
 - Latest sandbox DB milestone: `@repo/db` now defines `sandbox_runs`, `sandbox_artifacts`, and
   `sandbox_policy_decisions`, with generated Drizzle migration and schema tests. The tables capture
   run identity, review/static-analysis ownership, runner kind, trust/category, image, command,

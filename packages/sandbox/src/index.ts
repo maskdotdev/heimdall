@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1539,6 +1539,7 @@ async function collectDockerSandboxArtifacts(
 ): Promise<DockerArtifactCollection> {
   const artifacts: SandboxRunArtifact[] = [];
   const warnings: SandboxRunWarning[] = [];
+  const realOutputDirectory = await realpath(directories.outputDirectory);
   let totalBytes = 0;
 
   for (const artifactGlob of request.artifacts.collectFiles) {
@@ -1568,7 +1569,19 @@ async function collectDockerSandboxArtifacts(
       continue;
     }
 
-    const sourceStat = await statOptional(sourcePath);
+    const sourceLinkStat = await lstatOptional(sourcePath);
+    if (sourceLinkStat?.isSymbolicLink()) {
+      const realSourcePath = await realpathOptional(sourcePath);
+      if (!realSourcePath || !isPathInside(realSourcePath, realOutputDirectory)) {
+        warnings.push({
+          code: "sandbox_artifact_path_denied",
+          message: "Sandbox artifact collection skipped a symlink escape artifact.",
+        });
+        continue;
+      }
+    }
+
+    const sourceStat = sourceLinkStat ? await stat(sourcePath) : undefined;
     if (!sourceStat) {
       if (artifactGlob.required) {
         warnings.push({
@@ -1662,10 +1675,23 @@ function contentTypeForArtifact(name: string): string {
   return "text/plain";
 }
 
-/** Reads file status and returns undefined when the path does not exist. */
-async function statOptional(path: string): Promise<Awaited<ReturnType<typeof stat>> | undefined> {
+/** Reads link status and returns undefined when the path does not exist. */
+async function lstatOptional(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
   try {
-    return await stat(path);
+    return await lstat(path);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+/** Reads a real path and returns undefined when the path target does not exist. */
+async function realpathOptional(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path);
   } catch (error) {
     if (isNodeErrorWithCode(error, "ENOENT")) {
       return undefined;

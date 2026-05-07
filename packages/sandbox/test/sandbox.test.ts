@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -398,6 +398,48 @@ describe("DockerContainerSandboxRunner", () => {
     expect(called).toBe(false);
     expect(result.status).toBe("policy_denied");
     expect(result.error?.code).toBe("docker_network_policy_unsupported");
+  });
+
+  it("skips symlink artifacts that escape the output directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "heimdall-docker-artifact-escape-test-"));
+    const outsideDirectory = join(root, "outside");
+    const artifactRoot = join(root, "artifacts");
+    const temporaryRoot = join(root, "tmp");
+    const outsideSecretPath = join(outsideDirectory, "secret.json");
+
+    try {
+      await mkdir(outsideDirectory, { recursive: true });
+      await writeFile(outsideSecretPath, '{"secret":true}');
+      const runner = createDockerContainerSandboxRunner({
+        artifactRoot,
+        executor: async (input) => {
+          const outputMount = input.request.mounts.find((mount) => mount.purpose === "output");
+          if (!outputMount) {
+            throw new Error("Expected Docker runner to materialize an output mount.");
+          }
+          await mkdir(outputMount.source, { recursive: true });
+          await symlink(outsideSecretPath, join(outputMount.source, "report.json"));
+
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: "",
+          };
+        },
+        temporaryRoot,
+      });
+
+      const result = await runner.run(createRequest());
+
+      expect(result.status).toBe("succeeded");
+      expect(result.artifacts).toEqual([]);
+      expect(result.warnings).toContainEqual({
+        code: "sandbox_artifact_path_denied",
+        message: "Sandbox artifact collection skipped a symlink escape artifact.",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   });
 
   it("uses the gVisor Docker runtime when creating a gVisor runner", async () => {
