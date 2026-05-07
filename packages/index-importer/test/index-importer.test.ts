@@ -264,7 +264,7 @@ describe("importIndexArtifact telemetry", () => {
       chunkCount: 1,
       embeddingJobCount: 1,
     });
-    expect(insertedRows).toHaveLength(3);
+    expect(insertedRows).toHaveLength(4);
     expect(insertedRows[0]).toEqual(
       expect.objectContaining({
         chunkCountPlanned: 1,
@@ -300,6 +300,28 @@ describe("importIndexArtifact telemetry", () => {
         }),
         queueName: "embedding",
         repoId: "repo_1",
+        status: "pending",
+      }),
+    );
+    expect(insertedRows[3]).toEqual(
+      expect.objectContaining({
+        jobKey: expect.stringMatching(/^embedding:repair:embjob_/u),
+        jobType: "embedding.repair.v1",
+        payload: expect.objectContaining({
+          payload: expect.objectContaining({
+            dimensions: 2,
+            embeddingJobId: expect.stringMatching(/^embjob_/u),
+            embeddingProfileVersion: "code_embedding_profile.v1",
+            indexVersionId: result.indexVersionId,
+            model: "text-embedding-3-small",
+            provider: "hash",
+            repoId: "repo_1",
+          }),
+          scheduledFor: expect.any(String),
+        }),
+        queueName: "embedding",
+        repoId: "repo_1",
+        scheduledAt: expect.any(Date),
         status: "pending",
       }),
     );

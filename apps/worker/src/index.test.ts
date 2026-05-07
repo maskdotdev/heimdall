@@ -3,6 +3,7 @@ import { JOB_TYPES } from "@repo/contracts";
 import {
   validBillingReconcileJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
+  validEmbeddingRepairJobPayloadFixture,
   validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
@@ -401,6 +402,30 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validBillingReconcileJobPayloadFixture]);
+  });
+
+  it("dispatches embedding repair jobs through the configured repairer", async () => {
+    const payloads: unknown[] = [];
+    const handlers = createWorkerHandlers({
+      db: {} as never,
+      embeddingRepairer: async (payload) => {
+        payloads.push(payload);
+      },
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.EmbeddingRepair]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "embedding:repair:idx_01HXAMPLE",
+      jobId: "job_embedding_repair",
+      jobType: JOB_TYPES.EmbeddingRepair,
+      maxAttempts: 3,
+      payload: validEmbeddingRepairJobPayloadFixture,
+      schemaVersion: "embedding_repair_job.v1",
+    });
+
+    expect(payloads).toEqual([validEmbeddingRepairJobPayloadFixture]);
   });
 
   it("dispatches sandbox cleanup jobs through the configured cleaner", async () => {

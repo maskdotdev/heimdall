@@ -424,6 +424,40 @@ export type ReconcileEmbeddingJobResult = {
   readonly progress: EmbeddingJobProgressSnapshot;
 };
 
+/** Input used to repair a scoped set of durable embedding jobs. */
+export type RepairEmbeddingJobsInput = {
+  /** Database used to find embedding jobs and repair progress drift. */
+  readonly db: Pick<HeimdallDatabase, "select" | "update">;
+  /** Optional vector dimensions used to narrow repair scope. */
+  readonly dimensions?: number;
+  /** Optional single durable embedding job row ID to repair. */
+  readonly embeddingJobId?: string;
+  /** Embedding profile version to repair. */
+  readonly embeddingProfileVersion: string;
+  /** Imported index version to repair. */
+  readonly indexVersionId: string;
+  /** Maximum number of embedding jobs to inspect. */
+  readonly limit?: number;
+  /** Optional embedding model used to narrow repair scope. */
+  readonly model?: string;
+  /** Optional clock used for deterministic repaired timestamps. */
+  readonly now?: () => Date;
+  /** Optional embedding provider used to narrow repair scope. */
+  readonly provider?: string;
+  /** Repository associated with the repair scope. */
+  readonly repoId: string;
+};
+
+/** Summary returned after repairing a scoped set of embedding jobs. */
+export type RepairEmbeddingJobsResult = {
+  /** Number of durable embedding jobs inspected and refreshed. */
+  readonly embeddingJobCount: number;
+  /** Per-job reconciliation results. */
+  readonly jobs: readonly ReconcileEmbeddingJobResult[];
+  /** Total number of stale item rows repaired from stored vector rows. */
+  readonly repairedItemCount: number;
+};
+
 /** Result produced after embedding one chunk batch. */
 export type EmbedChunkBatchResult = {
   /** Number of chunks newly embedded and stored. */
@@ -752,6 +786,53 @@ export async function reconcileEmbeddingJob(
     repairedItemCount,
     progress: await refreshEmbeddingJobProgress(input.db, input.embeddingJobId, now),
   };
+}
+
+/** Repairs progress drift for a scoped set of durable embedding jobs. */
+export async function repairEmbeddingJobs(
+  input: RepairEmbeddingJobsInput,
+): Promise<RepairEmbeddingJobsResult> {
+  const rows = await input.db
+    .select({ embeddingJobId: embeddingJobs.embeddingJobId })
+    .from(embeddingJobs)
+    .where(embeddingRepairJobCondition(input))
+    .limit(repairEmbeddingJobLimit(input.limit));
+  const jobs: ReconcileEmbeddingJobResult[] = [];
+
+  for (const row of rows) {
+    const result = await reconcileEmbeddingJob({
+      db: input.db,
+      embeddingJobId: row.embeddingJobId,
+      ...(input.now ? { now: input.now } : {}),
+    });
+    if (result) {
+      jobs.push(result);
+    }
+  }
+
+  return {
+    embeddingJobCount: jobs.length,
+    jobs,
+    repairedItemCount: jobs.reduce((sum, job) => sum + job.repairedItemCount, 0),
+  };
+}
+
+/** Builds the embedding job predicate used by scoped repair jobs. */
+function embeddingRepairJobCondition(input: RepairEmbeddingJobsInput) {
+  return and(
+    eq(embeddingJobs.repoId, input.repoId),
+    eq(embeddingJobs.indexVersionId, input.indexVersionId),
+    eq(embeddingJobs.embeddingProfileVersion, input.embeddingProfileVersion),
+    ...(input.dimensions ? [eq(embeddingJobs.dimensions, input.dimensions)] : []),
+    ...(input.embeddingJobId ? [eq(embeddingJobs.embeddingJobId, input.embeddingJobId)] : []),
+    ...(input.model ? [eq(embeddingJobs.model, input.model)] : []),
+    ...(input.provider ? [eq(embeddingJobs.provider, input.provider)] : []),
+  );
+}
+
+/** Clamps repair job scans to a bounded number of durable embedding jobs. */
+function repairEmbeddingJobLimit(limit: number | undefined): number {
+  return Math.max(1, Math.min(limit ?? 100, 500));
 }
 
 /** Builds the stored-embedding predicate used to repair stale job item rows. */

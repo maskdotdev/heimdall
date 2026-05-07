@@ -21,6 +21,7 @@ export const JOB_TYPES = {
   SyncInstallation: "github.sync_installation.v1",
   IndexRepoCommit: "repo.index_commit.v1",
   EmbeddingBatch: "embedding.batch.v1",
+  EmbeddingRepair: "embedding.repair.v1",
   ReviewPullRequest: "pr.review.v1",
   PublishReview: "review.publish.v1",
   UpdateMemory: "memory.update.v1",

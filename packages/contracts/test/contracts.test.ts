@@ -32,6 +32,7 @@ import {
 import {
   validBillingReconcileJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
+  validEmbeddingRepairJobPayloadFixture,
   validIndexRepoCommitJobPayloadFixture,
   validPublishReviewJobPayloadFixture,
   validReviewArtifactCleanupJobPayloadFixture,
@@ -93,6 +94,7 @@ import { JobEnvelopeSchema } from "#contracts/jobs/envelope";
 import {
   BillingReconcileJobPayloadSchema,
   EmbeddingBatchJobPayloadSchema,
+  EmbeddingRepairJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
   PublishReviewJobPayloadSchema,
   ReviewArtifactCleanupJobPayloadSchema,
@@ -347,6 +349,13 @@ describe("contract validation", () => {
         validEmbeddingBatchJobPayloadFixture,
       ),
     ).toEqual(validEmbeddingBatchJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "EmbeddingRepairJobPayload",
+        EmbeddingRepairJobPayloadSchema,
+        validEmbeddingRepairJobPayloadFixture,
+      ),
+    ).toEqual(validEmbeddingRepairJobPayloadFixture);
     expect(
       parseWithSchema(
         "ReviewPullRequestJobPayload",

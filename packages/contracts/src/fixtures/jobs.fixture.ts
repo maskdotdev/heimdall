@@ -1,6 +1,7 @@
 import type {
   BillingReconcileJobPayload,
   EmbeddingBatchJobPayload,
+  EmbeddingRepairJobPayload,
   IndexRepoCommitJobPayload,
   PublishReviewJobPayload,
   ReviewArtifactCleanupJobPayload,
@@ -32,6 +33,13 @@ export const validEmbeddingBatchJobPayloadFixture = {
   chunkIds: [ids.chunkId],
   embeddingModel: "text-embedding-3-large",
 } satisfies EmbeddingBatchJobPayload;
+
+export const validEmbeddingRepairJobPayloadFixture = {
+  repoId: ids.repoId,
+  indexVersionId: ids.indexVersionId,
+  embeddingProfileVersion: "code_embedding_profile.v1",
+  limit: 50,
+} satisfies EmbeddingRepairJobPayload;
 
 export const validReviewPullRequestJobPayloadFixture = {
   repoId: ids.repoId,

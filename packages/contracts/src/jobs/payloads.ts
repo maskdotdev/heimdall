@@ -69,6 +69,22 @@ export const EmbeddingBatchJobPayloadSchema = Type.Object(
 );
 export type EmbeddingBatchJobPayload = Static<typeof EmbeddingBatchJobPayloadSchema>;
 
+/** Payload used by scheduled or operator-triggered embedding repair jobs. */
+export const EmbeddingRepairJobPayloadSchema = Type.Object(
+  {
+    repoId: RepoIdSchema,
+    indexVersionId: IndexVersionIdSchema,
+    embeddingProfileVersion: Type.String({ minLength: 1 }),
+    dimensions: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
+    embeddingJobId: Type.Optional(Type.String({ minLength: 1 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
+    model: Type.Optional(Type.String({ minLength: 1 })),
+    provider: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+export type EmbeddingRepairJobPayload = Static<typeof EmbeddingRepairJobPayloadSchema>;
+
 export const ReviewPullRequestJobPayloadSchema = Type.Object(
   {
     repoId: RepoIdSchema,
@@ -214,6 +230,7 @@ export const JobPayloadSchema = Type.Union([
   SyncInstallationJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
   EmbeddingBatchJobPayloadSchema,
+  EmbeddingRepairJobPayloadSchema,
   ReviewPullRequestJobPayloadSchema,
   PublishReviewJobPayloadSchema,
   UpdateMemoryJobPayloadSchema,

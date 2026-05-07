@@ -28,6 +28,7 @@ import {
   estimateEmbeddingTokenCost,
   type OpenAIEmbeddingsFetch,
   reconcileEmbeddingJob,
+  repairEmbeddingJobs,
   roughTokenEstimate,
 } from "../src";
 
@@ -767,6 +768,50 @@ describe("reconcileEmbeddingJob", () => {
   });
 });
 
+describe("repairEmbeddingJobs", () => {
+  it("scans scoped embedding jobs and returns aggregate repair counts", async () => {
+    const updatedValues: unknown[] = [];
+    const now = new Date("2026-05-07T12:00:00.000Z");
+
+    await expect(
+      repairEmbeddingJobs({
+        db: createEmbeddingRepairDatabaseStub({ updatedValues }),
+        dimensions: 2,
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        indexVersionId: "idx_01HREVIEW",
+        limit: 10,
+        model: "text-embedding-3-small",
+        now: () => now,
+        provider: "hash",
+        repoId: "repo_01HREVIEW",
+      }),
+    ).resolves.toEqual({
+      embeddingJobCount: 1,
+      jobs: [
+        {
+          embeddingJobId: "embjob_1",
+          repairedItemCount: 1,
+          progress: {
+            chunkCountEmbedded: 2,
+            chunkCountFailed: 0,
+            chunkCountSkipped: 0,
+            chunkCountTotal: 2,
+            embeddingJobId: "embjob_1",
+            status: "succeeded",
+          },
+        },
+      ],
+      repairedItemCount: 1,
+    });
+    expect(updatedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "embedded" }),
+        expect.objectContaining({ status: "succeeded" }),
+      ]),
+    );
+  });
+});
+
 describe("buildCodeChunkEmbeddingInput", () => {
   it("builds stable code chunk provider input with useful metadata", () => {
     const input = buildCodeChunkEmbeddingInput({
@@ -1034,6 +1079,57 @@ function createEmbeddingReconcileDatabaseStub(options: {
   readonly updatedValues: unknown[];
 }): Pick<HeimdallDatabase, "select" | "update"> {
   const selectedRows: readonly (readonly unknown[])[] = [
+    [
+      {
+        dimensions: 2,
+        embeddingJobId: "embjob_1",
+        embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        indexVersionId: "idx_01HREVIEW",
+        model: "text-embedding-3-small",
+        provider: "hash",
+        repoId: "repo_01HREVIEW",
+      },
+    ],
+    [
+      { chunkId: "chunk_1", status: "pending" },
+      { chunkId: "chunk_2", status: "embedded" },
+    ],
+    [{ chunkId: "chunk_1" }, { chunkId: "chunk_2" }],
+    [{ embedded: 2, failed: 0, skipped: 0, total: 2 }],
+  ];
+  let selectIndex = 0;
+
+  return {
+    select: () => ({
+      from: (_table: unknown) => ({
+        where: (_condition: unknown) => {
+          const rows = selectedRows[selectIndex] ?? [];
+          selectIndex += 1;
+
+          return Object.assign(Promise.resolve(rows), {
+            limit: async (count: number) => rows.slice(0, count),
+          });
+        },
+      }),
+    }),
+    update: (_table: unknown) => ({
+      set: (values: unknown) => {
+        options.updatedValues.push(values);
+
+        return {
+          where: async (_condition: unknown) => undefined,
+        };
+      },
+    }),
+  } as unknown as Pick<HeimdallDatabase, "select" | "update">;
+}
+
+function createEmbeddingRepairDatabaseStub(options: {
+  /** Captures values passed to fake update statements. */
+  readonly updatedValues: unknown[];
+}): Pick<HeimdallDatabase, "select" | "update"> {
+  const selectedRows: readonly (readonly unknown[])[] = [
+    [{ embeddingJobId: "embjob_1" }],
     [
       {
         dimensions: 2,

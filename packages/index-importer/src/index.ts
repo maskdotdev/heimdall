@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ReviewArtifactFetch, S3CompatibleReviewArtifactPayloadStore } from "@repo/artifacts";
-import { type EmbeddingBatchJobPayload, JOB_TYPES } from "@repo/contracts";
+import {
+  type EmbeddingBatchJobPayload,
+  type EmbeddingRepairJobPayload,
+  JOB_TYPES,
+} from "@repo/contracts";
 import {
   backgroundJobs,
   codeChunks,
@@ -38,6 +42,9 @@ const DEFAULT_CODE_EMBEDDING_PROFILE_VERSION = "code_embedding_profile.v1";
 
 /** Default embedding dimension used by the current pgvector storage schema. */
 const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
+
+/** Delay before a scheduled embedding repair job checks for progress drift. */
+const EMBEDDING_REPAIR_DELAY_MS = 15 * 60 * 1000;
 
 /** Resolver that loads an index artifact from a durable URI or local path. */
 export type IndexArtifactResolver = {
@@ -659,7 +666,82 @@ async function enqueueEmbeddingBatches(input: {
     count += 1;
   }
 
+  await enqueueEmbeddingRepairJob({
+    db: options.db,
+    dimensions: embeddingDimensions,
+    embeddingJobId,
+    embeddingModel,
+    embeddingProfileVersion,
+    embeddingProvider,
+    indexVersionId: input.indexVersionId,
+    orgId,
+    repoId: input.repoId,
+  });
+
   return count;
+}
+
+/** Schedules a delayed repair pass for embedding progress drift after batch jobs run. */
+async function enqueueEmbeddingRepairJob(input: {
+  /** Database used to persist the delayed durable repair job. */
+  readonly db: HeimdallDatabase;
+  /** Embedding vector dimensions recorded on the planned job. */
+  readonly dimensions: number;
+  /** Durable embedding job row ID repaired by the backstop. */
+  readonly embeddingJobId: string;
+  /** Embedding model recorded on the planned job. */
+  readonly embeddingModel: string;
+  /** Embedding profile version recorded on the planned job. */
+  readonly embeddingProfileVersion: string;
+  /** Embedding provider recorded on the planned job. */
+  readonly embeddingProvider: string;
+  /** Imported index version associated with the repair job. */
+  readonly indexVersionId: string;
+  /** Organization that owns the repository. */
+  readonly orgId: string;
+  /** Repository that owns the embedding job. */
+  readonly repoId: string;
+}): Promise<void> {
+  const scheduledAt = new Date(Date.now() + EMBEDDING_REPAIR_DELAY_MS);
+  const payload: EmbeddingRepairJobPayload = {
+    dimensions: input.dimensions,
+    embeddingJobId: input.embeddingJobId,
+    embeddingProfileVersion: input.embeddingProfileVersion,
+    indexVersionId: input.indexVersionId,
+    model: input.embeddingModel,
+    provider: input.embeddingProvider,
+    repoId: input.repoId,
+  };
+  const jobKey = `embedding:repair:${input.embeddingJobId}`;
+
+  await input.db
+    .insert(backgroundJobs)
+    .values({
+      backgroundJobId: stableId("job", [jobKey]),
+      jobKey,
+      jobType: JOB_TYPES.EmbeddingRepair,
+      maxAttempts: 3,
+      metadata: {
+        source: "embedding_planner_repair_backstop",
+      },
+      orgId: input.orgId,
+      payload: {
+        attempt: 0,
+        createdAt: new Date().toISOString(),
+        idempotencyKey: jobKey,
+        jobId: stableId("job", [jobKey, "envelope"]),
+        jobType: JOB_TYPES.EmbeddingRepair,
+        maxAttempts: 3,
+        payload,
+        scheduledFor: scheduledAt.toISOString(),
+        schemaVersion: "job_envelope.v1",
+      },
+      queueName: QUEUE_NAMES.embedding,
+      repoId: input.repoId,
+      scheduledAt,
+      status: "pending",
+    })
+    .onConflictDoNothing();
 }
 
 /** Loads a repository owner org for embedding planner rows. */

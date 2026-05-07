@@ -19,6 +19,7 @@ import { loadRuntimeConfig } from "@repo/config";
 import {
   type BillingReconcileJobPayload,
   type EmbeddingBatchJobPayload,
+  type EmbeddingRepairJobPayload,
   type IndexRepoCommitJobPayload,
   JOB_TYPES,
   type JobPayload,
@@ -54,6 +55,8 @@ import {
   type EmbeddingTokenRateCard,
   embedChunkBatch,
   type OpenAIEmbeddingsFetch,
+  reconcileEmbeddingJob,
+  repairEmbeddingJobs,
 } from "@repo/embedding";
 import {
   createGitHubProvider,
@@ -161,6 +164,8 @@ export type CreateWorkerHandlersOptions = {
   readonly billingProvider?: BillingProvider;
   /** Optional test hook for billing reconciliation jobs. */
   readonly billingReconciler?: (payload: BillingReconcileJobPayload) => Promise<void>;
+  /** Optional test hook for embedding repair jobs. */
+  readonly embeddingRepairer?: (payload: EmbeddingRepairJobPayload) => Promise<void>;
   /** Optional test hook for sandbox cleanup jobs. */
   readonly sandboxCleaner?: (payload: SandboxCleanupJobPayload) => Promise<void>;
   /** Optional test hook for review artifact cleanup jobs. */
@@ -571,6 +576,32 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
+      });
+    },
+    [JOB_TYPES.EmbeddingRepair]: async (envelope) => {
+      const payload = asEmbeddingRepairPayload(envelope.payload);
+      if (options.embeddingRepairer) {
+        await options.embeddingRepairer(payload);
+        return;
+      }
+
+      if (payload.embeddingJobId) {
+        await reconcileEmbeddingJob({
+          db: options.db,
+          embeddingJobId: payload.embeddingJobId,
+        });
+        return;
+      }
+
+      await repairEmbeddingJobs({
+        db: options.db,
+        ...(payload.dimensions ? { dimensions: payload.dimensions } : {}),
+        embeddingProfileVersion: payload.embeddingProfileVersion,
+        indexVersionId: payload.indexVersionId,
+        ...(payload.limit ? { limit: payload.limit } : {}),
+        ...(payload.model ? { model: payload.model } : {}),
+        ...(payload.provider ? { provider: payload.provider } : {}),
+        repoId: payload.repoId,
       });
     },
     [JOB_TYPES.ReviewPullRequest]: async (envelope) => {
@@ -2480,6 +2511,20 @@ function asEmbeddingBatchPayload(payload: JobPayload): EmbeddingBatchJobPayload 
   }
 
   return payload as EmbeddingBatchJobPayload;
+}
+
+/** Narrows a generic job payload to an embedding repair payload. */
+function asEmbeddingRepairPayload(payload: JobPayload): EmbeddingRepairJobPayload {
+  if (
+    !("repoId" in payload) ||
+    !("indexVersionId" in payload) ||
+    !("embeddingProfileVersion" in payload) ||
+    "chunkIds" in payload
+  ) {
+    throw new Error("Job payload is not an embedding repair payload.");
+  }
+
+  return payload as EmbeddingRepairJobPayload;
 }
 
 function asReviewPullRequestPayload(payload: JobPayload): ReviewPullRequestJobPayload {
