@@ -456,10 +456,23 @@ export const codeChunkEmbeddings = pgTable(
     embeddingDimension: integer("embedding_dimension").notNull().default(1536),
     embedding: vector("embedding").notNull(),
     contentHash: text("content_hash").notNull(),
+    inputHash: text("input_hash").notNull().default(""),
+    inputKind: text("input_kind").notNull().default("code_chunk"),
+    embeddingCacheKey: text("embedding_cache_key").notNull().default(""),
+    embeddingProfileVersion: text("embedding_profile_version")
+      .notNull()
+      .default("code_embedding_profile.v1"),
+    provider: text("provider").notNull().default("unknown"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("code_chunk_embeddings_chunk_model_unique").on(table.chunkId, table.embeddingModel),
+    index("code_chunk_embeddings_cache_idx").on(
+      table.embeddingCacheKey,
+      table.repoId,
+      table.embeddingModel,
+      table.embeddingDimension,
+    ),
   ],
 );
 

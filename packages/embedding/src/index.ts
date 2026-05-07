@@ -229,6 +229,22 @@ export type BuiltEmbeddingInput = {
   readonly wasTruncated: boolean;
 };
 
+/** Stable cache-key source for one provider-ready embedding input. */
+export type EmbeddingCacheKeyInput = {
+  /** Vector dimension returned by the provider. */
+  readonly dimensions: number;
+  /** Embedding profile version that defines input construction. */
+  readonly embeddingProfileVersion?: string;
+  /** SHA-256 hash of the final provider input text. */
+  readonly inputHash: `sha256:${string}`;
+  /** Kind of source represented by the input. */
+  readonly inputKind: BuiltEmbeddingInput["inputKind"];
+  /** Embedding model name. */
+  readonly model: string;
+  /** Low-cardinality provider ID used for telemetry and cache segregation. */
+  readonly provider?: string;
+};
+
 /** Request batching limits for provider calls. */
 export type EmbeddingBatchPolicy = {
   /** Maximum number of inputs per provider request. */
@@ -282,10 +298,14 @@ type EmbeddingTelemetryState = {
 type EmbeddingBatchTelemetryStats = {
   /** Provider request batches planned for the embedding job. */
   readonly batchCount: number;
+  /** Number of provider inputs served from durable cache rows. */
+  readonly cacheHitCount: number;
   /** Number of chunks inserted into vector storage. */
   readonly embeddedChunkCount: number;
   /** Number of provider inputs built from chunk text. */
   readonly inputCount: number;
+  /** Number of provider inputs sent to the configured provider. */
+  readonly providerInputCount: number;
   /** Number of requested chunks skipped before provider calls. */
   readonly skippedChunkCount: number;
   /** Estimated tokens sent to the embedding provider. */
@@ -346,12 +366,38 @@ export async function embedChunkBatch(
       );
     const inputChunkIds = new Set(chunkInputs.map((entry) => entry.row.chunkId));
     const skippedChunkIds = payload.chunkIds.filter((chunkId) => !inputChunkIds.has(chunkId));
-    const inputBatches = buildEmbeddingInputBatches(
-      chunkInputs.map((entry) => entry.input),
-      options.batchPolicy,
+    const cacheKeysByInputId = new Map(
+      chunkInputs.map((entry) => [
+        entry.input.inputId,
+        buildEmbeddingCacheKey({
+          dimensions: options.provider.dimensions,
+          inputHash: entry.input.inputHash,
+          inputKind: entry.input.inputKind,
+          model: payload.embeddingModel,
+          ...(options.provider.providerId ? { provider: options.provider.providerId } : {}),
+        }),
+      ]),
     );
-    telemetryStats = embeddingTelemetryStats(chunkInputs, inputBatches, skippedChunkIds.length);
-    const vectorsByInputId = new Map<string, readonly number[]>();
+    const vectorsByInputId = new Map(
+      await loadCachedEmbeddingVectors({
+        cacheKeysByInputId,
+        db: options.db,
+        inputs: chunkInputs.map((entry) => entry.input),
+        payload,
+        provider: options.provider,
+      }),
+    );
+    const providerInputs = chunkInputs
+      .filter((entry) => !vectorsByInputId.has(entry.input.inputId))
+      .map((entry) => entry.input);
+    const inputBatches = buildEmbeddingInputBatches(providerInputs, options.batchPolicy);
+    telemetryStats = embeddingTelemetryStats({
+      cacheHitCount: vectorsByInputId.size,
+      inputBatches,
+      inputs: chunkInputs.map((entry) => entry.input),
+      providerInputs,
+      skippedChunkCount: skippedChunkIds.length,
+    });
 
     for (const inputBatch of inputBatches) {
       const vectors = validateEmbeddingVectors(
@@ -380,6 +426,11 @@ export async function embedChunkBatch(
               embeddingDimension: options.provider.dimensions,
               embedding: [...requiredVectorForInput(vectorsByInputId, entry.input.inputId)],
               contentHash: entry.row.contentHash,
+              embeddingCacheKey: requiredCacheKeyForInput(cacheKeysByInputId, entry.input.inputId),
+              embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+              inputHash: entry.input.inputHash,
+              inputKind: entry.input.inputKind,
+              provider: options.provider.providerId ?? "unknown",
             })),
           )
           .onConflictDoNothing()
@@ -496,8 +547,10 @@ function finishEmbeddingTelemetry(
       ...(input.stats
         ? {
             "embedding.batch_count": input.stats.batchCount,
+            "embedding.cache_hit_count": input.stats.cacheHitCount,
             "embedding.embedded_chunk_count": input.stats.embeddedChunkCount,
             "embedding.input_count": input.stats.inputCount,
+            "embedding.provider_input_count": input.stats.providerInputCount,
             "embedding.skipped_chunk_count": input.stats.skippedChunkCount,
             "embedding.token_count": input.stats.tokenCount,
             "embedding.truncated_input_count": input.stats.truncatedInputCount,
@@ -518,10 +571,10 @@ function recordEmbeddingInputMetrics(
   labels: EmbeddingTelemetryState["labels"],
   stats: EmbeddingBatchTelemetryStats,
 ): void {
-  if (stats.inputCount > 0) {
+  if (stats.providerInputCount > 0) {
     metrics?.count(OBSERVABILITY_METRIC_NAMES.embeddingInputsTotal, {
       labels: { ...labels, input_kind: "code_chunk" },
-      value: stats.inputCount,
+      value: stats.providerInputCount,
     });
   }
   if (stats.tokenCount > 0) {
@@ -533,21 +586,27 @@ function recordEmbeddingInputMetrics(
 }
 
 /** Builds aggregate telemetry stats from planned provider inputs. */
-function embeddingTelemetryStats(
-  chunkInputs: readonly {
-    readonly input: BuiltEmbeddingInput;
-    readonly row: { readonly chunkId: string };
-  }[],
-  inputBatches: readonly (readonly BuiltEmbeddingInput[])[],
-  skippedChunkCount: number,
-): EmbeddingBatchTelemetryStats {
+function embeddingTelemetryStats(input: {
+  /** Number of provider inputs served from durable cache rows. */
+  readonly cacheHitCount: number;
+  /** Provider request batches planned for cache misses. */
+  readonly inputBatches: readonly (readonly BuiltEmbeddingInput[])[];
+  /** Provider-ready inputs built from chunk rows. */
+  readonly inputs: readonly BuiltEmbeddingInput[];
+  /** Provider-ready inputs that still require a provider call. */
+  readonly providerInputs: readonly BuiltEmbeddingInput[];
+  /** Number of requested chunks skipped before provider calls. */
+  readonly skippedChunkCount: number;
+}): EmbeddingBatchTelemetryStats {
   return {
-    batchCount: inputBatches.length,
+    batchCount: input.inputBatches.length,
+    cacheHitCount: input.cacheHitCount,
     embeddedChunkCount: 0,
-    inputCount: chunkInputs.length,
-    skippedChunkCount,
-    tokenCount: chunkInputs.reduce((total, entry) => total + entry.input.tokenEstimate, 0),
-    truncatedInputCount: chunkInputs.filter((entry) => entry.input.wasTruncated).length,
+    inputCount: input.inputs.length,
+    providerInputCount: input.providerInputs.length,
+    skippedChunkCount: input.skippedChunkCount,
+    tokenCount: input.providerInputs.reduce((total, entry) => total + entry.tokenEstimate, 0),
+    truncatedInputCount: input.inputs.filter((entry) => entry.wasTruncated).length,
   };
 }
 
@@ -644,6 +703,23 @@ export function buildEmbeddingInputBatches(
   }
 
   return batches;
+}
+
+/** Builds the durable cache key for one provider-ready embedding input. */
+export function buildEmbeddingCacheKey(input: EmbeddingCacheKeyInput): `sha256:${string}` {
+  return sha256(
+    [
+      normalizeEmbeddingCachePart(input.provider, "unknown"),
+      normalizeEmbeddingCachePart(input.model, "default"),
+      input.dimensions,
+      input.inputKind,
+      input.inputHash,
+      normalizeEmbeddingCachePart(
+        input.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+        DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+      ),
+    ].join(":"),
+  );
 }
 
 /** Estimates tokens conservatively for code-heavy embedding inputs. */
@@ -853,6 +929,69 @@ export function createEmbeddingProviderFromEnvironment(
   throw new Error(`Unsupported embedding provider: ${providerName}`);
 }
 
+/** Loads reusable vectors for provider inputs already embedded by the same profile. */
+async function loadCachedEmbeddingVectors(input: {
+  /** Cache key lookup for each built provider input. */
+  readonly cacheKeysByInputId: ReadonlyMap<string, `sha256:${string}`>;
+  /** Database used to read durable embedding rows. */
+  readonly db: HeimdallDatabase;
+  /** Provider-ready inputs that may be cache hits. */
+  readonly inputs: readonly BuiltEmbeddingInput[];
+  /** Embedding job payload used for repo and model scoping. */
+  readonly payload: EmbeddingBatchJobPayload;
+  /** Embedding provider used for dimension scoping. */
+  readonly provider: EmbeddingProvider;
+}): Promise<ReadonlyMap<string, readonly number[]>> {
+  const cacheKeys = [
+    ...new Set(
+      input.inputs.map((entry) =>
+        requiredCacheKeyForInput(input.cacheKeysByInputId, entry.inputId),
+      ),
+    ),
+  ];
+  if (cacheKeys.length === 0) {
+    return new Map();
+  }
+
+  const cachedRows = await input.db
+    .select({
+      embedding: codeChunkEmbeddings.embedding,
+      embeddingCacheKey: codeChunkEmbeddings.embeddingCacheKey,
+    })
+    .from(codeChunkEmbeddings)
+    .where(
+      and(
+        eq(codeChunkEmbeddings.repoId, input.payload.repoId),
+        eq(codeChunkEmbeddings.embeddingModel, input.payload.embeddingModel),
+        eq(codeChunkEmbeddings.embeddingDimension, input.provider.dimensions),
+        inArray(codeChunkEmbeddings.embeddingCacheKey, cacheKeys),
+      ),
+    );
+  const validatedVectors = validateEmbeddingVectors(
+    cachedRows.map((row) => row.embedding),
+    cachedRows.length,
+    input.provider.dimensions,
+  );
+  const vectorsByCacheKey = new Map<string, readonly number[]>();
+
+  for (const [index, row] of cachedRows.entries()) {
+    if (!vectorsByCacheKey.has(row.embeddingCacheKey)) {
+      vectorsByCacheKey.set(row.embeddingCacheKey, validatedVectors[index] ?? []);
+    }
+  }
+
+  const vectorsByInputId = new Map<string, readonly number[]>();
+  for (const builtInput of input.inputs) {
+    const cacheKey = requiredCacheKeyForInput(input.cacheKeysByInputId, builtInput.inputId);
+    const vector = vectorsByCacheKey.get(cacheKey);
+    if (vector) {
+      vectorsByInputId.set(builtInput.inputId, vector);
+    }
+  }
+
+  return vectorsByInputId;
+}
+
 /** Validates that provider output matches the storage contract before writing rows. */
 function validateEmbeddingVectors(
   vectors: readonly (readonly number[])[],
@@ -920,6 +1059,19 @@ function requiredVectorForInput(
   return vector;
 }
 
+/** Returns a cache key or fails when cache-key construction is broken. */
+function requiredCacheKeyForInput(
+  cacheKeysByInputId: ReadonlyMap<string, `sha256:${string}`>,
+  inputId: string,
+): `sha256:${string}` {
+  const cacheKey = cacheKeysByInputId.get(inputId);
+  if (!cacheKey) {
+    throw new Error(`Embedding cache key was not built for input ${inputId}.`);
+  }
+
+  return cacheKey;
+}
+
 /** Parses a positive integer environment value. */
 function optionalPositiveInteger(value: string | undefined): number | undefined {
   if (!value) {
@@ -965,6 +1117,12 @@ function stableId(prefix: string, parts: readonly unknown[]): string {
     .update(parts.map((part) => String(part)).join(":"))
     .digest("base64url")
     .slice(0, 26)}`;
+}
+
+/** Normalizes one cache-key component without allowing empty fields. */
+function normalizeEmbeddingCachePart(value: string | undefined, fallback: string): string {
+  const normalized = value?.trim();
+  return normalized && normalized.length > 0 ? normalized : fallback;
 }
 
 /** Returns whether an embedding provider error code is retryable by default. */

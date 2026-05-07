@@ -13,10 +13,12 @@ import { describe, expect, it } from "vitest";
 import {
   type BuiltEmbeddingInput,
   buildCodeChunkEmbeddingInput,
+  buildEmbeddingCacheKey,
   buildEmbeddingInputBatches,
   createEmbeddingProviderFromEnvironment,
   createHashEmbeddingProvider,
   createOpenAIEmbeddingProvider,
+  DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
   DEFAULT_EMBEDDING_DIMENSIONS,
   type EmbeddingProvider,
   EmbeddingProviderError,
@@ -73,6 +75,13 @@ type TestCodeChunkRow = {
   readonly startLine: number;
   /** Optional symbol ID attached to the chunk. */
   readonly symbolId: string | null;
+};
+
+type TestCachedEmbeddingRow = {
+  /** Vector stored by a previous embedding row. */
+  readonly embedding: readonly number[];
+  /** Durable cache key stored with the previous embedding row. */
+  readonly embeddingCacheKey: `sha256:${string}`;
 };
 
 describe("createHashEmbeddingProvider", () => {
@@ -315,6 +324,93 @@ describe("embedChunkBatch", () => {
     expect(JSON.stringify(spans)).not.toContain("SECRET_TOKEN");
   });
 
+  it("reuses durable cached vectors before calling the provider", async () => {
+    const cachedSource = {
+      chunkId: "chunk_cached",
+      endLine: 4,
+      path: "src/cached.ts",
+      startLine: 1,
+      text: "export const cached = true;",
+    };
+    const missSource = {
+      chunkId: "chunk_miss",
+      endLine: 4,
+      path: "src/miss.ts",
+      startLine: 1,
+      text: "export const miss = true;",
+    };
+    const cachedInput = buildCodeChunkEmbeddingInput(cachedSource);
+    const cachedVector = [0.1, 0.2];
+    const insertedValues: unknown[] = [];
+    const providerInputs: string[][] = [];
+    const provider = {
+      dimensions: 2,
+      embedTexts: async (texts) => {
+        providerInputs.push([...texts]);
+        return texts.map(() => [0.9, 1]);
+      },
+      model: "text-embedding-3-small",
+      providerId: "fake",
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      embedChunkBatch(testEmbeddingPayload(["chunk_cached", "chunk_miss"]), {
+        db: createEmbeddingDatabaseStub({
+          cachedEmbeddingRows: [
+            {
+              embedding: cachedVector,
+              embeddingCacheKey: buildEmbeddingCacheKey({
+                dimensions: provider.dimensions,
+                embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+                inputHash: cachedInput.inputHash,
+                inputKind: cachedInput.inputKind,
+                model: provider.model,
+                provider: provider.providerId,
+              }),
+            },
+          ],
+          insertedValues,
+          rows: [
+            testCodeChunkRow("chunk_cached", {
+              metadata: { text: cachedSource.text },
+              path: cachedSource.path,
+            }),
+            testCodeChunkRow("chunk_miss", {
+              metadata: { text: missSource.text },
+              path: missSource.path,
+            }),
+          ],
+        }),
+        provider,
+      }),
+    ).resolves.toEqual({
+      embeddedChunkCount: 2,
+      skippedChunkIds: [],
+    });
+
+    expect(providerInputs).toHaveLength(1);
+    expect(providerInputs[0]).toEqual([expect.stringContaining("path: src/miss.ts")]);
+    expect(JSON.stringify(providerInputs)).not.toContain("src/cached.ts");
+    expect(insertedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          chunkId: "chunk_cached",
+          embedding: cachedVector,
+          embeddingCacheKey: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+          embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+          inputHash: cachedInput.inputHash,
+          inputKind: "code_chunk",
+          provider: "fake",
+        }),
+        expect.objectContaining({
+          chunkId: "chunk_miss",
+          embedding: [0.9, 1],
+          provider: "fake",
+        }),
+      ]),
+    );
+  });
+
   it("records failed embedding telemetry when vector validation fails", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -526,20 +622,31 @@ function testCodeChunkRow(
 }
 
 function createEmbeddingDatabaseStub(options: {
+  /** Cached embedding rows returned by the fake cache lookup. */
+  readonly cachedEmbeddingRows?: readonly TestCachedEmbeddingRow[];
+  /** Captures values passed to the fake embedding insert. */
+  readonly insertedValues?: unknown[] | undefined;
   /** Chunk rows returned by the fake initial chunk lookup. */
   readonly rows: readonly TestCodeChunkRow[];
   /** Chunk IDs returned by the fake embedding insert. */
   readonly insertedChunkIds?: readonly string[];
 }): HeimdallDatabase {
   const insertedChunkIds = options.insertedChunkIds ?? options.rows.map((row) => row.chunkId);
+  let rootSelectCount = 0;
   const tx = {
     insert: (_table: unknown) => ({
-      values: (_values: unknown) => ({
-        onConflictDoNothing: () => ({
-          returning: async (_projection: unknown) =>
-            insertedChunkIds.map((chunkId) => ({ chunkId })),
-        }),
-      }),
+      values: (values: unknown) => {
+        if (Array.isArray(values)) {
+          options.insertedValues?.push(...values);
+        }
+
+        return {
+          onConflictDoNothing: () => ({
+            returning: async (_projection: unknown) =>
+              insertedChunkIds.map((chunkId) => ({ chunkId })),
+          }),
+        };
+      },
     }),
     select: (_projection: unknown) => ({
       from: (_table: unknown) => ({
@@ -555,7 +662,13 @@ function createEmbeddingDatabaseStub(options: {
   const db = {
     select: () => ({
       from: (_table: unknown) => ({
-        where: async (_condition: unknown) => options.rows,
+        where: async (_condition: unknown) => {
+          const selectedRows =
+            rootSelectCount === 0 ? options.rows : (options.cachedEmbeddingRows ?? []);
+          rootSelectCount += 1;
+
+          return selectedRows;
+        },
       }),
     }),
     transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
