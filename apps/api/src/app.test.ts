@@ -166,6 +166,74 @@ describe("api app", () => {
     });
   });
 
+  it("exposes liveness without touching external dependencies", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+
+    const response = await app.handle(new Request("http://localhost/livez"));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      checks: [{ name: "process", status: "pass" }],
+      ok: true,
+      service: "api",
+      status: "pass",
+    });
+  });
+
+  it("returns readiness success when injected checks pass", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      readinessCheck: async () => [
+        { name: "config", status: "pass" },
+        { name: "postgres", status: "pass" },
+      ],
+    });
+
+    const response = await app.handle(new Request("http://localhost/readyz"));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      checks: [
+        { name: "config", status: "pass" },
+        { name: "postgres", status: "pass" },
+      ],
+      ok: true,
+      service: "api",
+      status: "pass",
+    });
+  });
+
+  it("returns readiness failure without leaking dependency details", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      readinessCheck: async () => [
+        {
+          message: "Postgres is unavailable.",
+          name: "postgres",
+          status: "fail",
+        },
+      ],
+    });
+
+    const response = await app.handle(new Request("http://localhost/readyz"));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      checks: [
+        {
+          message: "Postgres is unavailable.",
+          name: "postgres",
+          status: "fail",
+        },
+      ],
+      ok: false,
+      service: "api",
+      status: "fail",
+    });
+  });
+
   it("exposes OpenAPI JSON outside production", async () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousOpenApiEnabled = process.env.HEIMDALL_OPENAPI_ENABLED;

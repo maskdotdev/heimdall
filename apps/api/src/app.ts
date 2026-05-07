@@ -30,6 +30,7 @@ import {
   type ProviderSubscription,
   StripeBillingProvider,
 } from "@repo/billing";
+import { loadRuntimeConfig } from "@repo/config";
 import {
   type BillingReconcileJobPayload,
   type CreateBillingCheckoutSessionRequest,
@@ -2484,6 +2485,36 @@ class BillingWebhookProcessingError extends Error {
   }
 }
 
+/** API health check status returned by liveness and readiness probes. */
+export type ApiHealthStatus = "fail" | "pass";
+
+/** One product-safe API health check row. */
+export type ApiHealthCheck = {
+  /** Stable dependency or subsystem name. */
+  readonly name: string;
+  /** Product-safe health status. */
+  readonly status: ApiHealthStatus;
+  /** Optional product-safe detail without secrets or connection strings. */
+  readonly message?: string;
+};
+
+/** Product-safe API health probe response. */
+export type ApiHealthResponse = {
+  /** Per-check health rows. */
+  readonly checks: readonly ApiHealthCheck[];
+  /** Whether every check passed. */
+  readonly ok: boolean;
+  /** Service identifier. */
+  readonly service: "api";
+  /** Aggregate health status. */
+  readonly status: ApiHealthStatus;
+  /** ISO timestamp for the probe response. */
+  readonly timestamp: string;
+};
+
+/** Readiness check hook used by tests and custom API composition. */
+export type ApiReadinessCheck = () => Promise<readonly ApiHealthCheck[]>;
+
 /** Dependencies used to create the API app. */
 export type CreateApiAppOptions = {
   /** GitHub webhook handler for tests or custom composition. */
@@ -2512,6 +2543,8 @@ export type CreateApiAppOptions = {
   readonly productGitHubOAuth?: ProductGitHubOAuthOptions;
   /** Admin control-plane observability sink for structured telemetry. */
   readonly adminObservabilitySink?: ObservabilitySink;
+  /** Optional readiness check hook for tests or custom composition. */
+  readonly readinessCheck?: ApiReadinessCheck;
 };
 
 /** Creates the Heimdall API app. */
@@ -2575,6 +2608,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
     createProductGitHubOAuthService({ auth: productGitHubOAuth, db: getDatabaseClient().db });
   const adminAuth = resolveAdminControlPlaneAuth(options.adminControlPlaneAuth);
   const observabilitySink = options.adminObservabilitySink ?? createNoopObservabilitySink();
+  const readinessCheck = options.readinessCheck ?? (() => checkApiReadiness(getDatabaseClient));
 
   return new Elysia()
     .use(
@@ -2606,6 +2640,22 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       }),
     )
     .get("/healthz", () => ({ ok: true, service: "api" }))
+    .get("/livez", () =>
+      createApiHealthResponse([
+        {
+          name: "process",
+          status: "pass",
+        },
+      ]),
+    )
+    .get("/readyz", async ({ set }) => {
+      const response = createApiHealthResponse(await readinessCheck());
+      if (!response.ok) {
+        set.status = 503;
+      }
+
+      return response;
+    })
     .options("/app/*", ({ request, set }) => {
       setProductResponseHeaders(request, set);
       set.status = 204;
@@ -6228,6 +6278,51 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         throw error;
       }
     });
+}
+
+/** Creates a product-safe API health response from individual checks. */
+function createApiHealthResponse(checks: readonly ApiHealthCheck[]): ApiHealthResponse {
+  const ok = checks.length > 0 && checks.every((check) => check.status === "pass");
+
+  return {
+    checks,
+    ok,
+    service: "api",
+    status: ok ? "pass" : "fail",
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/** Runs default API readiness checks against config and critical dependencies. */
+async function checkApiReadiness(
+  getDatabaseClient: () => DatabaseClient,
+): Promise<readonly ApiHealthCheck[]> {
+  const checks: ApiHealthCheck[] = [];
+
+  try {
+    loadRuntimeConfig();
+    checks.push({ name: "config", status: "pass" });
+  } catch {
+    checks.push({
+      message: "Runtime configuration is invalid.",
+      name: "config",
+      status: "fail",
+    });
+    return checks;
+  }
+
+  try {
+    await getDatabaseClient().db.execute(sql`select 1`);
+    checks.push({ name: "postgres", status: "pass" });
+  } catch {
+    checks.push({
+      message: "Postgres is unavailable.",
+      name: "postgres",
+      status: "fail",
+    });
+  }
+
+  return checks;
 }
 
 /** Creates the durable control-plane service backed by the database. */
