@@ -170,9 +170,14 @@ import {
   productCapabilities,
   productPermissionsForRole,
   recordSecurityEvent,
+  SECURITY_EVENT_SEVERITIES,
+  SECURITY_EVENT_SOURCES,
+  SECURITY_EVENT_STATUSES,
   type SecurityEvent,
   type SecurityEventSeverity,
   type SecurityEventSink,
+  type SecurityEventSource,
+  type SecurityEventStatus,
   verifyAdminIdentityAssertion,
   verifyCsrfToken,
 } from "@repo/security";
@@ -1877,6 +1882,62 @@ type AdminAuditLogSummary = {
   readonly metadata?: unknown;
 };
 
+/** Query options for security event history search. */
+type AdminSecurityEventQuery = {
+  /** Organization filter. */
+  readonly orgId?: string | undefined;
+  /** Repository filter. */
+  readonly repoId?: string | undefined;
+  /** Security event type filter. */
+  readonly type?: string | undefined;
+  /** Severity filter. */
+  readonly severity?: SecurityEventSeverity | undefined;
+  /** Source subsystem filter. */
+  readonly source?: SecurityEventSource | undefined;
+  /** Triage status filter. */
+  readonly status?: SecurityEventStatus | undefined;
+  /** Actor ID filter. */
+  readonly actorId?: string | undefined;
+  /** Resource type filter. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID filter. */
+  readonly resourceId?: string | undefined;
+  /** Free-text search over type, actor, resource, and metadata. */
+  readonly search?: string | undefined;
+  /** Maximum number of rows to return. */
+  readonly limit: number;
+};
+
+/** Security event summary returned by the control-plane dashboard. */
+type AdminSecurityEventSummary = {
+  /** Security event row ID. */
+  readonly securityEventId: string;
+  /** Organization associated with the event when available. */
+  readonly orgId?: string | undefined;
+  /** Repository associated with the event when available. */
+  readonly repoId?: string | undefined;
+  /** Security event type. */
+  readonly type: string;
+  /** Severity used for incident triage. */
+  readonly severity: SecurityEventSeverity;
+  /** Service or subsystem that emitted the event. */
+  readonly source: SecurityEventSource;
+  /** Current triage status. */
+  readonly status: SecurityEventStatus;
+  /** Actor that triggered the event when known. */
+  readonly actorId?: string | undefined;
+  /** Resource type affected by the event. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID affected by the event. */
+  readonly resourceId?: string | undefined;
+  /** Product-safe event metadata. */
+  readonly metadata: Readonly<Record<string, unknown>>;
+  /** ISO timestamp when the event was created. */
+  readonly createdAt: string;
+  /** ISO timestamp when the event was last updated. */
+  readonly updatedAt: string;
+};
+
 /** Query options for usage rollup inspection. */
 type AdminUsageQuery = {
   /** Organization IDs allowed by the caller scope. Use "*" for all organizations. */
@@ -2537,6 +2598,10 @@ export type AdminControlPlaneService = {
   ) => Promise<AdminControlPlaneSettings>;
   /** Lists searchable admin audit history. */
   readonly listAuditLogs: (query: AdminAuditLogQuery) => Promise<readonly AdminAuditLogSummary[]>;
+  /** Lists searchable security event history. */
+  readonly listSecurityEvents: (
+    query: AdminSecurityEventQuery,
+  ) => Promise<readonly AdminSecurityEventSummary[]>;
   /** Lists internal usage rollups visible to an admin actor scope. */
   readonly listUsageSummary: (query: AdminUsageQuery) => Promise<AdminUsageSummary>;
   /** Gets customer-facing usage summary metrics for one scoped org or repository. */
@@ -6228,6 +6293,30 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
 
       return { data: { auditLogs: await getAdminControlPlaneService().listAuditLogs(query) } };
     })
+    .get("/admin/security-events", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.audit.view",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const query = securityEventQueryFromUrl(new URL(request.url));
+      const authorizationResponse = guardSecurityEventQueryScope(guardResult.actor, query, set);
+      if (authorizationResponse) {
+        return authorizationResponse;
+      }
+
+      return {
+        data: {
+          securityEvents: await getAdminControlPlaneService().listSecurityEvents(query),
+        },
+      };
+    })
     .get("/admin/usage", async ({ request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -6710,6 +6799,7 @@ function createAdminControlPlaneService(dependencies: {
     listEvaluationRuns: (query) => listEvaluationRuns(dependencies.db, query),
     listEvaluationSuites: (query) => listEvaluationSuites(dependencies.db, query),
     listAuditLogs: (query) => listAuditLogs(dependencies.db, query),
+    listSecurityEvents: (query) => listSecurityEvents(dependencies.db, query),
     listRepositoryRules: (repoId) => listRepositoryRules(dependencies.db, repoId),
     listReviewFindings: (reviewRunId, query) =>
       listReviewFindings(dependencies.db, reviewRunId, query),
@@ -11199,6 +11289,67 @@ async function listAuditLogs(
   return rows.map(toAuditLogSummary);
 }
 
+/** Lists security events with strict filters and deterministic ordering. */
+async function listSecurityEvents(
+  db: HeimdallDatabase,
+  query: AdminSecurityEventQuery,
+): Promise<readonly AdminSecurityEventSummary[]> {
+  const conditions: SQL[] = [];
+  if (query.orgId) {
+    conditions.push(eq(securityEvents.orgId, query.orgId));
+  }
+  if (query.repoId) {
+    conditions.push(eq(securityEvents.repoId, query.repoId));
+  }
+  if (query.type) {
+    conditions.push(eq(securityEvents.type, query.type));
+  }
+  if (query.severity) {
+    conditions.push(eq(securityEvents.severity, query.severity));
+  }
+  if (query.source) {
+    conditions.push(eq(securityEvents.source, query.source));
+  }
+  if (query.status) {
+    conditions.push(eq(securityEvents.status, query.status));
+  }
+  if (query.actorId) {
+    conditions.push(eq(securityEvents.actorId, query.actorId));
+  }
+  if (query.resourceType) {
+    conditions.push(eq(securityEvents.resourceType, query.resourceType));
+  }
+  if (query.resourceId) {
+    conditions.push(eq(securityEvents.resourceId, query.resourceId));
+  }
+  if (query.search) {
+    const pattern = `%${query.search}%`;
+    const searchCondition = or(
+      ilike(securityEvents.securityEventId, pattern),
+      ilike(securityEvents.type, pattern),
+      ilike(securityEvents.severity, pattern),
+      ilike(securityEvents.source, pattern),
+      ilike(securityEvents.status, pattern),
+      ilike(securityEvents.actorId, pattern),
+      ilike(securityEvents.resourceType, pattern),
+      ilike(securityEvents.resourceId, pattern),
+      ilike(sql<string>`${securityEvents.metadata}::text`, pattern),
+    );
+    if (searchCondition) {
+      conditions.push(searchCondition);
+    }
+  }
+
+  const rows = await db
+    .select()
+    .from(securityEvents)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(securityEvents.createdAt), desc(securityEvents.securityEventId))
+    .limit(query.limit);
+
+  return rows.map(toSecurityEventSummary);
+}
+
 /** Lists aggregated usage rows for an admin-visible scope and time period. */
 async function listUsageSummary(
   db: HeimdallDatabase,
@@ -14100,6 +14251,30 @@ function guardAuditQueryScope(
   return undefined;
 }
 
+/** Guards security event query scope before search execution. */
+function guardSecurityEventQueryScope(
+  actor: AdminActor,
+  query: AdminSecurityEventQuery,
+  set: AdminStatusSet,
+): AdminErrorResponse | undefined {
+  if (query.orgId && !actorCanAccessOrg(actor, query.orgId)) {
+    return guardScopedAccess(actor, query.orgId, undefined, set);
+  }
+
+  if (!query.orgId && !actor.orgIds.includes("*")) {
+    set.status = 403;
+    return {
+      error: {
+        code: "admin.security_event_scope_required",
+        message:
+          "Security event history requires an orgId filter unless the actor has all-organization scope.",
+      },
+    };
+  }
+
+  return undefined;
+}
+
 /** Guards organization and repository filters for usage queries. */
 async function guardUsageQueryScope(
   actor: AdminActor,
@@ -15777,6 +15952,47 @@ function auditLogQueryFromUrl(url: URL): AdminAuditLogQuery {
   };
 }
 
+/** Converts a URL into a bounded security event query. */
+function securityEventQueryFromUrl(url: URL): AdminSecurityEventQuery {
+  return {
+    actorId: optionalQueryString(url, "actorId"),
+    limit: boundedLimit(url.searchParams.get("limit")),
+    orgId: optionalQueryString(url, "orgId"),
+    repoId: optionalQueryString(url, "repoId"),
+    resourceId: optionalQueryString(url, "resourceId"),
+    resourceType: optionalQueryString(url, "resourceType"),
+    search: optionalQueryString(url, "search"),
+    severity: optionalSecurityEventSeverity(url),
+    source: optionalSecurityEventSource(url),
+    status: optionalSecurityEventStatus(url),
+    type: optionalQueryString(url, "type"),
+  };
+}
+
+/** Reads a known security event severity from a URL query string. */
+function optionalSecurityEventSeverity(url: URL): SecurityEventSeverity | undefined {
+  const value = optionalQueryString(url, "severity");
+  return value && SECURITY_EVENT_SEVERITIES.includes(value as SecurityEventSeverity)
+    ? (value as SecurityEventSeverity)
+    : undefined;
+}
+
+/** Reads a known security event source from a URL query string. */
+function optionalSecurityEventSource(url: URL): SecurityEventSource | undefined {
+  const value = optionalQueryString(url, "source");
+  return value && SECURITY_EVENT_SOURCES.includes(value as SecurityEventSource)
+    ? (value as SecurityEventSource)
+    : undefined;
+}
+
+/** Reads a known security event status from a URL query string. */
+function optionalSecurityEventStatus(url: URL): SecurityEventStatus | undefined {
+  const value = optionalQueryString(url, "status");
+  return value && SECURITY_EVENT_STATUSES.includes(value as SecurityEventStatus)
+    ? (value as SecurityEventStatus)
+    : undefined;
+}
+
 /** Reads a non-empty query string value. */
 function optionalQueryString(url: URL, key: string): string | undefined {
   const value = url.searchParams.get(key)?.trim();
@@ -15891,6 +16107,39 @@ function toAuditLogSummary(row: {
     actorUserId: row.actorUserId ?? undefined,
     resourceId: row.resourceId ?? undefined,
     resourceType: row.resourceType,
+  };
+}
+
+/** Converts a security event row to the dashboard summary shape. */
+function toSecurityEventSummary(row: {
+  readonly securityEventId: string;
+  readonly orgId: string | null;
+  readonly repoId: string | null;
+  readonly type: string;
+  readonly severity: string;
+  readonly source: string;
+  readonly status: string;
+  readonly actorId: string | null;
+  readonly resourceType: string | null;
+  readonly resourceId: string | null;
+  readonly metadata: unknown;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}): AdminSecurityEventSummary {
+  return {
+    actorId: row.actorId ?? undefined,
+    createdAt: row.createdAt.toISOString(),
+    metadata: asOptionalRecord(row.metadata) ?? {},
+    orgId: row.orgId ?? undefined,
+    repoId: row.repoId ?? undefined,
+    resourceId: row.resourceId ?? undefined,
+    resourceType: row.resourceType ?? undefined,
+    securityEventId: row.securityEventId,
+    severity: row.severity as SecurityEventSeverity,
+    source: row.source as SecurityEventSource,
+    status: row.status as SecurityEventStatus,
+    type: row.type,
+    updatedAt: row.updatedAt.toISOString(),
   };
 }
 

@@ -1032,6 +1032,7 @@ type ViewKind =
   | "usage"
   | "plan"
   | "billing"
+  | "security"
   | "audit";
 
 /** Top-level console mode. */
@@ -2122,6 +2123,36 @@ type AdminAuditLogSummary = {
   readonly metadata?: unknown;
 };
 
+/** Security event row returned by the API. */
+type AdminSecurityEventSummary = {
+  /** Security event row ID. */
+  readonly securityEventId: string;
+  /** Organization ID when available. */
+  readonly orgId?: string | undefined;
+  /** Repository ID when available. */
+  readonly repoId?: string | undefined;
+  /** Security event type. */
+  readonly type: string;
+  /** Event severity. */
+  readonly severity: string;
+  /** Emitting service or subsystem. */
+  readonly source: string;
+  /** Triage status. */
+  readonly status: string;
+  /** Actor ID when known. */
+  readonly actorId?: string | undefined;
+  /** Resource type when available. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID when available. */
+  readonly resourceId?: string | undefined;
+  /** Product-safe event metadata. */
+  readonly metadata: Readonly<Record<string, unknown>>;
+  /** Event creation timestamp. */
+  readonly createdAt: string;
+  /** Event update timestamp. */
+  readonly updatedAt: string;
+};
+
 /** Usage rollup row returned by the API. */
 type AdminUsageRollupSummary = {
   /** Organization that owns the usage. */
@@ -2509,6 +2540,36 @@ type AuditViewState = {
   error?: string | undefined;
 };
 
+/** Mutable security event view state. */
+type SecurityEventViewState = {
+  /** Organization filter. */
+  orgId: string;
+  /** Repository filter. */
+  repoId: string;
+  /** Security event type filter. */
+  type: string;
+  /** Severity filter. */
+  severity: string;
+  /** Source subsystem filter. */
+  source: string;
+  /** Triage status filter. */
+  status: string;
+  /** Actor ID filter. */
+  actorId: string;
+  /** Resource type filter. */
+  resourceType: string;
+  /** Resource ID filter. */
+  resourceId: string;
+  /** Free-text search. */
+  search: string;
+  /** Loaded security event rows. */
+  rows: readonly AdminSecurityEventSummary[];
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+};
+
 /** Mutable usage view state. */
 type UsageViewState = {
   /** Organization filter. */
@@ -2724,6 +2785,8 @@ type AppState = {
   settings: SettingsViewState;
   /** Audit history view state. */
   audit: AuditViewState;
+  /** Security event history view state. */
+  security: SecurityEventViewState;
   /** Usage ledger inspection state. */
   usage: UsageViewState;
   /** Plan and entitlement inspection state. */
@@ -2758,6 +2821,20 @@ const DEFAULT_ENTITLEMENT_FEATURE_KEYS = [
   "static_analysis.enabled",
   "security.audit_logs",
 ].join("\n");
+/** Selectable security event severities shown in the operator dashboard. */
+const SECURITY_EVENT_SEVERITY_OPTIONS = ["", "critical", "high", "medium", "low", "info"];
+/** Selectable security event sources shown in the operator dashboard. */
+const SECURITY_EVENT_SOURCE_OPTIONS = [
+  "",
+  "api",
+  "worker",
+  "github",
+  "sandbox",
+  "llm_gateway",
+  "system",
+];
+/** Selectable security event statuses shown in the operator dashboard. */
+const SECURITY_EVENT_STATUS_OPTIONS = ["", "new", "triaged", "dismissed", "incident_created"];
 /** Sandbox runner options shown in repository settings. */
 const SANDBOX_RUNNER_OPTIONS = ["docker", "gvisor", "microvm"] as const;
 /** Forked pull request runner options shown in repository settings. */
@@ -2896,6 +2973,19 @@ const state: AppState = {
     resourceType: "",
     resourceId: "",
     actorUserId: "",
+    search: "",
+    rows: [],
+  },
+  security: {
+    orgId: "",
+    repoId: "",
+    type: "",
+    severity: "",
+    source: "",
+    status: "",
+    actorId: "",
+    resourceType: "",
+    resourceId: "",
     search: "",
     rows: [],
   },
@@ -3338,6 +3428,11 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "load-security") {
+    await loadSecurityEvents();
+    return;
+  }
+
   if (action === "load-usage") {
     await loadUsageSummary();
     return;
@@ -3475,6 +3570,11 @@ function handleInput(event: Event): void {
 
   if (field?.startsWith("audit.")) {
     updateAuditField(field.slice("audit.".length), target.value);
+    return;
+  }
+
+  if (field?.startsWith("security.")) {
+    updateSecurityEventField(field.slice("security.".length), target.value);
     return;
   }
 
@@ -5154,6 +5254,35 @@ async function loadAuditHistory(): Promise<void> {
     state.audit.error = errorMessage(error);
   } finally {
     state.audit.loading = undefined;
+    render();
+  }
+}
+
+/** Loads security event history using the current filters. */
+async function loadSecurityEvents(): Promise<void> {
+  state.security.loading = "Loading security events";
+  state.security.error = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "orgId", state.security.orgId);
+    appendQueryParam(params, "repoId", state.security.repoId);
+    appendQueryParam(params, "type", state.security.type);
+    appendQueryParam(params, "severity", state.security.severity);
+    appendQueryParam(params, "source", state.security.source);
+    appendQueryParam(params, "status", state.security.status);
+    appendQueryParam(params, "actorId", state.security.actorId);
+    appendQueryParam(params, "resourceType", state.security.resourceType);
+    appendQueryParam(params, "resourceId", state.security.resourceId);
+    appendQueryParam(params, "search", state.security.search);
+    params.set("limit", "50");
+    const result = await requestAdminData<{
+      readonly securityEvents: readonly AdminSecurityEventSummary[];
+    }>(`/admin/security-events?${params.toString()}`);
+    state.security.rows = result.securityEvents;
+  } catch (error) {
+    state.security.error = errorMessage(error);
+  } finally {
+    state.security.loading = undefined;
     render();
   }
 }
@@ -7036,6 +7165,7 @@ function renderPrimaryNav(): string {
     { kind: "usage", label: "Usage" },
     { kind: "plan", label: "Plan" },
     { kind: "billing", label: "Billing" },
+    { kind: "security", label: "Security" },
     { kind: "audit", label: "Audit" },
   ];
   return `
@@ -7079,6 +7209,9 @@ function renderActiveView(): string {
   }
   if (state.activeView === "billing") {
     return renderBillingView();
+  }
+  if (state.activeView === "security") {
+    return renderSecurityEventView();
   }
 
   return `
@@ -9418,6 +9551,103 @@ function renderAuditRows(rows: readonly AdminAuditLogSummary[]): string {
   `;
 }
 
+/** Renders a security event history search view. */
+function renderSecurityEventView(): string {
+  const security = state.security;
+  return `
+    <main class="inspector">
+      <section class="inspector-header">
+        <div>
+          <p class="eyebrow">Security</p>
+          <h2>Security Events</h2>
+        </div>
+        <button class="primary" data-action="load-security" type="button">Search</button>
+      </section>
+      ${security.loading ? `<p class="notice">${escapeHtml(security.loading)}...</p>` : ""}
+      ${security.error ? `<p class="error-line">${escapeHtml(security.error)}</p>` : ""}
+      <section class="panel">
+        <h3>Filters</h3>
+        <div class="form-grid">
+          ${renderTextInput("security.search", "Search", security.search, "keyword search")}
+          ${renderTextInput("security.type", "Type", security.type, "cross_tenant_access_attempt")}
+          ${renderSelect(
+            "security.severity",
+            "Severity",
+            security.severity,
+            SECURITY_EVENT_SEVERITY_OPTIONS,
+          )}
+          ${renderSelect(
+            "security.source",
+            "Source",
+            security.source,
+            SECURITY_EVENT_SOURCE_OPTIONS,
+          )}
+          ${renderSelect(
+            "security.status",
+            "Status",
+            security.status,
+            SECURITY_EVENT_STATUS_OPTIONS,
+          )}
+          ${renderTextInput("security.actorId", "Actor", security.actorId, "oidc:...")}
+          ${renderTextInput("security.resourceType", "Resource type", security.resourceType, "repository")}
+          ${renderTextInput("security.resourceId", "Resource ID", security.resourceId, "repo_...")}
+          ${renderTextInput("security.repoId", "Repository ID", security.repoId, "repo_...")}
+          ${renderTextInput("security.orgId", "Organization ID", security.orgId, "org_...")}
+        </div>
+      </section>
+      ${renderSecurityEventRows(security.rows)}
+    </main>
+  `;
+}
+
+/** Renders security event result rows. */
+function renderSecurityEventRows(rows: readonly AdminSecurityEventSummary[]): string {
+  if (rows.length === 0) {
+    return renderEmptyState();
+  }
+
+  return `
+    <section class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Severity</th>
+              <th>Status</th>
+              <th>Type</th>
+              <th>Actor</th>
+              <th>Scope</th>
+              <th>Request</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${formatTime(row.createdAt)}</td>
+                    <td>
+                      <span class="status ${securitySeverityClass(row.severity)}">
+                        ${escapeHtml(row.severity)}
+                      </span>
+                    </td>
+                    <td><span class="status ${statusClass(row.status)}">${escapeHtml(row.status)}</span></td>
+                    <td>${escapeHtml(row.type)}</td>
+                    <td>${escapeHtml(row.actorId ?? "system")}</td>
+                    <td>${escapeHtml(securityEventScopeLabel(row))}</td>
+                    <td><code>${escapeHtml(requestIdFromMetadata(row.metadata) ?? "n/a")}</code></td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 /** Renders one inspector tab. */
 function renderTab(config: InspectorConfig): string {
   const active = state.activeKind === config.kind;
@@ -11315,6 +11545,15 @@ function updateAuditField(field: string, value: string): void {
   }
 }
 
+/** Updates one security event filter field. */
+function updateSecurityEventField(field: string, value: string): void {
+  if (field in state.security) {
+    (state.security as Record<string, string | readonly AdminSecurityEventSummary[] | undefined>)[
+      field
+    ] = value;
+  }
+}
+
 /** Updates one usage filter field. */
 function updateUsageField(field: string, value: string): void {
   if (field in state.usage) {
@@ -11546,6 +11785,31 @@ function requestIdFromMetadata(metadata: unknown): string | undefined {
   const record = asRecord(metadata);
   const requestId = record?.requestId;
   return typeof requestId === "string" ? requestId : undefined;
+}
+
+/** Returns a compact scope label for one security event. */
+function securityEventScopeLabel(row: AdminSecurityEventSummary): string {
+  const resource =
+    row.resourceId && row.resourceType ? `${row.resourceType}:${row.resourceId}` : undefined;
+  const scope = [row.orgId, row.repoId, resource]
+    .filter((value): value is string => Boolean(value))
+    .join(" / ");
+  return scope.length > 0 ? scope : "global";
+}
+
+/** Returns a CSS class for security event severity. */
+function securitySeverityClass(severity: string): string {
+  if (severity === "critical" || severity === "high") {
+    return "bad";
+  }
+  if (severity === "medium") {
+    return "warn";
+  }
+  if (severity === "low" || severity === "info") {
+    return "muted";
+  }
+
+  return "muted";
 }
 
 /** Returns a CSS class for a durable status. */
@@ -11850,6 +12114,7 @@ function isViewKind(value: string): value is ViewKind {
     value === "usage" ||
     value === "plan" ||
     value === "billing" ||
+    value === "security" ||
     value === "audit"
   );
 }

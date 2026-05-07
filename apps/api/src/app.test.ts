@@ -41,6 +41,9 @@ type AdminRuleSummaryFixture = Awaited<
   ReturnType<AdminControlPlaneService["listRepositoryRules"]>
 >[number];
 type AdminUsageSummaryFixture = Awaited<ReturnType<AdminControlPlaneService["listUsageSummary"]>>;
+type AdminSecurityEventFixture = Awaited<
+  ReturnType<AdminControlPlaneService["listSecurityEvents"]>
+>[number];
 type ProductUsageSummaryFixture = Awaited<
   ReturnType<AdminControlPlaneService["getProductUsageSummary"]>
 >;
@@ -4566,6 +4569,109 @@ describe("api app", () => {
     });
   });
 
+  it("serves searchable security events only to scoped audit viewers", async () => {
+    const securityEventQueries: unknown[] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        listSecurityEvents: async (query) => {
+          securityEventQueries.push(query);
+          return [
+            securityEvent({
+              actorId: query.actorId,
+              repoId: query.repoId,
+              resourceId: query.resourceId,
+              resourceType: query.resourceType,
+              severity: query.severity ?? "critical",
+              source: query.source ?? "api",
+              status: query.status ?? "new",
+              type: query.type ?? "cross_tenant_access_attempt",
+            }),
+          ];
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.audit.view"],
+      providerSubject: "usr_auditor",
+    });
+
+    const response = await app.handle(
+      new Request(
+        "http://localhost/admin/security-events?orgId=org_1&repoId=repo_1&type=cross_tenant_access_attempt&severity=critical&source=api&status=new&actorId=oidc%3Ausr_auditor&resourceType=organization&resourceId=org_2&search=cross&limit=3",
+        {
+          headers: { cookie: login.cookie },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        securityEvents: [
+          {
+            actorId: "oidc:usr_auditor",
+            repoId: "repo_1",
+            severity: "critical",
+            source: "api",
+            status: "new",
+            type: "cross_tenant_access_attempt",
+          },
+        ],
+      },
+    });
+    expect(securityEventQueries).toEqual([
+      {
+        actorId: "oidc:usr_auditor",
+        limit: 3,
+        orgId: "org_1",
+        repoId: "repo_1",
+        resourceId: "org_2",
+        resourceType: "organization",
+        search: "cross",
+        severity: "critical",
+        source: "api",
+        status: "new",
+        type: "cross_tenant_access_attempt",
+      },
+    ]);
+  });
+
+  it("requires organization scope for scoped security event history viewers", async () => {
+    let queried = false;
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        listSecurityEvents: async () => {
+          queried = true;
+          return [];
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.audit.view"],
+      providerSubject: "usr_auditor",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/admin/security-events?severity=critical", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(queried).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "admin.security_event_scope_required",
+      },
+    });
+  });
+
   it("serves scoped usage rollups to inspectors", async () => {
     const usageQueries: unknown[] = [];
     const app = createApiApp({
@@ -5719,6 +5825,7 @@ function createMockControlPlaneService(
     listRepositoryRules: async () => [],
     listReviewFindings: async () => [reviewFindingFixture()],
     listReviewRuns: async () => [reviewRunSummaryFixture],
+    listSecurityEvents: async () => [],
     listUsageSummary: async () => usageSummaryFixture(),
     previewRepositoryPolicy: async () => {
       const result = buildReviewPolicySnapshot({
@@ -6911,6 +7018,30 @@ function auditLog(action: string) {
     auditLogId: `audit_${action}`,
     occurredAt: "2026-05-05T12:00:00.000Z",
     resourceType: "admin_session",
+  };
+}
+
+/** Creates a security event summary fixture. */
+function securityEvent(
+  overrides: Partial<AdminSecurityEventFixture> = {},
+): AdminSecurityEventFixture {
+  return {
+    actorId: "oidc:usr_admin",
+    createdAt: "2026-05-05T12:00:00.000Z",
+    metadata: {
+      requestId: "req_1",
+    },
+    orgId: "org_1",
+    repoId: "repo_1",
+    resourceId: "admin_session",
+    resourceType: "session",
+    securityEventId: "secevt_1",
+    severity: "critical",
+    source: "api",
+    status: "new",
+    type: "cross_tenant_access_attempt",
+    updatedAt: "2026-05-05T12:00:00.000Z",
+    ...overrides,
   };
 }
 
