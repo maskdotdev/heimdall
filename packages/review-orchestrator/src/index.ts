@@ -20,6 +20,7 @@ import {
   backgroundJobs,
   codeIndexVersions,
   type HeimdallDatabase,
+  llmCallArtifacts,
   llmCalls,
   memoryFacts,
   PullRequestRepository,
@@ -817,6 +818,7 @@ export async function runPullRequestReview(
             contextBundle,
             ...(staticAnalysisReport ? { staticAnalysisReport } : {}),
             llmGateway: createUsageRecordingLlmGateway({
+              artifactPayloadStore,
               db: dependencies.db,
               gateway:
                 dependencies.llmGateway ??
@@ -831,6 +833,7 @@ export async function runPullRequestReview(
               orgId: repositoryRecord.orgId,
               rateCard: dependencies.llmUsageRateCard ?? ZERO_COST_LLM_RATE_CARD,
               repoId: snapshot.repoId,
+              reviewRepository,
               reviewRunId,
               usageLedger,
             }),
@@ -2526,6 +2529,8 @@ function createPublishJobKey(reviewRunId: string): string {
 
 /** Creates an LLM gateway wrapper that records call rows and token usage events. */
 function createUsageRecordingLlmGateway(input: {
+  /** Artifact payload store used to persist redacted LLM prompt/response payloads. */
+  readonly artifactPayloadStore: ReviewArtifactPayloadStore;
   /** Database used to persist LLM call rows. */
   readonly db: HeimdallDatabase;
   /** Gateway that performs the actual model work. */
@@ -2542,6 +2547,8 @@ function createUsageRecordingLlmGateway(input: {
   readonly usageLedger: UsageLedger;
   /** Rate card used to estimate internal model cost. */
   readonly rateCard: LlmTokenRateCard;
+  /** Review repository used to persist review artifact metadata. */
+  readonly reviewRepository: ReviewRepository;
 }): LLMGateway {
   let sequence = 0;
   const nextSequence = () => {
@@ -2642,6 +2649,10 @@ async function recordLlmUsage(input: {
   readonly usageLedger: UsageLedger;
   /** Rate card used to estimate internal model cost. */
   readonly rateCard: LlmTokenRateCard;
+  /** Artifact payload store used to persist redacted LLM prompt/response payloads. */
+  readonly artifactPayloadStore: ReviewArtifactPayloadStore;
+  /** Review repository used to persist review artifact metadata. */
+  readonly reviewRepository: ReviewRepository;
   /** One-based call sequence within the review run. */
   readonly sequence: number;
   /** LLM task label. */
@@ -2671,6 +2682,23 @@ async function recordLlmUsage(input: {
   const llmCallId = stableId("llm", [input.reviewRunId, input.sequence, input.task, promptHash]);
   const elapsedMs = Date.parse(input.completedAt) - Date.parse(input.startedAt);
   const latencyMs = Number.isFinite(elapsedMs) ? Math.max(0, elapsedMs) : 0;
+  const artifactRefs = await persistLlmCallArtifacts({
+    artifactPayloadStore: input.artifactPayloadStore,
+    completedAt: input.completedAt,
+    llmCallId,
+    ...(input.metadata ? { metadata: input.metadata } : {}),
+    output: input.output,
+    prompt: input.prompt,
+    promptHash,
+    promptVersion,
+    repoId: input.repoId,
+    responseHash,
+    reviewRepository: input.reviewRepository,
+    reviewRunId: input.reviewRunId,
+    sequence: input.sequence,
+    system: input.system,
+    task: input.task,
+  });
 
   await input.db
     .insert(llmCalls)
@@ -2691,6 +2719,7 @@ async function recordLlmUsage(input: {
       startedAt: new Date(input.startedAt),
       completedAt: new Date(input.completedAt),
       metadata: {
+        artifactIds: artifactRefs.map((artifact) => artifact.artifactId),
         cachedInputTokens: estimate.cachedInputTokens,
         latencyMs,
         promptVersion,
@@ -2726,6 +2755,89 @@ async function recordLlmUsage(input: {
       task: input.task,
     },
   });
+
+  await input.db
+    .insert(llmCallArtifacts)
+    .values(
+      artifactRefs.map((artifact) => ({
+        artifactRole: artifact.kind === "llm_prompt" ? "prompt" : "response",
+        llmCallId,
+        reviewArtifactId: artifact.artifactId,
+      })),
+    )
+    .onConflictDoNothing();
+}
+
+/** Persists redacted prompt and response artifacts for a successful LLM call. */
+async function persistLlmCallArtifacts(input: {
+  /** Artifact payload store used to persist LLM payloads. */
+  readonly artifactPayloadStore: ReviewArtifactPayloadStore;
+  /** Call completion timestamp. */
+  readonly completedAt: string;
+  /** Stable LLM call ID. */
+  readonly llmCallId: string;
+  /** Optional caller metadata. */
+  readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Structured model output after gateway validation. */
+  readonly output: unknown;
+  /** Secret-redacted user prompt sent to the gateway. */
+  readonly prompt: string;
+  /** Hash of the redacted prompt payload. */
+  readonly promptHash: string;
+  /** Stable prompt version used by the call. */
+  readonly promptVersion: string;
+  /** Repository that owns the review. */
+  readonly repoId: string;
+  /** Hash of the structured model output. */
+  readonly responseHash: string;
+  /** Review repository used to persist artifact metadata. */
+  readonly reviewRepository: ReviewRepository;
+  /** Review run that caused the model call. */
+  readonly reviewRunId: string;
+  /** One-based call sequence within the review run. */
+  readonly sequence: number;
+  /** System prompt sent to the gateway. */
+  readonly system: string;
+  /** LLM task label. */
+  readonly task: string;
+}): Promise<readonly ReviewArtifactRef[]> {
+  const common = {
+    llmCallId: input.llmCallId,
+    promptVersion: input.promptVersion,
+    sequence: input.sequence,
+    task: input.task,
+  };
+
+  const [promptArtifact, responseArtifact] = await Promise.all([
+    persistArtifact(input.reviewRepository, input.artifactPayloadStore, {
+      createdAt: input.completedAt,
+      kind: "llm_prompt",
+      name: `llm-call-${input.sequence}-${input.task}-prompt`,
+      payload: {
+        ...common,
+        metadata: input.metadata ?? {},
+        prompt: input.prompt,
+        promptHash: input.promptHash,
+        system: input.system,
+      },
+      repoId: input.repoId,
+      reviewRunId: input.reviewRunId,
+    }),
+    persistArtifact(input.reviewRepository, input.artifactPayloadStore, {
+      createdAt: input.completedAt,
+      kind: "llm_response",
+      name: `llm-call-${input.sequence}-${input.task}-response`,
+      payload: {
+        ...common,
+        output: input.output,
+        responseHash: input.responseHash,
+      },
+      repoId: input.repoId,
+      reviewRunId: input.reviewRunId,
+    }),
+  ]);
+
+  return [promptArtifact, responseArtifact];
 }
 
 /** Returns a string metadata value by key when present. */
