@@ -1,8 +1,10 @@
 import { validCandidateFindingFixture } from "@repo/contracts/fixtures/finding.fixture";
 import {
   validChangedFileFixture,
+  validDiffHunkFixture,
   validPullRequestSnapshotFixture,
 } from "@repo/contracts/fixtures/pull-request.fixture";
+import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
 import { createPolicyFixture } from "@repo/rules";
 import { describe, expect, it } from "vitest";
@@ -201,6 +203,72 @@ describe("validateAndRankCandidateFindings", () => {
           reasons: expect.arrayContaining(["duplicate_exact"]),
           stage: "dedupe",
           status: "rejected",
+        }),
+      ]),
+    );
+  });
+
+  it("rejects semantic duplicates without requiring exact fingerprints or locations", () => {
+    const snapshot = {
+      ...validPullRequestSnapshotFixture,
+      changedFiles: [
+        {
+          ...validChangedFileFixture,
+          additions: 2,
+          hunks: [
+            {
+              ...validDiffHunkFixture,
+              lines: [
+                ...validDiffHunkFixture.lines,
+                {
+                  kind: "addition",
+                  content: "  return Number(a) + Number(b) + Number(c);",
+                  newLine: 4,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } satisfies PullRequestSnapshot;
+    const [baseEvidence] = validCandidateFindingFixture.evidence;
+    if (!baseEvidence) {
+      throw new Error("Expected candidate finding fixture evidence.");
+    }
+    const semanticDuplicate = {
+      ...validCandidateFindingFixture,
+      findingId: "fnd_SEMANTIC",
+      fingerprint: "fp_math_add_non_finite_alternate",
+      title: "Handle numeric inputs that are not finite",
+      body: "The new coercion accepts NaN and Infinity and can propagate unexpected values to callers.",
+      location: { ...validCandidateFindingFixture.location, line: 4 },
+      evidence: [
+        {
+          ...baseEvidence,
+          evidenceId: "ev_SEMANTIC",
+          range: { startLine: 4, endLine: 4 },
+        },
+      ],
+    };
+
+    const result = validateCandidateFindings({
+      snapshot,
+      findings: [validCandidateFindingFixture, semanticDuplicate],
+      timestamp: validCandidateFindingFixture.createdAt,
+    });
+
+    const rejected = result.rejected.find(
+      (finding) => finding.candidateFindingId === "fnd_SEMANTIC",
+    );
+    expect(rejected?.validation.reasons).toContain("duplicate_semantic");
+    expect(rejected?.validation.reasons).not.toContain("duplicate_exact");
+    expect(rejected?.validation.reasons).not.toContain("duplicate_location");
+    expect(result.duplicateGroups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          canonicalCandidateFindingId: validCandidateFindingFixture.findingId,
+          duplicateCandidateFindingIds: ["fnd_SEMANTIC"],
+          groupKind: "semantic",
         }),
       ]),
     );

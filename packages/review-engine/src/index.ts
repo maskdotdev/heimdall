@@ -215,7 +215,7 @@ type NormalizedFindingValidationConfig = {
 /** Duplicate group emitted by deterministic validation. */
 export type FindingDuplicateGroup = {
   /** Dedupe strategy that created the group. */
-  readonly groupKind: "exact" | "location";
+  readonly groupKind: "exact" | "location" | "semantic";
   /** Canonical candidate retained for ranking. */
   readonly canonicalCandidateFindingId: string;
   /** Duplicate candidates rejected in favor of the canonical candidate. */
@@ -307,17 +307,26 @@ export function validateCandidateFindings(
   const state = buildAnchorState(input.snapshot);
   const seenFingerprints = new Set<string>();
   const seenLocations = new Set<string>();
+  const seenSemanticSignatures: SemanticFindingSignature[] = [];
   const accepted: ValidatedFinding[] = [];
   const rejected: ValidatedFinding[] = [];
 
   for (const finding of input.findings) {
-    const reasons = rejectionReasons(finding, state, config, seenFingerprints, seenLocations);
+    const reasons = rejectionReasons(
+      finding,
+      state,
+      config,
+      seenFingerprints,
+      seenLocations,
+      seenSemanticSignatures,
+    );
     const decision = reasons.length === 0 ? "publish" : "reject";
     const validated = toValidatedFinding(finding, input.timestamp, decision, reasons);
 
     if (decision === "publish") {
       seenFingerprints.add(finding.fingerprint);
       seenLocations.add(locationKey(finding));
+      seenSemanticSignatures.push(buildSemanticSignature(finding));
       accepted.push(validated);
     } else {
       rejected.push(validated);
@@ -379,8 +388,11 @@ function buildDuplicateGroups(
   const groups = new Map<string, FindingDuplicateGroup>();
   const canonicalByFingerprint = new Map<string, string>();
   const canonicalByLocation = new Map<string, string>();
+  const canonicalSemanticSignatures: SemanticFindingSignature[] = [];
 
   for (const finding of findings) {
+    const isExactDuplicate = canonicalByFingerprint.has(finding.fingerprint);
+    const isLocationDuplicate = canonicalByLocation.has(locationKey(finding));
     collectDuplicateGroup({
       canonicalByKey: canonicalByFingerprint,
       finding,
@@ -395,6 +407,13 @@ function buildDuplicateGroups(
       groups,
       key: locationKey(finding),
     });
+    if (!isExactDuplicate && !isLocationDuplicate) {
+      collectSemanticDuplicateGroup({
+        canonicalSignatures: canonicalSemanticSignatures,
+        finding,
+        groups,
+      });
+    }
   }
 
   return [...groups.values()]
@@ -425,6 +444,33 @@ function collectDuplicateGroup(input: {
     ],
     groupKey,
     groupKind: input.groupKind,
+  });
+}
+
+function collectSemanticDuplicateGroup(input: {
+  readonly canonicalSignatures: SemanticFindingSignature[];
+  readonly finding: CandidateFinding;
+  readonly groups: Map<string, FindingDuplicateGroup>;
+}): void {
+  const signature = buildSemanticSignature(input.finding);
+  const canonicalSignature = input.canonicalSignatures.find((candidate) =>
+    semanticSignaturesMatch(signature, candidate),
+  );
+  if (!canonicalSignature) {
+    input.canonicalSignatures.push(signature);
+    return;
+  }
+
+  const groupKey = `semantic:${semanticGroupKey(canonicalSignature)}`;
+  const existingGroup = input.groups.get(groupKey);
+  input.groups.set(groupKey, {
+    canonicalCandidateFindingId: canonicalSignature.candidateFindingId,
+    duplicateCandidateFindingIds: [
+      ...(existingGroup?.duplicateCandidateFindingIds ?? []),
+      input.finding.findingId,
+    ],
+    groupKey,
+    groupKind: "semantic",
   });
 }
 
@@ -642,6 +688,18 @@ type AnchorState = {
   readonly addedLinesByPath: ReadonlyMap<string, ReadonlySet<number>>;
 };
 
+/** Lexical signature used for conservative deterministic semantic dedupe. */
+type SemanticFindingSignature = {
+  /** Candidate finding represented by this signature. */
+  readonly candidateFindingId: string;
+  /** Finding category used to avoid cross-domain grouping. */
+  readonly category: FindingCategory;
+  /** Repository path used to keep semantic groups local to a changed file. */
+  readonly path: string;
+  /** Normalized title and body tokens used for overlap scoring. */
+  readonly tokens: ReadonlySet<string>;
+};
+
 function buildAnchorState(snapshot: PullRequestSnapshot): AnchorState {
   return {
     files: new Map(snapshot.changedFiles.map((file) => [file.path, file])),
@@ -666,6 +724,7 @@ function rejectionReasons(
   config: NormalizedFindingValidationConfig,
   seenFingerprints: ReadonlySet<string>,
   seenLocations: ReadonlySet<string>,
+  seenSemanticSignatures: readonly SemanticFindingSignature[],
 ): readonly FindingRejectionReason[] {
   const reasons: FindingRejectionReason[] = [];
   const file = state.files.get(finding.location.path);
@@ -686,8 +745,17 @@ function rejectionReasons(
   if (!config.enabledCategories.includes(finding.category))
     pushReason(reasons, "category_disabled");
   if (finding.category === "style" && !config.allowStyleFindings) pushReason(reasons, "style_only");
-  if (seenFingerprints.has(finding.fingerprint)) pushReason(reasons, "duplicate_exact");
-  if (seenLocations.has(locationKey(finding))) pushReason(reasons, "duplicate_location");
+  const isExactDuplicate = seenFingerprints.has(finding.fingerprint);
+  const isLocationDuplicate = seenLocations.has(locationKey(finding));
+  if (isExactDuplicate) pushReason(reasons, "duplicate_exact");
+  if (isLocationDuplicate) pushReason(reasons, "duplicate_location");
+  if (
+    !isExactDuplicate &&
+    !isLocationDuplicate &&
+    hasSemanticDuplicate(finding, seenSemanticSignatures)
+  ) {
+    pushReason(reasons, "duplicate_semantic");
+  }
   if (isSuppressedByRepoRule(finding, config.repoRules)) {
     pushReason(reasons, "suppressed_by_repo_rule");
   }
@@ -823,6 +891,83 @@ function categoryPriority(category: FindingCategory): number {
 
 function locationKey(finding: CandidateFinding): string {
   return `${finding.location.path}:${finding.location.side}:${finding.location.line}`;
+}
+
+/** Returns whether the candidate overlaps strongly with a previously accepted finding. */
+function hasSemanticDuplicate(
+  finding: CandidateFinding,
+  seenSignatures: readonly SemanticFindingSignature[],
+): boolean {
+  const signature = buildSemanticSignature(finding);
+  return seenSignatures.some((seenSignature) => semanticSignaturesMatch(signature, seenSignature));
+}
+
+/** Builds a deterministic semantic signature from user-facing finding text. */
+function buildSemanticSignature(finding: CandidateFinding): SemanticFindingSignature {
+  return {
+    candidateFindingId: finding.findingId,
+    category: finding.category,
+    path: finding.location.path,
+    tokens: semanticTokens(`${finding.title}\n${finding.body}`),
+  };
+}
+
+/** Returns whether two semantic signatures are close enough to collapse. */
+function semanticSignaturesMatch(
+  left: SemanticFindingSignature,
+  right: SemanticFindingSignature,
+): boolean {
+  if (left.category !== right.category || left.path !== right.path) return false;
+
+  const overlap = intersectionSize(left.tokens, right.tokens);
+  if (overlap < SEMANTIC_DUPLICATE_MIN_OVERLAP) return false;
+
+  const union = left.tokens.size + right.tokens.size - overlap;
+  return union > 0 && overlap / union >= SEMANTIC_DUPLICATE_SIMILARITY;
+}
+
+/** Creates a stable group key for semantically equivalent findings. */
+function semanticGroupKey(signature: SemanticFindingSignature): string {
+  return [
+    signature.path,
+    signature.category,
+    [...signature.tokens].sort().slice(0, SEMANTIC_DUPLICATE_GROUP_KEY_TOKEN_LIMIT).join("-"),
+  ].join(":");
+}
+
+/** Extracts normalized content tokens for deterministic semantic dedupe. */
+function semanticTokens(text: string): ReadonlySet<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/u)
+      .map(normalizeSemanticToken)
+      .filter((token) => token.length >= SEMANTIC_TOKEN_MIN_LENGTH)
+      .filter((token) => !SEMANTIC_STOP_WORDS.has(token)),
+  );
+}
+
+/** Normalizes one token without introducing language-specific stemming dependencies. */
+function normalizeSemanticToken(token: string): string {
+  if (token.length > 5 && token.endsWith("ies")) return `${token.slice(0, -3)}y`;
+  if (token.length > 6 && token.endsWith("ing")) return token.slice(0, -3);
+  if (token.length > 5 && token.endsWith("ed")) return token.slice(0, -2);
+  if (token.length > 4 && token.endsWith("s") && !token.endsWith("ss")) {
+    return token.slice(0, -1);
+  }
+
+  return token;
+}
+
+/** Counts shared entries in two sets. */
+function intersectionSize(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
+  let count = 0;
+  const [smaller, larger] = left.size < right.size ? [left, right] : [right, left];
+  for (const value of smaller) {
+    if (larger.has(value)) count += 1;
+  }
+
+  return count;
 }
 
 function isSuppressedByRepoRule(finding: CandidateFinding, repoRules: readonly string[]): boolean {
@@ -990,6 +1135,32 @@ const DUPLICATE_REASONS = new Set<FindingRejectionReason>([
 ]);
 
 const RANKING_REASONS = new Set<FindingRejectionReason>(["budget_exceeded"]);
+
+const SEMANTIC_DUPLICATE_GROUP_KEY_TOKEN_LIMIT = 12;
+
+const SEMANTIC_DUPLICATE_MIN_OVERLAP = 5;
+
+const SEMANTIC_DUPLICATE_SIMILARITY = 0.5;
+
+const SEMANTIC_TOKEN_MIN_LENGTH = 4;
+
+const SEMANTIC_STOP_WORDS = new Set([
+  "about",
+  "after",
+  "before",
+  "could",
+  "from",
+  "have",
+  "into",
+  "more",
+  "return",
+  "that",
+  "this",
+  "when",
+  "which",
+  "with",
+  "without",
+]);
 
 const VALIDATION_REASONS_BY_STAGE: Record<
   FindingValidationEventStage,
