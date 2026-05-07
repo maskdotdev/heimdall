@@ -373,6 +373,15 @@ export const IndexRecordSchema = Type.Union([
 ]);
 export type IndexRecord = Static<typeof IndexRecordSchema>;
 
-export function isSupportedIndexRecordVersion(record: Pick<IndexRecord, "schemaVersion">): boolean {
+export const IndexArtifactSchema = Type.Object(
+  {
+    manifest: IndexManifestSchema,
+    records: Type.Array(IndexRecordSchema),
+  },
+  { additionalProperties: false },
+);
+export type IndexArtifact = Static<typeof IndexArtifactSchema>;
+
+export function isSupportedIndexRecordVersion(record: { readonly schemaVersion: string }): boolean {
   return record.schemaVersion === INDEX_RECORD_SCHEMA_VERSION;
 }
