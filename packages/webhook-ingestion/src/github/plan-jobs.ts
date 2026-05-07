@@ -1,5 +1,9 @@
 import { JOB_TYPES, type JobPayload, type RepositorySettings } from "@repo/contracts";
-import type { TelemetryTraceContext } from "@repo/observability";
+import type {
+  TelemetryMetricRecorder,
+  TelemetrySpanRecorder,
+  TelemetryTraceContext,
+} from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
 import { buildReviewPolicySnapshot, shouldReviewPr } from "@repo/rules";
 import { newId } from "../ids";
@@ -20,7 +24,9 @@ type PlanOptions = {
   readonly repositorySettings?: readonly RepositorySettings[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
   readonly feedback?: NormalizedGitHubFeedback | undefined;
+  readonly metrics?: TelemetryMetricRecorder | undefined;
   readonly traceContext?: TelemetryTraceContext | undefined;
+  readonly traces?: TelemetrySpanRecorder | undefined;
 };
 
 const createdAt = (): string => new Date().toISOString();
@@ -106,15 +112,21 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
       options.repositorySettings?.find((candidate) => candidate.repoId === snapshot.repoId) ??
       normalizedRepository.settings;
     const { snapshot: policySnapshot } = buildReviewPolicySnapshot({
+      ...(options.metrics ? { metrics: options.metrics } : {}),
       repository: normalizedRepository.repository,
       settings,
+      ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+      ...(options.traces ? { traces: options.traces } : {}),
     });
     const triggerDecision = shouldReviewPr({
       action,
       authorLogin: snapshot.authorLogin,
       isDraft: snapshot.isDraft,
       labels: snapshot.labels,
+      ...(options.metrics ? { metrics: options.metrics } : {}),
       policy: policySnapshot.effectivePolicy,
+      ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+      ...(options.traces ? { traces: options.traces } : {}),
     });
 
     if (!triggerDecision.shouldReview) {

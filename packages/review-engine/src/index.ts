@@ -1783,7 +1783,13 @@ function rejectionAnalysis(
     pushReason(reasons, "suppressed_by_memory");
   }
   if (config.policy) {
-    const policyDecision = evaluateFindingPolicy({ policy: config.policy, finding });
+    const policyDecision = evaluateFindingPolicy({
+      policy: config.policy,
+      finding,
+      ...(config.telemetry?.metrics ? { metrics: config.telemetry.metrics } : {}),
+      ...(config.telemetry?.traceContext ? { traceContext: config.telemetry.traceContext } : {}),
+      ...(config.telemetry?.traces ? { traces: config.telemetry.traces } : {}),
+    });
     const policyReason = policyReasonToRejectionReason(policyDecision.reasonCode);
     if (!policyDecision.shouldPublish && policyReason) {
       pushReason(reasons, policyReason);

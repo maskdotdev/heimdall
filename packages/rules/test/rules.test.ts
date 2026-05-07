@@ -1,5 +1,12 @@
 import type { RepoRule, RepositorySettings } from "@repo/contracts";
 import { ids, now } from "@repo/contracts/fixtures/common";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import {
   buildReviewPolicySnapshot,
@@ -264,6 +271,70 @@ describe("evaluateFindingPolicy", () => {
       reasonCode: "publishing_enabled",
     });
   });
+
+  it("records rules telemetry without paths or finding text", () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const telemetry = {
+      metrics: createRecordingMetrics(metrics),
+      traceContext: { requestId: "req_rules" },
+      traces: createRecordingTraces(spans),
+    };
+    const result = buildReviewPolicySnapshot({
+      ...telemetry,
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+    const policy = result.snapshot.effectivePolicy;
+
+    const pathClassification = classifyPath({
+      ...telemetry,
+      path: "src/private/auth.ts",
+      policy,
+    });
+    const triggerDecision = shouldReviewPr({
+      ...telemetry,
+      action: "opened",
+      authorLogin: "octocat",
+      labels: ["ready-for-review"],
+      policy,
+    });
+    const findingDecision = evaluateFindingPolicy({
+      ...telemetry,
+      finding: {
+        ...createFindingInputFixture().finding,
+        body: "Never mention this raw body.",
+        location: { path: "src/private/auth.ts", line: 8, side: "RIGHT", isInDiff: true },
+        title: "Never mention this raw title.",
+      },
+      policy,
+    });
+    const publishingDecision = getPublishingPolicyDecision(policy, telemetry);
+
+    expect(pathClassification.ignored).toBe(false);
+    expect(triggerDecision.shouldReview).toBe(true);
+    expect(findingDecision.shouldPublish).toBe(true);
+    expect(publishingDecision.reasonCode).toBe("publishing_enabled");
+    expect(metrics.map((metric) => metric.name)).toEqual(
+      expect.arrayContaining([
+        OBSERVABILITY_METRIC_NAMES.rulesDecisionsTotal,
+        OBSERVABILITY_METRIC_NAMES.rulesPolicyCompileDurationMs,
+        OBSERVABILITY_METRIC_NAMES.rulesPolicyCompilationsTotal,
+      ]),
+    );
+    expect(spans.map((span) => span.name)).toEqual(
+      expect.arrayContaining([
+        OBSERVABILITY_SPAN_NAMES.rulesCompilePolicy,
+        OBSERVABILITY_SPAN_NAMES.rulesEvaluateFinding,
+        OBSERVABILITY_SPAN_NAMES.rulesEvaluatePath,
+        OBSERVABILITY_SPAN_NAMES.rulesEvaluateTrigger,
+      ]),
+    );
+    const serializedTelemetry = JSON.stringify({ metrics, spans });
+    expect(serializedTelemetry).not.toContain("src/private/auth.ts");
+    expect(serializedTelemetry).not.toContain("Never mention");
+  });
 });
 
 describe("evaluateMemoryPolicy", () => {
@@ -309,6 +380,78 @@ describe("evaluateMemoryPolicy", () => {
     });
   });
 });
+
+/** Metric record captured by telemetry assertions. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels attached to the record. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Span record captured by telemetry assertions. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Creates a metric recorder that stores metric records in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}
 
 /** Creates a repository rule fixture for policy tests. */
 function createRuleFixture(overrides: Partial<RepoRule> = {}): RepoRule {

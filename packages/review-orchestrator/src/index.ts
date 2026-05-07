@@ -374,9 +374,12 @@ export async function runPullRequestReview(
   });
   const policyResult = buildReviewPolicySnapshot({
     activeRules,
+    ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
     repository: repositoryRecord,
     ...(repositorySettings ? { settings: repositorySettings } : {}),
+    ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
     timestamp: startedAt,
+    ...(dependencies.traces ? { traces: dependencies.traces } : {}),
     reviewRunId,
   });
   const planSnapshot = await entitlementService.compilePlanSnapshot({

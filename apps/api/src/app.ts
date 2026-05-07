@@ -2661,12 +2661,6 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
 
     return environmentArtifactPayloadStore;
   };
-  const githubWebhookHandler =
-    options.githubWebhookHandler ??
-    new GitHubWebhookHandler({
-      db: getDatabaseClient().db,
-      webhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? "",
-    });
   const getAdminDebugService = () =>
     options.adminDebugService ?? createAdminDebugService({ db: getDatabaseClient().db });
   const getAdminControlPlaneService = () =>
@@ -2695,6 +2689,14 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
   const observabilitySink = options.adminObservabilitySink ?? createNoopObservabilitySink();
   const metrics = options.metrics ?? createNoopTelemetryMetricRecorder();
   const traces = options.traces ?? createNoopTelemetrySpanRecorder();
+  const githubWebhookHandler =
+    options.githubWebhookHandler ??
+    new GitHubWebhookHandler({
+      db: getDatabaseClient().db,
+      metrics,
+      traces,
+      webhookSecret: process.env.GITHUB_WEBHOOK_SECRET ?? "",
+    });
   const readinessCheck = options.readinessCheck ?? (() => checkApiReadiness(getDatabaseClient));
   const apiRequestTelemetry = new WeakMap<Request, ApiRequestTelemetryState>();
 

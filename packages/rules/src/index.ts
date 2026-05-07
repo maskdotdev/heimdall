@@ -16,6 +16,15 @@ import {
 } from "@repo/contracts";
 import { OrgIdSchema, RepoIdSchema, ReviewRunIdSchema } from "@repo/contracts/primitives/ids";
 import { IsoDateTimeSchema } from "@repo/contracts/primitives/time";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+  type TelemetryTraceContextInput,
+} from "@repo/observability";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
@@ -383,8 +392,18 @@ export type PolicyWarning = {
   readonly details?: Readonly<Record<string, unknown>>;
 };
 
+/** Optional telemetry dependencies used by rules and configuration evaluation. */
+export type RulesTelemetryOptions = {
+  /** Optional metric recorder for policy compilation and decision counters. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Optional trace context propagated from a request or durable job boundary. */
+  readonly traceContext?: TelemetryTraceContextInput | undefined;
+  /** Optional span recorder for product-safe rules spans. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
+};
+
 /** Inputs required to compile a review policy snapshot. */
-export type BuildReviewPolicySnapshotInput = {
+export type BuildReviewPolicySnapshotInput = RulesTelemetryOptions & {
   /** Repository identity and enablement state. */
   readonly repository: Pick<Repository, "enabled" | "orgId" | "repoId">;
   /** Repository settings row. Defaults are used when the row is missing. */
@@ -410,7 +429,7 @@ export type BuildReviewPolicySnapshotResult = {
 };
 
 /** Path classification input. */
-export type ClassifyPathInput = {
+export type ClassifyPathInput = RulesTelemetryOptions & {
   /** Policy that contains path matchers. */
   readonly policy: EffectiveReviewPolicy;
   /** Repository-relative path to classify. */
@@ -448,7 +467,7 @@ export type PathClassification = {
 };
 
 /** Pull request input needed for a cheap trigger decision. */
-export type ShouldReviewPrInput = {
+export type ShouldReviewPrInput = RulesTelemetryOptions & {
   /** Policy used to decide whether review work should run. */
   readonly policy: EffectiveReviewPolicy;
   /** Pull request action from the webhook or manual trigger. */
@@ -474,7 +493,7 @@ export type ShouldReviewPrDecision = {
 };
 
 /** Candidate finding input needed for policy validation. */
-export type EvaluateFindingPolicyInput = {
+export type EvaluateFindingPolicyInput = RulesTelemetryOptions & {
   /** Policy used to evaluate the finding. */
   readonly policy: EffectiveReviewPolicy;
   /** Finding to evaluate. */
@@ -523,7 +542,7 @@ export type MemoryPolicyAction =
   | "natural_language_instruction";
 
 /** Input for checking whether memory may influence review behavior. */
-export type EvaluateMemoryPolicyInput = {
+export type EvaluateMemoryPolicyInput = RulesTelemetryOptions & {
   /** Policy used to evaluate the memory action. */
   readonly policy: EffectiveReviewPolicy;
   /** Memory action being considered. */
@@ -589,6 +608,46 @@ export function createDefaultRepositorySettings(
 
 /** Compiles repository settings and active rules into an immutable policy snapshot. */
 export function buildReviewPolicySnapshot(
+  input: BuildReviewPolicySnapshotInput,
+): BuildReviewPolicySnapshotResult {
+  const startedAtMs = Date.now();
+  const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesCompilePolicy, {
+    "rules.active_rule_input_count": input.activeRules?.length ?? 0,
+    "rules.repository_enabled": input.repository.enabled,
+    "rules.review_run_attached": Boolean(input.reviewRunId),
+    "rules.settings_provided": Boolean(input.settings),
+  });
+
+  try {
+    const result = buildReviewPolicySnapshotCore(input);
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    recordRulesPolicyCompilationMetrics(input, result, "compiled", durationMs);
+    span?.end({
+      attributes: {
+        "rules.active_rule_count": result.snapshot.activeRuleVersions.length,
+        "rules.review_policy": result.snapshot.effectivePolicy.reviewPolicy,
+        "rules.warning_count": result.warnings.length,
+      },
+      status: "ok",
+    });
+
+    return result;
+  } catch (error) {
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    recordRulesPolicyCompilationMetrics(input, undefined, "failed", durationMs);
+    span?.end({
+      attributes: {
+        "rules.status": "failed",
+      },
+      error,
+      status: "error",
+    });
+    throw error;
+  }
+}
+
+/** Compiles repository settings without telemetry side effects. */
+function buildReviewPolicySnapshotCore(
   input: BuildReviewPolicySnapshotInput,
 ): BuildReviewPolicySnapshotResult {
   const timestamp = input.timestamp ?? new Date().toISOString();
@@ -746,6 +805,41 @@ export function matchesAnyPathPattern(path: string, patterns: readonly string[])
 
 /** Classifies a path with the compiled path policy. */
 export function classifyPath(input: ClassifyPathInput): PathClassification {
+  const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesEvaluatePath, {
+    "rules.decision_type": "classify_path",
+    "rules.line_count_provided": input.lineCount !== undefined,
+    "rules.size_provided": input.sizeBytes !== undefined,
+  });
+
+  try {
+    const result = classifyPathCore(input);
+    recordRulesDecisionTelemetry(input, result.trace);
+    span?.end({
+      attributes: {
+        "rules.action": result.trace.decision,
+        "rules.generated": result.generated,
+        "rules.ignored": result.ignored,
+        "rules.matched_pattern_count": result.matchedPatterns.length,
+        "rules.reason": result.trace.reasonCode,
+      },
+      status: "ok",
+    });
+
+    return result;
+  } catch (error) {
+    span?.end({
+      attributes: {
+        "rules.status": "failed",
+      },
+      error,
+      status: "error",
+    });
+    throw error;
+  }
+}
+
+/** Classifies a path without telemetry side effects. */
+function classifyPathCore(input: ClassifyPathInput): PathClassification {
   const path = normalizeRepoPath(input.path);
   const policy = input.policy.paths;
   const matchedPatterns: string[] = [];
@@ -809,6 +903,39 @@ export function classifyPath(input: ClassifyPathInput): PathClassification {
 
 /** Decides whether a pull request should be reviewed. */
 export function shouldReviewPr(input: ShouldReviewPrInput): ShouldReviewPrDecision {
+  const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesEvaluateTrigger, {
+    "rules.decision_type": "should_review_pr",
+    "rules.pr_action": sanitizeRulesTelemetryLabel(input.action),
+  });
+
+  try {
+    const result = shouldReviewPrCore(input);
+    recordRulesDecisionTelemetry(input, result.trace);
+    span?.end({
+      attributes: {
+        "rules.action": result.trace.decision,
+        "rules.reason": result.reasonCode,
+        "rules.review_policy": result.reviewPolicy,
+        "rules.should_review": result.shouldReview,
+      },
+      status: "ok",
+    });
+
+    return result;
+  } catch (error) {
+    span?.end({
+      attributes: {
+        "rules.status": "failed",
+      },
+      error,
+      status: "error",
+    });
+    throw error;
+  }
+}
+
+/** Decides whether a pull request should be reviewed without telemetry side effects. */
+function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision {
   const labels = new Set((input.labels ?? []).map(normalizeComparable));
   const ignoredLabels = input.policy.trigger.ignoredLabels.map(normalizeComparable);
   const ignoredAuthors = input.policy.trigger.ignoredAuthors.map(normalizeComparable);
@@ -862,12 +989,49 @@ export function shouldReviewPr(input: ShouldReviewPrInput): ShouldReviewPrDecisi
 
 /** Evaluates whether a candidate finding may be published under policy. */
 export function evaluateFindingPolicy(input: EvaluateFindingPolicyInput): FindingPolicyDecision {
+  const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesEvaluateFinding, {
+    "rules.decision_type": "should_publish_finding",
+    "rules.finding_category": input.finding.category,
+    "rules.finding_severity": input.finding.severity,
+  });
+
+  try {
+    const result = evaluateFindingPolicyCore(input);
+    recordRulesDecisionTelemetry(input, result.trace);
+    span?.end({
+      attributes: {
+        "rules.action": result.trace.decision,
+        "rules.matched_rule_count": result.trace.matchedRuleIds.length,
+        "rules.reason": result.reasonCode,
+        "rules.should_publish": result.shouldPublish,
+      },
+      status: "ok",
+    });
+
+    return result;
+  } catch (error) {
+    span?.end({
+      attributes: {
+        "rules.status": "failed",
+      },
+      error,
+      status: "error",
+    });
+    throw error;
+  }
+}
+
+/** Evaluates whether a candidate finding may be published without telemetry side effects. */
+function evaluateFindingPolicyCore(input: EvaluateFindingPolicyInput): FindingPolicyDecision {
   const finding = input.finding;
   const classification =
     input.pathClassification ??
     classifyPath({
       policy: input.policy,
       path: finding.location.path,
+      ...(input.metrics ? { metrics: input.metrics } : {}),
+      ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+      ...(input.traces ? { traces: input.traces } : {}),
     });
   const matchedRuleIds = matchingSuppressionRuleIds(input.policy, finding);
   let shouldPublish = true;
@@ -931,7 +1095,16 @@ export function evaluateFindingPolicy(input: EvaluateFindingPolicyInput): Findin
 /** Returns the publishing mode enabled by a compiled policy. */
 export function getPublishingPolicyDecision(
   policy: EffectiveReviewPolicy,
+  telemetry: RulesTelemetryOptions = {},
 ): PublishingPolicyDecision {
+  const result = getPublishingPolicyDecisionCore(policy);
+  recordRulesDecisionTelemetry(telemetry, result.trace);
+
+  return result;
+}
+
+/** Returns the publishing mode decision without telemetry side effects. */
+function getPublishingPolicyDecisionCore(policy: EffectiveReviewPolicy): PublishingPolicyDecision {
   const publishing = policy.enabled
     ? policy.publishing
     : {
@@ -1001,7 +1174,7 @@ export function evaluateMemoryPolicy(input: EvaluateMemoryPolicyInput): MemoryPo
     reasonCode = "actor_not_trusted_for_memory";
   }
 
-  return {
+  const result = {
     allowed,
     maxFactsInContext: memory.enableMemoryContext ? memory.maxMemoryFactsInContext : 0,
     reasonCode,
@@ -1020,6 +1193,10 @@ export function evaluateMemoryPolicy(input: EvaluateMemoryPolicyInput): MemoryPo
       },
     }),
   };
+
+  recordRulesDecisionTelemetry(input, result.trace);
+
+  return result;
 }
 
 /** Creates a valid policy fixture for unit tests and local rule testing. */
@@ -1377,6 +1554,69 @@ function collectMatchingPatterns(path: string, patterns: readonly string[]): str
 /** Normalizes labels, authors, and other exact-match values. */
 function normalizeComparable(value: string): string {
   return value.trim().toLowerCase();
+}
+
+/** Starts a rules telemetry span with product-safe attributes. */
+function startRulesSpan(
+  telemetry: RulesTelemetryOptions,
+  name: string,
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+): TelemetrySpanHandle | undefined {
+  return telemetry.traces?.startSpan(name, {
+    attributes,
+    kind: "internal",
+    traceContext: telemetry.traceContext,
+  });
+}
+
+/** Records policy compilation metrics with bounded status labels. */
+function recordRulesPolicyCompilationMetrics(
+  telemetry: RulesTelemetryOptions,
+  result: BuildReviewPolicySnapshotResult | undefined,
+  status: "compiled" | "failed",
+  durationMs: number,
+): void {
+  const labels = {
+    status,
+    warning_status:
+      result === undefined ? "unknown" : result.warnings.length > 0 ? "warnings" : "clean",
+  };
+  telemetry.metrics?.count(OBSERVABILITY_METRIC_NAMES.rulesPolicyCompilationsTotal, {
+    labels,
+  });
+  telemetry.metrics?.histogram(
+    OBSERVABILITY_METRIC_NAMES.rulesPolicyCompileDurationMs,
+    durationMs,
+    {
+      labels,
+      unit: "ms",
+    },
+  );
+}
+
+/** Records one low-cardinality rules decision metric from a decision trace. */
+function recordRulesDecisionTelemetry(
+  telemetry: RulesTelemetryOptions,
+  trace: PolicyDecisionTrace,
+): void {
+  telemetry.metrics?.count(OBSERVABILITY_METRIC_NAMES.rulesDecisionsTotal, {
+    labels: {
+      action: sanitizeRulesTelemetryLabel(trace.decision),
+      decision_type: sanitizeRulesTelemetryLabel(trace.decisionType),
+      reason: sanitizeRulesTelemetryLabel(trace.reasonCode),
+    },
+  });
+}
+
+/** Sanitizes rule telemetry label values before handing them to metric sinks. */
+function sanitizeRulesTelemetryLabel(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.:-]+/gu, "_")
+    .slice(0, 80);
+
+  return normalized.length > 0 ? normalized : "unknown";
 }
 
 /** Returns whether a repository rule has expired before the policy timestamp. */

@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@repo/contracts": "workspace:*",
+    "@repo/observability": "workspace:*",
     "@sinclair/typebox": "catalog:"
   },
   "devDependencies": {

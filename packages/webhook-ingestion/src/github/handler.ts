@@ -22,6 +22,8 @@ import {
 import {
   createTelemetryTraceContextFromHeaders,
   normalizeTelemetryTraceContext,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
   type TelemetryTraceContext,
 } from "@repo/observability";
 import { eq, inArray } from "drizzle-orm";
@@ -45,6 +47,10 @@ import { planGitHubWebhookJobs } from "./plan-jobs";
 export type GitHubWebhookHandlerDependencies = {
   /** Database used for durable webhook and job records. */
   readonly db: HeimdallDatabase;
+  /** Optional metric recorder used for webhook planning policy telemetry. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Optional span recorder used for webhook planning policy telemetry. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
   /** GitHub webhook secret. */
   readonly webhookSecret: string;
 };
@@ -216,7 +222,9 @@ export class GitHubWebhookHandler {
         repositorySettings: await loadPersistedRepositorySettings(tx, normalized.repositories),
         pullRequest: normalized.pullRequest,
         feedback: normalized.feedback,
+        ...(this.dependencies.metrics ? { metrics: this.dependencies.metrics } : {}),
         traceContext,
+        ...(this.dependencies.traces ? { traces: this.dependencies.traces } : {}),
       });
 
       for (const job of jobs) {
