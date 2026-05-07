@@ -70,6 +70,20 @@ const dedupeMarker = (body: string, reviewRunId: string, findingId?: string): st
   return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
 };
 
+const summaryDedupeMarker = (input: {
+  readonly owner: string;
+  readonly repo: string;
+  readonly pullRequestNumber: number;
+  readonly providerRepoId?: string;
+}): string => {
+  const fingerprint = `sha256:${createHash("sha256")
+    .update(
+      `summary:${input.providerRepoId ?? `${input.owner}/${input.repo}`}:${input.pullRequestNumber}`,
+    )
+    .digest("hex")}`;
+  return `<!-- heimdall:summary:${input.pullRequestNumber}:${fingerprint} -->`;
+};
+
 const createProvider = (fetcher: GitHubFetch, observeRequest?: GitHubRequestObserver) =>
   createGitHubProvider(
     {
@@ -545,6 +559,63 @@ describe("GitHubAppProvider", () => {
     });
     expect(
       fetcher.calls.some((call) => call.url.endsWith("/repos/acme/api/issues/7/comments")),
+    ).toBe(false);
+  });
+
+  it("updates an existing summary comment with a stable PR marker", async () => {
+    const marker = summaryDedupeMarker({ owner: "acme", repo: "api", pullRequestNumber: 7 });
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url) => url.includes("/repos/acme/api/issues/7/comments?per_page=100&page=1"),
+        response: jsonResponse([
+          {
+            id: 14,
+            body: `Old summary\n\n${marker}`,
+            user: { login: "heimdall[bot]" },
+            html_url: "https://github.com/acme/api/pull/7#issuecomment-14",
+          },
+        ]),
+      },
+      {
+        match: (url, init) =>
+          url.endsWith("/repos/acme/api/issues/comments/14") && init?.method === "PATCH",
+        response: jsonResponse({
+          id: 14,
+          html_url: "https://github.com/acme/api/pull/7#issuecomment-14",
+        }),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+
+    await expect(
+      provider.publishSummaryComment({
+        provider: "github",
+        installationId: "99",
+        owner: "acme",
+        repo: "api",
+        pullRequestNumber: 7,
+        reviewRunId: "rev_2",
+        body: "New summary",
+      }),
+    ).resolves.toEqual({
+      providerCommentId: "14",
+      htmlUrl: "https://github.com/acme/api/pull/7#issuecomment-14",
+    });
+
+    const updateCall = fetcher.calls.find(
+      (call) =>
+        call.url.endsWith("/repos/acme/api/issues/comments/14") && call.init?.method === "PATCH",
+    );
+    const body = JSON.parse(String(updateCall?.init?.body)) as Record<string, unknown>;
+
+    expect(body.body).toContain("New summary");
+    expect(body.body).toContain(marker);
+    expect(
+      fetcher.calls.some(
+        (call) =>
+          call.url.endsWith("/repos/acme/api/issues/7/comments") && call.init?.method === "POST",
+      ),
     ).toBe(false);
   });
 

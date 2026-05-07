@@ -190,9 +190,23 @@ export class FakeGitProvider implements GitProvider {
   public async publishSummaryComment(
     input: PublishSummaryCommentInput,
   ): Promise<PublishedSummaryComment> {
-    const marker = createDedupeMarker(input.body, input.reviewRunId);
-    const existingComment = this.botComments.find((comment) => comment.body.includes(marker));
+    const stableMarker = createSummaryDedupeMarker(input);
+    const legacyMarker = createDedupeMarker(input.body, input.reviewRunId);
+    const body = withSummaryDedupeMarkers(input);
+    const existingCommentIndex = this.botComments.findIndex(
+      (comment) => comment.body.includes(stableMarker) || comment.body.includes(legacyMarker),
+    );
+    const existingComment =
+      existingCommentIndex >= 0 ? this.botComments[existingCommentIndex] : undefined;
     if (existingComment) {
+      if (existingComment.body !== body && !existingComment.body.includes(legacyMarker)) {
+        this.publishedSummaryComments.push(input);
+        this.botComments[existingCommentIndex] = {
+          ...existingComment,
+          body,
+        };
+      }
+
       return {
         providerCommentId: existingComment.providerCommentId,
         ...(existingComment.htmlUrl ? { htmlUrl: existingComment.htmlUrl } : {}),
@@ -203,7 +217,7 @@ export class FakeGitProvider implements GitProvider {
     const providerCommentId = stableId("summary", [input.owner, input.repo, input.reviewRunId]);
     this.botComments.push({
       providerCommentId,
-      body: `${input.body}\n\n${marker}`,
+      body,
       authorLogin: "heimdall[bot]",
     });
 
@@ -260,3 +274,20 @@ const createDedupeMarker = (body: string, reviewRunId: string): string => {
     .digest("hex")}`;
   return `<!-- heimdall:${reviewRunId}:summary:${fingerprint} -->`;
 };
+
+const createSummaryDedupeMarker = (input: GitHubPullRequestRef): string => {
+  const fingerprint = `sha256:${createHash("sha256")
+    .update(
+      `summary:${input.providerRepoId ?? `${input.owner}/${input.repo}`}:${input.pullRequestNumber}`,
+    )
+    .digest("hex")}`;
+  return `<!-- heimdall:summary:${input.pullRequestNumber}:${fingerprint} -->`;
+};
+
+const withSummaryDedupeMarkers = (input: PublishSummaryCommentInput): string =>
+  [
+    input.body,
+    "",
+    createSummaryDedupeMarker(input),
+    createDedupeMarker(input.body, input.reviewRunId),
+  ].join("\n");

@@ -591,14 +591,35 @@ export class GitHubAppProvider implements GitProvider {
       throw new GitHubPermissionError("GitHub summary comments are disabled by configuration.", {});
     }
 
-    const marker = this.createDedupeMarker(input.body, input.reviewRunId);
-    const [existingComment] = (await this.fetchExistingBotComments(input)).filter((comment) =>
-      comment.body.includes(marker),
+    const stableMarker = this.createSummaryDedupeMarker(input);
+    const legacyMarker = this.createDedupeMarker(input.body, input.reviewRunId);
+    const body = this.withSummaryDedupeMarkers(input);
+    const existingComment = (await this.fetchExistingBotComments(input)).find(
+      (comment) => comment.body.includes(stableMarker) || comment.body.includes(legacyMarker),
     );
     if (existingComment) {
+      if (existingComment.body === body || existingComment.body.includes(legacyMarker)) {
+        return {
+          providerCommentId: existingComment.providerCommentId,
+          ...withOptional("htmlUrl", existingComment.htmlUrl),
+        };
+      }
+
+      const updatedComment = await this.requestInstallation<JsonRecord>(
+        input,
+        `/repos/${input.owner}/${input.repo}/issues/comments/${existingComment.providerCommentId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ body }),
+        },
+      );
+
       return {
         providerCommentId: existingComment.providerCommentId,
-        ...withOptional("htmlUrl", existingComment.htmlUrl),
+        ...withOptional(
+          "htmlUrl",
+          optionalString(updatedComment, "html_url") ?? existingComment.htmlUrl,
+        ),
       };
     }
 
@@ -608,7 +629,7 @@ export class GitHubAppProvider implements GitProvider {
       {
         method: "POST",
         body: JSON.stringify({
-          body: this.withDedupeMarker(input.body, input.reviewRunId),
+          body,
         }),
       },
     );
@@ -897,9 +918,25 @@ export class GitHubAppProvider implements GitProvider {
     return `${body}\n\n${this.createDedupeMarker(body, reviewRunId, findingId)}`;
   }
 
+  private withSummaryDedupeMarkers(input: PublishSummaryCommentInput): string {
+    return [
+      input.body,
+      "",
+      this.createSummaryDedupeMarker(input),
+      this.createDedupeMarker(input.body, input.reviewRunId),
+    ].join("\n");
+  }
+
   private createDedupeMarker(body: string, reviewRunId: string, findingId?: string): string {
     const fingerprint = sha256(`${reviewRunId}:${findingId ?? "summary"}:${body}`);
     return `<!-- heimdall:${reviewRunId}:${findingId ?? "summary"}:${fingerprint} -->`;
+  }
+
+  private createSummaryDedupeMarker(input: GitHubPullRequestRef): string {
+    const fingerprint = sha256(
+      `summary:${input.providerRepoId ?? `${input.owner}/${input.repo}`}:${input.pullRequestNumber}`,
+    );
+    return `<!-- heimdall:summary:${input.pullRequestNumber}:${fingerprint} -->`;
   }
 
   private mapExistingCommentIdsByFindingId(
