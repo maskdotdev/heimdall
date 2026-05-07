@@ -1,0 +1,9 @@
+diff --git a/src/zero.ts b/src/zero.ts
+--- a/src/zero.ts
++++ b/src/zero.ts
+@@ -0,0 +1,2 @@
++export const first = true;
++export const second = true;
+@@ -8,2 +10,0 @@
+-export const removed = true;
+-export const gone = removed;

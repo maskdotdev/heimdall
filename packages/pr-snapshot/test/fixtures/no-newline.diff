@@ -1,0 +1,8 @@
+diff --git a/src/no-newline.ts b/src/no-newline.ts
+--- a/src/no-newline.ts
++++ b/src/no-newline.ts
+@@ -1 +1 @@
+-export const value = "old";
+\ No newline at end of file
++export const value = "new";
+\ No newline at end of file

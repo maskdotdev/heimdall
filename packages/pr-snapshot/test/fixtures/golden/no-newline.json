@@ -1,0 +1,36 @@
+[
+  {
+    "additions": 1,
+    "changes": 2,
+    "deletions": 1,
+    "hunks": [
+      {
+        "header": "@@ -1 +1 @@",
+        "hunkId": "hunk_0",
+        "lines": [
+          {
+            "content": "export const value = \"old\";",
+            "kind": "deletion",
+            "oldLine": 1
+          },
+          {
+            "content": "export const value = \"new\";",
+            "kind": "addition",
+            "newLine": 1
+          }
+        ],
+        "newLines": 1,
+        "newStart": 1,
+        "oldLines": 1,
+        "oldStart": 1
+      }
+    ],
+    "isBinary": false,
+    "isGenerated": false,
+    "isTest": false,
+    "language": "typescript",
+    "patch": "@@ -1 +1 @@\n-export const value = \"old\";\n+export const value = \"new\";",
+    "path": "src/no-newline.ts",
+    "status": "modified"
+  }
+]

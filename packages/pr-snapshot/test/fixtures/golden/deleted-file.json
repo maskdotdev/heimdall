@@ -1,0 +1,36 @@
+[
+  {
+    "additions": 0,
+    "changes": 2,
+    "deletions": 2,
+    "hunks": [
+      {
+        "header": "@@ -1,2 +0,0 @@",
+        "hunkId": "hunk_0",
+        "lines": [
+          {
+            "content": "export const stale = true;",
+            "kind": "deletion",
+            "oldLine": 1
+          },
+          {
+            "content": "export const value = stale;",
+            "kind": "deletion",
+            "oldLine": 2
+          }
+        ],
+        "newLines": 0,
+        "newStart": 0,
+        "oldLines": 2,
+        "oldStart": 1
+      }
+    ],
+    "isBinary": false,
+    "isGenerated": false,
+    "isTest": false,
+    "language": "typescript",
+    "patch": "@@ -1,2 +0,0 @@\n-export const stale = true;\n-export const value = stale;",
+    "path": "src/remove.ts",
+    "status": "deleted"
+  }
+]

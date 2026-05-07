@@ -1,0 +1,8 @@
+diff --git a/src/remove.ts b/src/remove.ts
+deleted file mode 100644
+index 1111111..0000000
+--- a/src/remove.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-export const stale = true;
+-export const value = stale;

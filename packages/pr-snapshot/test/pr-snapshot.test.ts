@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ChangedFile } from "@repo/contracts";
 import { ChangedFileSchema, ChangeSetSchema, parseWithSchema } from "@repo/contracts";
 import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
 import { describe, expect, it } from "vitest";
@@ -17,7 +21,33 @@ import {
   toGitHubReviewCommentAnchor,
 } from "../src";
 
+type NormalizedDiffHunk = Omit<ChangedFile["hunks"][number], "hunkId"> & {
+  /** Stable fixture-local hunk identifier. */
+  readonly hunkId: string;
+};
+
+type NormalizedChangedFile = Omit<ChangedFile, "hunks"> & {
+  /** Parsed hunks with deterministic fixture-local identifiers. */
+  readonly hunks: readonly NormalizedDiffHunk[];
+};
+
+const fixtureDirectory = fileURLToPath(new URL("fixtures/", import.meta.url));
+const goldenFixtureNames = [
+  "added-file",
+  "deleted-file",
+  "multiple-hunks",
+  "no-newline",
+  "zero-line-range",
+] as const;
+
 describe("parseUnifiedDiff", () => {
+  it.each(goldenFixtureNames)("matches the %s golden fixture", (fixtureName) => {
+    const diff = readFixture(`${fixtureName}.diff`);
+    const expected = readJsonFixture(`golden/${fixtureName}.json`);
+
+    expect(normalizeParsedFiles(parseUnifiedDiff(diff))).toEqual(expected);
+  });
+
   it("parses modified files into changed-file contracts", () => {
     const [file] = parseUnifiedDiff(`diff --git a/src/math.ts b/src/math.ts
 index 1111111..2222222 100644
@@ -151,6 +181,27 @@ Binary files a/assets/logo.png and b/assets/logo.png differ
     });
   });
 });
+
+/** Reads a PR snapshot parser fixture as UTF-8 text. */
+function readFixture(path: string): string {
+  return readFileSync(resolve(fixtureDirectory, path), "utf8");
+}
+
+/** Reads an expected fixture JSON payload. */
+function readJsonFixture(path: string): unknown {
+  return JSON.parse(readFixture(path)) as unknown;
+}
+
+/** Normalizes parser output by replacing content-derived hunk IDs with fixture-local IDs. */
+function normalizeParsedFiles(files: readonly ChangedFile[]): readonly NormalizedChangedFile[] {
+  return files.map((file) => ({
+    ...file,
+    hunks: file.hunks.map((hunk, index) => ({
+      ...hunk,
+      hunkId: `hunk_${index}`,
+    })),
+  }));
+}
 
 describe("line anchors", () => {
   it("indexes commentable left and right side lines", () => {
