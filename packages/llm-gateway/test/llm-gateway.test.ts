@@ -8,7 +8,14 @@ import {
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import { describe, expect, it } from "vitest";
-import { createLLMGateway, FakeLLMProvider, LLMGatewayError, type LLMProvider } from "../src/index";
+import {
+  createLLMGateway,
+  createOpenAIChatCompletionsProvider,
+  FakeLLMProvider,
+  LLMGatewayError,
+  type LLMProvider,
+  type OpenAIChatCompletionsFetch,
+} from "../src/index";
 
 type RecordedMetric = {
   /** Metric instrument kind recorded by the fake recorder. */
@@ -215,6 +222,110 @@ describe("createLLMGateway", () => {
     });
   });
 
+  it("calls OpenAI-compatible Chat Completions with JSON mode", async () => {
+    const calls: RecordedFetchCall[] = [];
+    const fetchFn: OpenAIChatCompletionsFetch = async (url, init) => {
+      calls.push({ ...(init ? { init } : {}), url: String(url) });
+      return openAIChatCompletionResponse({ findings: [] });
+    };
+    const gateway = createLLMGateway(
+      createOpenAIChatCompletionsProvider({
+        apiKey: "sk-test-openai-key",
+        baseUrl: "https://llm.example/v1/",
+        fetch: fetchFn,
+        model: "gpt-test",
+      }),
+    );
+
+    await expect(
+      gateway.generateReviewFindings({
+        prompt: JSON.stringify({ changedFiles: [] }),
+      }),
+    ).resolves.toEqual({ findings: [] });
+
+    const call = requireFirstFetchCall(calls);
+    expect(call.url).toBe("https://llm.example/v1/chat/completions");
+    expect(call.init).toMatchObject({
+      headers: {
+        Authorization: "Bearer sk-test-openai-key",
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    const body = requestJsonBody(call);
+    expect(body).toMatchObject({
+      model: "gpt-test",
+      n: 1,
+      response_format: { type: "json_object" },
+      store: false,
+    });
+    expect(body.messages).toEqual([
+      {
+        content: expect.stringContaining("JSON"),
+        role: "system",
+      },
+      {
+        content: JSON.stringify({ changedFiles: [] }),
+        role: "user",
+      },
+    ]);
+  });
+
+  it("normalizes OpenAI-compatible HTTP errors", async () => {
+    const gateway = createLLMGateway(
+      createOpenAIChatCompletionsProvider({
+        apiKey: "sk-test-openai-key",
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              error: {
+                code: "invalid_api_key",
+                message: "Invalid API key.",
+                type: "invalid_request_error",
+              },
+            }),
+            {
+              headers: { "x-request-id": "req_123" },
+              status: 401,
+            },
+          ),
+        model: "gpt-test",
+      }),
+      { retryPolicy: { maxAttempts: 1 } },
+    );
+
+    await expect(gateway.generateReviewFindings({ prompt: "{}" })).rejects.toMatchObject({
+      code: "provider_auth_failed",
+      details: {
+        errorCode: "invalid_api_key",
+        errorType: "invalid_request_error",
+        requestId: "req_123",
+        status: 401,
+        statusFamily: "4xx",
+      },
+      model: "gpt-test",
+      provider: "openai",
+      retryable: false,
+    });
+  });
+
+  it("rejects non-JSON OpenAI message content as structured output failure", async () => {
+    const gateway = createLLMGateway(
+      createOpenAIChatCompletionsProvider({
+        apiKey: "sk-test-openai-key",
+        fetch: async () => openAIChatCompletionRawContentResponse("not-json"),
+        model: "gpt-test",
+      }),
+    );
+
+    await expect(gateway.generateReviewFindings({ prompt: "{}" })).rejects.toMatchObject({
+      code: "schema_validation_failed",
+      provider: "openai",
+      retryable: false,
+    });
+  });
+
   it("records product-safe metrics and spans for successful calls", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -404,6 +515,68 @@ describe("createLLMGateway", () => {
     );
   });
 });
+
+type RecordedFetchCall = {
+  /** Request init passed to the fake fetch implementation. */
+  readonly init?: RequestInit;
+  /** Request URL passed to the fake fetch implementation. */
+  readonly url: string;
+};
+
+/** Creates a successful Chat Completions response with JSON-stringified assistant content. */
+function openAIChatCompletionResponse(content: unknown): Response {
+  return openAIChatCompletionRawContentResponse(JSON.stringify(content));
+}
+
+/** Creates a successful Chat Completions response with raw assistant content. */
+function openAIChatCompletionRawContentResponse(content: string): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            content,
+            role: "assistant",
+          },
+        },
+      ],
+    }),
+    {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    },
+  );
+}
+
+/** Returns the first recorded fetch call or raises a test setup failure. */
+function requireFirstFetchCall(calls: readonly RecordedFetchCall[]): RecordedFetchCall {
+  const call = calls[0];
+  if (!call) {
+    throw new Error("Expected one fetch call.");
+  }
+
+  return call;
+}
+
+/** Parses a recorded JSON request body into an object for assertions. */
+function requestJsonBody(call: RecordedFetchCall): Record<string, unknown> {
+  if (typeof call.init?.body !== "string") {
+    throw new Error("Expected request body to be a JSON string.");
+  }
+
+  const parsed = JSON.parse(call.init.body) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Expected request body to be a JSON object.");
+  }
+
+  return parsed;
+}
+
+/** Returns whether a value is a non-null object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
   return {

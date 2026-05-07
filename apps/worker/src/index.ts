@@ -65,7 +65,13 @@ import {
   withIndexerTimeout,
 } from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
-import { createLLMGateway, type LLMGateway, type LLMProvider } from "@repo/llm-gateway";
+import {
+  createLLMGateway,
+  createOpenAIChatCompletionsProvider,
+  type LLMGateway,
+  type LLMProvider,
+  type OpenAIChatCompletionsFetch,
+} from "@repo/llm-gateway";
 import {
   createMemoryCandidatesFromCommand,
   type FeedbackCommand,
@@ -182,6 +188,9 @@ export type WorkerIndexerDriverEnvironment = Readonly<Record<string, string | un
 /** Environment values used to select the worker static-analysis runner. */
 export type WorkerStaticAnalysisRunnerEnvironment = Readonly<Record<string, string | undefined>>;
 
+/** Environment values used to select the worker LLM gateway. */
+export type WorkerLlmGatewayEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Runtime dependencies used while creating a worker static-analysis runner. */
 export type WorkerStaticAnalysisRunnerOptions = {
   /** Optional database used to persist sandbox run results. */
@@ -189,6 +198,18 @@ export type WorkerStaticAnalysisRunnerOptions = {
   /** Optional metric recorder used for sandbox run telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder used for sandbox run telemetry. */
+  readonly traces?: TelemetrySpanRecorder;
+};
+
+/** Runtime dependencies used while creating a worker LLM gateway. */
+export type WorkerLlmGatewayOptions = {
+  /** Optional fetch implementation used by provider adapters. */
+  readonly fetch?: OpenAIChatCompletionsFetch;
+  /** Optional metric recorder used for LLM gateway telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
+  /** Optional secrets manager used to resolve provider API keys. */
+  readonly secretsManager?: SecretsManager;
+  /** Optional span recorder used for LLM gateway telemetry. */
   readonly traces?: TelemetrySpanRecorder;
 };
 
@@ -626,6 +647,109 @@ export async function resolveWorkerGitHubPrivateKey(
   return resolved.value.replaceAll("\\n", "\n");
 }
 
+/** Resolves the worker LLM provider API key through the security secret boundary. */
+export async function resolveWorkerLlmApiKey(
+  env: WorkerLlmGatewayEnvironment,
+  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+): Promise<string | undefined> {
+  const secretRefValue = firstEnvValue(env, [
+    "HEIMDALL_LLM_PROVIDER_API_KEY_SECRET_REF",
+    "LLM_PROVIDER_API_KEY_SECRET_REF",
+    "HEIMDALL_LLM_API_KEY_SECRET_REF",
+    "OPENAI_API_KEY_SECRET_REF",
+  ]);
+  const localEnvName = firstEnvName(env, [
+    "HEIMDALL_LLM_PROVIDER_API_KEY",
+    "LLM_PROVIDER_API_KEY",
+    "HEIMDALL_LLM_API_KEY",
+    "OPENAI_API_KEY",
+  ]);
+  const secretRef = secretRefValue
+    ? parseSecretRef(secretRefValue)
+    : localEnvName
+      ? parseSecretRef(`env:${localEnvName}`)
+      : undefined;
+  if (!secretRef) {
+    return undefined;
+  }
+
+  const resolved = await secretsManager.resolveSecret(secretRef, {
+    purpose: "llm_provider_api_key",
+    service: "llm_gateway",
+  });
+  return resolved.value;
+}
+
+/** Creates the optional worker LLM gateway selected by environment configuration. */
+export async function createWorkerLlmGatewayFromEnvironment(
+  env: WorkerLlmGatewayEnvironment,
+  options: WorkerLlmGatewayOptions = {},
+): Promise<LLMGateway | undefined> {
+  if (env.HEIMDALL_REVIEW_SMOKE_FINDING === "true") {
+    return createWorkerReviewSmokeGateway({
+      ...(options.metrics ? { metrics: options.metrics } : {}),
+      ...(options.traces ? { traces: options.traces } : {}),
+    });
+  }
+
+  const providerName =
+    optionalEnvString(env.HEIMDALL_LLM_PROVIDER) ?? optionalEnvString(env.LLM_PROVIDER);
+  if (!providerName && !hasOpenAIProviderConfiguration(env)) {
+    return undefined;
+  }
+  if (providerName && !isOpenAIProviderName(providerName)) {
+    throw new Error(`Unsupported LLM_PROVIDER: ${providerName}`);
+  }
+
+  const model =
+    optionalEnvString(env.HEIMDALL_LLM_MODEL) ??
+    optionalEnvString(env.LLM_MODEL) ??
+    optionalEnvString(env.OPENAI_MODEL);
+  if (!model) {
+    throw new Error(
+      "HEIMDALL_LLM_MODEL, LLM_MODEL, or OPENAI_MODEL is required when the OpenAI LLM provider is configured.",
+    );
+  }
+
+  const apiKey = await resolveWorkerLlmApiKey(
+    env,
+    options.secretsManager ?? createLocalEnvSecretsManager({ env }),
+  );
+  if (!apiKey) {
+    throw new Error(
+      "LLM_PROVIDER_API_KEY_SECRET_REF, OPENAI_API_KEY_SECRET_REF, or OPENAI_API_KEY is required when the OpenAI LLM provider is configured.",
+    );
+  }
+
+  const baseUrl =
+    optionalEnvString(env.HEIMDALL_LLM_BASE_URL) ??
+    optionalEnvString(env.LLM_PROVIDER_BASE_URL) ??
+    optionalEnvString(env.OPENAI_BASE_URL);
+  const modelProfile =
+    optionalEnvString(env.HEIMDALL_LLM_MODEL_PROFILE) ??
+    optionalEnvString(env.LLM_MODEL_PROFILE) ??
+    "review_llm";
+  const timeoutMs =
+    optionalPositiveInteger(env.HEIMDALL_LLM_TIMEOUT_MS) ??
+    optionalPositiveInteger(env.LLM_PROVIDER_TIMEOUT_MS) ??
+    optionalPositiveInteger(env.OPENAI_TIMEOUT_MS);
+
+  return createLLMGateway(
+    createOpenAIChatCompletionsProvider({
+      apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      model,
+      ...(timeoutMs ? { timeoutMs } : {}),
+    }),
+    {
+      defaultModelProfile: modelProfile,
+      ...(options.metrics ? { metrics: options.metrics } : {}),
+      ...(options.traces ? { traces: options.traces } : {}),
+    },
+  );
+}
+
 /** Starts BullMQ workers and a polling outbox dispatcher. */
 export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const observability = createObservabilityRuntime({
@@ -654,13 +778,10 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       traces: observability.traces,
     },
   );
-  const llmGateway =
-    process.env.HEIMDALL_REVIEW_SMOKE_FINDING === "true"
-      ? createWorkerReviewSmokeGateway({
-          metrics: observability.metrics,
-          traces: observability.traces,
-        })
-      : undefined;
+  const llmGateway = await createWorkerLlmGatewayFromEnvironment(process.env, {
+    metrics: observability.metrics,
+    traces: observability.traces,
+  });
   const artifactPayloadStore = createWorkerReviewArtifactPayloadStoreFromEnv();
   const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env, {
     db: databaseClient.db,
@@ -1345,6 +1466,49 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
 function optionalEnvString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Returns the first configured environment variable value from an ordered list. */
+function firstEnvValue(
+  env: Readonly<Record<string, string | undefined>>,
+  names: readonly string[],
+): string | undefined {
+  const name = firstEnvName(env, names);
+  return name ? optionalEnvString(env[name]) : undefined;
+}
+
+/** Returns the first configured environment variable name from an ordered list. */
+function firstEnvName(
+  env: Readonly<Record<string, string | undefined>>,
+  names: readonly string[],
+): string | undefined {
+  for (const name of names) {
+    if (optionalEnvString(env[name])) {
+      return name;
+    }
+  }
+
+  return undefined;
+}
+
+/** Returns whether OpenAI provider settings are present without an explicit provider selector. */
+function hasOpenAIProviderConfiguration(env: WorkerLlmGatewayEnvironment): boolean {
+  return Boolean(firstEnvValue(env, ["HEIMDALL_LLM_MODEL", "LLM_MODEL", "OPENAI_MODEL"]));
+}
+
+/** Returns whether a provider selector names an OpenAI-compatible provider. */
+function isOpenAIProviderName(value: string): boolean {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "");
+
+  return (
+    normalized === "openai" ||
+    normalized === "openai_chat_completions" ||
+    normalized === "openai_compatible"
+  );
 }
 
 /** Parses INDEXER_CLI_ARGS_JSON into a spawn argument array. */

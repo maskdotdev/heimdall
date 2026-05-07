@@ -24,6 +24,14 @@ pnpm dev
 If your Node distribution does not include Corepack, use
 `npm exec --yes -- pnpm@10.33.3 install` for the first install.
 
+## Review LLM Provider
+
+Real review-model calls are disabled unless the worker is configured with an explicit provider.
+For an OpenAI-compatible Chat Completions provider, set `LLM_PROVIDER=openai`, `OPENAI_MODEL` or
+`LLM_MODEL`, and either `LLM_PROVIDER_API_KEY_SECRET_REF`, `OPENAI_API_KEY_SECRET_REF`, or a local
+`OPENAI_API_KEY` development fallback. Set `HEIMDALL_REVIEW_SMOKE_FINDING=true` only for the
+guarded live PR review smoke, which uses the deterministic smoke gateway instead of a real model.
+
 ## Repository Structure
 
 ```text

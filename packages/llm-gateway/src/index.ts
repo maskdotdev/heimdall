@@ -9,7 +9,7 @@ import {
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import { redactPromptSecrets } from "@repo/security";
-import type { Static, TSchema } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
 /** Task names supported by the gateway MVP. */
 export type LLMTask = "review.findings";
@@ -125,6 +125,34 @@ export type FakeLLMProviderOptions = {
   readonly failureCode?: LLMErrorCode;
 };
 
+/** Fetch boundary used by the OpenAI Chat Completions provider. */
+export type OpenAIChatCompletionsFetch = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+/** Options used to create an OpenAI-compatible Chat Completions provider. */
+export type OpenAIChatCompletionsProviderOptions = {
+  /** Secret API key used only in the Authorization header. */
+  readonly apiKey: string;
+  /** Optional OpenAI-compatible API base URL. Defaults to https://api.openai.com/v1. */
+  readonly baseUrl?: string;
+  /** Optional fetch implementation for tests or alternate runtimes. */
+  readonly fetch?: OpenAIChatCompletionsFetch;
+  /** Optional maximum completion tokens passed through to compatible providers. */
+  readonly maxCompletionTokens?: number;
+  /** Model identifier sent to the provider. */
+  readonly model: string;
+  /** Optional OpenAI organization header value. */
+  readonly organization?: string;
+  /** Optional OpenAI project header value. */
+  readonly project?: string;
+  /** Optional sampling temperature passed through to compatible providers. */
+  readonly temperature?: number;
+  /** Optional request timeout in milliseconds. */
+  readonly timeoutMs?: number;
+};
+
 /** Error raised by the gateway after provider, validation, budget, or policy failures. */
 export class LLMGatewayError extends Error {
   /** Stable gateway error code. */
@@ -203,6 +231,189 @@ export class FakeLLMProvider implements LLMProvider {
 
     return (fixture ?? this.options.defaultObject ?? { findings: [] }) as Static<TSchemaValue>;
   }
+}
+
+/** Provider adapter backed by the OpenAI-compatible Chat Completions HTTP API. */
+export class OpenAIChatCompletionsProvider implements LLMProvider {
+  /** Stable provider adapter identifier used for errors, traces, and tests. */
+  public readonly id = "openai";
+
+  /** Secret API key used only for request authorization. */
+  private readonly apiKey: string;
+
+  /** OpenAI-compatible API base URL without a trailing slash. */
+  private readonly baseUrl: string;
+
+  /** Fetch implementation used for provider requests. */
+  private readonly fetchFn: OpenAIChatCompletionsFetch;
+
+  /** Optional maximum completion tokens for provider requests. */
+  private readonly maxCompletionTokens: number | undefined;
+
+  /** Model identifier sent to the provider. */
+  private readonly model: string;
+
+  /** Optional organization header value. */
+  private readonly organization: string | undefined;
+
+  /** Optional project header value. */
+  private readonly project: string | undefined;
+
+  /** Optional sampling temperature for provider requests. */
+  private readonly temperature: number | undefined;
+
+  /** Optional request timeout in milliseconds. */
+  private readonly timeoutMs: number | undefined;
+
+  /** Creates an OpenAI-compatible Chat Completions provider. */
+  public constructor(options: OpenAIChatCompletionsProviderOptions) {
+    this.apiKey = requireOpenAIProviderString(options.apiKey, "apiKey");
+    this.baseUrl = normalizeOpenAIBaseUrl(options.baseUrl ?? "https://api.openai.com/v1");
+    this.fetchFn = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.maxCompletionTokens = optionalPositiveNumber(options.maxCompletionTokens);
+    this.model = requireOpenAIProviderString(options.model, "model");
+    this.organization = optionalProviderString(options.organization);
+    this.project = optionalProviderString(options.project);
+    this.temperature = optionalFiniteNumber(options.temperature);
+    this.timeoutMs = optionalPositiveNumber(options.timeoutMs);
+  }
+
+  /** Calls Chat Completions and parses the assistant message content as JSON. */
+  public async generateObject<TSchemaValue extends TSchema>(
+    input: GenerateObjectInput<TSchemaValue>,
+  ): Promise<Static<TSchemaValue>> {
+    const response = await this.fetchChatCompletion(input);
+    if (!response.ok) {
+      throw await openAIHttpError(response, input, this.model);
+    }
+
+    const body = await readOpenAIJsonResponse(response, input, this.model);
+    const completion = parseOpenAIChatCompletionResponse(body, input, this.model);
+    const choice = completion.choices[0];
+    if (!choice) {
+      throw openAIResponseShapeError("OpenAI response did not include a completion choice.", {
+        model: this.model,
+        task: input.task,
+      });
+    }
+
+    if (
+      choice.finish_reason === "content_filter" ||
+      optionalProviderString(choice.message.refusal)
+    ) {
+      throw new LLMGatewayError("OpenAI refused to return review JSON for this request.", {
+        code: "provider_refusal",
+        details: openAIResponseDetails({ finishReason: choice.finish_reason }),
+        model: this.model,
+        provider: this.id,
+        retryable: false,
+        task: input.task,
+      });
+    }
+
+    const content = optionalProviderString(choice.message.content);
+    if (!content) {
+      throw new LLMGatewayError("OpenAI response did not include JSON message content.", {
+        code: "schema_validation_failed",
+        details: openAIResponseDetails({ finishReason: choice.finish_reason }),
+        model: this.model,
+        provider: this.id,
+        retryable: false,
+        task: input.task,
+      });
+    }
+
+    try {
+      return JSON.parse(content) as Static<TSchemaValue>;
+    } catch (error) {
+      throw new LLMGatewayError("OpenAI response message content was not valid JSON.", {
+        cause: error,
+        code: "schema_validation_failed",
+        details: openAIResponseDetails({ finishReason: choice.finish_reason }),
+        model: this.model,
+        provider: this.id,
+        retryable: false,
+        task: input.task,
+      });
+    }
+  }
+
+  /** Sends one Chat Completions request with optional timeout handling. */
+  private async fetchChatCompletion<TSchemaValue extends TSchema>(
+    input: GenerateObjectInput<TSchemaValue>,
+  ): Promise<Response> {
+    const controller = this.timeoutMs ? new AbortController() : undefined;
+    const timeout =
+      controller && this.timeoutMs
+        ? setTimeout(() => controller.abort(), this.timeoutMs)
+        : undefined;
+
+    try {
+      return await this.fetchFn(`${this.baseUrl}/chat/completions`, {
+        body: JSON.stringify(this.createRequestBody(input)),
+        headers: this.createRequestHeaders(),
+        method: "POST",
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (error) {
+      const isTimeout = controller?.signal.aborted === true;
+      throw new LLMGatewayError(
+        isTimeout
+          ? "OpenAI chat completion request timed out."
+          : "OpenAI chat completion request failed.",
+        {
+          cause: error,
+          code: isTimeout ? "timeout" : "provider_unavailable",
+          model: this.model,
+          provider: this.id,
+          retryable: true,
+          task: input.task,
+        },
+      );
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  /** Builds the product request body for a JSON-mode Chat Completions call. */
+  private createRequestBody<TSchemaValue extends TSchema>(
+    input: GenerateObjectInput<TSchemaValue>,
+  ): Record<string, unknown> {
+    return {
+      messages: [
+        {
+          content: `${input.system}\n\nReturn exactly one valid JSON object for ${input.schemaName}.`,
+          role: "system",
+        },
+        { content: input.prompt, role: "user" },
+      ],
+      model: this.model,
+      n: 1,
+      response_format: { type: "json_object" },
+      store: false,
+      ...(this.maxCompletionTokens ? { max_completion_tokens: this.maxCompletionTokens } : {}),
+      ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
+    };
+  }
+
+  /** Builds request headers without exposing the API key to logs or metadata. */
+  private createRequestHeaders(): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.apiKey}`,
+      "Content-Type": "application/json",
+      ...(this.organization ? { "OpenAI-Organization": this.organization } : {}),
+      ...(this.project ? { "OpenAI-Project": this.project } : {}),
+    };
+  }
+}
+
+/** Creates an OpenAI-compatible Chat Completions provider adapter. */
+export function createOpenAIChatCompletionsProvider(
+  options: OpenAIChatCompletionsProviderOptions,
+): LLMProvider {
+  return new OpenAIChatCompletionsProvider(options);
 }
 
 /** Creates a schema-validating LLM gateway around an injected provider adapter. */
@@ -296,6 +507,57 @@ export function normalizeLLMError(
   });
 }
 
+const NullableOpenAIStringSchema = Type.Union([Type.String(), Type.Null()]);
+
+const OpenAIChatCompletionResponseSchema = Type.Object(
+  {
+    choices: Type.Array(
+      Type.Object(
+        {
+          finish_reason: Type.Optional(NullableOpenAIStringSchema),
+          message: Type.Object(
+            {
+              content: Type.Optional(NullableOpenAIStringSchema),
+              refusal: Type.Optional(NullableOpenAIStringSchema),
+            },
+            { additionalProperties: true },
+          ),
+        },
+        { additionalProperties: true },
+      ),
+      { minItems: 1 },
+    ),
+    id: Type.Optional(Type.String()),
+  },
+  { additionalProperties: true },
+);
+
+type OpenAIChatCompletionResponse = Static<typeof OpenAIChatCompletionResponseSchema>;
+
+const OpenAIErrorResponseSchema = Type.Object(
+  {
+    error: Type.Optional(
+      Type.Object(
+        {
+          code: Type.Optional(Type.Union([Type.String(), Type.Number(), Type.Null()])),
+          message: Type.Optional(Type.String()),
+          param: Type.Optional(NullableOpenAIStringSchema),
+          type: Type.Optional(Type.String()),
+        },
+        { additionalProperties: true },
+      ),
+    ),
+  },
+  { additionalProperties: true },
+);
+
+type OpenAIHttpErrorMapping = {
+  /** Stable gateway error code for an OpenAI HTTP status. */
+  readonly code: LLMErrorCode;
+  /** Whether retrying the same request can succeed. */
+  readonly retryable: boolean;
+};
+
 const DEFAULT_RETRYABLE_ERROR_CODES: readonly LLMErrorCode[] = [
   "provider_unavailable",
   "provider_rate_limited",
@@ -316,6 +578,231 @@ function normalizeRetryPolicy(
     retryableErrorCodes:
       retryPolicy?.retryableErrorCodes ?? DEFAULT_RETRY_POLICY.retryableErrorCodes,
   };
+}
+
+/** Reads one required, non-empty OpenAI provider option. */
+function requireOpenAIProviderString(value: string, name: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new LLMGatewayError(`OpenAI provider option ${name} is required.`, {
+      code: "unknown",
+      provider: "openai",
+      retryable: false,
+    });
+  }
+
+  return trimmed;
+}
+
+/** Reads one optional, non-empty provider string. */
+function optionalProviderString(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Reads one optional positive number. */
+function optionalPositiveNumber(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/** Reads one optional finite number. */
+function optionalFiniteNumber(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) ? value : undefined;
+}
+
+/** Normalizes an OpenAI-compatible base URL by removing trailing slashes. */
+function normalizeOpenAIBaseUrl(value: string): string {
+  const trimmed = requireOpenAIProviderString(value, "baseUrl");
+  return trimmed.replaceAll(/\/+$/gu, "");
+}
+
+/** Reads the provider JSON response body. */
+async function readOpenAIJsonResponse<TSchemaValue extends TSchema>(
+  response: Response,
+  input: GenerateObjectInput<TSchemaValue>,
+  model: string,
+): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    throw new LLMGatewayError("OpenAI chat completion response was not valid JSON.", {
+      cause: error,
+      code: "provider_unavailable",
+      details: { responseShape: "chat_completion" },
+      model,
+      provider: "openai",
+      retryable: true,
+      task: input.task,
+    });
+  }
+}
+
+/** Parses the provider response envelope without trusting provider output shape. */
+function parseOpenAIChatCompletionResponse<TSchemaValue extends TSchema>(
+  body: unknown,
+  input: GenerateObjectInput<TSchemaValue>,
+  model: string,
+): OpenAIChatCompletionResponse {
+  try {
+    return parseWithSchema(
+      "OpenAIChatCompletionResponse",
+      OpenAIChatCompletionResponseSchema,
+      body,
+    );
+  } catch (error) {
+    throw openAIResponseShapeError("OpenAI chat completion response envelope was invalid.", {
+      cause: error,
+      model,
+      task: input.task,
+    });
+  }
+}
+
+/** Creates a provider-unavailable error for an invalid OpenAI response envelope. */
+function openAIResponseShapeError(
+  message: string,
+  options: {
+    /** Original validation or parsing error. */
+    readonly cause?: unknown;
+    /** Model that returned the invalid response. */
+    readonly model: string;
+    /** Task that was running when the response failed. */
+    readonly task: LLMTask;
+  },
+): LLMGatewayError {
+  return new LLMGatewayError(message, {
+    ...(options.cause ? { cause: options.cause } : {}),
+    code: "provider_unavailable",
+    details: { responseShape: "chat_completion" },
+    model: options.model,
+    provider: "openai",
+    retryable: true,
+    task: options.task,
+  });
+}
+
+/** Creates a normalized gateway error from an OpenAI HTTP failure. */
+async function openAIHttpError<TSchemaValue extends TSchema>(
+  response: Response,
+  input: GenerateObjectInput<TSchemaValue>,
+  model: string,
+): Promise<LLMGatewayError> {
+  const details = await openAIHttpErrorDetails(response);
+  const mapping = openAIErrorMappingForStatus(response.status, stringDetail(details, "errorCode"));
+
+  return new LLMGatewayError(
+    `OpenAI chat completions request failed with HTTP ${response.status}.`,
+    {
+      code: mapping.code,
+      details,
+      model,
+      provider: "openai",
+      retryable: mapping.retryable,
+      task: input.task,
+    },
+  );
+}
+
+/** Extracts product-safe details from an OpenAI HTTP error response. */
+async function openAIHttpErrorDetails(
+  response: Response,
+): Promise<Readonly<Record<string, unknown>>> {
+  const parsed = await safeReadOpenAIErrorBody(response);
+  const error = parseOpenAIErrorBody(parsed);
+  const requestId =
+    optionalProviderString(response.headers.get("x-request-id")) ??
+    optionalProviderString(response.headers.get("openai-request-id"));
+  const errorCode = openAIErrorCodeString(error?.code);
+
+  return {
+    ...(errorCode ? { errorCode } : {}),
+    ...(optionalProviderString(error?.type)
+      ? { errorType: optionalProviderString(error?.type) }
+      : {}),
+    ...(requestId ? { requestId } : {}),
+    status: response.status,
+    statusFamily: `${Math.trunc(response.status / 100)}xx`,
+  };
+}
+
+/** Reads an OpenAI error body when the response body is valid JSON. */
+async function safeReadOpenAIErrorBody(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parses an OpenAI error response with a narrow boundary schema. */
+function parseOpenAIErrorBody(
+  value: unknown,
+): Static<typeof OpenAIErrorResponseSchema>["error"] | undefined {
+  try {
+    return parseWithSchema("OpenAIErrorResponse", OpenAIErrorResponseSchema, value).error;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Converts an OpenAI error code value into a safe string detail. */
+function openAIErrorCodeString(value: string | number | null | undefined): string | undefined {
+  if (typeof value === "string") {
+    return optionalProviderString(value);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return undefined;
+}
+
+/** Maps OpenAI HTTP statuses into the gateway error model. */
+function openAIErrorMappingForStatus(
+  status: number,
+  errorCode: string | undefined,
+): OpenAIHttpErrorMapping {
+  const normalizedErrorCode = errorCode?.trim().toLowerCase();
+  if (normalizedErrorCode === "context_length_exceeded" || status === 413) {
+    return { code: "input_too_large", retryable: false };
+  }
+
+  if (status === 401 || status === 403) {
+    return { code: "provider_auth_failed", retryable: false };
+  }
+  if (status === 404) {
+    return { code: "model_not_found", retryable: false };
+  }
+  if (status === 408) {
+    return { code: "timeout", retryable: true };
+  }
+  if (status === 429) {
+    return { code: "provider_rate_limited", retryable: true };
+  }
+  if (status >= 500) {
+    return { code: "provider_unavailable", retryable: true };
+  }
+  if (status === 400) {
+    return { code: "model_capability_missing", retryable: false };
+  }
+
+  return { code: "unknown", retryable: false };
+}
+
+/** Creates product-safe provider response details. */
+function openAIResponseDetails(input: {
+  /** Finish reason returned by the provider, when present. */
+  readonly finishReason?: string | null | undefined;
+}): Readonly<Record<string, unknown>> {
+  return optionalProviderString(input.finishReason)
+    ? { finishReason: optionalProviderString(input.finishReason) }
+    : {};
+}
+
+/** Reads one string field from a product-safe detail record. */
+function stringDetail(details: Readonly<Record<string, unknown>>, key: string): string | undefined {
+  const value = details[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 async function executeProviderObject<TSchemaValue extends TSchema>(

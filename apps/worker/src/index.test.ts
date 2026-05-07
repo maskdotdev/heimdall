@@ -18,10 +18,12 @@ import {
   createRedisPublishThrottle,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
+  createWorkerLlmGatewayFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
   type RedisPublishThrottleClient,
   resolveWorkerGitHubPrivateKey,
+  resolveWorkerLlmApiKey,
   verifyWorkerIndexerCapabilities,
 } from "./index";
 
@@ -92,6 +94,132 @@ describe("resolveWorkerGitHubPrivateKey", () => {
     ).rejects.toMatchObject({
       code: "secret_provider_unsupported",
     });
+  });
+});
+
+describe("resolveWorkerLlmApiKey", () => {
+  it("resolves the local LLM provider API key through an env secret ref", async () => {
+    await expect(
+      resolveWorkerLlmApiKey({
+        OPENAI_API_KEY: "sk-test-openai-key",
+      }),
+    ).resolves.toBe("sk-test-openai-key");
+  });
+
+  it("resolves an explicit LLM provider API key secret ref", async () => {
+    await expect(
+      resolveWorkerLlmApiKey({
+        LLM_PROVIDER_API_KEY_SECRET_REF: "env:WORKER_LLM_API_KEY",
+        OPENAI_API_KEY: "ignored-direct-key",
+        WORKER_LLM_API_KEY: "sk-resolved-worker-key",
+      }),
+    ).resolves.toBe("sk-resolved-worker-key");
+  });
+
+  it("returns undefined when no LLM provider API key ref or env fallback exists", async () => {
+    await expect(resolveWorkerLlmApiKey({})).resolves.toBeUndefined();
+  });
+
+  it("fails closed for unsupported LLM provider secret providers", async () => {
+    await expect(
+      resolveWorkerLlmApiKey({
+        LLM_PROVIDER_API_KEY_SECRET_REF: "aws:prod/openai/api-key",
+      }),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+  });
+});
+
+describe("createWorkerLlmGatewayFromEnvironment", () => {
+  it("keeps the review LLM disabled by default", async () => {
+    await expect(createWorkerLlmGatewayFromEnvironment({})).resolves.toBeUndefined();
+  });
+
+  it("creates an OpenAI-compatible gateway from explicit worker environment", async () => {
+    const calls: RecordedLlmFetchCall[] = [];
+    const gateway = await createWorkerLlmGatewayFromEnvironment(
+      {
+        LLM_PROVIDER: "openai",
+        OPENAI_API_KEY: "sk-test-openai-key",
+        OPENAI_MODEL: "gpt-test",
+      },
+      {
+        fetch: async (url, init) => {
+          calls.push({ ...(init ? { init } : {}), url: String(url) });
+          return llmChatCompletionResponse({ findings: [] });
+        },
+      },
+    );
+    if (!gateway) {
+      throw new Error("Expected configured worker LLM gateway.");
+    }
+
+    await expect(gateway.generateReviewFindings({ prompt: "{}" })).resolves.toEqual({
+      findings: [],
+    });
+
+    const call = requireFirstLlmFetchCall(calls);
+    expect(call.url).toBe("https://api.openai.com/v1/chat/completions");
+    expect(call.init).toMatchObject({
+      headers: expect.objectContaining({
+        Authorization: "Bearer sk-test-openai-key",
+      }),
+      method: "POST",
+    });
+    expect(llmRequestJsonBody(call)).toMatchObject({
+      model: "gpt-test",
+      response_format: { type: "json_object" },
+      store: false,
+    });
+  });
+
+  it("keeps the smoke gateway as an explicit mode", async () => {
+    const gateway = await createWorkerLlmGatewayFromEnvironment({
+      HEIMDALL_REVIEW_SMOKE_FINDING: "true",
+    });
+    if (!gateway) {
+      throw new Error("Expected smoke worker LLM gateway.");
+    }
+
+    const output = await gateway.generateReviewFindings({
+      prompt: JSON.stringify({
+        changedFiles: [
+          {
+            hunks: [{ lines: [{ kind: "addition", newLine: 9 }] }],
+            path: "heimdall-smoke/pr-review-smoke.txt",
+            status: "modified",
+          },
+        ],
+      }),
+    });
+
+    expect(output.findings).toEqual([
+      expect.objectContaining({
+        line: 9,
+        path: "heimdall-smoke/pr-review-smoke.txt",
+        title: "Live PR review smoke test",
+      }),
+    ]);
+  });
+
+  it("requires an API key when the OpenAI-compatible provider is configured", async () => {
+    await expect(
+      createWorkerLlmGatewayFromEnvironment({
+        LLM_PROVIDER: "openai",
+        OPENAI_MODEL: "gpt-test",
+      }),
+    ).rejects.toThrow(
+      "LLM_PROVIDER_API_KEY_SECRET_REF, OPENAI_API_KEY_SECRET_REF, or OPENAI_API_KEY is required",
+    );
+  });
+
+  it("rejects unsupported worker LLM providers", async () => {
+    await expect(
+      createWorkerLlmGatewayFromEnvironment({
+        LLM_PROVIDER: "bogus",
+      }),
+    ).rejects.toThrow("Unsupported LLM_PROVIDER: bogus");
   });
 });
 
@@ -806,6 +934,64 @@ describe("verifyWorkerIndexerCapabilities", () => {
     info.mockRestore();
   });
 });
+
+/** Fetch call captured by worker LLM gateway tests. */
+type RecordedLlmFetchCall = {
+  /** Request init passed to the fake fetch implementation. */
+  readonly init?: RequestInit;
+  /** Request URL passed to the fake fetch implementation. */
+  readonly url: string;
+};
+
+/** Creates a successful Chat Completions response for worker LLM gateway tests. */
+function llmChatCompletionResponse(content: unknown): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            content: JSON.stringify(content),
+            role: "assistant",
+          },
+        },
+      ],
+    }),
+    {
+      headers: { "Content-Type": "application/json" },
+      status: 200,
+    },
+  );
+}
+
+/** Returns the first recorded worker LLM fetch call or raises a test setup failure. */
+function requireFirstLlmFetchCall(calls: readonly RecordedLlmFetchCall[]): RecordedLlmFetchCall {
+  const call = calls[0];
+  if (!call) {
+    throw new Error("Expected one worker LLM fetch call.");
+  }
+
+  return call;
+}
+
+/** Parses a worker LLM JSON request body into an object for assertions. */
+function llmRequestJsonBody(call: RecordedLlmFetchCall): Record<string, unknown> {
+  if (typeof call.init?.body !== "string") {
+    throw new Error("Expected worker LLM request body to be a JSON string.");
+  }
+
+  const parsed = JSON.parse(call.init.body) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Expected worker LLM request body to be a JSON object.");
+  }
+
+  return parsed;
+}
+
+/** Returns whether a value is a non-null object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 /** Metric record captured by worker telemetry assertions. */
 type WorkerRecordedMetric = {
