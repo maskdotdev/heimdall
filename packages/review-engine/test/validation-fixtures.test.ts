@@ -10,6 +10,7 @@ import {
 import type { ChangedFile, DiffHunk } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import type { ReviewPolicy } from "@repo/contracts/repository/settings";
+import type { ContextBundle } from "@repo/contracts/review/context";
 import type {
   CandidateFinding,
   FindingRejectionReason,
@@ -53,6 +54,8 @@ type ValidationFixtureMemoryFact = {
 
 /** Validation config supported by validation fixture JSON. */
 type ValidationFixtureConfig = {
+  /** Context item IDs available to evidence context reference validation. */
+  readonly contextItemIds?: readonly string[];
   /** Enabled finding categories. */
   readonly enabledCategories?: FindingValidationConfig["enabledCategories"];
   /** Maximum accepted findings before budget rejection. */
@@ -135,6 +138,10 @@ type ValidationFixtureFinding = {
 
 /** Evidence fragment supported by validation fixture JSON. */
 type ValidationFixtureEvidence = {
+  /** Optional context item referenced by this evidence. */
+  readonly contextItemId?: string;
+  /** Optional evidence confidence override. */
+  readonly confidence?: number;
   /** Evidence summary visible to validators. */
   readonly summary: string;
 };
@@ -220,9 +227,14 @@ describe("validation fixture goldens", () => {
         loadedFixture.fixture.expected.rankOrderCandidateFindingIds.map((_, index) => index + 1),
       );
 
-      expect(rejectionReasonsByCandidateId(result.rejected)).toEqual(
-        expect.objectContaining(loadedFixture.fixture.expected.rejected),
-      );
+      const rejectionReasons = rejectionReasonsByCandidateId(result.rejected);
+      for (const [candidateFindingId, expectedReasons] of Object.entries(
+        loadedFixture.fixture.expected.rejected,
+      )) {
+        expect(rejectionReasons[candidateFindingId]).toEqual(
+          expect.arrayContaining([...expectedReasons]),
+        );
+      }
       expect(result.rejected.map((finding) => finding.candidateFindingId).sort()).toEqual(
         Object.keys(loadedFixture.fixture.expected.rejected).sort(),
       );
@@ -300,6 +312,9 @@ function validationConfigFromFixture(
   }
 
   return {
+    ...(config.contextItemIds
+      ? { contextBundle: contextBundleFromFixture(config.contextItemIds) }
+      : {}),
     ...(config.enabledCategories ? { enabledCategories: config.enabledCategories } : {}),
     ...(typeof config.maxPublishableFindings === "number"
       ? { maxPublishableFindings: config.maxPublishableFindings }
@@ -432,6 +447,8 @@ function candidateFindingFromFixture(finding: ValidationFixtureFinding): Candida
     evidence:
       finding.evidence?.map((evidence, index) => ({
         ...baseEvidenceFixture(),
+        ...(evidence.contextItemId ? { contextItemId: evidence.contextItemId } : {}),
+        ...(typeof evidence.confidence === "number" ? { confidence: evidence.confidence } : {}),
         evidenceId: `ev_${finding.findingId}_${index + 1}`,
         path: location.path,
         range: { endLine: location.line, startLine: location.line },
@@ -444,6 +461,23 @@ function candidateFindingFromFixture(finding: ValidationFixtureFinding): Candida
     sourceName: finding.sourceName ?? validCandidateFindingFixture.sourceName,
     ...(finding.suggestedFix ? { suggestedFix: finding.suggestedFix } : {}),
     title: finding.title,
+  };
+}
+
+/** Builds a context-bundle fragment from fixture context item IDs. */
+function contextBundleFromFixture(contextItemIds: readonly string[]): Pick<ContextBundle, "items"> {
+  return {
+    items: contextItemIds.map((contextItemId) => ({
+      contextItemId,
+      kind: "diff",
+      source: "diff",
+      priority: 100,
+      tokenEstimate: 10,
+      provenance: {
+        retriever: "fixture",
+        reason: "validation fixture",
+      },
+    })),
   };
 }
 

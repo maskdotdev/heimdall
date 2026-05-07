@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "finding_validation_fixture.v1",
+  "name": "weak evidence rejection",
+  "snapshot": {
+    "addedLines": [2]
+  },
+  "findings": [
+    {
+      "findingId": "fnd_FIX_WEAK_EVIDENCE",
+      "fingerprint": "fp_fixture_weak_evidence",
+      "severity": "medium",
+      "title": "Reject weak evidence",
+      "body": "The candidate has evidence that is too weak to support a published finding.",
+      "location": { "line": 2 },
+      "evidence": [
+        {
+          "summary": "weak",
+          "confidence": 0.1
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "acceptedCandidateFindingIds": [],
+    "rankOrderCandidateFindingIds": [],
+    "rejected": {
+      "fnd_FIX_WEAK_EVIDENCE": ["weak_evidence"]
+    },
+    "duplicateGroups": [],
+    "publishPlan": {
+      "checkAnnotationCandidateFindingIds": [],
+      "inlineCandidateFindingIds": [],
+      "summaryCandidateFindingIds": []
+    }
+  }
+}

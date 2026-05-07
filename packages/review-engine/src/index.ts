@@ -1,19 +1,82 @@
 import { createHash } from "node:crypto";
-import type { FindingCategory, FindingSeverity } from "@repo/contracts/enums/finding";
+import type {
+  FindingCategory,
+  FindingSeverity,
+  FindingSource,
+} from "@repo/contracts/enums/finding";
 import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import type { ContextBundle } from "@repo/contracts/review/context";
-import type {
-  CandidateFinding,
-  Evidence,
-  FindingRejectionReason,
-  LLMFindingOutput,
-  PublishedFinding,
-  ValidatedFinding,
+import {
+  type CandidateFinding,
+  CandidateFindingSchema,
+  type Evidence,
+  type FindingRejectionReason,
+  type LLMFindingOutput,
+  type PublishedFinding,
+  type ValidatedFinding,
 } from "@repo/contracts/review/finding";
+import { safeParseWithSchema } from "@repo/contracts/validation/parse";
 import type { LLMGateway } from "@repo/llm-gateway";
 import { evaluateSuppression, type MemoryFact, type SuppressionDecision } from "@repo/memory";
 import { type EffectiveReviewPolicy, evaluateFindingPolicy } from "@repo/rules";
+
+/** Valid finding categories used when normalizing schema-invalid candidates. */
+const FINDING_CATEGORIES = new Set<FindingCategory>([
+  "architecture",
+  "correctness",
+  "dependency",
+  "documentation",
+  "maintainability",
+  "other",
+  "performance",
+  "security",
+  "style",
+  "test_coverage",
+]);
+
+/** Valid finding severities used when normalizing schema-invalid candidates. */
+const FINDING_SEVERITIES = new Set<FindingSeverity>(["critical", "high", "info", "low", "medium"]);
+
+/** Valid finding sources used when normalizing schema-invalid candidates. */
+const FINDING_SOURCES = new Set<FindingSource>([
+  "hybrid",
+  "llm",
+  "memory",
+  "rule",
+  "static_analysis",
+]);
+
+/** Maximum accepted candidate title length from the public contract. */
+const MAX_CANDIDATE_TITLE_LENGTH = 200;
+
+/** Maximum accepted candidate body length from the public contract. */
+const MAX_CANDIDATE_BODY_LENGTH = 4000;
+
+/** Maximum accepted suggested fix length from the public contract. */
+const MAX_SUGGESTED_FIX_LENGTH = 8000;
+
+/** Minimum evidence summary length before evidence is considered useful. */
+const MIN_EVIDENCE_SUMMARY_LENGTH = 12;
+
+/** Minimum evidence confidence before evidence is considered useful. */
+const MIN_EVIDENCE_CONFIDENCE = 0.2;
+
+/** Normalization failures that make later candidate validators unreliable. */
+const SCHEMA_BLOCKING_REASONS = new Set<FindingRejectionReason>([
+  "invalid_file_path",
+  "invalid_schema",
+  "line_missing",
+  "missing_file_path",
+  "unsupported_schema_version",
+]);
+
+type NormalizedCandidateFindingForValidation = {
+  /** Candidate normalized enough that validation can persist an explicit rejection. */
+  readonly finding: CandidateFinding;
+  /** Rejection reasons discovered while normalizing schema-invalid boundary data. */
+  readonly reasons: readonly FindingRejectionReason[];
+};
 
 /** Context provided to every deterministic or model-backed review pass. */
 export type ReviewPassContext = {
@@ -196,6 +259,8 @@ export type FindingValidationConfig = {
   readonly repoRules?: readonly string[];
   /** Previously published findings on the same pull request used for comment dedupe. */
   readonly previousPublishedFindings?: readonly PreviousPublishedFinding[];
+  /** Retrieved context bundle used to validate evidence context references. */
+  readonly contextBundle?: Pick<ContextBundle, "items">;
   /** Active and inactive memory facts available for validation suppression. */
   readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
@@ -232,6 +297,8 @@ type NormalizedFindingValidationConfig = {
   readonly repoRules: readonly string[];
   /** Previously published findings on the same pull request. */
   readonly previousPublishedFindings: readonly PreviousPublishedFinding[];
+  /** Retrieved context bundle used to validate evidence context references. */
+  readonly contextBundle?: Pick<ContextBundle, "items">;
   /** Active and inactive memory facts available for validation suppression. */
   readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
@@ -342,16 +409,26 @@ export function validateCandidateFindings(
   const seenSemanticSignatures: SemanticFindingSignature[] = [];
   const accepted: ValidatedFinding[] = [];
   const rejected: ValidatedFinding[] = [];
+  const normalizedCandidates: CandidateFinding[] = [];
 
-  for (const finding of input.findings) {
-    const analysis = rejectionAnalysis(
-      finding,
-      state,
-      config,
-      seenFingerprints,
-      seenLocations,
-      seenSemanticSignatures,
-    );
+  for (const rawFinding of input.findings as readonly unknown[]) {
+    const normalizedFinding = normalizeCandidateFindingForValidation(rawFinding, input.timestamp);
+    const finding = normalizedFinding.finding;
+    normalizedCandidates.push(finding);
+    const validatorAnalysis = shouldSkipCandidateValidators(normalizedFinding.reasons)
+      ? { reasons: [] }
+      : rejectionAnalysis(
+          finding,
+          state,
+          config,
+          seenFingerprints,
+          seenLocations,
+          seenSemanticSignatures,
+        );
+    const analysis = {
+      ...validatorAnalysis,
+      reasons: mergeRejectionReasons(normalizedFinding.reasons, validatorAnalysis.reasons),
+    };
     const decision = analysis.reasons.length === 0 ? "publish" : "reject";
     const validated = toValidatedFinding(finding, input.timestamp, decision, analysis);
 
@@ -380,7 +457,7 @@ export function validateCandidateFindings(
 
   return {
     accepted: finalAccepted,
-    duplicateGroups: buildDuplicateGroups(input.findings),
+    duplicateGroups: buildDuplicateGroups(normalizedCandidates),
     rejected: finalRejected,
     stats: buildValidationStats(input.findings.length, finalAccepted, finalRejected),
     trace: buildValidationTrace(input.timestamp, validated),
@@ -411,11 +488,139 @@ function normalizeFindingValidationConfig(
       config?.policy?.findings.allowStyleFindings ?? config?.allowStyleFindings ?? false,
     maxPublishableFindings:
       config?.policy?.findings.maxCommentsPerReview ?? config?.maxPublishableFindings ?? 10,
+    ...(config?.contextBundle ? { contextBundle: config.contextBundle } : {}),
     previousPublishedFindings: config?.previousPublishedFindings ?? [],
     repoRules: config?.repoRules ?? [],
     ...(config?.memorySuppression ? { memorySuppression: config.memorySuppression } : {}),
     ...(config?.policy ? { policy: config.policy } : {}),
   };
+}
+
+/** Normalizes boundary data so every candidate can produce a validation decision. */
+function normalizeCandidateFindingForValidation(
+  rawFinding: unknown,
+  timestamp: string,
+): NormalizedCandidateFindingForValidation {
+  const parsed = safeParseWithSchema("CandidateFinding", CandidateFindingSchema, rawFinding);
+  if (parsed.ok) {
+    return { finding: parsed.value, reasons: [] };
+  }
+
+  return {
+    finding: fallbackCandidateFinding(rawFinding, timestamp),
+    reasons: schemaRejectionReasons(rawFinding),
+  };
+}
+
+/** Creates a contract-shaped candidate for invalid boundary data. */
+function fallbackCandidateFinding(rawFinding: unknown, timestamp: string): CandidateFinding {
+  const record = isRecord(rawFinding) ? rawFinding : {};
+  const locationRecord = isRecord(record.location) ? record.location : {};
+  const findingId = findingIdFromUnknown(record.findingId, rawFinding);
+  const location = locationFromUnknown(locationRecord);
+  const evidence = evidenceFromUnknown(record.evidence, findingId, location);
+  const suggestedFix = boundedOptionalString(record.suggestedFix, MAX_SUGGESTED_FIX_LENGTH);
+
+  return {
+    findingId,
+    schemaVersion: "candidate_finding.v1",
+    reviewRunId: reviewRunIdFromUnknown(record.reviewRunId, rawFinding),
+    source: findingSourceFromUnknown(record.source),
+    sourceName: boundedRequiredString(record.sourceName, "unknown-source", 200),
+    category: findingCategoryFromUnknown(record.category),
+    severity: findingSeverityFromUnknown(record.severity),
+    title: boundedRequiredString(
+      record.title,
+      "Invalid candidate finding",
+      MAX_CANDIDATE_TITLE_LENGTH,
+    ),
+    body: boundedRequiredString(
+      record.body,
+      "Candidate finding failed schema validation.",
+      MAX_CANDIDATE_BODY_LENGTH,
+    ),
+    location,
+    evidence,
+    ...(suggestedFix ? { suggestedFix } : {}),
+    confidence: confidenceFromUnknown(record.confidence),
+    fingerprint: boundedRequiredString(
+      record.fingerprint,
+      stableId("fp", [safeStableString(rawFinding)]),
+      512,
+    ),
+    createdAt: boundedRequiredString(record.createdAt, timestamp, 64),
+    ...(isRecord(record.metadata) ? { metadata: record.metadata } : {}),
+  };
+}
+
+/** Maps schema failures to product validation reasons where possible. */
+function schemaRejectionReasons(rawFinding: unknown): readonly FindingRejectionReason[] {
+  const reasons: FindingRejectionReason[] = [];
+  const record = isRecord(rawFinding) ? rawFinding : undefined;
+  const locationRecord = record && isRecord(record.location) ? record.location : undefined;
+
+  if (!record) {
+    pushReason(reasons, "invalid_schema");
+    return reasons;
+  }
+
+  if (record.schemaVersion !== undefined && record.schemaVersion !== "candidate_finding.v1") {
+    pushReason(reasons, "unsupported_schema_version");
+  }
+  if (!locationRecord || typeof locationRecord.path !== "string" || !locationRecord.path.trim()) {
+    pushReason(reasons, "missing_file_path");
+  } else {
+    const pathReason = repoPathRejectionReason(locationRecord.path);
+    if (pathReason) pushReason(reasons, pathReason);
+  }
+  if (!locationRecord || !isPositiveInteger(locationRecord.line)) {
+    pushReason(reasons, "line_missing");
+  }
+  if (!Array.isArray(record.evidence) || record.evidence.length === 0) {
+    pushReason(reasons, "missing_evidence");
+  }
+  if (
+    stringTooLong(record.title, MAX_CANDIDATE_TITLE_LENGTH) ||
+    stringTooLong(record.body, MAX_CANDIDATE_BODY_LENGTH) ||
+    stringTooLong(record.suggestedFix, MAX_SUGGESTED_FIX_LENGTH)
+  ) {
+    pushReason(reasons, "too_verbose");
+  }
+  if (
+    !isFindingId(record.findingId) ||
+    !isReviewRunId(record.reviewRunId) ||
+    !isFindingSource(record.source) ||
+    !isFindingCategory(record.category) ||
+    !isFindingSeverity(record.severity) ||
+    !isNonEmptyString(record.title) ||
+    !isNonEmptyString(record.body) ||
+    !isConfidence(record.confidence)
+  ) {
+    pushReason(reasons, "invalid_schema");
+  }
+  if (reasons.length === 0) {
+    pushReason(reasons, "invalid_schema");
+  }
+
+  return reasons;
+}
+
+/** Returns whether schema normalization found a blocker for later validators. */
+function shouldSkipCandidateValidators(reasons: readonly FindingRejectionReason[]): boolean {
+  return reasons.some((reason) => SCHEMA_BLOCKING_REASONS.has(reason));
+}
+
+/** Merges validation reasons while preserving first-seen order. */
+function mergeRejectionReasons(
+  left: readonly FindingRejectionReason[],
+  right: readonly FindingRejectionReason[],
+): readonly FindingRejectionReason[] {
+  const reasons: FindingRejectionReason[] = [];
+  for (const reason of [...left, ...right]) {
+    pushReason(reasons, reason);
+  }
+
+  return reasons;
 }
 
 function buildDuplicateGroups(
@@ -831,17 +1036,30 @@ function rejectionAnalysis(
   seenSemanticSignatures: readonly SemanticFindingSignature[],
 ): FindingRejectionAnalysis {
   const reasons: FindingRejectionReason[] = [];
-  const file = state.files.get(finding.location.path);
-  const addedLines = state.addedLinesByPath.get(finding.location.path);
+  const pathReason = repoPathRejectionReason(finding.location.path);
+  if (pathReason) pushReason(reasons, pathReason);
+  const file = pathReason ? undefined : state.files.get(finding.location.path);
+  const addedLines = pathReason ? undefined : state.addedLinesByPath.get(finding.location.path);
 
-  if (!file) pushReason(reasons, "file_not_in_pr");
-  if (file?.status === "deleted") pushReason(reasons, "file_deleted");
-  if (file?.isBinary) pushReason(reasons, "binary_file");
-  if (file?.isGenerated) pushReason(reasons, "generated_file");
+  if (!pathReason && !file) pushReason(reasons, "file_not_in_pr");
+  if (!pathReason && file?.status === "deleted") pushReason(reasons, "file_deleted");
+  if (!pathReason && file?.isBinary) pushReason(reasons, "binary_file");
+  if (!pathReason && file?.isGenerated) pushReason(reasons, "generated_file");
   if (finding.location.side !== "RIGHT") pushReason(reasons, "wrong_diff_side");
-  if (!finding.location.line) pushReason(reasons, "line_missing");
-  if (!addedLines?.has(finding.location.line)) pushReason(reasons, "line_not_in_diff");
+  if (!isPositiveInteger(finding.location.line)) pushReason(reasons, "line_missing");
+  if (
+    isPositiveInteger(finding.location.line) &&
+    !pathReason &&
+    !addedLines?.has(finding.location.line)
+  ) {
+    pushReason(reasons, "line_not_in_diff");
+  }
   if (finding.evidence.length === 0) pushReason(reasons, "missing_evidence");
+  if (hasWeakEvidence(finding)) pushReason(reasons, "weak_evidence");
+  if (hasInvalidContextReference(finding, config)) {
+    pushReason(reasons, "invalid_context_reference");
+  }
+  if (hasUnsafeSuggestedFix(finding)) pushReason(reasons, "unsafe_suggested_fix");
   if (containsSecretLikeValue(finding)) pushReason(reasons, "contains_secret");
   if (finding.confidence < 0.55) pushReason(reasons, "low_confidence");
   if (severityRank(finding.severity) < severityRank(config.minimumSeverity)) {
@@ -885,6 +1103,47 @@ function rejectionAnalysis(
   };
 }
 
+/** Returns whether evidence is present but too weak to support a finding. */
+function hasWeakEvidence(finding: CandidateFinding): boolean {
+  return finding.evidence.some(
+    (evidence) =>
+      evidence.summary.trim().length < MIN_EVIDENCE_SUMMARY_LENGTH ||
+      evidence.confidence < MIN_EVIDENCE_CONFIDENCE,
+  );
+}
+
+/** Returns whether a candidate references context outside the retrieved bundle. */
+function hasInvalidContextReference(
+  finding: CandidateFinding,
+  config: NormalizedFindingValidationConfig,
+): boolean {
+  const referencedContextIds = finding.evidence
+    .map((evidence) => evidence.contextItemId)
+    .filter((contextItemId): contextItemId is string => Boolean(contextItemId));
+  if (referencedContextIds.length === 0) {
+    return false;
+  }
+
+  const knownContextIds = new Set(
+    config.contextBundle?.items.map((item) => item.contextItemId) ?? [],
+  );
+  if (knownContextIds.size === 0) {
+    return true;
+  }
+
+  return referencedContextIds.some((contextItemId) => !knownContextIds.has(contextItemId));
+}
+
+/** Returns whether a suggested fix contains unsafe shell-like operations. */
+function hasUnsafeSuggestedFix(finding: CandidateFinding): boolean {
+  const suggestedFix = finding.suggestedFix?.toLowerCase();
+  if (!suggestedFix) {
+    return false;
+  }
+
+  return UNSAFE_SUGGESTED_FIX_PATTERNS.some((pattern) => pattern.test(suggestedFix));
+}
+
 /** Evaluates configured memory facts for one candidate finding. */
 function memorySuppressionDecision(
   finding: CandidateFinding,
@@ -906,6 +1165,227 @@ function memorySuppressionDecision(
 function pushReason(reasons: FindingRejectionReason[], reason: FindingRejectionReason): void {
   if (!reasons.includes(reason)) {
     reasons.push(reason);
+  }
+}
+
+/** Returns whether a value is a non-array object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Returns whether a value is a non-empty string. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/** Returns whether a value is a valid finding ID. */
+function isFindingId(value: unknown): value is CandidateFinding["findingId"] {
+  return typeof value === "string" && /^fnd_[A-Za-z0-9_-]+$/u.test(value);
+}
+
+/** Returns whether a value is a valid evidence ID. */
+function isEvidenceId(value: unknown): value is Evidence["evidenceId"] {
+  return typeof value === "string" && /^ev_[A-Za-z0-9_-]+$/u.test(value);
+}
+
+/** Returns whether a value is a valid review run ID. */
+function isReviewRunId(value: unknown): value is CandidateFinding["reviewRunId"] {
+  return typeof value === "string" && /^rrn_[A-Za-z0-9_-]+$/u.test(value);
+}
+
+/** Returns whether a value is a valid finding source. */
+function isFindingSource(value: unknown): value is FindingSource {
+  return typeof value === "string" && FINDING_SOURCES.has(value as FindingSource);
+}
+
+/** Returns whether a value is a valid finding category. */
+function isFindingCategory(value: unknown): value is FindingCategory {
+  return typeof value === "string" && FINDING_CATEGORIES.has(value as FindingCategory);
+}
+
+/** Returns whether a value is a valid finding severity. */
+function isFindingSeverity(value: unknown): value is FindingSeverity {
+  return typeof value === "string" && FINDING_SEVERITIES.has(value as FindingSeverity);
+}
+
+/** Returns whether a value is a valid confidence score. */
+function isConfidence(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+/** Returns whether a value is a positive integer. */
+function isPositiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 1;
+}
+
+/** Returns whether a string field exceeds a contract maximum. */
+function stringTooLong(value: unknown, maxLength: number): boolean {
+  return typeof value === "string" && value.length > maxLength;
+}
+
+/** Builds a stable finding ID from unknown boundary data. */
+function findingIdFromUnknown(value: unknown, rawFinding: unknown): CandidateFinding["findingId"] {
+  return isFindingId(value)
+    ? value
+    : stableId("fnd", ["invalid-candidate", safeStableString(rawFinding)]);
+}
+
+/** Builds a stable review run ID from unknown boundary data. */
+function reviewRunIdFromUnknown(
+  value: unknown,
+  rawFinding: unknown,
+): CandidateFinding["reviewRunId"] {
+  return isReviewRunId(value)
+    ? value
+    : stableId("rrn", ["invalid-candidate", safeStableString(rawFinding)]);
+}
+
+/** Coerces an unknown value into a known finding source. */
+function findingSourceFromUnknown(value: unknown): FindingSource {
+  return isFindingSource(value) ? value : "llm";
+}
+
+/** Coerces an unknown value into a known finding category. */
+function findingCategoryFromUnknown(value: unknown): FindingCategory {
+  return isFindingCategory(value) ? value : "other";
+}
+
+/** Coerces an unknown value into a known finding severity. */
+function findingSeverityFromUnknown(value: unknown): FindingSeverity {
+  return isFindingSeverity(value) ? value : "low";
+}
+
+/** Coerces an unknown value into a bounded confidence score. */
+function confidenceFromUnknown(value: unknown): number {
+  return isConfidence(value) ? value : 0;
+}
+
+/** Coerces an unknown value into a bounded required string. */
+function boundedRequiredString(value: unknown, fallback: string, maxLength: number): string {
+  const source = isNonEmptyString(value) ? value : fallback;
+  return source.slice(0, maxLength);
+}
+
+/** Coerces an unknown value into a bounded optional string. */
+function boundedOptionalString(value: unknown, maxLength: number): string | undefined {
+  return isNonEmptyString(value) ? value.slice(0, maxLength) : undefined;
+}
+
+/** Builds a safe fallback candidate location from unknown boundary data. */
+function locationFromUnknown(value: Record<string, unknown>): CandidateFinding["location"] {
+  const rawPath = typeof value.path === "string" ? value.path : "";
+  const pathReason = repoPathRejectionReason(rawPath);
+  const path =
+    pathReason === "missing_file_path"
+      ? "__missing_path__"
+      : pathReason === "invalid_file_path"
+        ? "__invalid_path__"
+        : rawPath;
+
+  return {
+    path,
+    line: isPositiveInteger(value.line) ? value.line : 1,
+    side: value.side === "LEFT" || value.side === "RIGHT" ? value.side : "RIGHT",
+    isInDiff: value.isInDiff === true,
+  };
+}
+
+/** Builds safe fallback evidence from unknown boundary data. */
+function evidenceFromUnknown(
+  value: unknown,
+  findingId: string,
+  location: CandidateFinding["location"],
+): Evidence[] {
+  if (Array.isArray(value) && value.length > 0) {
+    return value.map((rawEvidence, index) =>
+      evidenceItemFromUnknown(rawEvidence, findingId, index, location),
+    );
+  }
+
+  return [
+    {
+      evidenceId: stableId("ev", [findingId, "schema-validation"]),
+      kind: "external",
+      summary: "Candidate failed schema validation before evidence could be trusted.",
+      path: location.path,
+      range: { startLine: location.line, endLine: location.line },
+      confidence: 0,
+    },
+  ];
+}
+
+/** Builds one safe fallback evidence item from unknown boundary data. */
+function evidenceItemFromUnknown(
+  rawEvidence: unknown,
+  findingId: string,
+  index: number,
+  location: CandidateFinding["location"],
+): Evidence {
+  const record = isRecord(rawEvidence) ? rawEvidence : {};
+  return {
+    evidenceId: isEvidenceId(record.evidenceId)
+      ? record.evidenceId
+      : stableId("ev", [findingId, index]),
+    kind: evidenceKindFromUnknown(record.kind),
+    summary: boundedRequiredString(
+      record.summary,
+      "Candidate evidence failed schema validation.",
+      1000,
+    ),
+    path:
+      typeof record.path === "string" && !repoPathRejectionReason(record.path)
+        ? record.path
+        : location.path,
+    range: { startLine: location.line, endLine: location.line },
+    confidence: isConfidence(record.confidence) ? record.confidence : 0,
+    ...(isNonEmptyString(record.contextItemId)
+      ? { contextItemId: boundedRequiredString(record.contextItemId, "", 128) }
+      : {}),
+  };
+}
+
+/** Coerces an unknown evidence kind into a known evidence kind. */
+function evidenceKindFromUnknown(value: unknown): Evidence["kind"] {
+  const evidenceKinds = new Set<Evidence["kind"]>([
+    "code_snippet",
+    "diff",
+    "external",
+    "llm_reasoning",
+    "memory_fact",
+    "repo_rule",
+    "static_analysis",
+    "symbol_graph",
+  ]);
+  return typeof value === "string" && evidenceKinds.has(value as Evidence["kind"])
+    ? (value as Evidence["kind"])
+    : "external";
+}
+
+/** Returns a path rejection reason for unsafe or missing repository paths. */
+function repoPathRejectionReason(
+  path: string,
+): "missing_file_path" | "invalid_file_path" | undefined {
+  const trimmedPath = path.trim();
+  if (!trimmedPath) {
+    return "missing_file_path";
+  }
+  if (
+    trimmedPath.startsWith("/") ||
+    trimmedPath.includes("\\") ||
+    trimmedPath.split("/").some((segment) => segment === "..")
+  ) {
+    return "invalid_file_path";
+  }
+
+  return undefined;
+}
+
+/** Serializes unknown boundary data for deterministic fallback IDs. */
+function safeStableString(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
   }
 }
 
@@ -1386,6 +1866,12 @@ const SECRET_LIKE_PATTERNS = [
   /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/u,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
   /\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{16,}/iu,
+] as const;
+
+const UNSAFE_SUGGESTED_FIX_PATTERNS = [
+  /\brm\s+-rf\s+\/(?:\s|$)/u,
+  /\b(?:curl|wget)\b[^\n|;&]*(?:\||&&)\s*(?:sh|bash)\b/u,
+  /-----begin [a-z ]*private key-----/u,
 ] as const;
 
 const VALIDATION_EVENT_STAGES = [

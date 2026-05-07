@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "finding_validation_fixture.v1",
+  "name": "invalid traversal path",
+  "snapshot": {
+    "addedLines": [2]
+  },
+  "findings": [
+    {
+      "findingId": "fnd_FIX_INVALID_PATH",
+      "fingerprint": "fp_fixture_invalid_path",
+      "severity": "medium",
+      "title": "Reject traversal paths",
+      "body": "The finding points at a path that escapes the repository root.",
+      "location": { "path": "src/../secret.ts", "line": 2 }
+    }
+  ],
+  "expected": {
+    "acceptedCandidateFindingIds": [],
+    "rankOrderCandidateFindingIds": [],
+    "rejected": {
+      "fnd_FIX_INVALID_PATH": ["invalid_file_path"]
+    },
+    "duplicateGroups": [],
+    "publishPlan": {
+      "checkAnnotationCandidateFindingIds": [],
+      "inlineCandidateFindingIds": [],
+      "summaryCandidateFindingIds": []
+    }
+  }
+}

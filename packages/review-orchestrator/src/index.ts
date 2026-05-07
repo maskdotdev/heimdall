@@ -611,6 +611,7 @@ export async function runPullRequestReview(
       repoId: snapshot.repoId,
     });
     const validationConfig = {
+      contextBundle,
       memorySuppression: {
         memoryFacts: reviewMemoryFacts,
         orgId: repositoryRecord.orgId,

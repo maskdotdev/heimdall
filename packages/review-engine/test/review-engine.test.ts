@@ -5,7 +5,8 @@ import {
   validPullRequestSnapshotFixture,
 } from "@repo/contracts/fixtures/pull-request.fixture";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
-import type { CandidateFinding } from "@repo/contracts/review/finding";
+import type { ContextBundle } from "@repo/contracts/review/context";
+import type { CandidateFinding, Evidence } from "@repo/contracts/review/finding";
 import { createStaticLLMGateway } from "@repo/llm-gateway";
 import type { MemoryFact } from "@repo/memory";
 import { createPolicyFixture } from "@repo/rules";
@@ -487,6 +488,83 @@ describe("validateAndRankCandidateFindings", () => {
     });
   });
 
+  it("rejects runtime schema and path failures with explicit reasons", () => {
+    const unsupportedSchemaVersion = {
+      ...validCandidateFindingFixture,
+      findingId: "fnd_UNSUPPORTED_SCHEMA",
+      fingerprint: "fp_unsupported_schema",
+      schemaVersion: "candidate_finding.v0",
+    } as unknown as CandidateFinding;
+    const missingPath = {
+      ...validCandidateFindingFixture,
+      findingId: "fnd_MISSING_PATH",
+      fingerprint: "fp_missing_path",
+      location: { ...validCandidateFindingFixture.location, path: "" },
+    } as unknown as CandidateFinding;
+    const invalidPath = {
+      ...validCandidateFindingFixture,
+      findingId: "fnd_INVALID_PATH",
+      fingerprint: "fp_invalid_path",
+      location: { ...validCandidateFindingFixture.location, path: "src/../secret.ts" },
+    } as unknown as CandidateFinding;
+
+    const result = validateCandidateFindings({
+      snapshot: validPullRequestSnapshotFixture,
+      findings: [unsupportedSchemaVersion, missingPath, invalidPath],
+      timestamp: validCandidateFindingFixture.createdAt,
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(rejectionReasonsByCandidateId(result.rejected)).toMatchObject({
+      fnd_INVALID_PATH: expect.arrayContaining(["invalid_file_path"]),
+      fnd_MISSING_PATH: expect.arrayContaining(["missing_file_path"]),
+      fnd_UNSUPPORTED_SCHEMA: expect.arrayContaining(["unsupported_schema_version"]),
+    });
+  });
+
+  it("rejects weak evidence, invalid context references, and unsafe suggested fixes", () => {
+    const weakEvidence = candidateFindingFixture({
+      evidence: [evidenceFixture({ confidence: 0.1, summary: "weak" })],
+      findingId: "fnd_WEAK_EVIDENCE",
+      fingerprint: "fp_weak_evidence",
+      location: { ...validCandidateFindingFixture.location, line: 2 },
+      title: "Explain weak evidence",
+    });
+    const invalidContextReference = candidateFindingFixture({
+      evidence: [
+        evidenceFixture({
+          contextItemId: "ctxitem_missing",
+          summary: "The referenced context item is not present in the retrieved bundle.",
+        }),
+      ],
+      findingId: "fnd_INVALID_CONTEXT",
+      fingerprint: "fp_invalid_context",
+      location: { ...validCandidateFindingFixture.location, line: 4 },
+      title: "Reference retrieved context",
+    });
+    const unsafeSuggestedFix = candidateFindingFixture({
+      findingId: "fnd_UNSAFE_FIX",
+      fingerprint: "fp_unsafe_fix",
+      location: { ...validCandidateFindingFixture.location, line: 6 },
+      suggestedFix: "Run rm -rf / before applying this change.",
+      title: "Avoid unsafe cleanup command",
+    });
+
+    const result = validateCandidateFindings({
+      snapshot: snapshotWithAddedLines([2, 4, 6]),
+      findings: [weakEvidence, invalidContextReference, unsafeSuggestedFix],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: { contextBundle: contextBundleWithItems(["ctxitem_valid"]) },
+    });
+
+    expect(result.accepted).toHaveLength(0);
+    expect(rejectionReasonsByCandidateId(result.rejected)).toMatchObject({
+      fnd_INVALID_CONTEXT: expect.arrayContaining(["invalid_context_reference"]),
+      fnd_UNSAFE_FIX: expect.arrayContaining(["unsafe_suggested_fix"]),
+      fnd_WEAK_EVIDENCE: expect.arrayContaining(["weak_evidence"]),
+    });
+  });
+
   it("rejects generated, deleted, and binary files before publishing", () => {
     const generatedFinding = candidateFindingFixture({
       findingId: "fnd_GENERATED",
@@ -687,5 +765,35 @@ function memoryFactFixture(overrides: Partial<MemoryFact> = {}): MemoryFact {
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-05T00:00:00.000Z",
     ...overrides,
+  };
+}
+
+/** Creates evidence for validation tests. */
+function evidenceFixture(overrides: Partial<Evidence> = {}): Evidence {
+  const [evidence] = validCandidateFindingFixture.evidence;
+  if (!evidence) {
+    throw new Error("Expected candidate finding fixture evidence.");
+  }
+
+  return {
+    ...evidence,
+    ...overrides,
+  };
+}
+
+/** Creates a context-bundle fragment for context-reference validation tests. */
+function contextBundleWithItems(contextItemIds: readonly string[]): Pick<ContextBundle, "items"> {
+  return {
+    items: contextItemIds.map((contextItemId) => ({
+      contextItemId,
+      kind: "diff",
+      source: "diff",
+      priority: 100,
+      tokenEstimate: 10,
+      provenance: {
+        retriever: "fixture",
+        reason: "validation fixture",
+      },
+    })),
   };
 }

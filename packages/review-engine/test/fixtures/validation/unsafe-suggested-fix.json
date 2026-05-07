@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "finding_validation_fixture.v1",
+  "name": "unsafe suggested fix",
+  "snapshot": {
+    "addedLines": [2]
+  },
+  "findings": [
+    {
+      "findingId": "fnd_FIX_UNSAFE_FIX",
+      "fingerprint": "fp_fixture_unsafe_fix",
+      "severity": "medium",
+      "title": "Reject unsafe suggested fix",
+      "body": "The finding includes a suggested fix with an unsafe shell operation.",
+      "location": { "line": 2 },
+      "suggestedFix": "Run rm -rf / before applying this change."
+    }
+  ],
+  "expected": {
+    "acceptedCandidateFindingIds": [],
+    "rankOrderCandidateFindingIds": [],
+    "rejected": {
+      "fnd_FIX_UNSAFE_FIX": ["unsafe_suggested_fix"]
+    },
+    "duplicateGroups": [],
+    "publishPlan": {
+      "checkAnnotationCandidateFindingIds": [],
+      "inlineCandidateFindingIds": [],
+      "summaryCandidateFindingIds": []
+    }
+  }
+}
