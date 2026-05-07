@@ -56,7 +56,9 @@ async function main(args: readonly string[]): Promise<void> {
 
   const artifacts = await writeEvalReportArtifacts(report, outputDir);
   process.stdout.write(renderEvalReportMarkdown(report));
-  process.stdout.write(`Artifacts:\n- ${artifacts.markdownPath}\n- ${artifacts.jsonPath}\n`);
+  process.stdout.write(
+    `Artifacts:\n- ${artifacts.markdownPath}\n- ${artifacts.jsonPath}\n- ${artifacts.junitPath}\n`,
+  );
 
   if (options.failOnThreshold) {
     assertEvalGate(report);

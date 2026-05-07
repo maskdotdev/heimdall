@@ -267,6 +267,8 @@ export type RunEvaluationInput = {
 export type EvalReportArtifacts = {
   /** Absolute path to the JSON report. */
   readonly jsonPath: string;
+  /** Absolute path to the JUnit XML report. */
+  readonly junitPath: string;
   /** Absolute path to the Markdown report. */
   readonly markdownPath: string;
 };
@@ -438,10 +440,12 @@ export async function writeEvalReportArtifacts(
   const absoluteOutputDir = resolve(outputDir);
   await mkdir(absoluteOutputDir, { recursive: true });
   const jsonPath = resolve(absoluteOutputDir, "report.json");
+  const junitPath = resolve(absoluteOutputDir, "report.junit.xml");
   const markdownPath = resolve(absoluteOutputDir, "report.md");
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  await writeFile(junitPath, renderEvalReportJUnit(report), "utf8");
   await writeFile(markdownPath, renderEvalReportMarkdown(report), "utf8");
-  return { jsonPath, markdownPath };
+  return { jsonPath, junitPath, markdownPath };
 }
 
 /** Renders a CI-safe Markdown report without raw fixture code or context text. */
@@ -486,6 +490,59 @@ export function renderEvalReportMarkdown(report: EvalReport): string {
   ];
 
   return `${lines.join("\n")}\n`;
+}
+
+/** Renders a CI-safe JUnit XML report without raw fixture code or context text. */
+export function renderEvalReportJUnit(report: EvalReport): string {
+  const failedCases = report.caseResults.filter((caseResult) => caseResult.status === "fail");
+  const failedChecks = report.gate.checks.filter((check) => check.status === "fail");
+  const testCount = report.caseResults.length + report.gate.checks.length;
+  const failureCount = failedCases.length + failedChecks.length;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<testsuite name="${escapeXml(report.suiteId)}" tests="${testCount}" failures="${failureCount}" errors="0" skipped="0" timestamp="${escapeXml(
+      report.startedAt,
+    )}">`,
+    `  <properties><property name="variant" value="${escapeXml(report.variant.variantId)}" /></properties>`,
+    ...report.caseResults.map(renderEvalCaseJUnitTestcase),
+    ...report.gate.checks.map(renderEvalGateJUnitTestcase),
+    "</testsuite>",
+    "",
+  ];
+
+  return lines.join("\n");
+}
+
+/** Renders one eval case result as a JUnit testcase. */
+function renderEvalCaseJUnitTestcase(caseResult: EvalCaseResult): string {
+  const opening = `  <testcase classname="eval.case" name="${escapeXml(caseResult.caseId)}">`;
+  if (caseResult.status === "pass") {
+    return `${opening}</testcase>`;
+  }
+
+  const message = caseResult.failureReasons.join("; ");
+  return [
+    opening,
+    `    <failure message="${escapeXml(message)}">${escapeXml(message)}</failure>`,
+    "  </testcase>",
+  ].join("\n");
+}
+
+/** Renders one eval gate check as a JUnit testcase. */
+function renderEvalGateJUnitTestcase(check: EvalGateCheck): string {
+  const opening = `  <testcase classname="eval.gate" name="${escapeXml(check.metric)}">`;
+  if (check.status === "pass") {
+    return `${opening}</testcase>`;
+  }
+
+  const message = `${check.metric} ${formatGateNumber(check.actual)} did not satisfy ${check.comparator} ${formatGateNumber(
+    check.threshold,
+  )}`;
+  return [
+    opening,
+    `    <failure message="${escapeXml(message)}">${escapeXml(message)}</failure>`,
+    "  </testcase>",
+  ].join("\n");
 }
 
 /** Throws when an evaluation report fails its configured gate. */
@@ -990,6 +1047,16 @@ function formatRate(value: number): string {
 /** Formats one gate number for Markdown output. */
 function formatGateNumber(value: number): string {
   return value > 1 ? value.toFixed(2) : value.toFixed(3);
+}
+
+/** Escapes text for XML element and attribute contexts. */
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }
 
 /** Validates unknown data with a TypeBox schema and returns the typed value. */
