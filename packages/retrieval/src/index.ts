@@ -17,6 +17,14 @@ import {
   type RelevantMemoryRetriever,
   type RelevantMemoryTraceEntry,
 } from "@repo/memory";
+import {
+  classifyTelemetryError,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanHandle,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 
 /** Indexed chunk shape consumed by retrieval. */
@@ -96,8 +104,14 @@ export type RetrieveContextInput = {
   readonly maxTokens?: number;
   /** Optional relevant-memory retrieval for team facts and preferences. */
   readonly memory?: RetrieveMemoryContextOptions | undefined;
+  /** Optional metric recorder for product-safe aggregate retrieval telemetry. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Low-cardinality review mode label for aggregate retrieval metrics. */
+  readonly reviewMode?: string | undefined;
   /** Timestamp used for deterministic tests. */
   readonly timestamp?: string;
+  /** Optional span recorder for product-safe retrieval spans. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
 };
 
 /** Optional memory retrieval configuration for a context bundle. */
@@ -142,60 +156,250 @@ type MemoryRetrievalResult = {
   readonly trace: readonly RelevantMemoryTraceEntry[];
 };
 
+type RetrievalTelemetryStatus = "failed" | "succeeded";
+
+type RetrievalTelemetryState = {
+  /** Low-cardinality labels shared by request and duration metrics. */
+  readonly labels: Readonly<{
+    readonly review_mode: string;
+  }>;
+  /** Monotonic start time used for duration metrics. */
+  readonly startedAtMs: number;
+  /** Product-safe retrieval span handle. */
+  readonly span: TelemetrySpanHandle | undefined;
+};
+
 /** Retrieves a compact context bundle, falling back to diff context when indexes are missing. */
 export async function retrieveContext(input: RetrieveContextInput): Promise<ContextBundle> {
+  const telemetry = startRetrievalTelemetry(input);
   const maxTokens = input.maxTokens ?? 8000;
   const timestamp = input.timestamp ?? new Date().toISOString();
-  const diffItems = input.snapshot.changedFiles.flatMap((file) => contextItemsForFile(file));
-  const indexedResult = input.index
-    ? await retrieveIndexedItems({ ...input, index: input.index }, diffItems)
-    : { items: [], warnings: [] };
-  const memoryResult = input.memory
-    ? await retrieveMemoryItems({ ...input, memory: input.memory }, timestamp)
-    : { factIds: [], items: [], trace: [] };
-  const items = packItems(
-    input.indexAvailable === false || !input.index
-      ? [...memoryResult.items, ...withFallbackRule(diffItems)]
-      : [...memoryResult.items, ...indexedResult.items, ...diffItems],
-    maxTokens,
-  );
 
-  return parseWithSchema("ContextBundle", ContextBundleSchema, {
-    schemaVersion: "context_bundle.v1",
-    contextBundleId: stableId("ctx", [
-      input.reviewRunId,
-      input.snapshot.snapshotId,
-      input.indexAvailable === false ? "diff-fallback" : "indexed",
-      memoryResult.factIds.join(","),
-    ]),
-    reviewRunId: input.reviewRunId,
-    repoId: input.snapshot.repoId,
-    pullRequestSnapshotId: input.snapshot.snapshotId,
-    baseSha: input.snapshot.baseSha,
-    headSha: input.snapshot.headSha,
-    changedFiles: input.snapshot.changedFiles,
-    changedSymbols: [],
-    items: [...items],
-    tokenBudget: {
-      maxTokens,
-      estimatedTokens: items.reduce((total, item) => total + item.tokenEstimate, 0),
-    },
-    createdAt: timestamp,
-    metadata: {
-      retrievalMode: input.index ? "indexed_context" : "diff_fallback",
-      indexAvailable: Boolean(input.index),
-      ...(input.index ? { indexVersionId: input.index.indexVersionId } : {}),
-      ...(memoryResult.trace.length > 0
-        ? {
-            memory: {
-              includedFactIds: memoryResult.factIds,
-              trace: memoryResult.trace,
-            },
-          }
-        : {}),
-      ...(indexedResult.warnings.length > 0 ? { warnings: indexedResult.warnings } : {}),
+  try {
+    const diffItems = input.snapshot.changedFiles.flatMap((file) => contextItemsForFile(file));
+    const indexedResult = input.index
+      ? await retrieveIndexedItems({ ...input, index: input.index }, diffItems)
+      : { items: [], warnings: [] };
+    const memoryResult = input.memory
+      ? await retrieveMemoryItems({ ...input, memory: input.memory }, timestamp)
+      : { factIds: [], items: [], trace: [] };
+    const candidateItems =
+      input.indexAvailable === false || !input.index
+        ? [...memoryResult.items, ...withFallbackRule(diffItems)]
+        : [...memoryResult.items, ...indexedResult.items, ...diffItems];
+    const items = packItems(candidateItems, maxTokens);
+
+    const bundle = parseWithSchema("ContextBundle", ContextBundleSchema, {
+      schemaVersion: "context_bundle.v1",
+      contextBundleId: stableId("ctx", [
+        input.reviewRunId,
+        input.snapshot.snapshotId,
+        input.indexAvailable === false ? "diff-fallback" : "indexed",
+        memoryResult.factIds.join(","),
+      ]),
+      reviewRunId: input.reviewRunId,
+      repoId: input.snapshot.repoId,
+      pullRequestSnapshotId: input.snapshot.snapshotId,
+      baseSha: input.snapshot.baseSha,
+      headSha: input.snapshot.headSha,
+      changedFiles: input.snapshot.changedFiles,
+      changedSymbols: [],
+      items: [...items],
+      tokenBudget: {
+        maxTokens,
+        estimatedTokens: items.reduce((total, item) => total + item.tokenEstimate, 0),
+      },
+      createdAt: timestamp,
+      metadata: {
+        retrievalMode: input.index ? "indexed_context" : "diff_fallback",
+        indexAvailable: Boolean(input.index),
+        ...(input.index ? { indexVersionId: input.index.indexVersionId } : {}),
+        ...(memoryResult.trace.length > 0
+          ? {
+              memory: {
+                includedFactIds: memoryResult.factIds,
+                trace: memoryResult.trace,
+              },
+            }
+          : {}),
+        ...(indexedResult.warnings.length > 0 ? { warnings: indexedResult.warnings } : {}),
+      },
+    });
+    finishRetrievalTelemetry(input.metrics, telemetry, {
+      bundle,
+      candidateItems,
+      status: "succeeded",
+    });
+    return bundle;
+  } catch (error) {
+    finishRetrievalTelemetry(input.metrics, telemetry, { error, status: "failed" });
+    throw error;
+  }
+}
+
+/** Starts retrieval telemetry with only product-safe span attributes. */
+function startRetrievalTelemetry(input: RetrieveContextInput): RetrievalTelemetryState {
+  const labels = { review_mode: normalizeRetrievalLabel(input.reviewMode, "standard") };
+  const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.retrievalBuildContext, {
+    attributes: {
+      "app.repo_id": input.snapshot.repoId,
+      "app.review_run_id": input.reviewRunId,
+      "retrieval.changed_file_count": input.snapshot.changedFiles.length,
+      "retrieval.index_available": Boolean(input.index),
+      "retrieval.review_mode": labels.review_mode,
     },
   });
+
+  return {
+    labels,
+    span,
+    startedAtMs: Date.now(),
+  };
+}
+
+/** Ends retrieval telemetry and emits bounded aggregate metrics. */
+function finishRetrievalTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  telemetry: RetrievalTelemetryState,
+  input: {
+    /** Retrieved context bundle, when retrieval succeeded. */
+    readonly bundle?: ContextBundle | undefined;
+    /** Candidate context items considered before final budget packing. */
+    readonly candidateItems?: readonly ContextItem[] | undefined;
+    /** Error raised by retrieval, when retrieval failed. */
+    readonly error?: unknown;
+    /** Final retrieval status. */
+    readonly status: RetrievalTelemetryStatus;
+  },
+): void {
+  const durationMs = Date.now() - telemetry.startedAtMs;
+  const labels = {
+    ...telemetry.labels,
+    ...(input.error === undefined ? {} : { error_class: classifyTelemetryError(input.error) }),
+    status: input.status,
+  };
+
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.retrievalRequestsTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.retrievalDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
+
+  if (input.candidateItems) {
+    recordContextItemCounts(
+      metrics,
+      OBSERVABILITY_METRIC_NAMES.retrievalSourceCandidatesTotal,
+      input.candidateItems,
+      "source",
+    );
+  }
+  if (input.bundle) {
+    recordContextItemCounts(
+      metrics,
+      OBSERVABILITY_METRIC_NAMES.retrievalContextItemsTotal,
+      input.bundle.items,
+      "kind_and_source",
+    );
+    recordContextTokenCounts(metrics, input.bundle.items);
+  }
+
+  telemetry.span?.end({
+    ...(input.error === undefined ? {} : { error: input.error }),
+    attributes: {
+      ...(input.bundle
+        ? {
+            "retrieval.context_item_count": input.bundle.items.length,
+            "retrieval.context_tokens": input.bundle.tokenBudget.estimatedTokens,
+          }
+        : {}),
+      ...(input.candidateItems
+        ? { "retrieval.source_candidate_count": input.candidateItems.length }
+        : {}),
+      ...(input.error === undefined
+        ? {}
+        : { "retrieval.error_class": classifyTelemetryError(input.error) }),
+      "retrieval.status": input.status,
+    },
+    status: input.status === "succeeded" ? "ok" : "error",
+  });
+}
+
+/** Records context item count metrics grouped by safe source and optional item type. */
+function recordContextItemCounts(
+  metrics: TelemetryMetricRecorder | undefined,
+  name: string,
+  items: readonly ContextItem[],
+  mode: "source" | "kind_and_source",
+): void {
+  for (const [key, count] of groupedContextItemCounts(items, mode)) {
+    metrics?.count(name, {
+      labels: contextItemMetricLabels(key),
+      value: count,
+    });
+  }
+}
+
+/** Records context token count metrics grouped by safe source and item type. */
+function recordContextTokenCounts(
+  metrics: TelemetryMetricRecorder | undefined,
+  items: readonly ContextItem[],
+): void {
+  const tokensByKey = new Map<string, number>();
+  for (const item of items) {
+    const key = `${normalizeRetrievalLabel(item.kind, "unknown")}|${normalizeRetrievalLabel(
+      item.source,
+      "unknown",
+    )}`;
+    tokensByKey.set(key, (tokensByKey.get(key) ?? 0) + item.tokenEstimate);
+  }
+
+  for (const [key, tokenCount] of tokensByKey) {
+    metrics?.count(OBSERVABILITY_METRIC_NAMES.retrievalContextTokens, {
+      labels: contextItemMetricLabels(key),
+      value: tokenCount,
+    });
+  }
+}
+
+/** Groups context item counts by source or by item type and source. */
+function groupedContextItemCounts(
+  items: readonly ContextItem[],
+  mode: "source" | "kind_and_source",
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const source = normalizeRetrievalLabel(item.source, "unknown");
+    const key =
+      mode === "source"
+        ? `|${source}`
+        : `${normalizeRetrievalLabel(item.kind, "unknown")}|${source}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Converts a grouped context item metric key into low-cardinality labels. */
+function contextItemMetricLabels(
+  key: string,
+): Readonly<Record<"item_type" | "source_type", string>> | Readonly<Record<"source_type", string>> {
+  const [itemType, sourceType] = key.split("|", 2);
+  if (itemType) {
+    return { item_type: itemType, source_type: sourceType ?? "unknown" };
+  }
+
+  return { source_type: sourceType ?? "unknown" };
+}
+
+/** Normalizes bounded retrieval telemetry label values. */
+function normalizeRetrievalLabel(value: string | undefined, fallback: string): string {
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized && normalized.length > 0 ? normalized : fallback;
 }
 
 /** Creates a Drizzle-backed retrieval index over imported chunk, symbol, and edge tables. */

@@ -1,7 +1,42 @@
 import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
 import { createStaticRelevantMemoryRetriever, type MemoryFact } from "@repo/memory";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricOptions,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanEndOptions,
+  type TelemetrySpanOptions,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { describe, expect, it } from "vitest";
 import { type RetrievalIndex, retrieveContext } from "../src/index";
+
+type RecordedMetric = {
+  /** Metric instrument kind recorded by the fake recorder. */
+  readonly kind: "counter" | "histogram";
+  /** Low-cardinality metric labels. */
+  readonly labels?: TelemetryMetricOptions["labels"] | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+type RecordedSpan = {
+  /** Attributes attached when the span ended. */
+  readonly endAttributes?: TelemetrySpanEndOptions["attributes"] | undefined;
+  /** Error attached when the span ended. */
+  readonly error?: unknown;
+  /** Span name. */
+  readonly name: string;
+  /** Attributes attached when the span started. */
+  readonly startAttributes?: TelemetrySpanOptions["attributes"] | undefined;
+  /** Span status attached when the span ended. */
+  readonly status?: TelemetrySpanEndOptions["status"] | undefined;
+};
 
 describe("retrieveContext", () => {
   it("returns diff context with an explicit missing-index fallback", async () => {
@@ -23,6 +58,70 @@ describe("retrieveContext", () => {
     expect(bundle.items.some((item) => item.kind === "diff")).toBe(true);
   });
 
+  it("records product-safe retrieval metrics and spans", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const bundle = await retrieveContext({
+      reviewRunId: "rrn_01HREVIEW",
+      snapshot: validPullRequestSnapshotFixture,
+      indexAvailable: false,
+      metrics: createRecordingMetrics(metrics),
+      reviewMode: "Strict Mode",
+      timestamp: "2026-05-05T00:00:00.000Z",
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(bundle.items.some((item) => item.kind === "diff")).toBe(true);
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: {
+            review_mode: "strict_mode",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.retrievalRequestsTotal,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: {
+            review_mode: "strict_mode",
+            status: "succeeded",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.retrievalDurationMs,
+          unit: "ms",
+        }),
+        expect.objectContaining({
+          labels: { source_type: "diff" },
+          name: OBSERVABILITY_METRIC_NAMES.retrievalSourceCandidatesTotal,
+        }),
+        expect.objectContaining({
+          labels: { item_type: "diff", source_type: "diff" },
+          name: OBSERVABILITY_METRIC_NAMES.retrievalContextItemsTotal,
+        }),
+        expect.objectContaining({
+          labels: { item_type: "diff", source_type: "diff" },
+          name: OBSERVABILITY_METRIC_NAMES.retrievalContextTokens,
+        }),
+      ]),
+    );
+    expect(spans).toEqual([
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "retrieval.status": "succeeded",
+        }),
+        name: OBSERVABILITY_SPAN_NAMES.retrievalBuildContext,
+        startAttributes: expect.objectContaining({
+          "app.review_run_id": "rrn_01HREVIEW",
+          "retrieval.review_mode": "strict_mode",
+        }),
+        status: "ok",
+      }),
+    ]);
+    expect(JSON.stringify(metrics)).not.toContain("src/index.ts");
+    expect(JSON.stringify(spans)).not.toContain("src/index.ts");
+  });
+
   it("validates context bundles against the shared runtime contract", async () => {
     await expect(
       retrieveContext({
@@ -32,6 +131,44 @@ describe("retrieveContext", () => {
         timestamp: "2026-05-05T00:00:00.000Z",
       }),
     ).rejects.toThrow(/ContextBundle/u);
+  });
+
+  it("records failed retrieval telemetry when validation fails", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+
+    await expect(
+      retrieveContext({
+        reviewRunId: "invalid-review-run-id",
+        snapshot: validPullRequestSnapshotFixture,
+        indexAvailable: false,
+        metrics: createRecordingMetrics(metrics),
+        timestamp: "2026-05-05T00:00:00.000Z",
+        traces: createRecordingTraces(spans),
+      }),
+    ).rejects.toThrow(/ContextBundle/u);
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          labels: {
+            error_class: "validation_error",
+            review_mode: "standard",
+            status: "failed",
+          },
+          name: OBSERVABILITY_METRIC_NAMES.retrievalRequestsTotal,
+        }),
+      ]),
+    );
+    expect(spans).toEqual([
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "retrieval.error_class": "validation_error",
+          "retrieval.status": "failed",
+        }),
+        status: "error",
+      }),
+    ]);
   });
 
   it("adds relevant memory facts as explicit context items", async () => {
@@ -216,3 +353,44 @@ describe("retrieveContext", () => {
     });
   });
 });
+
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          error: endOptions.error,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
+  };
+}

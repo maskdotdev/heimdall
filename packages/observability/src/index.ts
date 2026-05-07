@@ -596,6 +596,11 @@ export const OBSERVABILITY_METRIC_NAMES = {
   queueJobsFailedTotal: "code_review_agent.queue.jobs_failed_total",
   queueJobsStartedTotal: "code_review_agent.queue.jobs_started_total",
   queueRetriesTotal: "code_review_agent.queue.retries_total",
+  retrievalContextItemsTotal: "code_review_agent.retrieval.context_items_total",
+  retrievalContextTokens: "code_review_agent.retrieval.context_tokens",
+  retrievalDurationMs: "code_review_agent.retrieval.duration_ms",
+  retrievalRequestsTotal: "code_review_agent.retrieval.requests_total",
+  retrievalSourceCandidatesTotal: "code_review_agent.retrieval.source_candidates_total",
   webhookDeliveriesTotal: "code_review_agent.webhook.deliveries_total",
   webhookDeliveryDurationMs: "code_review_agent.webhook.delivery_duration_ms",
   webhookDuplicateDeliveriesTotal: "code_review_agent.webhook.duplicate_deliveries_total",
@@ -611,6 +616,7 @@ export const OBSERVABILITY_SPAN_NAMES = {
   llmGenerateObject: "code_review_agent.llm.generate_object",
   pullRequestReview: "code_review_agent.review.pull_request",
   reviewPipelineStage: "code_review_agent.review.pipeline_stage",
+  retrievalBuildContext: "code_review_agent.retrieval.build_context",
   webhookDelivery: "code_review_agent.webhook.delivery",
 } as const;
 
