@@ -194,6 +194,101 @@ export type RetentionDecision = {
   readonly reason: string;
 };
 
+/** Severity levels used for security events and incident triage. */
+export const SECURITY_EVENT_SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
+
+/** Severity level used for security events and incident triage. */
+export type SecurityEventSeverity = (typeof SECURITY_EVENT_SEVERITIES)[number];
+
+/** Sources that can emit security events. */
+export const SECURITY_EVENT_SOURCES = [
+  "api",
+  "worker",
+  "github",
+  "sandbox",
+  "llm_gateway",
+  "system",
+] as const;
+
+/** Source that emitted one security event. */
+export type SecurityEventSource = (typeof SECURITY_EVENT_SOURCES)[number];
+
+/** Lifecycle states for security event triage. */
+export const SECURITY_EVENT_STATUSES = ["new", "triaged", "dismissed", "incident_created"] as const;
+
+/** Lifecycle state for security event triage. */
+export type SecurityEventStatus = (typeof SECURITY_EVENT_STATUSES)[number];
+
+/** Structured high-risk security event recorded by services and control-plane workflows. */
+export type SecurityEvent = {
+  /** Stable event ID. */
+  readonly id: string;
+  /** Organization scope when the event is tenant-specific. */
+  readonly orgId?: string | undefined;
+  /** Repository scope when the event is repository-specific. */
+  readonly repoId?: string | undefined;
+  /** Event type, such as invalid_webhook_signature_spike. */
+  readonly type: string;
+  /** Security severity for triage and alerting. */
+  readonly severity: SecurityEventSeverity;
+  /** Service or subsystem that emitted the event. */
+  readonly source: SecurityEventSource;
+  /** Actor that triggered the event when known. */
+  readonly actorId?: string | undefined;
+  /** Resource type affected by the event. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID affected by the event. */
+  readonly resourceId?: string | undefined;
+  /** Product-safe metadata with sensitive keys and values removed or redacted. */
+  readonly metadata: Readonly<Record<string, string | number | boolean>>;
+  /** ISO timestamp when the event was created. */
+  readonly createdAt: string;
+  /** Triage status. */
+  readonly status: SecurityEventStatus;
+};
+
+/** Input accepted when creating a normalized security event. */
+export type SecurityEventInput = {
+  /** Optional stable event ID. Defaults to a generated ID. */
+  readonly id?: string | undefined;
+  /** Organization scope when the event is tenant-specific. */
+  readonly orgId?: string | undefined;
+  /** Repository scope when the event is repository-specific. */
+  readonly repoId?: string | undefined;
+  /** Event type, such as invalid_webhook_signature_spike. */
+  readonly type: string;
+  /** Optional explicit severity. Defaults from the event type. */
+  readonly severity?: SecurityEventSeverity | undefined;
+  /** Service or subsystem that emitted the event. */
+  readonly source: SecurityEventSource;
+  /** Actor that triggered the event when known. */
+  readonly actorId?: string | undefined;
+  /** Resource type affected by the event. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID affected by the event. */
+  readonly resourceId?: string | undefined;
+  /** Metadata that is sanitized before recording. */
+  readonly metadata?: Readonly<Record<string, unknown>> | undefined;
+  /** Optional deterministic timestamp for tests. */
+  readonly createdAt?: string | undefined;
+  /** Triage status. Defaults to new. */
+  readonly status?: SecurityEventStatus | undefined;
+};
+
+/** Sink that records normalized security events. */
+export type SecurityEventSink = {
+  /** Records one normalized security event. */
+  readonly record: (event: SecurityEvent) => void;
+};
+
+/** In-memory security-event sink used by tests and local tools. */
+export type MemorySecurityEventSink = SecurityEventSink & {
+  /** Removes all recorded events. */
+  readonly clear: () => void;
+  /** Returns recorded events in insertion order. */
+  readonly events: () => readonly SecurityEvent[];
+};
+
 /** Conservative default retention policy for MVP deployments. */
 export const DEFAULT_RETENTION_POLICY = {
   auditLogDays: 365,
@@ -259,6 +354,44 @@ const internalArtifactTypes = new Set(["audit_log", "security_event", "system_me
 
 /** Artifact types that are public by design. */
 const publicArtifactTypes = new Set(["marketing_content", "public_documentation"]);
+
+/** High-risk event types that should page or trigger incident workflows by default. */
+const criticalSecurityEventTypes = new Set([
+  "secret_detected_in_log_or_artifact",
+  "cross_tenant_access_attempt",
+  "support_break_glass_started",
+  "sandbox_escape_indicator",
+  "private_key_rotation_failure",
+  "llm_key_rotation_failure",
+]);
+
+/** Security event types that require urgent triage but are not always incidents. */
+const highSecurityEventTypes = new Set([
+  "artifact_download_spike",
+  "invalid_webhook_signature_spike",
+  "prompt_redaction_secret_detected",
+  "sandbox_resource_abuse",
+  "unexpected_github_permission_error",
+]);
+
+/** Metadata keys that must not be copied to security events. */
+const sensitiveSecurityMetadataKeyPatterns = [
+  "authorization",
+  "code",
+  "cookie",
+  "database_url",
+  "diff",
+  "email",
+  "password",
+  "private_key",
+  "prompt",
+  "raw",
+  "redis_url",
+  "secret",
+  "signed_url",
+  "source",
+  "token",
+] as const;
 
 /** Identity provider families that can back admin actors. */
 export type AdminIdentityProvider = "oidc" | "saml" | "github_org";
@@ -735,6 +868,69 @@ export function resolveArtifactRetention(input: {
   };
 }
 
+/** Returns the default severity for one security event type. */
+export function defaultSecurityEventSeverity(type: string): SecurityEventSeverity {
+  if (criticalSecurityEventTypes.has(type)) {
+    return "critical";
+  }
+  if (highSecurityEventTypes.has(type)) {
+    return "high";
+  }
+  if (type.includes("denied") || type.includes("failure") || type.includes("rejected")) {
+    return "medium";
+  }
+
+  return "info";
+}
+
+/** Returns whether a security event should trigger immediate alerting by default. */
+export function shouldAlertSecurityEvent(event: Pick<SecurityEvent, "severity" | "type">): boolean {
+  return event.severity === "critical" || criticalSecurityEventTypes.has(event.type);
+}
+
+/** Creates a normalized product-safe security event. */
+export function createSecurityEvent(input: SecurityEventInput): SecurityEvent {
+  return {
+    id: input.id ?? randomToken("secevt"),
+    metadata: sanitizeSecurityEventMetadata(input.metadata ?? {}),
+    severity: input.severity ?? defaultSecurityEventSeverity(input.type),
+    source: input.source,
+    status: input.status ?? "new",
+    type: input.type,
+    createdAt: input.createdAt ?? new Date().toISOString(),
+    ...(input.actorId ? { actorId: input.actorId } : {}),
+    ...(input.orgId ? { orgId: input.orgId } : {}),
+    ...(input.repoId ? { repoId: input.repoId } : {}),
+    ...(input.resourceId ? { resourceId: input.resourceId } : {}),
+    ...(input.resourceType ? { resourceType: input.resourceType } : {}),
+  };
+}
+
+/** Creates an in-memory security-event sink. */
+export function createMemorySecurityEventSink(): MemorySecurityEventSink {
+  const recordedEvents: SecurityEvent[] = [];
+
+  return {
+    clear: () => {
+      recordedEvents.length = 0;
+    },
+    events: () => [...recordedEvents],
+    record: (event) => {
+      recordedEvents.push(event);
+    },
+  };
+}
+
+/** Records a normalized security event and returns the recorded event. */
+export function recordSecurityEvent(
+  sink: SecurityEventSink,
+  input: SecurityEventInput,
+): SecurityEvent {
+  const event = createSecurityEvent(input);
+  sink.record(event);
+  return event;
+}
+
 /** Returns whether an HTTP method is safe from CSRF mutation checks. */
 export function isCsrfSafeMethod(method: string): boolean {
   return method === "GET" || method === "HEAD" || method === "OPTIONS";
@@ -794,6 +990,48 @@ function addDays(timestamp: string, days: number): string {
   }
 
   return new Date(parsed + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/** Sanitizes security-event metadata to keep logs and alerts product-safe. */
+function sanitizeSecurityEventMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, string | number | boolean>> {
+  const sanitized: Record<string, string | number | boolean> = {};
+
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!isSafeSecurityMetadataKey(key)) {
+      continue;
+    }
+    if (typeof value === "boolean" || typeof value === "number") {
+      sanitized[key] = value;
+      continue;
+    }
+    if (typeof value === "string") {
+      sanitized[key] = redactSecurityMetadataValue(value);
+    }
+  }
+
+  return sanitized;
+}
+
+/** Returns whether one security-event metadata key is safe to persist and alert on. */
+function isSafeSecurityMetadataKey(key: string): boolean {
+  if (!/^[A-Za-z0-9_.-]{1,120}$/u.test(key)) {
+    return false;
+  }
+
+  const normalizedKey = key.toLowerCase().replaceAll(/[.-]/gu, "_");
+  return !sensitiveSecurityMetadataKeyPatterns.some((pattern) => normalizedKey.includes(pattern));
+}
+
+/** Redacts secret-looking strings from allowed security-event metadata values. */
+function redactSecurityMetadataValue(value: string): string {
+  return value
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[redacted-email]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gu, "Bearer [redacted]")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/gu, "[redacted-token]")
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/gu, "[redacted-token]")
+    .slice(0, 1000);
 }
 
 /** Returns a signed session token string for a JSON-serializable payload. */

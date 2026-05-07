@@ -3,15 +3,20 @@ import {
   actorCanAccessRepo,
   classifyArtifact,
   createAdminSessionManager,
+  createMemorySecurityEventSink,
+  createSecurityEvent,
   DEFAULT_RETENTION_POLICY,
+  defaultSecurityEventSeverity,
   isProductRole,
   productActorHasOrgPermission,
   productActorHasRepoPermission,
   productCapabilities,
   productPermissionsForRole,
   productRoleHasPermission,
+  recordSecurityEvent,
   resolveArtifactRetention,
   retentionClassForArtifactType,
+  shouldAlertSecurityEvent,
   signAdminIdentityAssertion,
   verifyAdminIdentityAssertion,
   verifyCsrfToken,
@@ -212,5 +217,58 @@ describe("admin security", () => {
       expiresAt: "2026-05-14T00:00:00.000Z",
       storage: "allowed",
     });
+  });
+
+  it("normalizes high-risk security events with safe metadata", () => {
+    const event = createSecurityEvent({
+      actorId: "user_1",
+      createdAt: "2026-05-07T12:00:00.000Z",
+      metadata: {
+        count: 3,
+        "debug.raw_diff": "+ const leaked = true;",
+        "github.token": "ghp_1234567890abcdef",
+        provider: "github",
+        reason: "Authorization: Bearer github_pat_1234567890",
+        "source.body": "export const leaked = true;",
+      },
+      orgId: "org_1",
+      repoId: "repo_1",
+      resourceId: "artifact_1",
+      resourceType: "review_artifact",
+      source: "api",
+      type: "secret_detected_in_log_or_artifact",
+    });
+
+    expect(event).toMatchObject({
+      actorId: "user_1",
+      createdAt: "2026-05-07T12:00:00.000Z",
+      metadata: {
+        count: 3,
+        provider: "github",
+        reason: "Authorization: Bearer [redacted]",
+      },
+      severity: "critical",
+      status: "new",
+    });
+    expect(JSON.stringify(event)).not.toContain("ghp_1234567890abcdef");
+    expect(JSON.stringify(event)).not.toContain("github_pat_1234567890");
+    expect(JSON.stringify(event)).not.toContain("export const leaked");
+    expect(shouldAlertSecurityEvent(event)).toBe(true);
+  });
+
+  it("records security events through the sink boundary", () => {
+    const sink = createMemorySecurityEventSink();
+    const event = recordSecurityEvent(sink, {
+      createdAt: "2026-05-07T12:05:00.000Z",
+      metadata: { statusCode: 403 },
+      source: "api",
+      type: "cross_tenant_access_attempt",
+    });
+
+    expect(defaultSecurityEventSeverity("invalid_webhook_signature_spike")).toBe("high");
+    expect(event.severity).toBe("critical");
+    expect(sink.events()).toEqual([event]);
+    sink.clear();
+    expect(sink.events()).toEqual([]);
   });
 });
