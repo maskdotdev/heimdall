@@ -32,6 +32,7 @@
     "@repo/review-orchestrator": "workspace:*",
     "@repo/repo-sync": "workspace:*",
     "@repo/sandbox": "workspace:*",
+    "@repo/security": "workspace:*",
     "@repo/tool-runner": "workspace:*",
     "@repo/usage": "workspace:*",
     "bullmq": "catalog:",

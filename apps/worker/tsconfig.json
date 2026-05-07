@@ -27,6 +27,7 @@
     { "path": "../../packages/review-orchestrator/tsconfig.build.json" },
     { "path": "../../packages/repo-sync/tsconfig.build.json" },
     { "path": "../../packages/sandbox/tsconfig.build.json" },
+    { "path": "../../packages/security/tsconfig.build.json" },
     { "path": "../../packages/tool-runner/tsconfig.build.json" },
     { "path": "../../packages/usage/tsconfig.build.json" }
   ]

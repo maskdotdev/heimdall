@@ -18,6 +18,7 @@ import {
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
   type RedisPublishThrottleClient,
+  resolveWorkerGitHubPrivateKey,
   verifyWorkerIndexerCapabilities,
 } from "./index";
 
@@ -54,6 +55,40 @@ describe("createWorkerReviewSmokeGateway", () => {
         title: "Live PR review smoke test",
       }),
     ]);
+  });
+});
+
+describe("resolveWorkerGitHubPrivateKey", () => {
+  it("resolves the local GitHub private key through an env secret ref", async () => {
+    await expect(
+      resolveWorkerGitHubPrivateKey({
+        GITHUB_PRIVATE_KEY: "line-one\\nline-two",
+      }),
+    ).resolves.toBe("line-one\nline-two");
+  });
+
+  it("resolves an explicit GitHub private key secret ref", async () => {
+    await expect(
+      resolveWorkerGitHubPrivateKey({
+        GITHUB_APP_PRIVATE_KEY_SECRET_REF: "env:WORKER_GITHUB_PRIVATE_KEY",
+        GITHUB_PRIVATE_KEY: "ignored-direct-value",
+        WORKER_GITHUB_PRIVATE_KEY: "resolved\\nprivate-key",
+      }),
+    ).resolves.toBe("resolved\nprivate-key");
+  });
+
+  it("returns undefined when no private key ref or env fallback exists", async () => {
+    await expect(resolveWorkerGitHubPrivateKey({})).resolves.toBeUndefined();
+  });
+
+  it("fails closed for unsupported production providers", async () => {
+    await expect(
+      resolveWorkerGitHubPrivateKey({
+        GITHUB_APP_PRIVATE_KEY_SECRET_REF: "aws:prod/github-app/private-key",
+      }),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
   });
 });
 

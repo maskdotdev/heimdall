@@ -112,6 +112,7 @@ import {
   type SandboxTelemetryOptions,
   withSandboxTelemetry,
 } from "@repo/sandbox";
+import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } from "@repo/security";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { reconcileBillingState } from "@repo/usage";
 import { Worker } from "bullmq";
@@ -122,6 +123,9 @@ import IORedis from "ioredis";
 const DEFAULT_INDEX_ARTIFACT_ROOT = ".heimdall/index-artifacts";
 /** Default maximum time allowed for one indexer run. */
 const DEFAULT_INDEXER_TIMEOUT_MS = 120_000;
+
+/** Environment map used by worker runtime secret resolution. */
+type WorkerSecretEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** GitHub installation row shape required by worker handlers. */
 type GitHubInstallationRuntimeRef = GitHubInstallationRef & {
@@ -573,15 +577,46 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
   };
 }
 
+/** Resolves the GitHub App private key through the security secret boundary. */
+export async function resolveWorkerGitHubPrivateKey(
+  env: WorkerSecretEnvironment,
+  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+): Promise<string | undefined> {
+  const secretRefValue =
+    optionalEnvString(env.GITHUB_APP_PRIVATE_KEY_SECRET_REF) ??
+    optionalEnvString(env.GITHUB_PRIVATE_KEY_SECRET_REF);
+  const localEnvName = optionalEnvString(env.GITHUB_PRIVATE_KEY)
+    ? "GITHUB_PRIVATE_KEY"
+    : optionalEnvString(env.GITHUB_APP_PRIVATE_KEY)
+      ? "GITHUB_APP_PRIVATE_KEY"
+      : undefined;
+  const secretRef = secretRefValue
+    ? parseSecretRef(secretRefValue)
+    : localEnvName
+      ? parseSecretRef(`env:${localEnvName}`)
+      : undefined;
+  if (!secretRef) {
+    return undefined;
+  }
+
+  const resolved = await secretsManager.resolveSecret(secretRef, {
+    purpose: "github_app_private_key",
+    service: "worker",
+  });
+  return resolved.value.replaceAll("\\n", "\n");
+}
+
 /** Starts BullMQ workers and a polling outbox dispatcher. */
 export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const observability = createObservabilityRuntime({
     defaultServiceName: "code-review-worker",
   });
   const config = loadRuntimeConfig();
-  const githubPrivateKey = process.env.GITHUB_PRIVATE_KEY?.replaceAll("\\n", "\n");
+  const githubPrivateKey = await resolveWorkerGitHubPrivateKey(process.env);
   if (!config.githubAppId || !githubPrivateKey) {
-    throw new Error("GITHUB_APP_ID and GITHUB_PRIVATE_KEY are required to start workers.");
+    throw new Error(
+      "GITHUB_APP_ID and GITHUB_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_SECRET_REF are required to start workers.",
+    );
   }
 
   const databaseClient = createDatabaseClient();
@@ -1167,6 +1202,12 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Reads a non-empty environment string. */
+function optionalEnvString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** Parses INDEXER_CLI_ARGS_JSON into a spawn argument array. */
