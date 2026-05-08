@@ -35,7 +35,7 @@ import {
   type UpdateMemoryJobPayload,
 } from "@repo/contracts";
 import {
-  backgroundJobs,
+  BackgroundJobRepository,
   billingProviderRequests,
   createDatabaseClient,
   feedbackEvents,
@@ -821,6 +821,8 @@ export async function enqueueWaitingReviewRunsForIndex(
     )
     .limit(100);
 
+  const backgroundJobRepository = new BackgroundJobRepository(db);
+
   for (const run of waitingRuns) {
     const jobKey = `github:review-resume:${payload.repoId}:${run.pullRequestNumber}:${payload.commitSha}:index`;
     const reviewPayload: ReviewPullRequestJobPayload = {
@@ -844,24 +846,17 @@ export async function enqueueWaitingReviewRunsForIndex(
       ...(options.traceContext ? { traceContext: options.traceContext } : {}),
     };
 
-    await db
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: stableWorkerId("job", ["review_resume", jobKey]),
-        jobKey,
-        jobType: JOB_TYPES.ReviewPullRequest,
-        maxAttempts: envelope.maxAttempts,
-        metadata: {
-          completedIndexCommitSha: payload.commitSha,
-          source: "index_dependency_ready",
-        },
-        payload: envelope,
-        queueName: QUEUE_NAMES.review,
-        repoId: payload.repoId,
-        reviewRunId: run.reviewRunId,
-        status: "pending",
-      })
-      .onConflictDoNothing();
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: stableWorkerId("job", ["review_resume", jobKey]),
+      envelope,
+      metadata: {
+        completedIndexCommitSha: payload.commitSha,
+        source: "index_dependency_ready",
+      },
+      queueName: QUEUE_NAMES.review,
+      repoId: payload.repoId,
+      reviewRunId: run.reviewRunId,
+    });
   }
 
   return {
@@ -903,6 +898,8 @@ async function enqueueEmbeddingRepairBatches(
     return;
   }
 
+  const backgroundJobRepository = new BackgroundJobRepository(db);
+
   for (let index = 0; index < chunkIds.length; index += EMBEDDING_REPAIR_BATCH_SIZE) {
     const batchChunkIds = chunkIds.slice(index, index + EMBEDDING_REPAIR_BATCH_SIZE);
     const batchIndex = index / EMBEDDING_REPAIR_BATCH_SIZE;
@@ -916,33 +913,27 @@ async function enqueueEmbeddingRepairBatches(
       repoId: payload.repoId,
     };
     const now = new Date().toISOString();
+    const envelope: JobEnvelope<EmbeddingBatchJobPayload> = {
+      attempt: 0,
+      createdAt: now,
+      idempotencyKey: jobKey,
+      jobId: stableWorkerId("job", ["embedding_repair_batch", jobKey, "envelope"]),
+      jobType: JOB_TYPES.EmbeddingBatch,
+      maxAttempts: 3,
+      payload: batchPayload,
+      schemaVersion: "job_envelope.v1",
+    };
 
-    await db
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: stableWorkerId("job", ["embedding_repair_batch", jobKey]),
-        jobKey,
-        jobType: JOB_TYPES.EmbeddingBatch,
-        maxAttempts: 3,
-        metadata: {
-          embeddingRepairJobId: payload.embeddingJobId,
-          source: "embedding_repair",
-        },
-        payload: {
-          attempt: 0,
-          createdAt: now,
-          idempotencyKey: jobKey,
-          jobId: stableWorkerId("job", ["embedding_repair_batch", jobKey, "envelope"]),
-          jobType: JOB_TYPES.EmbeddingBatch,
-          maxAttempts: 3,
-          payload: batchPayload,
-          schemaVersion: "job_envelope.v1",
-        },
-        queueName: QUEUE_NAMES.embedding,
-        repoId: payload.repoId,
-        status: "pending",
-      })
-      .onConflictDoNothing();
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: stableWorkerId("job", ["embedding_repair_batch", jobKey]),
+      envelope,
+      metadata: {
+        embeddingRepairJobId: payload.embeddingJobId,
+        source: "embedding_repair",
+      },
+      queueName: QUEUE_NAMES.embedding,
+      repoId: payload.repoId,
+    });
   }
 }
 

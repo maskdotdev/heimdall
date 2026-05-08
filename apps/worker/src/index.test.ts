@@ -582,7 +582,9 @@ describe("createWorkerHandlers", () => {
         values: (value: unknown) => {
           insertedRows.push(value);
           return {
-            onConflictDoNothing: async () => undefined,
+            onConflictDoNothing: () => ({
+              returning: async () => [createBackgroundJobInsertedRow(value)],
+            }),
           };
         },
       }),
@@ -1923,7 +1925,9 @@ function createWorkerEmbeddingRepairDatabaseStub(options: {
         options.insertedRows.push(values);
 
         return {
-          onConflictDoNothing: async () => undefined,
+          onConflictDoNothing: () => ({
+            returning: async () => [createBackgroundJobInsertedRow(values)],
+          }),
         };
       },
     }),
@@ -1951,6 +1955,29 @@ function createWorkerEmbeddingRepairDatabaseStub(options: {
   };
 
   return db as never;
+}
+
+/** Adds database-default fields expected by the background job repository mapper. */
+function createBackgroundJobInsertedRow(values: unknown): unknown {
+  if (typeof values !== "object" || values === null || Array.isArray(values)) {
+    return values;
+  }
+
+  const row = values as Record<string, unknown>;
+  const timestamp = new Date("2026-05-08T00:00:00.000Z");
+
+  return {
+    ...row,
+    attempts: row.attempts ?? 0,
+    completedAt: row.completedAt ?? null,
+    createdAt: row.createdAt ?? timestamp,
+    error: row.error ?? null,
+    orgId: row.orgId ?? null,
+    reviewRunId: row.reviewRunId ?? null,
+    scheduledAt: row.scheduledAt ?? null,
+    startedAt: row.startedAt ?? null,
+    updatedAt: row.updatedAt ?? timestamp,
+  };
 }
 
 /** In-memory Redis script harness shared by cross-process throttle unit tests. */
