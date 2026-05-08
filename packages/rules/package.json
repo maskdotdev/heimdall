@@ -22,7 +22,8 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/observability": "workspace:*",
-    "@sinclair/typebox": "catalog:"
+    "@sinclair/typebox": "catalog:",
+    "yaml": "2.4.2"
   },
   "devDependencies": {
     "@types/node": "catalog:",

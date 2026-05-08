@@ -8,8 +8,12 @@ import {
   FindingCategorySchema,
   type FindingSeverity,
   FindingSeveritySchema,
+  type GitCommitSha,
+  GitCommitShaSchema,
   type OrgSettings,
   type PullRequestSnapshot,
+  type RepoPath,
+  RepoPathSchema,
   type RepoRule,
   RepoRuleIdSchema,
   RepoRuleSchema,
@@ -17,6 +21,8 @@ import {
   type RepositorySettings,
   type ReviewPolicy,
   ReviewPolicySchema,
+  type Sha256,
+  Sha256Schema,
 } from "@repo/contracts";
 import { OrgIdSchema, RepoIdSchema, ReviewRunIdSchema } from "@repo/contracts/primitives/ids";
 import { IsoDateTimeSchema } from "@repo/contracts/primitives/time";
@@ -29,8 +35,9 @@ import {
   type TelemetrySpanRecorder,
   type TelemetryTraceContextInput,
 } from "@repo/observability";
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { parseDocument } from "yaml";
 
 /** Default policy compiler version used for policy snapshot hashing and debugging. */
 export const RULES_ENGINE_VERSION = "rules-engine.v2";
@@ -88,6 +95,17 @@ export const DEFAULT_CONFIG_PATHS = [
   "Cargo.toml",
   ".github/workflows/**",
 ] as const;
+
+/** Default repo-local reviewer config filenames trusted by the policy layer. */
+export const REPO_LOCAL_CONFIG_ALLOWED_PATHS = [
+  ".ai-reviewer.yml",
+  ".ai-reviewer.yaml",
+  ".github/ai-reviewer.yml",
+  ".github/ai-reviewer.yaml",
+] as const;
+
+/** Maximum repo-local reviewer config size accepted by the parser. */
+export const MAX_REPO_LOCAL_CONFIG_BYTES = 64 * 1024;
 
 /** Default documentation path patterns used to classify changed files. */
 export const DEFAULT_DOCUMENTATION_PATHS = ["**/*.md", "docs/**"] as const;
@@ -389,6 +407,380 @@ export const ReviewPolicySnapshotSchema = Type.Object(
 /** Immutable review policy snapshot stored with a review run. */
 export type ReviewPolicySnapshot = Static<typeof ReviewPolicySnapshotSchema>;
 
+/** Supported on-disk repo-local config encodings. */
+export const RepoLocalConfigFormatSchema = Type.Union([Type.Literal("yaml"), Type.Literal("json")]);
+
+/** Supported on-disk repo-local config encoding. */
+export type RepoLocalConfigFormat = Static<typeof RepoLocalConfigFormatSchema>;
+
+/** Trust mode used when selecting a repo-local config source. */
+export const ConfigFileTrustModeSchema = Type.Union([
+  Type.Literal("base_sha_only"),
+  Type.Literal("default_branch_only"),
+  Type.Literal("disabled"),
+]);
+
+/** Trust mode used when selecting a repo-local config source. */
+export type ConfigFileTrustMode = Static<typeof ConfigFileTrustModeSchema>;
+
+/** Policy that controls whether repo-local config files can influence review behavior. */
+export const ConfigFilePolicySchema = Type.Object(
+  {
+    enabled: Type.Boolean(),
+    allowedPaths: Type.Array(RepoPathSchema),
+    trustMode: ConfigFileTrustModeSchema,
+    allowConfigFileToDisableReviews: Type.Boolean(),
+    allowConfigFileToLowerSeverityThreshold: Type.Boolean(),
+    allowConfigFileToLowerConfidenceThreshold: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+/** Policy that controls whether repo-local config files can influence review behavior. */
+export type ConfigFilePolicy = Static<typeof ConfigFilePolicySchema>;
+
+/** Default config-file policy for trusted base-sha repo-local configuration. */
+export const DEFAULT_CONFIG_FILE_POLICY = {
+  enabled: true,
+  allowedPaths: [...REPO_LOCAL_CONFIG_ALLOWED_PATHS],
+  trustMode: "base_sha_only",
+  allowConfigFileToDisableReviews: false,
+  allowConfigFileToLowerSeverityThreshold: false,
+  allowConfigFileToLowerConfidenceThreshold: false,
+} satisfies ConfigFilePolicy;
+
+/** Review mode accepted in repo-local config files. */
+export const RepoLocalConfigReviewModeSchema = Type.Union([
+  ReviewPolicySchema,
+  Type.Literal("inline_comments_with_summary"),
+]);
+
+/** Review mode accepted in repo-local config files. */
+export type RepoLocalConfigReviewMode = Static<typeof RepoLocalConfigReviewModeSchema>;
+
+/** Normalized review settings parsed from a repo-local config file. */
+export const RepoLocalReviewConfigSchema = Type.Object(
+  {
+    maxCommentsPerReview: Type.Optional(Type.Integer({ minimum: 0, maximum: 50 })),
+    minimumConfidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    mode: Type.Optional(ReviewPolicySchema),
+    severityThreshold: Type.Optional(FindingSeveritySchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Normalized review settings parsed from a repo-local config file. */
+export type RepoLocalReviewConfig = Static<typeof RepoLocalReviewConfigSchema>;
+
+/** Raw review settings accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFileReviewSchema = Type.Object(
+  {
+    max_comments_per_pr: Type.Optional(Type.Integer({ minimum: 0, maximum: 50 })),
+    minimum_confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    mode: Type.Optional(RepoLocalConfigReviewModeSchema),
+    severity_threshold: Type.Optional(FindingSeveritySchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw review settings accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFileReview = Static<typeof RepoLocalConfigFileReviewSchema>;
+
+/** Normalized trigger settings parsed from a repo-local config file. */
+export const RepoLocalTriggerConfigSchema = Type.Object(
+  {
+    enabledActions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 64 }))),
+    includeBaseBranches: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    requireAnyLabel: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+    skipDraftPullRequests: Type.Optional(Type.Boolean()),
+    skipIfAnyLabel: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+  },
+  { additionalProperties: false },
+);
+
+/** Normalized trigger settings parsed from a repo-local config file. */
+export type RepoLocalTriggerConfig = Static<typeof RepoLocalTriggerConfigSchema>;
+
+/** Raw trigger settings accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFileTriggerSchema = Type.Object(
+  {
+    enabled_actions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 64 }))),
+    include_base_branches: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    require_any_label: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+    skip_draft_pull_requests: Type.Optional(Type.Boolean()),
+    skip_if_any_label: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw trigger settings accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFileTrigger = Static<typeof RepoLocalConfigFileTriggerSchema>;
+
+/** Normalized path settings parsed from a repo-local config file. */
+export const RepoLocalPathConfigSchema = Type.Object(
+  {
+    config: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    documentation: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    generated: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    ignored: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    included: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    tests: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    vendored: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+  },
+  { additionalProperties: false },
+);
+
+/** Normalized path settings parsed from a repo-local config file. */
+export type RepoLocalPathConfig = Static<typeof RepoLocalPathConfigSchema>;
+
+/** Raw path settings accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFilePathSchema = RepoLocalPathConfigSchema;
+
+/** Raw path settings accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFilePath = Static<typeof RepoLocalConfigFilePathSchema>;
+
+/** Category allow and deny lists parsed from a repo-local config file. */
+export const RepoLocalCategoryConfigSchema = Type.Object(
+  {
+    disabled: Type.Optional(Type.Array(FindingCategorySchema)),
+    enabled: Type.Optional(Type.Array(FindingCategorySchema)),
+  },
+  { additionalProperties: false },
+);
+
+/** Category allow and deny lists parsed from a repo-local config file. */
+export type RepoLocalCategoryConfig = Static<typeof RepoLocalCategoryConfigSchema>;
+
+/** Retrieval settings parsed from a repo-local config file. */
+export const RepoLocalRetrievalConfigSchema = Type.Object(
+  {
+    enableCallerCalleeContext: Type.Optional(Type.Boolean()),
+    enableCodeownersContext: Type.Optional(Type.Boolean()),
+    enableConfigContext: Type.Optional(Type.Boolean()),
+    enableImportContext: Type.Optional(Type.Boolean()),
+    enableLexicalSearch: Type.Optional(Type.Boolean()),
+    enableMemoryContext: Type.Optional(Type.Boolean()),
+    enableRelatedTests: Type.Optional(Type.Boolean()),
+    enableSameFileContext: Type.Optional(Type.Boolean()),
+    enableSemanticSearch: Type.Optional(Type.Boolean()),
+    graphSearchDepth: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+    includeDocumentationContext: Type.Optional(Type.Boolean()),
+    includeGeneratedContext: Type.Optional(Type.Boolean()),
+    includeVendoredContext: Type.Optional(Type.Boolean()),
+    lexicalSearchLimit: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+    maxContextItemsPerSource: Type.Optional(
+      Type.Record(Type.String({ minLength: 1, maxLength: 80 }), Type.Integer({ minimum: 0 })),
+    ),
+    maxContextTokens: Type.Optional(Type.Integer({ minimum: 1, maximum: 256_000 })),
+    semanticSearchLimit: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Retrieval settings parsed from a repo-local config file. */
+export type RepoLocalRetrievalConfig = Static<typeof RepoLocalRetrievalConfigSchema>;
+
+/** Raw retrieval settings accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFileRetrievalSchema = Type.Object(
+  {
+    enable_caller_callee_context: Type.Optional(Type.Boolean()),
+    enable_codeowners_context: Type.Optional(Type.Boolean()),
+    enable_config_context: Type.Optional(Type.Boolean()),
+    enable_import_context: Type.Optional(Type.Boolean()),
+    enable_lexical_search: Type.Optional(Type.Boolean()),
+    enable_memory_context: Type.Optional(Type.Boolean()),
+    enable_related_tests: Type.Optional(Type.Boolean()),
+    enable_same_file_context: Type.Optional(Type.Boolean()),
+    enable_semantic_search: Type.Optional(Type.Boolean()),
+    graph_search_depth: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+    include_documentation_context: Type.Optional(Type.Boolean()),
+    include_generated_context: Type.Optional(Type.Boolean()),
+    include_vendored_context: Type.Optional(Type.Boolean()),
+    lexical_search_limit: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+    max_context_items_per_source: Type.Optional(
+      Type.Record(Type.String({ minLength: 1, maxLength: 80 }), Type.Integer({ minimum: 0 })),
+    ),
+    max_context_tokens: Type.Optional(Type.Integer({ minimum: 1, maximum: 256_000 })),
+    semantic_search_limit: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw retrieval settings accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFileRetrieval = Static<typeof RepoLocalConfigFileRetrievalSchema>;
+
+/** Publishing settings parsed from a repo-local config file. */
+export const RepoLocalPublishingConfigSchema = Type.Object(
+  {
+    maxCommentsPerReview: Type.Optional(Type.Integer({ minimum: 0, maximum: 50 })),
+    publishCheckRun: Type.Optional(Type.Boolean()),
+    publishInlineComments: Type.Optional(Type.Boolean()),
+    publishSummaryComment: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** Publishing settings parsed from a repo-local config file. */
+export type RepoLocalPublishingConfig = Static<typeof RepoLocalPublishingConfigSchema>;
+
+/** Raw publishing settings accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFilePublishingSchema = Type.Object(
+  {
+    check_run: Type.Optional(Type.Boolean()),
+    inline_comments: Type.Optional(Type.Boolean()),
+    max_comments_per_pr: Type.Optional(Type.Integer({ minimum: 0, maximum: 50 })),
+    summary: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw publishing settings accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFilePublishing = Static<typeof RepoLocalConfigFilePublishingSchema>;
+
+/** Memory settings parsed from a repo-local config file. */
+export const RepoLocalMemoryConfigSchema = Type.Partial(EffectiveMemoryPolicySchema, {
+  additionalProperties: false,
+});
+
+/** Memory settings parsed from a repo-local config file. */
+export type RepoLocalMemoryConfig = Static<typeof RepoLocalMemoryConfigSchema>;
+
+/** Raw memory settings accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFileMemorySchema = Type.Object(
+  {
+    allow_exact_finding_suppression: Type.Optional(Type.Boolean()),
+    allow_natural_language_instructions: Type.Optional(Type.Boolean()),
+    allow_path_category_suppression: Type.Optional(Type.Boolean()),
+    enable_memory_context: Type.Optional(Type.Boolean()),
+    enable_memory_suppression: Type.Optional(Type.Boolean()),
+    max_memory_facts_in_context: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
+    memory_ttl_days: Type.Optional(Type.Integer({ minimum: 1, maximum: 3650 })),
+    require_approval_for_memory_facts: Type.Optional(Type.Boolean()),
+    trusted_feedback_roles: Type.Optional(Type.Array(TrustedMemoryActorRoleSchema)),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw memory settings accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFileMemory = Static<typeof RepoLocalConfigFileMemorySchema>;
+
+/** Condition block for one repo-local rule. */
+export const RepoLocalRuleConditionConfigSchema = Type.Object(
+  {
+    categories: Type.Optional(Type.Array(FindingCategorySchema)),
+    paths: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    severities: Type.Optional(Type.Array(FindingSeveritySchema)),
+  },
+  { additionalProperties: false },
+);
+
+/** Condition block for one repo-local rule. */
+export type RepoLocalRuleConditionConfig = Static<typeof RepoLocalRuleConditionConfigSchema>;
+
+/** Action block for one repo-local rule. */
+export const RepoLocalRuleActionConfigSchema = Type.Object(
+  {
+    disabledCategories: Type.Optional(Type.Array(FindingCategorySchema)),
+    enabledCategories: Type.Optional(Type.Array(FindingCategorySchema)),
+    minimumConfidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    severityThreshold: Type.Optional(FindingSeveritySchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Action block for one repo-local rule. */
+export type RepoLocalRuleActionConfig = Static<typeof RepoLocalRuleActionConfigSchema>;
+
+/** Normalized repo-local rule parsed from a config file. */
+export const RepoLocalRuleConfigSchema = Type.Object(
+  {
+    action: RepoLocalRuleActionConfigSchema,
+    name: Type.String({ minLength: 1, maxLength: 200 }),
+    when: Type.Optional(RepoLocalRuleConditionConfigSchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Normalized repo-local rule parsed from a config file. */
+export type RepoLocalRuleConfig = Static<typeof RepoLocalRuleConfigSchema>;
+
+/** Raw condition block accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFileRuleConditionSchema = RepoLocalRuleConditionConfigSchema;
+
+/** Raw condition block accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFileRuleCondition = Static<
+  typeof RepoLocalConfigFileRuleConditionSchema
+>;
+
+/** Raw action block accepted from YAML or JSON repo-local config files. */
+export const RepoLocalConfigFileRuleActionSchema = Type.Object(
+  {
+    disabled_categories: Type.Optional(Type.Array(FindingCategorySchema)),
+    enabled_categories: Type.Optional(Type.Array(FindingCategorySchema)),
+    minimum_confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    severity_threshold: Type.Optional(FindingSeveritySchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw action block accepted from YAML or JSON repo-local config files. */
+export type RepoLocalConfigFileRuleAction = Static<typeof RepoLocalConfigFileRuleActionSchema>;
+
+/** Raw repo-local rule accepted from YAML or JSON config files. */
+export const RepoLocalConfigFileRuleSchema = Type.Object(
+  {
+    action: RepoLocalConfigFileRuleActionSchema,
+    name: Type.String({ minLength: 1, maxLength: 200 }),
+    when: Type.Optional(RepoLocalConfigFileRuleConditionSchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Raw repo-local rule accepted from YAML or JSON config files. */
+export type RepoLocalConfigFileRule = Static<typeof RepoLocalConfigFileRuleSchema>;
+
+/** Strict raw shape accepted from repo-local YAML or JSON config files. */
+export const RepoLocalConfigFileSchema = Type.Object(
+  {
+    categories: Type.Optional(RepoLocalCategoryConfigSchema),
+    memory: Type.Optional(RepoLocalConfigFileMemorySchema),
+    paths: Type.Optional(RepoLocalConfigFilePathSchema),
+    publishing: Type.Optional(RepoLocalConfigFilePublishingSchema),
+    retrieval: Type.Optional(RepoLocalConfigFileRetrievalSchema),
+    review: Type.Optional(RepoLocalConfigFileReviewSchema),
+    rules: Type.Optional(Type.Array(RepoLocalConfigFileRuleSchema)),
+    triggers: Type.Optional(RepoLocalConfigFileTriggerSchema),
+    version: Type.Literal(1),
+  },
+  { additionalProperties: false },
+);
+
+/** Strict raw shape accepted from repo-local YAML or JSON config files. */
+export type RepoLocalConfigFile = Static<typeof RepoLocalConfigFileSchema>;
+
+/** Parsed and normalized repo-local config object used by policy compilation. */
+export const RepoLocalConfigSchema = Type.Object(
+  {
+    schemaVersion: Type.Literal("repo_local_config.v1"),
+    configVersion: Type.Literal(1),
+    sourcePath: RepoPathSchema,
+    sourceCommitSha: GitCommitShaSchema,
+    sourceHash: Sha256Schema,
+    categories: Type.Optional(RepoLocalCategoryConfigSchema),
+    memory: Type.Optional(RepoLocalMemoryConfigSchema),
+    paths: Type.Optional(RepoLocalPathConfigSchema),
+    publishing: Type.Optional(RepoLocalPublishingConfigSchema),
+    retrieval: Type.Optional(RepoLocalRetrievalConfigSchema),
+    review: Type.Optional(RepoLocalReviewConfigSchema),
+    rules: Type.Optional(Type.Array(RepoLocalRuleConfigSchema)),
+    triggers: Type.Optional(RepoLocalTriggerConfigSchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Parsed and normalized repo-local config object used by policy compilation. */
+export type RepoLocalConfig = Static<typeof RepoLocalConfigSchema>;
+
 /** Warning emitted when the policy compiler clamps or ignores unsafe input. */
 export type PolicyWarning = {
   /** Stable warning code used by dashboards and tests. */
@@ -398,6 +790,55 @@ export type PolicyWarning = {
   /** Optional structured warning details. */
   readonly details?: Readonly<Record<string, unknown>>;
 };
+
+/** Validation error returned for a rejected repo-local config file. */
+export type RepoLocalConfigValidationError = {
+  /** Stable error code used by dashboards and tests. */
+  readonly code: string;
+  /** Human-readable error message. */
+  readonly message: string;
+  /** Optional JSON-path-like location in the config file. */
+  readonly path?: string | undefined;
+};
+
+/** Inputs required to parse and validate a repo-local config file. */
+export type ParseRepoLocalConfigInput = {
+  /** Raw YAML or JSON config file content. */
+  readonly content: string;
+  /** Config content format. */
+  readonly format: RepoLocalConfigFormat;
+  /** Policy that controls config-file trust and weakening behavior. */
+  readonly policy?: ConfigFilePolicy;
+  /** Optional content-size limit in bytes. */
+  readonly maxBytes?: number;
+  /** Commit SHA from which the config content was loaded. */
+  readonly sourceCommitSha: GitCommitSha;
+  /** Repository-relative config file path. */
+  readonly sourcePath: RepoPath;
+};
+
+/** Successful repo-local config parse result. */
+export type ParseRepoLocalConfigSuccess = {
+  /** Whether parsing and validation succeeded. */
+  readonly ok: true;
+  /** Parsed and normalized config object. */
+  readonly config: RepoLocalConfig;
+  /** Non-fatal parser warnings. */
+  readonly warnings: readonly PolicyWarning[];
+};
+
+/** Failed repo-local config parse result. */
+export type ParseRepoLocalConfigFailure = {
+  /** Whether parsing and validation succeeded. */
+  readonly ok: false;
+  /** Validation errors that prevented using the config. */
+  readonly errors: readonly RepoLocalConfigValidationError[];
+  /** Non-fatal parser warnings. */
+  readonly warnings: readonly PolicyWarning[];
+};
+
+/** Result returned by repo-local config parsing and validation. */
+export type ParseRepoLocalConfigResult = ParseRepoLocalConfigSuccess | ParseRepoLocalConfigFailure;
 
 /** Optional telemetry dependencies used by rules and configuration evaluation. */
 export type RulesTelemetryOptions = {
@@ -1436,6 +1877,746 @@ export function parseReviewPolicySnapshot(value: unknown): ReviewPolicySnapshot 
   }
 
   return value as ReviewPolicySnapshot;
+}
+
+/** Parses, normalizes, validates, and hashes one trusted repo-local config file. */
+export function parseRepoLocalConfig(input: ParseRepoLocalConfigInput): ParseRepoLocalConfigResult {
+  const warnings: PolicyWarning[] = [];
+  const policy = input.policy ?? DEFAULT_CONFIG_FILE_POLICY;
+  const policyErrors = validationErrorsForSchema(
+    ConfigFilePolicySchema,
+    policy,
+    "invalid_config_file_policy",
+  );
+
+  if (policyErrors.length > 0) {
+    return { ok: false, errors: policyErrors, warnings };
+  }
+  if (!policy.enabled || policy.trustMode === "disabled") {
+    return {
+      ok: false,
+      errors: [
+        {
+          code: "config_file_disabled",
+          message: "Repo-local config files are disabled by policy.",
+          path: "$",
+        },
+      ],
+      warnings,
+    };
+  }
+
+  const sourcePathResult = validateRepoLocalConfigSourcePath(input.sourcePath, policy);
+  if (!sourcePathResult.ok) {
+    return { ok: false, errors: sourcePathResult.errors, warnings };
+  }
+
+  const sourceCommitErrors = validationErrorsForSchema(
+    GitCommitShaSchema,
+    input.sourceCommitSha,
+    "invalid_source_commit_sha",
+    "$.sourceCommitSha",
+  );
+  if (sourceCommitErrors.length > 0) {
+    return { ok: false, errors: sourceCommitErrors, warnings };
+  }
+
+  if (!Value.Check(RepoLocalConfigFormatSchema, input.format)) {
+    return {
+      ok: false,
+      errors: [
+        {
+          code: "unsupported_config_format",
+          message: "Repo-local config format must be yaml or json.",
+          path: "$.format",
+        },
+      ],
+      warnings,
+    };
+  }
+
+  const maxBytes = input.maxBytes ?? MAX_REPO_LOCAL_CONFIG_BYTES;
+  const contentBytes = Buffer.byteLength(input.content, "utf8");
+  if (contentBytes > maxBytes) {
+    return {
+      ok: false,
+      errors: [
+        {
+          code: "config_file_too_large",
+          message: `Repo-local config file is ${contentBytes} bytes, above the ${maxBytes} byte limit.`,
+          path: "$",
+        },
+      ],
+      warnings,
+    };
+  }
+
+  const parsed = parseRepoLocalConfigDocument(input, warnings);
+  if (!parsed.ok) {
+    return { ok: false, errors: parsed.errors, warnings };
+  }
+
+  const rawSchemaErrors = validationErrorsForSchema(
+    RepoLocalConfigFileSchema,
+    parsed.value,
+    "invalid_config_schema",
+  );
+  if (rawSchemaErrors.length > 0) {
+    return { ok: false, errors: rawSchemaErrors, warnings };
+  }
+
+  const rawConfig = parsed.value as RepoLocalConfigFile;
+  const safetyErrors = validateRepoLocalConfigSafety(rawConfig, policy);
+  const patternErrors = validateRepoLocalConfigPatterns(rawConfig);
+  const validationErrors = [...safetyErrors, ...patternErrors];
+  if (validationErrors.length > 0) {
+    return { ok: false, errors: validationErrors, warnings };
+  }
+
+  const config = normalizeRepoLocalConfigFile(
+    rawConfig,
+    {
+      sourceCommitSha: input.sourceCommitSha,
+      sourceHash: sha256(input.content),
+      sourcePath: sourcePathResult.path,
+    },
+    warnings,
+  );
+  const normalizedErrors = validationErrorsForSchema(
+    RepoLocalConfigSchema,
+    config,
+    "invalid_normalized_config",
+  );
+
+  if (normalizedErrors.length > 0) {
+    return { ok: false, errors: normalizedErrors, warnings };
+  }
+
+  return {
+    ok: true,
+    config: config as RepoLocalConfig,
+    warnings,
+  };
+}
+
+/** Result returned after validating a repo-local config source path. */
+type RepoLocalConfigSourcePathResult =
+  | {
+      /** Whether the source path is valid and allowed. */
+      readonly ok: true;
+      /** Normalized repository-relative config path. */
+      readonly path: RepoPath;
+    }
+  | {
+      /** Whether the source path is valid and allowed. */
+      readonly ok: false;
+      /** Source-path validation errors. */
+      readonly errors: readonly RepoLocalConfigValidationError[];
+    };
+
+/** Result returned after parsing repo-local config text. */
+type RepoLocalConfigDocumentParseResult =
+  | {
+      /** Whether the document parsed successfully. */
+      readonly ok: true;
+      /** Parsed JavaScript value. */
+      readonly value: unknown;
+    }
+  | {
+      /** Whether the document parsed successfully. */
+      readonly ok: false;
+      /** Parse errors. */
+      readonly errors: readonly RepoLocalConfigValidationError[];
+    };
+
+/** Metadata stamped on a normalized repo-local config object. */
+type RepoLocalConfigSourceMetadata = {
+  /** Commit SHA from which the config content was loaded. */
+  readonly sourceCommitSha: GitCommitSha;
+  /** SHA-256 hash of the raw config content. */
+  readonly sourceHash: Sha256;
+  /** Normalized repository-relative config file path. */
+  readonly sourcePath: RepoPath;
+};
+
+/** Validates that the config file was loaded from an allowed trusted path. */
+function validateRepoLocalConfigSourcePath(
+  sourcePath: RepoPath,
+  policy: ConfigFilePolicy,
+): RepoLocalConfigSourcePathResult {
+  let normalizedSourcePath: RepoPath;
+  try {
+    normalizedSourcePath = normalizeRepoPath(sourcePath) as RepoPath;
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [
+        {
+          code: "invalid_source_path",
+          message: messageFromUnknown(error),
+          path: "$.sourcePath",
+        },
+      ],
+    };
+  }
+
+  const allowedPaths: RepoPath[] = [];
+  const errors: RepoLocalConfigValidationError[] = [];
+  for (const [index, allowedPath] of policy.allowedPaths.entries()) {
+    try {
+      allowedPaths.push(normalizeRepoPath(allowedPath) as RepoPath);
+    } catch (error) {
+      errors.push({
+        code: "invalid_allowed_config_path",
+        message: messageFromUnknown(error),
+        path: `$.policy.allowedPaths[${index}]`,
+      });
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+  if (!allowedPaths.includes(normalizedSourcePath)) {
+    return {
+      ok: false,
+      errors: [
+        {
+          code: "source_path_not_allowed",
+          message: "Repo-local config file path is not allowed by policy.",
+          path: "$.sourcePath",
+        },
+      ],
+    };
+  }
+
+  return { ok: true, path: normalizedSourcePath };
+}
+
+/** Parses raw YAML or JSON config text into an unknown value. */
+function parseRepoLocalConfigDocument(
+  input: Pick<ParseRepoLocalConfigInput, "content" | "format">,
+  warnings: PolicyWarning[],
+): RepoLocalConfigDocumentParseResult {
+  if (input.format === "json") {
+    try {
+      return { ok: true, value: JSON.parse(input.content) as unknown };
+    } catch (error) {
+      return {
+        ok: false,
+        errors: [
+          {
+            code: "invalid_json",
+            message: messageFromUnknown(error),
+            path: "$",
+          },
+        ],
+      };
+    }
+  }
+
+  try {
+    const document = parseDocument(input.content, {
+      merge: false,
+      schema: "core",
+      strict: true,
+      uniqueKeys: true,
+      version: "1.2",
+    });
+    if (document.errors.length > 0) {
+      return {
+        ok: false,
+        errors: document.errors.map((error, index) => ({
+          code: "invalid_yaml",
+          message: error.message,
+          path: `$.yamlErrors[${index}]`,
+        })),
+      };
+    }
+    for (const [index, warning] of document.warnings.entries()) {
+      warnings.push({
+        code: "yaml_parse_warning",
+        message: warning.message,
+        details: { warningIndex: index },
+      });
+    }
+
+    return { ok: true, value: document.toJS({ maxAliasCount: 0 }) };
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [
+        {
+          code: "invalid_yaml",
+          message: messageFromUnknown(error),
+          path: "$",
+        },
+      ],
+    };
+  }
+}
+
+/** Validates policy-specific safety constraints for repo-local config files. */
+function validateRepoLocalConfigSafety(
+  config: RepoLocalConfigFile,
+  policy: ConfigFilePolicy,
+): RepoLocalConfigValidationError[] {
+  const errors: RepoLocalConfigValidationError[] = [];
+  if (config.review?.mode === "disabled" && !policy.allowConfigFileToDisableReviews) {
+    errors.push({
+      code: "review_disable_not_allowed",
+      message: "Repo-local config cannot disable reviews under the current config-file policy.",
+      path: "$.review.mode",
+    });
+  }
+
+  appendSeverityFloorErrors({
+    allowLowerThreshold: policy.allowConfigFileToLowerSeverityThreshold,
+    errors,
+    path: "$.review.severity_threshold",
+    severityThreshold: config.review?.severity_threshold,
+  });
+  appendConfidenceFloorErrors({
+    allowLowerThreshold: policy.allowConfigFileToLowerConfidenceThreshold,
+    errors,
+    minimumConfidence: config.review?.minimum_confidence,
+    path: "$.review.minimum_confidence",
+  });
+
+  for (const [index, rule] of (config.rules ?? []).entries()) {
+    appendSeverityFloorErrors({
+      allowLowerThreshold: policy.allowConfigFileToLowerSeverityThreshold,
+      errors,
+      path: `$.rules[${index}].action.severity_threshold`,
+      severityThreshold: rule.action.severity_threshold,
+    });
+    appendConfidenceFloorErrors({
+      allowLowerThreshold: policy.allowConfigFileToLowerConfidenceThreshold,
+      errors,
+      minimumConfidence: rule.action.minimum_confidence,
+      path: `$.rules[${index}].action.minimum_confidence`,
+    });
+  }
+
+  return errors;
+}
+
+/** Adds a severity-floor error when repo-local config asks for an unsafe threshold. */
+function appendSeverityFloorErrors(input: {
+  /** Whether the config policy allows lowering below the default safety floor. */
+  readonly allowLowerThreshold: boolean;
+  /** Mutable error accumulator. */
+  readonly errors: RepoLocalConfigValidationError[];
+  /** Config path for the checked threshold. */
+  readonly path: string;
+  /** Requested severity threshold. */
+  readonly severityThreshold?: FindingSeverity | undefined;
+}): void {
+  if (
+    !input.severityThreshold ||
+    input.allowLowerThreshold ||
+    severityRank(input.severityThreshold) >=
+      severityRank(DEFAULT_SAFETY_FLOOR.minimumPublishSeverity)
+  ) {
+    return;
+  }
+
+  input.errors.push({
+    code: "severity_threshold_below_safety_floor",
+    message: "Repo-local config cannot lower severity below the default safety floor.",
+    path: input.path,
+  });
+}
+
+/** Adds a confidence-floor error when repo-local config asks for an unsafe threshold. */
+function appendConfidenceFloorErrors(input: {
+  /** Whether the config policy allows lowering below the default safety floor. */
+  readonly allowLowerThreshold: boolean;
+  /** Mutable error accumulator. */
+  readonly errors: RepoLocalConfigValidationError[];
+  /** Requested minimum confidence. */
+  readonly minimumConfidence?: number | undefined;
+  /** Config path for the checked threshold. */
+  readonly path: string;
+}): void {
+  if (
+    input.minimumConfidence === undefined ||
+    input.allowLowerThreshold ||
+    input.minimumConfidence >= DEFAULT_SAFETY_FLOOR.minimumAllowedConfidence
+  ) {
+    return;
+  }
+
+  input.errors.push({
+    code: "confidence_threshold_below_safety_floor",
+    message: "Repo-local config cannot lower confidence below the default safety floor.",
+    path: input.path,
+  });
+}
+
+/** Validates all path-like patterns in a repo-local config file. */
+function validateRepoLocalConfigPatterns(
+  config: RepoLocalConfigFile,
+): RepoLocalConfigValidationError[] {
+  const errors: RepoLocalConfigValidationError[] = [];
+  appendPatternErrors(
+    errors,
+    config.triggers?.include_base_branches,
+    "$.triggers.include_base_branches",
+  );
+  appendPatternErrors(errors, config.paths?.config, "$.paths.config");
+  appendPatternErrors(errors, config.paths?.documentation, "$.paths.documentation");
+  appendPatternErrors(errors, config.paths?.generated, "$.paths.generated");
+  appendPatternErrors(errors, config.paths?.ignored, "$.paths.ignored");
+  appendPatternErrors(errors, config.paths?.included, "$.paths.included");
+  appendPatternErrors(errors, config.paths?.tests, "$.paths.tests");
+  appendPatternErrors(errors, config.paths?.vendored, "$.paths.vendored");
+
+  for (const [index, rule] of (config.rules ?? []).entries()) {
+    appendPatternErrors(errors, rule.when?.paths, `$.rules[${index}].when.paths`);
+  }
+
+  return errors;
+}
+
+/** Adds validation errors for unsafe repo-local glob-like patterns. */
+function appendPatternErrors(
+  errors: RepoLocalConfigValidationError[],
+  patterns: readonly string[] | undefined,
+  path: string,
+): void {
+  if (!patterns) {
+    return;
+  }
+
+  for (const [index, pattern] of patterns.entries()) {
+    if (pattern.includes("\\")) {
+      errors.push({
+        code: "dangerous_path_pattern",
+        message: "Repo-local config path patterns must not contain backslashes.",
+        path: `${path}[${index}]`,
+      });
+      continue;
+    }
+
+    try {
+      compileGlobPattern(pattern);
+    } catch (error) {
+      errors.push({
+        code: "dangerous_path_pattern",
+        message: messageFromUnknown(error),
+        path: `${path}[${index}]`,
+      });
+    }
+  }
+}
+
+/** Normalizes a strict raw config file into the policy compiler's config object. */
+function normalizeRepoLocalConfigFile(
+  config: RepoLocalConfigFile,
+  metadata: RepoLocalConfigSourceMetadata,
+  warnings: PolicyWarning[],
+): RepoLocalConfig {
+  const categories = nonEmptyObject({ ...(config.categories ?? {}) });
+  const memory = normalizeRepoLocalMemoryConfig(config.memory);
+  const paths = normalizeRepoLocalPathConfig(config.paths);
+  const publishing = normalizeRepoLocalPublishingConfig(config.publishing);
+  const retrieval = normalizeRepoLocalRetrievalConfig(config.retrieval);
+  const review = normalizeRepoLocalReviewConfig(config.review, warnings);
+  const triggers = normalizeRepoLocalTriggerConfig(config.triggers);
+
+  return {
+    schemaVersion: "repo_local_config.v1",
+    configVersion: config.version,
+    sourcePath: metadata.sourcePath,
+    sourceCommitSha: metadata.sourceCommitSha,
+    sourceHash: metadata.sourceHash,
+    ...(categories ? { categories } : {}),
+    ...(memory ? { memory } : {}),
+    ...(paths ? { paths } : {}),
+    ...(publishing ? { publishing } : {}),
+    ...(retrieval ? { retrieval } : {}),
+    ...(review ? { review } : {}),
+    ...(config.rules ? { rules: config.rules.map(normalizeRepoLocalRuleConfig) } : {}),
+    ...(triggers ? { triggers } : {}),
+  };
+}
+
+/** Normalizes raw repo-local review settings. */
+function normalizeRepoLocalReviewConfig(
+  review: RepoLocalConfigFileReview | undefined,
+  warnings: PolicyWarning[],
+): RepoLocalReviewConfig | undefined {
+  if (!review) {
+    return undefined;
+  }
+
+  const normalized: RepoLocalReviewConfig = {
+    ...(review.max_comments_per_pr !== undefined
+      ? { maxCommentsPerReview: review.max_comments_per_pr }
+      : {}),
+    ...(review.minimum_confidence !== undefined
+      ? { minimumConfidence: review.minimum_confidence }
+      : {}),
+    ...(review.mode ? { mode: normalizeRepoLocalReviewMode(review.mode, warnings) } : {}),
+    ...(review.severity_threshold ? { severityThreshold: review.severity_threshold } : {}),
+  };
+
+  return nonEmptyObject(normalized);
+}
+
+/** Normalizes the config-file review mode alias used by the public YAML example. */
+function normalizeRepoLocalReviewMode(
+  mode: RepoLocalConfigReviewMode,
+  warnings: PolicyWarning[],
+): ReviewPolicy {
+  if (mode === "inline_comments_with_summary") {
+    warnings.push({
+      code: "repo_local_review_mode_alias",
+      message:
+        "Review mode inline_comments_with_summary was normalized to inline_comments_and_summary.",
+    });
+    return "inline_comments_and_summary";
+  }
+
+  return mode;
+}
+
+/** Normalizes raw repo-local trigger settings. */
+function normalizeRepoLocalTriggerConfig(
+  triggers: RepoLocalConfigFileTrigger | undefined,
+): RepoLocalTriggerConfig | undefined {
+  if (!triggers) {
+    return undefined;
+  }
+
+  const normalized: RepoLocalTriggerConfig = {
+    ...(triggers.enabled_actions ? { enabledActions: [...triggers.enabled_actions] } : {}),
+    ...(triggers.include_base_branches
+      ? { includeBaseBranches: normalizePatternList(triggers.include_base_branches) }
+      : {}),
+    ...(triggers.require_any_label ? { requireAnyLabel: [...triggers.require_any_label] } : {}),
+    ...(triggers.skip_draft_pull_requests !== undefined
+      ? { skipDraftPullRequests: triggers.skip_draft_pull_requests }
+      : {}),
+    ...(triggers.skip_if_any_label ? { skipIfAnyLabel: [...triggers.skip_if_any_label] } : {}),
+  };
+
+  return nonEmptyObject(normalized);
+}
+
+/** Normalizes raw repo-local path settings. */
+function normalizeRepoLocalPathConfig(
+  paths: RepoLocalConfigFilePath | undefined,
+): RepoLocalPathConfig | undefined {
+  if (!paths) {
+    return undefined;
+  }
+
+  const normalized: RepoLocalPathConfig = {
+    ...(paths.config ? { config: normalizePatternList(paths.config) } : {}),
+    ...(paths.documentation ? { documentation: normalizePatternList(paths.documentation) } : {}),
+    ...(paths.generated ? { generated: normalizePatternList(paths.generated) } : {}),
+    ...(paths.ignored ? { ignored: normalizePatternList(paths.ignored) } : {}),
+    ...(paths.included ? { included: normalizePatternList(paths.included) } : {}),
+    ...(paths.tests ? { tests: normalizePatternList(paths.tests) } : {}),
+    ...(paths.vendored ? { vendored: normalizePatternList(paths.vendored) } : {}),
+  };
+
+  return nonEmptyObject(normalized);
+}
+
+/** Normalizes raw repo-local retrieval settings. */
+function normalizeRepoLocalRetrievalConfig(
+  retrieval: RepoLocalConfigFileRetrieval | undefined,
+): RepoLocalRetrievalConfig | undefined {
+  if (!retrieval) {
+    return undefined;
+  }
+
+  const normalized: RepoLocalRetrievalConfig = {
+    ...(retrieval.enable_caller_callee_context !== undefined
+      ? { enableCallerCalleeContext: retrieval.enable_caller_callee_context }
+      : {}),
+    ...(retrieval.enable_codeowners_context !== undefined
+      ? { enableCodeownersContext: retrieval.enable_codeowners_context }
+      : {}),
+    ...(retrieval.enable_config_context !== undefined
+      ? { enableConfigContext: retrieval.enable_config_context }
+      : {}),
+    ...(retrieval.enable_import_context !== undefined
+      ? { enableImportContext: retrieval.enable_import_context }
+      : {}),
+    ...(retrieval.enable_lexical_search !== undefined
+      ? { enableLexicalSearch: retrieval.enable_lexical_search }
+      : {}),
+    ...(retrieval.enable_memory_context !== undefined
+      ? { enableMemoryContext: retrieval.enable_memory_context }
+      : {}),
+    ...(retrieval.enable_related_tests !== undefined
+      ? { enableRelatedTests: retrieval.enable_related_tests }
+      : {}),
+    ...(retrieval.enable_same_file_context !== undefined
+      ? { enableSameFileContext: retrieval.enable_same_file_context }
+      : {}),
+    ...(retrieval.enable_semantic_search !== undefined
+      ? { enableSemanticSearch: retrieval.enable_semantic_search }
+      : {}),
+    ...(retrieval.graph_search_depth !== undefined
+      ? { graphSearchDepth: retrieval.graph_search_depth }
+      : {}),
+    ...(retrieval.include_documentation_context !== undefined
+      ? { includeDocumentationContext: retrieval.include_documentation_context }
+      : {}),
+    ...(retrieval.include_generated_context !== undefined
+      ? { includeGeneratedContext: retrieval.include_generated_context }
+      : {}),
+    ...(retrieval.include_vendored_context !== undefined
+      ? { includeVendoredContext: retrieval.include_vendored_context }
+      : {}),
+    ...(retrieval.lexical_search_limit !== undefined
+      ? { lexicalSearchLimit: retrieval.lexical_search_limit }
+      : {}),
+    ...(retrieval.max_context_items_per_source
+      ? { maxContextItemsPerSource: { ...retrieval.max_context_items_per_source } }
+      : {}),
+    ...(retrieval.max_context_tokens !== undefined
+      ? { maxContextTokens: retrieval.max_context_tokens }
+      : {}),
+    ...(retrieval.semantic_search_limit !== undefined
+      ? { semanticSearchLimit: retrieval.semantic_search_limit }
+      : {}),
+  };
+
+  return nonEmptyObject(normalized);
+}
+
+/** Normalizes raw repo-local publishing settings. */
+function normalizeRepoLocalPublishingConfig(
+  publishing: RepoLocalConfigFilePublishing | undefined,
+): RepoLocalPublishingConfig | undefined {
+  if (!publishing) {
+    return undefined;
+  }
+
+  const normalized: RepoLocalPublishingConfig = {
+    ...(publishing.check_run !== undefined ? { publishCheckRun: publishing.check_run } : {}),
+    ...(publishing.inline_comments !== undefined
+      ? { publishInlineComments: publishing.inline_comments }
+      : {}),
+    ...(publishing.max_comments_per_pr !== undefined
+      ? { maxCommentsPerReview: publishing.max_comments_per_pr }
+      : {}),
+    ...(publishing.summary !== undefined ? { publishSummaryComment: publishing.summary } : {}),
+  };
+
+  return nonEmptyObject(normalized);
+}
+
+/** Normalizes raw repo-local memory settings. */
+function normalizeRepoLocalMemoryConfig(
+  memory: RepoLocalConfigFileMemory | undefined,
+): RepoLocalMemoryConfig | undefined {
+  if (!memory) {
+    return undefined;
+  }
+
+  const normalized: RepoLocalMemoryConfig = {
+    ...(memory.allow_exact_finding_suppression !== undefined
+      ? { allowExactFindingSuppression: memory.allow_exact_finding_suppression }
+      : {}),
+    ...(memory.allow_natural_language_instructions !== undefined
+      ? { allowNaturalLanguageInstructions: memory.allow_natural_language_instructions }
+      : {}),
+    ...(memory.allow_path_category_suppression !== undefined
+      ? { allowPathCategorySuppression: memory.allow_path_category_suppression }
+      : {}),
+    ...(memory.enable_memory_context !== undefined
+      ? { enableMemoryContext: memory.enable_memory_context }
+      : {}),
+    ...(memory.enable_memory_suppression !== undefined
+      ? { enableMemorySuppression: memory.enable_memory_suppression }
+      : {}),
+    ...(memory.max_memory_facts_in_context !== undefined
+      ? { maxMemoryFactsInContext: memory.max_memory_facts_in_context }
+      : {}),
+    ...(memory.memory_ttl_days !== undefined ? { memoryTtlDays: memory.memory_ttl_days } : {}),
+    ...(memory.require_approval_for_memory_facts !== undefined
+      ? { requireApprovalForMemoryFacts: memory.require_approval_for_memory_facts }
+      : {}),
+    ...(memory.trusted_feedback_roles
+      ? { trustedFeedbackRoles: [...memory.trusted_feedback_roles] }
+      : {}),
+  };
+
+  return nonEmptyObject(normalized);
+}
+
+/** Normalizes one raw repo-local rule. */
+function normalizeRepoLocalRuleConfig(rule: RepoLocalConfigFileRule): RepoLocalRuleConfig {
+  return {
+    action: normalizeRepoLocalRuleActionConfig(rule.action),
+    name: rule.name,
+    ...(rule.when ? { when: normalizeRepoLocalRuleConditionConfig(rule.when) } : {}),
+  };
+}
+
+/** Normalizes one raw repo-local rule condition. */
+function normalizeRepoLocalRuleConditionConfig(
+  condition: RepoLocalConfigFileRuleCondition,
+): RepoLocalRuleConditionConfig {
+  return {
+    ...(condition.categories ? { categories: [...condition.categories] } : {}),
+    ...(condition.paths ? { paths: normalizePatternList(condition.paths) } : {}),
+    ...(condition.severities ? { severities: [...condition.severities] } : {}),
+  };
+}
+
+/** Normalizes one raw repo-local rule action. */
+function normalizeRepoLocalRuleActionConfig(
+  action: RepoLocalConfigFileRuleAction,
+): RepoLocalRuleActionConfig {
+  return {
+    ...(action.disabled_categories ? { disabledCategories: [...action.disabled_categories] } : {}),
+    ...(action.enabled_categories ? { enabledCategories: [...action.enabled_categories] } : {}),
+    ...(action.minimum_confidence !== undefined
+      ? { minimumConfidence: action.minimum_confidence }
+      : {}),
+    ...(action.severity_threshold ? { severityThreshold: action.severity_threshold } : {}),
+  };
+}
+
+/** Normalizes a list of safe glob-like path patterns. */
+function normalizePatternList(patterns: readonly string[]): string[] {
+  return patterns.map((pattern) => normalizePathLike(pattern));
+}
+
+/** Returns an object when it has at least one own key. */
+function nonEmptyObject<T extends object>(value: T): T | undefined {
+  return Object.keys(value).length > 0 ? value : undefined;
+}
+
+/** Builds stable TypeBox validation errors for a schema check. */
+function validationErrorsForSchema(
+  schema: TSchema,
+  value: unknown,
+  code: string,
+  forcedPath?: string,
+): RepoLocalConfigValidationError[] {
+  if (Value.Check(schema, value)) {
+    return [];
+  }
+
+  return [...Value.Errors(schema, value)].map((error) => ({
+    code,
+    message: error.message,
+    path: forcedPath ?? (error.path ? error.path : "$"),
+  }));
+}
+
+/** Returns a safe message for an unknown caught value. */
+function messageFromUnknown(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Converts a review policy mode into publishing booleans. */

@@ -16,10 +16,13 @@ import {
   createFindingInputFixture,
   createPolicyFixture,
   createPrInputFixture,
+  DEFAULT_CONFIG_FILE_POLICY,
   evaluateFindingPolicy,
   evaluateMemoryPolicy,
   getPublishingPolicyDecision,
+  MAX_REPO_LOCAL_CONFIG_BYTES,
   matchesAnyPathPattern,
+  parseRepoLocalConfig,
   shouldReviewPr,
 } from "../src/index";
 
@@ -241,6 +244,224 @@ describe("buildReviewPolicySnapshot", () => {
     expect(result.warnings.map((warning) => warning.code)).toEqual([
       "user_rules_disabled_by_org_settings",
     ]);
+  });
+});
+
+describe("parseRepoLocalConfig", () => {
+  it("parses and normalizes the documented YAML config shape with source metadata", () => {
+    const result = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "review:",
+        "  mode: inline_comments_with_summary",
+        "  max_comments_per_pr: 5",
+        "  severity_threshold: medium",
+        "  minimum_confidence: 0.75",
+        "triggers:",
+        "  skip_draft_pull_requests: true",
+        "  require_any_label: []",
+        "  skip_if_any_label:",
+        "    - no-ai-review",
+        "  include_base_branches:",
+        "    - main",
+        "    - release/**",
+        "paths:",
+        "  ignored:",
+        '    - "**/generated/**"',
+        '    - "**/*.pb.ts"',
+        "  tests:",
+        '    - "**/*.test.ts"',
+        "categories:",
+        "  enabled:",
+        "    - correctness",
+        "    - security",
+        "  disabled:",
+        "    - style",
+        "publishing:",
+        "  summary: true",
+        "  inline_comments: true",
+        "  check_run: false",
+        "rules:",
+        "  - name: Only security comments in generated config",
+        "    when:",
+        "      paths:",
+        "        - .github/workflows/**",
+        "    action:",
+        "      enabled_categories:",
+        "        - security",
+        "        - correctness",
+        "      severity_threshold: high",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1234567890",
+      sourcePath: ".ai-reviewer.yml",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.errors));
+    }
+    expect(result.config).toMatchObject({
+      schemaVersion: "repo_local_config.v1",
+      configVersion: 1,
+      sourcePath: ".ai-reviewer.yml",
+      sourceCommitSha: "abcdef1234567890",
+      review: {
+        maxCommentsPerReview: 5,
+        minimumConfidence: 0.75,
+        mode: "inline_comments_and_summary",
+        severityThreshold: "medium",
+      },
+      triggers: {
+        includeBaseBranches: ["main", "release/**"],
+        requireAnyLabel: [],
+        skipDraftPullRequests: true,
+        skipIfAnyLabel: ["no-ai-review"],
+      },
+      paths: {
+        ignored: ["**/generated/**", "**/*.pb.ts"],
+        tests: ["**/*.test.ts"],
+      },
+      categories: {
+        disabled: ["style"],
+        enabled: ["correctness", "security"],
+      },
+      publishing: {
+        publishCheckRun: false,
+        publishInlineComments: true,
+        publishSummaryComment: true,
+      },
+      rules: [
+        {
+          action: {
+            enabledCategories: ["security", "correctness"],
+            severityThreshold: "high",
+          },
+          name: "Only security comments in generated config",
+          when: { paths: [".github/workflows/**"] },
+        },
+      ],
+    });
+    expect(result.config.sourceHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "repo_local_review_mode_alias",
+    ]);
+  });
+
+  it("parses JSON config and normalizes leading current-directory path segments", () => {
+    const result = parseRepoLocalConfig({
+      content: JSON.stringify({
+        version: 1,
+        paths: { ignored: ["./generated/**"] },
+        review: { severity_threshold: "high" },
+      }),
+      format: "json",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".github/ai-reviewer.yaml",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error(JSON.stringify(result.errors));
+    }
+    expect(result.config.paths?.ignored).toEqual(["generated/**"]);
+    expect(result.config.review?.severityThreshold).toBe("high");
+  });
+
+  it("rejects unknown keys, oversized files, disallowed paths, and dangerous patterns", () => {
+    const unknownKey = parseRepoLocalConfig({
+      content: "version: 1\nunknown: true\n",
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yaml",
+    });
+    const oversized = parseRepoLocalConfig({
+      content: "version: 1\n",
+      format: "yaml",
+      maxBytes: 4,
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yaml",
+    });
+    const disallowedPath = parseRepoLocalConfig({
+      content: "version: 1\n",
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: "README.md",
+    });
+    const dangerousPattern = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "paths:",
+        "  ignored:",
+        "    - ../secret/**",
+        "    - src\\\\secret\\\\**",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yaml",
+    });
+
+    expect(unknownKey.ok).toBe(false);
+    expect(oversized.ok).toBe(false);
+    expect(disallowedPath.ok).toBe(false);
+    expect(dangerousPattern.ok).toBe(false);
+    if (unknownKey.ok || oversized.ok || disallowedPath.ok || dangerousPattern.ok) {
+      throw new Error("Expected invalid repo-local config inputs to be rejected.");
+    }
+    expect(unknownKey.errors.map((error) => error.code)).toContain("invalid_config_schema");
+    expect(oversized.errors.map((error) => error.code)).toContain("config_file_too_large");
+    expect(disallowedPath.errors.map((error) => error.code)).toContain("source_path_not_allowed");
+    expect(dangerousPattern.errors.map((error) => error.code)).toEqual([
+      "dangerous_path_pattern",
+      "dangerous_path_pattern",
+    ]);
+  });
+
+  it("rejects config files that try to weaken review gates without policy approval", () => {
+    const rejected = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "review:",
+        "  mode: disabled",
+        "  severity_threshold: low",
+        "  minimum_confidence: 0.4",
+        "rules:",
+        "  - name: Lower generated config threshold",
+        "    action:",
+        "      severity_threshold: info",
+        "      minimum_confidence: 0.2",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yml",
+    });
+    const allowed = parseRepoLocalConfig({
+      content: "version: 1\nreview:\n  mode: disabled\n",
+      format: "yaml",
+      policy: {
+        ...DEFAULT_CONFIG_FILE_POLICY,
+        allowConfigFileToDisableReviews: true,
+      },
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yml",
+    });
+
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) {
+      throw new Error("Expected weakening repo-local config to be rejected.");
+    }
+    expect(rejected.errors.map((error) => error.code)).toEqual([
+      "review_disable_not_allowed",
+      "severity_threshold_below_safety_floor",
+      "confidence_threshold_below_safety_floor",
+      "severity_threshold_below_safety_floor",
+      "confidence_threshold_below_safety_floor",
+    ]);
+    expect(allowed.ok).toBe(true);
+  });
+
+  it("uses the documented default size limit", () => {
+    expect(MAX_REPO_LOCAL_CONFIG_BYTES).toBe(64 * 1024);
   });
 });
 
