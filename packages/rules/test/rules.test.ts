@@ -324,6 +324,118 @@ describe("buildReviewPolicySnapshot", () => {
     });
   });
 
+  it("compiles scoped repo-local suppress actions with advanced matchers", () => {
+    const parsed = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "rules:",
+        "  - name: Suppress generated client noise",
+        "    when:",
+        "      paths:",
+        "        - src/sdk/**",
+        "      languages:",
+        "        - typescript",
+        "      authors:",
+        "        - dependabot[bot]",
+        "      labels:",
+        "        - generated",
+        "      title_regex: Generated client",
+        "      confidence_less_than: 0.95",
+        "    action:",
+        "      suppress_findings: Generated client code is reviewed upstream.",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".github/ai-reviewer.yml",
+    });
+    if (!parsed.ok) {
+      throw new Error(JSON.stringify(parsed.errors));
+    }
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      orgSettings: { ...createDefaultOrgSettings(ids.orgId, now), allowRepoLocalConfig: true },
+      repoLocalConfig: parsed.config,
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+    const policy = result.snapshot.effectivePolicy;
+    const matched = evaluateFindingPolicy(
+      createFindingInputFixture({
+        language: "typescript",
+        policy,
+        pullRequest: { authorLogin: "dependabot[bot]", labels: ["generated"] },
+        finding: {
+          location: { path: "src/sdk/client.ts", line: 4, side: "RIGHT", isInDiff: true },
+          title: "Generated client wrapper can return undefined",
+        },
+      }),
+    );
+    const highConfidence = evaluateFindingPolicy(
+      createFindingInputFixture({
+        language: "typescript",
+        policy,
+        pullRequest: { authorLogin: "dependabot[bot]", labels: ["generated"] },
+        finding: {
+          confidence: 0.95,
+          location: { path: "src/sdk/client.ts", line: 4, side: "RIGHT", isInDiff: true },
+          title: "Generated client wrapper can return undefined",
+        },
+      }),
+    );
+    const missingLabel = evaluateFindingPolicy(
+      createFindingInputFixture({
+        language: "typescript",
+        policy,
+        pullRequest: { authorLogin: "dependabot[bot]", labels: ["ready-for-review"] },
+        finding: {
+          location: { path: "src/sdk/client.ts", line: 4, side: "RIGHT", isInDiff: true },
+          title: "Generated client wrapper can return undefined",
+        },
+      }),
+    );
+
+    expect(result.warnings).toEqual([]);
+    expect(parsed.config.rules?.[0]).toMatchObject({
+      action: {
+        suppressFindingsReason: "Generated client code is reviewed upstream.",
+      },
+      when: {
+        authors: ["dependabot[bot]"],
+        confidenceLessThan: 0.95,
+        labels: ["generated"],
+        languages: ["typescript"],
+        paths: ["src/sdk/**"],
+        titleRegex: "Generated client",
+      },
+    });
+    expect(policy.rules).toHaveLength(1);
+    expect(policy.rules[0]?.metadata).toMatchObject({
+      actionKind: "suppress_findings",
+      reason: "Generated client code is reviewed upstream.",
+      source: "repo_local_config",
+    });
+    expect(policy.rules[0]?.matcher).toMatchObject({
+      authors: ["dependabot[bot]"],
+      confidenceLessThan: 0.95,
+      labels: ["generated"],
+      languages: ["typescript"],
+      paths: ["src/sdk/**"],
+      titleRegex: "Generated client",
+    });
+    expect(matched).toMatchObject({
+      reasonCode: "suppressed_by_repo_rule",
+      shouldPublish: false,
+    });
+    expect(highConfidence).toMatchObject({
+      reasonCode: "allowed",
+      shouldPublish: true,
+    });
+    expect(missingLabel).toMatchObject({
+      reasonCode: "allowed",
+      shouldPublish: true,
+    });
+  });
+
   it("applies organization settings as policy defaults and guardrails", () => {
     const orgSettings: OrgSettings = {
       ...createDefaultOrgSettings(ids.orgId, now),
@@ -744,6 +856,45 @@ describe("parseRepoLocalConfig", () => {
       "confidence_threshold_below_safety_floor",
     ]);
     expect(allowed.ok).toBe(true);
+  });
+
+  it("rejects unsafe repo-local runtime suppression rules", () => {
+    const unscopedSuppression = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "rules:",
+        "  - name: Suppress everything",
+        "    action:",
+        "      suppress_findings: Not scoped enough.",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yml",
+    });
+    const invalidTitleRegex = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "rules:",
+        "  - name: Invalid title regex",
+        "    when:",
+        "      title_regex: '['",
+        "    action:",
+        "      suppress_findings: Invalid regex should fail validation.",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".ai-reviewer.yml",
+    });
+
+    expect(unscopedSuppression.ok).toBe(false);
+    expect(invalidTitleRegex.ok).toBe(false);
+    if (unscopedSuppression.ok || invalidTitleRegex.ok) {
+      throw new Error("Expected unsafe repo-local runtime suppression rules to be rejected.");
+    }
+    expect(unscopedSuppression.errors.map((error) => error.code)).toEqual([
+      "unscoped_suppress_findings",
+    ]);
+    expect(invalidTitleRegex.errors.map((error) => error.code)).toEqual(["invalid_title_regex"]);
   });
 
   it("uses the documented default size limit", () => {

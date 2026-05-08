@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   type CandidateFinding,
   type CodeLanguage,
+  CodeLanguageSchema,
   DEFAULT_ORG_SETTINGS,
   DEFAULT_REPOSITORY_SETTINGS,
   type FindingCategory,
@@ -700,9 +701,14 @@ export type RepoLocalConfigFileMemory = Static<typeof RepoLocalConfigFileMemoryS
 /** Condition block for one repo-local rule. */
 export const RepoLocalRuleConditionConfigSchema = Type.Object(
   {
+    authors: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
     categories: Type.Optional(Type.Array(FindingCategorySchema)),
+    confidenceLessThan: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    labels: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+    languages: Type.Optional(Type.Array(CodeLanguageSchema)),
     paths: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
     severities: Type.Optional(Type.Array(FindingSeveritySchema)),
+    titleRegex: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
   },
   { additionalProperties: false },
 );
@@ -717,6 +723,7 @@ export const RepoLocalRuleActionConfigSchema = Type.Object(
     enabledCategories: Type.Optional(Type.Array(FindingCategorySchema)),
     minimumConfidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
     severityThreshold: Type.Optional(FindingSeveritySchema),
+    suppressFindingsReason: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
   },
   { additionalProperties: false },
 );
@@ -738,7 +745,19 @@ export const RepoLocalRuleConfigSchema = Type.Object(
 export type RepoLocalRuleConfig = Static<typeof RepoLocalRuleConfigSchema>;
 
 /** Raw condition block accepted from YAML or JSON repo-local config files. */
-export const RepoLocalConfigFileRuleConditionSchema = RepoLocalRuleConditionConfigSchema;
+export const RepoLocalConfigFileRuleConditionSchema = Type.Object(
+  {
+    authors: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+    categories: Type.Optional(Type.Array(FindingCategorySchema)),
+    confidence_less_than: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    labels: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }))),
+    languages: Type.Optional(Type.Array(CodeLanguageSchema)),
+    paths: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
+    severities: Type.Optional(Type.Array(FindingSeveritySchema)),
+    title_regex: Type.Optional(Type.String({ minLength: 1, maxLength: 240 })),
+  },
+  { additionalProperties: false },
+);
 
 /** Raw condition block accepted from YAML or JSON repo-local config files. */
 export type RepoLocalConfigFileRuleCondition = Static<
@@ -752,6 +771,7 @@ export const RepoLocalConfigFileRuleActionSchema = Type.Object(
     enabled_categories: Type.Optional(Type.Array(FindingCategorySchema)),
     minimum_confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
     severity_threshold: Type.Optional(FindingSeveritySchema),
+    suppress_findings: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
   },
   { additionalProperties: false },
 );
@@ -2366,9 +2386,57 @@ function validateRepoLocalConfigSafety(
       minimumConfidence: rule.action.minimum_confidence,
       path: `$.rules[${index}].action.minimum_confidence`,
     });
+    appendSuppressFindingsScopeErrors({
+      condition: rule.when,
+      errors,
+      path: `$.rules[${index}]`,
+      suppressFindingsReason: rule.action.suppress_findings,
+    });
   }
 
   return errors;
+}
+
+/** Adds an error when a direct suppression action has no explicit matcher scope. */
+function appendSuppressFindingsScopeErrors(input: {
+  /** Raw repo-local rule condition used as the suppression matcher. */
+  readonly condition?: RepoLocalConfigFileRuleCondition | undefined;
+  /** Mutable error accumulator. */
+  readonly errors: RepoLocalConfigValidationError[];
+  /** Config path for the checked rule. */
+  readonly path: string;
+  /** Direct suppression reason from the repo-local action block. */
+  readonly suppressFindingsReason?: string | undefined;
+}): void {
+  if (!input.suppressFindingsReason || repoLocalRuleConditionHasScope(input.condition)) {
+    return;
+  }
+
+  input.errors.push({
+    code: "unscoped_suppress_findings",
+    message: "Repo-local suppress_findings actions must include at least one matcher condition.",
+    path: `${input.path}.action.suppress_findings`,
+  });
+}
+
+/** Returns true when a repo-local rule condition carries at least one matcher scope. */
+function repoLocalRuleConditionHasScope(
+  condition: RepoLocalConfigFileRuleCondition | undefined,
+): boolean {
+  if (!condition) {
+    return false;
+  }
+
+  return (
+    (condition.authors?.length ?? 0) > 0 ||
+    (condition.categories?.length ?? 0) > 0 ||
+    condition.confidence_less_than !== undefined ||
+    (condition.labels?.length ?? 0) > 0 ||
+    (condition.languages?.length ?? 0) > 0 ||
+    (condition.paths?.length ?? 0) > 0 ||
+    (condition.severities?.length ?? 0) > 0 ||
+    Boolean(condition.title_regex)
+  );
 }
 
 /** Adds a severity-floor error when repo-local config asks for an unsafe threshold. */
@@ -2444,6 +2512,7 @@ function validateRepoLocalConfigPatterns(
 
   for (const [index, rule] of (config.rules ?? []).entries()) {
     appendPatternErrors(errors, rule.when?.paths, `$.rules[${index}].when.paths`);
+    appendTitleRegexErrors(errors, rule.when?.title_regex, `$.rules[${index}].when.title_regex`);
   }
 
   return errors;
@@ -2478,6 +2547,27 @@ function appendPatternErrors(
         path: `${path}[${index}]`,
       });
     }
+  }
+}
+
+/** Adds validation errors for invalid repo-local title regex matchers. */
+function appendTitleRegexErrors(
+  errors: RepoLocalConfigValidationError[],
+  titleRegex: string | undefined,
+  path: string,
+): void {
+  if (!titleRegex) {
+    return;
+  }
+
+  try {
+    new RegExp(titleRegex, "iu");
+  } catch (error) {
+    errors.push({
+      code: "invalid_title_regex",
+      message: messageFromUnknown(error),
+      path,
+    });
   }
 }
 
@@ -2736,9 +2826,16 @@ function normalizeRepoLocalRuleConditionConfig(
   condition: RepoLocalConfigFileRuleCondition,
 ): RepoLocalRuleConditionConfig {
   return {
+    ...(condition.authors ? { authors: [...condition.authors] } : {}),
     ...(condition.categories ? { categories: [...condition.categories] } : {}),
+    ...(condition.confidence_less_than !== undefined
+      ? { confidenceLessThan: condition.confidence_less_than }
+      : {}),
+    ...(condition.labels ? { labels: [...condition.labels] } : {}),
+    ...(condition.languages ? { languages: [...condition.languages] } : {}),
     ...(condition.paths ? { paths: normalizePatternList(condition.paths) } : {}),
     ...(condition.severities ? { severities: [...condition.severities] } : {}),
+    ...(condition.title_regex ? { titleRegex: condition.title_regex } : {}),
   };
 }
 
@@ -2753,6 +2850,7 @@ function normalizeRepoLocalRuleActionConfig(
       ? { minimumConfidence: action.minimum_confidence }
       : {}),
     ...(action.severity_threshold ? { severityThreshold: action.severity_threshold } : {}),
+    ...(action.suppress_findings ? { suppressFindingsReason: action.suppress_findings } : {}),
   };
 }
 
@@ -3026,6 +3124,17 @@ function compileRepoLocalRule(input: CompileRepoLocalRuleInput): readonly RepoRu
     );
   }
 
+  if (action.suppressFindingsReason) {
+    rules.push(
+      createRepoLocalSuppressionRule(
+        input,
+        "suppress_findings",
+        baseMatcher,
+        action.suppressFindingsReason,
+      ),
+    );
+  }
+
   return rules;
 }
 
@@ -3034,9 +3143,16 @@ function repoLocalRuleBaseMatcher(
   condition: RepoLocalRuleConditionConfig | undefined,
 ): RepoRuleMatcher {
   return {
+    ...(condition?.authors ? { authors: [...condition.authors] } : {}),
     ...(condition?.categories ? { categories: [...condition.categories] } : {}),
+    ...(condition?.confidenceLessThan !== undefined
+      ? { confidenceLessThan: condition.confidenceLessThan }
+      : {}),
+    ...(condition?.labels ? { labels: [...condition.labels] } : {}),
+    ...(condition?.languages ? { languages: [...condition.languages] } : {}),
     ...(condition?.paths ? { paths: [...condition.paths] } : {}),
     ...(condition?.severities ? { severities: [...condition.severities] } : {}),
+    ...(condition?.titleRegex ? { titleRegex: condition.titleRegex } : {}),
   };
 }
 
@@ -3045,6 +3161,7 @@ function createRepoLocalSuppressionRule(
   input: CompileRepoLocalRuleInput,
   actionKind: string,
   matcher: RepoRuleMatcher,
+  reason?: string,
 ): RepoRule {
   return parseRepoRule({
     ruleId: stableId("rule", [
@@ -3058,7 +3175,7 @@ function createRepoLocalSuppressionRule(
     name: boundedRuleName(`${input.rule.name} (${actionKind})`),
     effect: "suppress",
     matcher,
-    instruction: `Suppress findings matched by repo-local rule "${input.rule.name}" action ${actionKind}.`,
+    instruction: repoLocalSuppressionInstruction(input.rule.name, actionKind, reason),
     priority: repoLocalRulePriority(input.ruleIndex),
     enabled: true,
     createdAt: input.timestamp,
@@ -3066,6 +3183,7 @@ function createRepoLocalSuppressionRule(
     metadata: {
       actionKind,
       configVersion: input.repoLocalConfig.configVersion,
+      ...(reason ? { reason } : {}),
       ruleIndex: input.ruleIndex,
       ruleName: input.rule.name,
       source: "repo_local_config",
@@ -3074,6 +3192,20 @@ function createRepoLocalSuppressionRule(
       sourcePath: input.repoLocalConfig.sourcePath,
     },
   });
+}
+
+/** Returns the product-safe instruction attached to a synthetic suppression rule. */
+function repoLocalSuppressionInstruction(
+  ruleName: string,
+  actionKind: string,
+  reason: string | undefined,
+): string {
+  const baseInstruction = `Suppress findings matched by repo-local rule "${ruleName}" action ${actionKind}.`;
+  if (!reason) {
+    return baseInstruction;
+  }
+
+  return `${baseInstruction} Reason: ${reason}`;
 }
 
 /** Parses a synthetic repo-local rule through the shared runtime schema. */
