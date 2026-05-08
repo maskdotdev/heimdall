@@ -1061,15 +1061,9 @@ describe("createWorkerHandlers", () => {
           installationId: "inst_1",
           owner: "acme",
           provider: "github",
+          providerInstallationId: "123456",
           providerRepoId: "987654",
           repo: "heimdall",
-          repoId: "repo_1",
-        },
-      ],
-      [
-        {
-          installationId: "inst_1",
-          providerInstallationId: "123456",
         },
       ],
       [
@@ -1114,6 +1108,11 @@ describe("createWorkerHandlers", () => {
       }),
       select: () => ({
         from: () => ({
+          innerJoin: () => ({
+            where: () => ({
+              limit: async () => selectRows.shift() ?? [],
+            }),
+          }),
           where: () => {
             const query = {
               limit: async () => selectRows.shift() ?? [],

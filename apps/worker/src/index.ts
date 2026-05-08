@@ -46,7 +46,7 @@ import {
   providerInstallations,
   publishedFindings,
   publishedSummaryComments,
-  repositories,
+  RepositoryRepository,
   reviewArtifacts,
   reviewRuns,
   sandboxArtifacts,
@@ -2297,27 +2297,20 @@ export async function loadGitHubRepositoryRef(
   db: HeimdallDatabase,
   payload: IndexRepoCommitJobPayload,
 ): Promise<GitHubRepositoryRef> {
-  const [repository] = await db
-    .select({
-      owner: repositories.owner,
-      repo: repositories.name,
-      providerRepoId: repositories.providerRepoId,
-      provider: repositories.provider,
-    })
-    .from(repositories)
-    .where(eq(repositories.repoId, payload.repoId))
-    .limit(1);
+  const repository = await new RepositoryRepository(db).getRepositoryProviderRef({
+    installationId: payload.installationId,
+    provider: "github",
+    repoId: payload.repoId,
+  });
 
-  if (!repository || repository.provider !== "github") {
+  if (!repository) {
     throw new Error(`GitHub repository ${payload.repoId} was not found.`);
   }
 
-  const installation = await loadGitHubInstallationRef(db, payload.installationId);
-
   return {
     provider: "github",
-    installationId: installation.installationId,
-    providerInstallationId: installation.providerInstallationId,
+    installationId: repository.installationId,
+    providerInstallationId: repository.providerInstallationId,
     owner: repository.owner,
     repo: repository.repo,
     providerRepoId: repository.providerRepoId,
@@ -2428,31 +2421,11 @@ async function loadRecentReviewThreadReconciliationTargets(
   db: HeimdallDatabase,
   payload: UpdateMemoryJobPayload,
 ): Promise<readonly ReviewThreadReconciliationTarget[]> {
-  const [repository] = await db
-    .select({
-      installationId: repositories.installationId,
-      owner: repositories.owner,
-      provider: repositories.provider,
-      providerRepoId: repositories.providerRepoId,
-      repo: repositories.name,
-      repoId: repositories.repoId,
-    })
-    .from(repositories)
-    .where(eq(repositories.repoId, payload.repoId))
-    .limit(1);
-  if (!repository || repository.provider !== "github") {
-    return [];
-  }
-
-  const [installation] = await db
-    .select({
-      installationId: providerInstallations.installationId,
-      providerInstallationId: providerInstallations.providerInstallationId,
-    })
-    .from(providerInstallations)
-    .where(eq(providerInstallations.installationId, repository.installationId))
-    .limit(1);
-  if (!installation) {
+  const repository = await new RepositoryRepository(db).getRepositoryProviderRef({
+    provider: "github",
+    repoId: payload.repoId,
+  });
+  if (!repository) {
     return [];
   }
 
@@ -2474,13 +2447,13 @@ async function loadRecentReviewThreadReconciliationTargets(
     .limit(THREAD_RECONCILIATION_REVIEW_RUN_LIMIT);
 
   return runs.map((run) => ({
-    installationId: installation.installationId,
-    providerInstallationId: installation.providerInstallationId,
+    installationId: repository.installationId,
+    providerInstallationId: repository.providerInstallationId,
     owner: repository.owner,
     pullRequestNumber: run.pullRequestNumber,
     providerRepoId: repository.providerRepoId,
     repo: repository.repo,
-    repoId: repository.repoId,
+    repoId: payload.repoId,
     reviewRunId: run.reviewRunId,
   }));
 }
@@ -2726,13 +2699,9 @@ async function findPublishedFindingForProviderFeedback(
       return undefined;
     }
 
-    const [repository] = await db
-      .select({ orgId: repositories.orgId })
-      .from(repositories)
-      .where(eq(repositories.repoId, reviewRun.repoId))
-      .limit(1);
+    const orgId = await new RepositoryRepository(db).getRepositoryOrgId(reviewRun.repoId);
 
-    if (!repository) {
+    if (!orgId) {
       return undefined;
     }
 
@@ -2749,7 +2718,7 @@ async function findPublishedFindingForProviderFeedback(
         severity: finding.severity,
         title: finding.title,
       },
-      orgId: repository.orgId,
+      orgId,
       publishedFindingId: published.publishedFindingId,
       repoId: reviewRun.repoId,
     };
@@ -2802,17 +2771,13 @@ async function findPublishedSummaryForProviderFeedback(
       return undefined;
     }
 
-    const [repository] = await db
-      .select({ orgId: repositories.orgId })
-      .from(repositories)
-      .where(eq(repositories.repoId, reviewRun.repoId))
-      .limit(1);
-    if (!repository) {
+    const orgId = await new RepositoryRepository(db).getRepositoryOrgId(reviewRun.repoId);
+    if (!orgId) {
       return undefined;
     }
 
     return {
-      orgId: repository.orgId,
+      orgId,
       providerCommentId: summary.providerCommentId,
       publishedSummaryCommentId: summary.publishedSummaryCommentId,
       repoId: reviewRun.repoId,
