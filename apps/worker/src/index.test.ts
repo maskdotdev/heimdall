@@ -1074,6 +1074,100 @@ describe("createWorkerHandlers", () => {
       }),
     ]);
   });
+
+  it("creates pending memory candidates from trusted PR summary commands", async () => {
+    const selectRows: unknown[][] = [
+      [],
+      [
+        {
+          providerCommentId: "summary_1",
+          publishedSummaryCommentId: "psc_1",
+          reviewRunId: "rrn_1",
+        },
+      ],
+      [{ repoId: "repo_1" }],
+      [{ orgId: "org_1" }],
+    ];
+    const insertedRows: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedRows.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => selectRows.shift() ?? [],
+          }),
+        }),
+      }),
+    };
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.UpdateMemory]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "github:memory:fb_summary",
+      jobId: "job_memory_summary_command",
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      payload: {
+        actorLogin: "maintainer",
+        bodyHash: `sha256:${"c".repeat(64)}`,
+        externalCommentId: "summary_1",
+        externalEventId: "fb_summary",
+        feedbackCommand: {
+          commandHash: `sha256:${"d".repeat(64)}`,
+          commandKind: "remember_fact",
+          confidence: 0.96,
+          content: "API handlers use shared middleware for authentication.",
+          proposedAppliesTo: {},
+          proposedScope: {
+            level: "repo",
+            orgId: "org_1",
+            repoId: "repo_1",
+          },
+        },
+        feedbackKind: "comment_reply",
+        provider: "github",
+        reason: "comment_reply",
+        repoId: "repo_1",
+      },
+      schemaVersion: "job_envelope.v1",
+    });
+
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        eventKind: "issue_comment_created",
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        reviewRunId: "rrn_1",
+      }),
+      expect.objectContaining({
+        polarity: "memory",
+        signalKind: "explicit_remember_command",
+      }),
+      expect.objectContaining({
+        candidateKind: "repo_fact",
+        createdByLogin: "maintainer",
+        metadata: expect.objectContaining({
+          publishedSummaryCommentId: "psc_1",
+          source: "provider_feedback_command",
+        }),
+        proposedContent: "API handlers use shared middleware for authentication.",
+        sourceFeedbackEventId: "fb_summary",
+        sourceKind: "command",
+        status: "pending",
+        trustLevel: "explicit_maintainer",
+      }),
+    ]);
+  });
 });
 
 describe("createRedisPublishThrottle", () => {

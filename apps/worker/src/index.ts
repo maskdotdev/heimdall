@@ -45,6 +45,7 @@ import {
   memoryCandidates,
   providerInstallations,
   publishedFindings,
+  publishedSummaryComments,
   repositories,
   reviewArtifacts,
   reviewRuns,
@@ -2408,10 +2409,20 @@ async function recordOutcomeFromProviderFeedback(
 
   const published = await findPublishedFindingForProviderFeedback(db, payload);
   if (!published) {
+    await recordSummaryFeedbackCommand(db, payload, receivedAt, telemetry);
     return;
   }
 
-  const feedbackEvent = providerFeedbackEventFromPayload(payload, published, receivedAt);
+  const feedbackEvent = providerFeedbackEventFromPayload(
+    payload,
+    {
+      orgId: published.orgId,
+      publishedFindingId: published.publishedFindingId,
+      repoId: published.repoId,
+      reviewRunId: published.finding.reviewRunId,
+    },
+    receivedAt,
+  );
   await persistFeedbackEventAndSignals(db, feedbackEvent, feedbackCommandFromPayload(payload));
 
   if (outcome) {
@@ -2438,6 +2449,53 @@ async function recordOutcomeFromProviderFeedback(
   }
 
   await createMemoryCandidatesFromProviderCommand(db, payload, published, receivedAt, telemetry);
+}
+
+/** Records trusted feedback commands that target a PR summary comment. */
+async function recordSummaryFeedbackCommand(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+  receivedAt: string,
+  telemetry: MemoryTelemetryOptions = {},
+): Promise<void> {
+  const command = feedbackCommandFromPayload(payload);
+  if (!command || !payload.externalCommentId) {
+    return;
+  }
+
+  const summary = await findPublishedSummaryForProviderFeedback(db, payload);
+  if (!summary) {
+    return;
+  }
+
+  const feedbackEvent = providerFeedbackEventFromPayload(
+    payload,
+    {
+      orgId: summary.orgId,
+      repoId: summary.repoId,
+      reviewRunId: summary.reviewRunId,
+    },
+    receivedAt,
+  );
+  await persistFeedbackEventAndSignals(db, feedbackEvent, command);
+
+  const candidates = createMemoryCandidatesFromCommand({
+    command,
+    createdAt: receivedAt,
+    createdByLogin: payload.actorLogin,
+    ...(telemetry.metrics ? { metrics: telemetry.metrics } : {}),
+    orgId: summary.orgId,
+    repoId: summary.repoId,
+    ...(telemetry.traceContext ? { traceContext: telemetry.traceContext } : {}),
+    ...(telemetry.traces ? { traces: telemetry.traces } : {}),
+  });
+
+  for (const candidate of candidates) {
+    await db
+      .insert(memoryCandidates)
+      .values(memoryCandidateFromSummaryCommandCandidate({ candidate, payload, summary }))
+      .onConflictDoNothing();
+  }
 }
 
 /** Finds a published finding row from provider feedback metadata. */
@@ -2544,18 +2602,87 @@ async function findPublishedFindingForProviderFeedback(
   return undefined;
 }
 
+/** Finds a published PR summary comment row from provider feedback metadata. */
+async function findPublishedSummaryForProviderFeedback(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+): Promise<
+  | {
+      readonly orgId: string;
+      readonly providerCommentId: string;
+      readonly publishedSummaryCommentId: string;
+      readonly repoId: string;
+      readonly reviewRunId: string;
+    }
+  | undefined
+> {
+  const commentIds = uniqueStrings([payload.externalCommentId]);
+
+  for (const commentId of commentIds) {
+    const [summary] = await db
+      .select({
+        providerCommentId: publishedSummaryComments.providerCommentId,
+        publishedSummaryCommentId: publishedSummaryComments.publishedSummaryCommentId,
+        reviewRunId: publishedSummaryComments.reviewRunId,
+      })
+      .from(publishedSummaryComments)
+      .where(
+        and(
+          eq(publishedSummaryComments.provider, payload.provider ?? "github"),
+          eq(publishedSummaryComments.providerCommentId, commentId),
+        ),
+      )
+      .limit(1);
+    if (!summary) {
+      continue;
+    }
+
+    const [reviewRun] = await db
+      .select({ repoId: reviewRuns.repoId })
+      .from(reviewRuns)
+      .where(eq(reviewRuns.reviewRunId, summary.reviewRunId))
+      .limit(1);
+    if (!reviewRun) {
+      return undefined;
+    }
+
+    const [repository] = await db
+      .select({ orgId: repositories.orgId })
+      .from(repositories)
+      .where(eq(repositories.repoId, reviewRun.repoId))
+      .limit(1);
+    if (!repository) {
+      return undefined;
+    }
+
+    return {
+      orgId: repository.orgId,
+      providerCommentId: summary.providerCommentId,
+      publishedSummaryCommentId: summary.publishedSummaryCommentId,
+      repoId: reviewRun.repoId,
+      reviewRunId: summary.reviewRunId,
+    };
+  }
+
+  return undefined;
+}
+
+/** Provider feedback context used to build normalized feedback events. */
+type ProviderFeedbackEventContext = {
+  /** Organization that owns the feedback target. */
+  readonly orgId: string;
+  /** Repository that owns the feedback target. */
+  readonly repoId: string;
+  /** Review run associated with the feedback target. */
+  readonly reviewRunId: string;
+  /** Published finding row when the feedback targets an inline finding. */
+  readonly publishedFindingId?: string | undefined;
+};
+
 /** Builds a normalized durable feedback event from a provider memory job payload. */
 function providerFeedbackEventFromPayload(
   payload: UpdateMemoryJobPayload,
-  published: {
-    readonly orgId: string;
-    readonly publishedFindingId: string;
-    readonly repoId: string;
-    readonly publishedFindingReviewRunId?: string | undefined;
-    readonly finding: {
-      readonly reviewRunId: string;
-    };
-  },
+  context: ProviderFeedbackEventContext,
   receivedAt: string,
 ): FeedbackEvent {
   return {
@@ -2567,8 +2694,8 @@ function providerFeedbackEventFromPayload(
         payload.externalCommentId ??
         receivedAt,
     ]),
-    orgId: published.orgId,
-    repoId: published.repoId,
+    orgId: context.orgId,
+    repoId: context.repoId,
     provider: payload.provider ?? "github",
     source: "webhook",
     eventKind: feedbackEventKindFromPayload(payload),
@@ -2582,8 +2709,8 @@ function providerFeedbackEventFromPayload(
         }
       : {}),
     ...(payload.pullRequestNumber ? { pullRequestNumber: payload.pullRequestNumber } : {}),
-    reviewRunId: published.publishedFindingReviewRunId ?? published.finding.reviewRunId,
-    publishedFindingId: published.publishedFindingId,
+    reviewRunId: context.reviewRunId,
+    ...(context.publishedFindingId ? { publishedFindingId: context.publishedFindingId } : {}),
     ...((payload.externalParentCommentId ?? payload.externalCommentId)
       ? { externalCommentId: payload.externalParentCommentId ?? payload.externalCommentId }
       : {}),
@@ -2837,6 +2964,46 @@ function memoryCandidateFromCommandCandidate(input: {
     ...(input.candidate.createdByLogin ? { createdByLogin: input.candidate.createdByLogin } : {}),
     sourceFeedbackEventId: input.payload.externalEventId,
     sourceFindingId: input.published.publishedFindingId,
+    sourceKind: input.candidate.sourceKind,
+    status: input.candidate.status,
+    trustLevel: input.candidate.trustLevel,
+  };
+}
+
+/** Converts a summary-comment command candidate into the durable database insert shape. */
+function memoryCandidateFromSummaryCommandCandidate(input: {
+  /** Memory-package candidate created from a parsed PR summary command. */
+  readonly candidate: MemoryCandidate;
+  /** Provider feedback job payload. */
+  readonly payload: UpdateMemoryJobPayload;
+  /** Published summary comment that received the feedback command. */
+  readonly summary: {
+    readonly publishedSummaryCommentId: string;
+    readonly reviewRunId: string;
+  };
+}): typeof memoryCandidates.$inferInsert {
+  return {
+    candidateKind: input.candidate.candidateKind,
+    confidence: input.candidate.confidence,
+    memoryCandidateId: stableWorkerId("mcand", [
+      "summary_command",
+      input.payload.externalEventId ??
+        input.payload.externalCommentId ??
+        input.summary.publishedSummaryCommentId,
+      input.candidate.id,
+    ]),
+    metadata: {
+      ...providerFeedbackCommandMetadata(input.payload),
+      publishedSummaryCommentId: input.summary.publishedSummaryCommentId,
+      reviewRunId: input.summary.reviewRunId,
+    },
+    orgId: input.candidate.orgId,
+    proposedAppliesTo: input.candidate.proposedAppliesTo,
+    proposedContent: input.candidate.proposedContent,
+    proposedScope: input.candidate.proposedScope,
+    ...(input.candidate.repoId ? { repoId: input.candidate.repoId } : {}),
+    ...(input.candidate.createdByLogin ? { createdByLogin: input.candidate.createdByLogin } : {}),
+    sourceFeedbackEventId: input.payload.externalEventId,
     sourceKind: input.candidate.sourceKind,
     status: input.candidate.status,
     trustLevel: input.candidate.trustLevel,
