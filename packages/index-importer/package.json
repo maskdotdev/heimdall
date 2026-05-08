@@ -24,7 +24,6 @@
     "@repo/contracts": "workspace:*",
     "@repo/db": "workspace:*",
     "@repo/index-schema": "workspace:*",
-    "@repo/indexer-driver": "workspace:*",
     "@repo/observability": "workspace:*",
     "@repo/queue": "workspace:*",
     "drizzle-orm": "catalog:"

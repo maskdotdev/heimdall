@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  diffIndexArtifacts,
   INDEX_ARTIFACT_SCHEMA_VERSION,
   INDEX_RECORD_SCHEMA_VERSION,
   type IndexArtifact,
@@ -12,6 +13,9 @@ import {
   IndexRecordSchema,
   isSupportedIndexManifestVersion,
   isSupportedIndexRecordVersion,
+  parseIndexRecordsJsonl,
+  stringifyIndexRecordsJsonl,
+  validateIndexArtifact,
 } from "../src";
 
 const repoId = "repo_123";
@@ -135,6 +139,76 @@ describe("IndexArtifactSchema", () => {
         fixture.supportedRecordVersions,
       );
     }
+  });
+
+  it("validates coherent checked-in artifacts with schema-owned semantic checks", () => {
+    const artifact = readArtifactFixture("current-artifact.json");
+
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("round-trips compact JSONL records and reports bounded parse failures", () => {
+    const artifact = canonicalIndexArtifactFixture();
+    const jsonl = stringifyIndexRecordsJsonl(artifact.records);
+
+    expect(jsonl.endsWith("\n")).toBe(true);
+    expect(jsonl).not.toContain("\n\n");
+    expect(parseIndexRecordsJsonl(jsonl)).toEqual(artifact.records);
+    expect(() => parseIndexRecordsJsonl("\n")).toThrow(
+      "Invalid index artifact JSONL record at line 1: empty line.",
+    );
+    expect(() => parseIndexRecordsJsonl(`${jsonl}`, { limits: { maxRecords: 1 } })).toThrow(
+      "Index artifact JSONL record count exceeds configured maximum 1.",
+    );
+    expect(() =>
+      parseIndexRecordsJsonl(jsonl, {
+        limits: { maxRecordBytes: 1 },
+      }),
+    ).toThrow("Index artifact JSONL record at line 1 exceeds configured maximum 1 bytes.");
+  });
+
+  it("diffs manifest and record-level artifact changes by stable identity", () => {
+    const baseline = canonicalIndexArtifactFixture();
+    const [fileRecord, ...remainingRecords] = baseline.records;
+    if (!fileRecord || fileRecord.type !== "file") {
+      throw new Error("Compatibility fixture must start with a file record.");
+    }
+    const changedFile = {
+      ...fileRecord,
+      contentHash: sha256Fixture("f"),
+    } satisfies IndexRecord;
+    const addedFile = {
+      ...fileRecord,
+      contentHash: sha256Fixture("e"),
+      fileId: "file_added",
+      path: "src/added.ts",
+    } satisfies IndexRecord;
+    const candidate = {
+      manifest: {
+        ...baseline.manifest,
+        fileCount: baseline.manifest.fileCount + 1,
+        recordCount: baseline.manifest.recordCount,
+      },
+      records: [changedFile, ...remainingRecords, addedFile],
+    } satisfies IndexArtifact;
+
+    const diff = diffIndexArtifacts(baseline, candidate);
+
+    expect(diff.summary).toEqual({
+      addedRecordCount: 1,
+      changedRecordCount: 1,
+      manifestChangeCount: 1,
+      removedRecordCount: 0,
+    });
+    expect(diff.addedRecords).toEqual([{ identity: "file:file_added", recordType: "file" }]);
+    expect(diff.changedRecords.map((record) => record.identity)).toEqual(["file:file_source"]);
+    expect(diff.manifestChanges).toEqual([
+      {
+        baselineValue: 1,
+        candidateValue: 2,
+        field: "fileCount",
+      },
+    ]);
   });
 });
 

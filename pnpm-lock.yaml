@@ -214,9 +214,6 @@ importers:
       '@repo/index-schema':
         specifier: workspace:*
         version: link:../../packages/index-schema
-      '@repo/indexer-driver':
-        specifier: workspace:*
-        version: link:../../packages/indexer-driver
       '@repo/indexer-ts':
         specifier: workspace:*
         version: link:../../packages/indexer-ts
@@ -619,9 +616,6 @@ importers:
       '@repo/index-schema':
         specifier: workspace:*
         version: link:../index-schema
-      '@repo/indexer-driver':
-        specifier: workspace:*
-        version: link:../indexer-driver
       '@repo/observability':
         specifier: workspace:*
         version: link:../observability
@@ -648,6 +642,9 @@ importers:
         specifier: 'catalog:'
         version: 0.34.49
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.6.0
       typescript:
         specifier: 'catalog:'
         version: 6.0.3

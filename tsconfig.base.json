@@ -28,6 +28,7 @@
       "@repo/webhook-ingestion": ["packages/webhook-ingestion/src/index.ts"],
       "@repo/repo-sync": ["packages/repo-sync/src/index.ts"],
       "@repo/index-schema": ["packages/index-schema/src/index.ts"],
+      "@repo/index-schema/node": ["packages/index-schema/src/node.ts"],
       "@repo/indexer-driver": ["packages/indexer-driver/src/index.ts"],
       "@repo/indexer-ts": ["packages/indexer-ts/src/index.ts"],
       "@repo/index-importer": ["packages/index-importer/src/index.ts"],

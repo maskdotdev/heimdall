@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { type ReviewArtifactFetch, S3CompatibleReviewArtifactPayloadStore } from "@repo/artifacts";
 import {
@@ -24,9 +21,8 @@ import {
   repositories,
   symbols,
 } from "@repo/db";
-import type { ChunkRecord } from "@repo/index-schema";
-import type { IndexArtifact } from "@repo/indexer-driver";
-import { validateIndexArtifact } from "@repo/indexer-driver";
+import { type ChunkRecord, type IndexArtifact, validateIndexArtifact } from "@repo/index-schema";
+import { type ReadIndexArtifactPathOptions, readIndexArtifactPath } from "@repo/index-schema/node";
 import {
   classifyTelemetryError,
   OBSERVABILITY_METRIC_NAMES,
@@ -324,7 +320,10 @@ export function createFileSystemIndexArtifactResolver(
     readArtifact: async (artifactUri, readOptions) => {
       const artifactPath = resolveLocalArtifactPath(artifactUri, rootPath);
 
-      return readFilesystemIndexArtifact(artifactPath, readOptions);
+      return readIndexArtifactPath(
+        artifactPath,
+        artifactPathReadOptions(readOptions?.importLimits),
+      );
     },
   };
 }
@@ -410,7 +409,7 @@ export async function readIndexArtifactFromUri(
 ): Promise<IndexArtifact> {
   return createFileSystemIndexArtifactResolver(options).readArtifact(
     artifactUri,
-    artifactReadOptions(options.importLimits),
+    indexArtifactReadOptions(options.importLimits),
   );
 }
 
@@ -421,7 +420,7 @@ export async function importIndexArtifactFromUri(
   const resolver = options.artifactResolver ?? createFileSystemIndexArtifactResolver();
   const artifact = await resolver.readArtifact(
     options.artifactUri,
-    artifactReadOptions(options.importLimits),
+    indexArtifactReadOptions(options.importLimits),
   );
 
   return importIndexArtifact(artifact, options);
@@ -1201,11 +1200,25 @@ function assignOptionalLimit<K extends keyof IndexImportLimits>(
   }
 }
 
-/** Builds read options only when caller-provided limits exist. */
-function artifactReadOptions(
+/** Builds resolver read options only when caller-provided limits exist. */
+function indexArtifactReadOptions(
   importLimits: Partial<IndexImportLimits> | undefined,
 ): IndexArtifactReadOptions | undefined {
   return importLimits === undefined ? undefined : { importLimits };
+}
+
+/** Builds split-artifact path read limits from resolved importer safety limits. */
+function artifactPathReadOptions(
+  importLimits: Partial<IndexImportLimits> | undefined,
+): ReadIndexArtifactPathOptions {
+  const limits = resolveIndexImportLimits(importLimits);
+
+  return {
+    recordLimits: {
+      maxRecordBytes: limits.maxRecordBytes,
+      maxRecords: limits.maxRecords,
+    },
+  };
 }
 
 /** Parses an optional positive integer from an environment variable. */
@@ -1598,105 +1611,6 @@ function resolveLocalArtifactPath(artifactUri: string, rootPath: string | undefi
   }
 
   return artifactPath;
-}
-
-/** Reads either a whole-artifact JSON file or a split artifact directory. */
-async function readFilesystemIndexArtifact(
-  artifactPath: string,
-  options: IndexArtifactReadOptions | undefined,
-): Promise<IndexArtifact> {
-  const info = await stat(artifactPath);
-  if (info.isDirectory()) {
-    return readSplitIndexArtifactDirectory(artifactPath, options);
-  }
-
-  return JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
-}
-
-/** Reads an artifact directory containing index-manifest.json and records.jsonl files. */
-async function readSplitIndexArtifactDirectory(
-  directoryPath: string,
-  options: IndexArtifactReadOptions | undefined,
-): Promise<IndexArtifact> {
-  const [manifestJson, records] = await Promise.all([
-    readSplitIndexManifest(directoryPath),
-    readJsonlIndexRecords(resolve(directoryPath, "records.jsonl"), options),
-  ]);
-
-  return {
-    manifest: JSON.parse(manifestJson) as IndexArtifact["manifest"],
-    records,
-  };
-}
-
-/** Reads the canonical split artifact manifest file. */
-async function readSplitIndexManifest(directoryPath: string): Promise<string> {
-  const manifestPath = resolve(directoryPath, "index-manifest.json");
-  try {
-    return await readFile(manifestPath, "utf8");
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT")) {
-      throw new Error("Index artifact directory is missing index-manifest.json.", {
-        cause: error,
-      });
-    }
-
-    throw error;
-  }
-}
-
-/** Streams newline-delimited index records from a split artifact records file. */
-async function readJsonlIndexRecords(
-  recordsPath: string,
-  options: IndexArtifactReadOptions | undefined,
-): Promise<IndexArtifact["records"]> {
-  const limits = resolveIndexImportLimits(options?.importLimits);
-  const records: Array<IndexArtifact["records"][number]> = [];
-  const lines = createInterface({
-    crlfDelay: Number.POSITIVE_INFINITY,
-    input: createReadStream(recordsPath, { encoding: "utf8" }),
-  });
-  let lineNumber = 0;
-
-  for await (const line of lines) {
-    lineNumber += 1;
-    const lineBytes = byteLength(line);
-    if (lineBytes > limits.maxRecordBytes) {
-      throw new Error(
-        `Index artifact JSONL record at line ${lineNumber} exceeds configured maximum ${limits.maxRecordBytes} bytes.`,
-      );
-    }
-
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      throw new Error(`Invalid index artifact JSONL record at line ${lineNumber}: empty line.`);
-    }
-    if (records.length + 1 > limits.maxRecords) {
-      throw new Error(
-        `Index artifact JSONL record count exceeds configured maximum ${limits.maxRecords}.`,
-      );
-    }
-
-    try {
-      records.push(JSON.parse(trimmed) as IndexArtifact["records"][number]);
-    } catch (error) {
-      throw new Error(`Invalid index artifact JSONL record at line ${lineNumber}.`, {
-        cause: error,
-      });
-    }
-  }
-
-  return records;
-}
-
-/** Returns whether an unknown error has the supplied Node error code. */
-function isNodeErrorWithCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { readonly code?: unknown }).code === code
-  );
 }
 
 /** Converts R2 object URIs to S3-compatible URIs for the shared object reader. */

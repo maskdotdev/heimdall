@@ -15,7 +15,7 @@ import {
   indexImportBatches,
   symbols,
 } from "@repo/db";
-import type { IndexArtifact } from "@repo/indexer-driver";
+import type { IndexArtifact } from "@repo/index-schema";
 import {
   OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,

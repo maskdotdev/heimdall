@@ -1,20 +1,12 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { IndexManifest, IndexRecord } from "@repo/index-schema";
-import { validateIndexArtifact } from "@repo/indexer-driver";
+import { stringifyIndexArtifactJson, validateIndexArtifact } from "@repo/index-schema";
+import { readIndexArtifactPath, writeSplitIndexArtifactDirectory } from "@repo/index-schema/node";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 
 /** Artifact output layouts supported by the CLI. */
 export type IndexerCliOutputFormat = "json" | "split";
-
-/** In-memory artifact shape that can be written to either supported CLI layout. */
-type WritableIndexArtifact = {
-  /** Artifact manifest. */
-  readonly manifest: IndexManifest;
-  /** Artifact records in canonical order. */
-  readonly records: readonly IndexRecord[];
-};
 
 /** CLI request shape accepted through flags or request JSON. */
 export type IndexerCliRequest = {
@@ -102,12 +94,6 @@ type IndexerCliFlagValues = {
   readonly pretty: boolean;
 };
 
-/** Canonical split artifact manifest file name. */
-const INDEX_MANIFEST_FILE_NAME = "index-manifest.json";
-
-/** Canonical split artifact records file name. */
-const INDEX_RECORDS_FILE_NAME = "records.jsonl";
-
 const HELP_TEXT = `Usage:
   indexer capabilities --json
   indexer index --repo-id <repo_id> --commit-sha <sha> --workspace <path> [--output <path>] [--format json|split] [--pretty]
@@ -178,7 +164,7 @@ export async function runIndexerCli(
     }
 
     const outputPath = resolve(splitOutputPath);
-    await writeSplitIndexArtifact(outputPath, result.artifact);
+    await writeSplitIndexArtifactDirectory(outputPath, result.artifact);
     io.stdout.write(
       JSON.stringify({
         artifactId: result.artifact.manifest.artifactId,
@@ -192,7 +178,7 @@ export async function runIndexerCli(
     return 0;
   }
 
-  const json = `${JSON.stringify(result.artifact, null, parsed.request.pretty ? 2 : 0)}\n`;
+  const json = stringifyIndexArtifactJson(result.artifact, { pretty: parsed.request.pretty });
   if (!parsed.request.outputPath || parsed.request.outputPath === "-") {
     io.stdout.write(json);
     return 0;
@@ -451,68 +437,6 @@ function completeRequest(
 /** Returns the split artifact output directory when the request has one. */
 function splitArtifactOutputPath(request: IndexerCliRequest): string | undefined {
   return request.outputPath && request.outputPath !== "-" ? request.outputPath : undefined;
-}
-
-/** Reads either a whole JSON artifact file or a split artifact directory. */
-async function readIndexArtifactPath(artifactPath: string): Promise<WritableIndexArtifact> {
-  const artifactStats = await stat(artifactPath);
-  if (artifactStats.isDirectory()) {
-    return readSplitIndexArtifact(artifactPath);
-  }
-
-  return JSON.parse(await readFile(artifactPath, "utf8")) as WritableIndexArtifact;
-}
-
-/** Reads the canonical split artifact files from a directory. */
-async function readSplitIndexArtifact(artifactPath: string): Promise<WritableIndexArtifact> {
-  const [manifest, records] = await Promise.all([
-    readJsonFile<IndexManifest>(join(artifactPath, INDEX_MANIFEST_FILE_NAME)),
-    readJsonlRecords(join(artifactPath, INDEX_RECORDS_FILE_NAME)),
-  ]);
-
-  return { manifest, records };
-}
-
-/** Reads a JSON file and narrows it to the caller-provided type. */
-async function readJsonFile<T>(path: string): Promise<T> {
-  return JSON.parse(await readFile(path, "utf8")) as T;
-}
-
-/** Reads compact JSONL index records while rejecting blank middle lines. */
-async function readJsonlRecords(path: string): Promise<readonly IndexRecord[]> {
-  const text = await readFile(path, "utf8");
-  if (text.length === 0) {
-    return [];
-  }
-
-  const lines = text.endsWith("\n") ? text.slice(0, -1).split(/\r?\n/u) : text.split(/\r?\n/u);
-  return lines.map((line, index) => {
-    if (line.trim().length === 0) {
-      throw new Error(`${INDEX_RECORDS_FILE_NAME} line ${index + 1} is blank.`);
-    }
-
-    return JSON.parse(line) as IndexRecord;
-  });
-}
-
-/** Writes an index artifact as a canonical split artifact directory. */
-async function writeSplitIndexArtifact(
-  outputPath: string,
-  artifact: WritableIndexArtifact,
-): Promise<void> {
-  await mkdir(outputPath, { recursive: true });
-
-  const recordsJsonl = artifact.records.map((record) => JSON.stringify(record)).join("\n");
-  await writeFile(
-    join(outputPath, INDEX_RECORDS_FILE_NAME),
-    recordsJsonl.length > 0 ? `${recordsJsonl}\n` : "",
-    "utf8",
-  );
-  await writeFile(
-    join(outputPath, INDEX_MANIFEST_FILE_NAME),
-    `${JSON.stringify(artifact.manifest, null, 2)}\n`,
-    "utf8",
-  );
 }
 
 /** Returns a supported artifact output format when the input is valid. */
