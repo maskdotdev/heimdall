@@ -1223,6 +1223,8 @@ type NormalizedFindingValidationConfig = {
   readonly memorySuppression?: FindingMemorySuppressionConfig;
   /** Immutable review policy snapshot used for policy-aware validation. */
   readonly policy?: EffectiveReviewPolicy;
+  /** Pull request metadata used by policy-aware repository rule matchers. */
+  readonly policyPullRequest?: Pick<PullRequestSnapshot, "authorLogin" | "labels">;
   /** Optional telemetry dependencies propagated to validation collaborators. */
   readonly telemetry?: ReviewEngineTelemetryOptions;
 };
@@ -1701,7 +1703,7 @@ function reviewRunIdFromCandidateInput(findings: readonly unknown[]): string | u
 
 function normalizeFindingValidationConfig(
   config: FindingValidationConfig | undefined,
-  telemetry: ReviewEngineTelemetryOptions = {},
+  input: ReviewEngineTelemetryOptions & Pick<ValidateAndRankCandidateFindingsInput, "snapshot">,
 ): NormalizedFindingValidationConfig {
   return {
     minimumSeverity: config?.policy?.findings.severityThreshold ?? config?.minimumSeverity ?? "low",
@@ -1728,7 +1730,11 @@ function normalizeFindingValidationConfig(
     repoRules: config?.repoRules ?? [],
     ...(config?.memorySuppression ? { memorySuppression: config.memorySuppression } : {}),
     ...(config?.policy ? { policy: config.policy } : {}),
-    ...(telemetry.metrics || telemetry.traces || telemetry.traceContext ? { telemetry } : {}),
+    policyPullRequest: {
+      authorLogin: input.snapshot.authorLogin,
+      labels: input.snapshot.labels,
+    },
+    ...(input.metrics || input.traces || input.traceContext ? { telemetry: input } : {}),
   };
 }
 
@@ -2483,6 +2489,8 @@ function rejectionAnalysis(
     const policyDecision = evaluateFindingPolicy({
       policy: config.policy,
       finding,
+      ...(file ? { language: file.language } : {}),
+      ...(config.policyPullRequest ? { pullRequest: config.policyPullRequest } : {}),
       ...(config.telemetry?.metrics ? { metrics: config.telemetry.metrics } : {}),
       ...(config.telemetry?.traceContext ? { traceContext: config.telemetry.traceContext } : {}),
       ...(config.telemetry?.traces ? { traces: config.telemetry.traces } : {}),

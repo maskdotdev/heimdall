@@ -866,6 +866,44 @@ describe("validateAndRankCandidateFindings", () => {
     );
   });
 
+  it("passes pull request labels, author, and file language into policy rule validation", () => {
+    const findings = validateAndRankCandidateFindings({
+      snapshot: {
+        ...validPullRequestSnapshotFixture,
+        authorLogin: "octocat",
+        labels: ["skip-ai"],
+      },
+      findings: [validCandidateFindingFixture],
+      timestamp: validCandidateFindingFixture.createdAt,
+      config: {
+        policy: createPolicyFixture({
+          rules: [
+            {
+              ruleId: "rule_pr_metadata",
+              orgId: "org_01HXAMPLE",
+              repoId: validPullRequestSnapshotFixture.repoId,
+              name: "Suppress labeled TypeScript findings",
+              effect: "suppress",
+              matcher: {
+                authors: ["octocat"],
+                labels: ["skip-ai"],
+                languages: ["typescript"],
+              },
+              instruction: "Suppress findings when a trusted skip label is present.",
+              priority: 100,
+              enabled: true,
+              createdAt: validCandidateFindingFixture.createdAt,
+              updatedAt: validCandidateFindingFixture.createdAt,
+            },
+          ],
+        }),
+      },
+    });
+
+    expect(findings[0]?.decision).toBe("reject");
+    expect(findings[0]?.validation.reasons).toContain("suppressed_by_repo_rule");
+  });
+
   it("returns an inspectable validation result with stats, duplicate groups, and trace events", () => {
     const duplicate = {
       ...validCandidateFindingFixture,

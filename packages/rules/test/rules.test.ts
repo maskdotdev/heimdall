@@ -338,6 +338,47 @@ describe("evaluateFindingPolicy", () => {
     });
   });
 
+  it("matches suppression rules by language, pull request author, and labels", () => {
+    const policy = createPolicyFixture({
+      rules: [
+        createRuleFixture({
+          effect: "suppress",
+          matcher: {
+            authors: ["octocat"],
+            labels: ["skip-ai"],
+            languages: ["typescript"],
+            titleRegex: "non-finite",
+          },
+        }),
+      ],
+    });
+    const matched = evaluateFindingPolicy(
+      createFindingInputFixture({
+        language: "typescript",
+        policy,
+        pullRequest: { authorLogin: "octocat", labels: ["skip-ai"] },
+      }),
+    );
+    const missingLabel = evaluateFindingPolicy(
+      createFindingInputFixture({
+        language: "typescript",
+        policy,
+        pullRequest: { authorLogin: "octocat", labels: ["ready-for-review"] },
+      }),
+    );
+
+    expect(matched).toMatchObject({
+      shouldPublish: false,
+      reasonCode: "suppressed_by_repo_rule",
+      trace: { matchedRuleIds: [ids.ruleId] },
+    });
+    expect(missingLabel).toMatchObject({
+      shouldPublish: true,
+      reasonCode: "allowed",
+      trace: { matchedRuleIds: [] },
+    });
+  });
+
   it("allows strong findings and returns publishing policy decisions", () => {
     const policy = createPolicyFixture({ reviewPolicy: "summary_only" });
     const findingDecision = evaluateFindingPolicy(createFindingInputFixture({ policy }));

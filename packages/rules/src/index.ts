@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   type CandidateFinding,
+  type CodeLanguage,
   DEFAULT_ORG_SETTINGS,
   DEFAULT_REPOSITORY_SETTINGS,
   type FindingCategory,
@@ -8,6 +9,7 @@ import {
   type FindingSeverity,
   FindingSeveritySchema,
   type OrgSettings,
+  type PullRequestSnapshot,
   type RepoRule,
   RepoRuleIdSchema,
   RepoRuleSchema,
@@ -508,6 +510,10 @@ export type EvaluateFindingPolicyInput = RulesTelemetryOptions & {
     CandidateFinding,
     "body" | "category" | "confidence" | "evidence" | "location" | "severity" | "title"
   >;
+  /** Optional source-file language used for language-scoped repository rules. */
+  readonly language?: CodeLanguage;
+  /** Optional pull request metadata used for author and label repository rules. */
+  readonly pullRequest?: Pick<PullRequestSnapshot, "authorLogin" | "labels">;
   /** Optional precomputed path classification. */
   readonly pathClassification?: PathClassification;
 };
@@ -1168,7 +1174,7 @@ function evaluateFindingPolicyCore(input: EvaluateFindingPolicyInput): FindingPo
       ...(input.traceContext ? { traceContext: input.traceContext } : {}),
       ...(input.traces ? { traces: input.traces } : {}),
     });
-  const matchedRuleIds = matchingSuppressionRuleIds(input.policy, finding);
+  const matchedRuleIds = matchingSuppressionRuleIds(input.policy, input);
   let shouldPublish = true;
   let reasonCode = "allowed";
 
@@ -1220,6 +1226,7 @@ function evaluateFindingPolicyCore(input: EvaluateFindingPolicyInput): FindingPo
       details: {
         category: finding.category,
         confidence: finding.confidence,
+        ...(input.language ? { language: input.language } : {}),
         path: classification.path,
         severity: finding.severity,
       },
@@ -1407,7 +1414,9 @@ export function createFindingInputFixture(
       title: "Handle non-finite numeric inputs",
       ...overrides.finding,
     },
+    ...(overrides.language ? { language: overrides.language } : {}),
     ...(overrides.pathClassification ? { pathClassification: overrides.pathClassification } : {}),
+    ...(overrides.pullRequest ? { pullRequest: overrides.pullRequest } : {}),
   };
 }
 
@@ -1805,21 +1814,22 @@ function ruleExpired(rule: RepoRule, timestamp: string): boolean {
 /** Returns suppression rule IDs that match a finding. */
 function matchingSuppressionRuleIds(
   policy: EffectiveReviewPolicy,
-  finding: EvaluateFindingPolicyInput["finding"],
+  input: EvaluateFindingPolicyInput,
 ): string[] {
   return policy.rules
     .filter((rule) => rule.effect === "suppress")
-    .filter((rule) => ruleMatchesFinding(rule, finding))
+    .filter((rule) => ruleMatchesFinding(rule, input))
     .map((rule) => rule.ruleId);
 }
 
 /** Returns whether one repository rule matches a finding. */
-function ruleMatchesFinding(
-  rule: RepoRule,
-  finding: EvaluateFindingPolicyInput["finding"],
-): boolean {
+function ruleMatchesFinding(rule: RepoRule, input: EvaluateFindingPolicyInput): boolean {
+  const finding = input.finding;
   const matcher = rule.matcher;
   if (matcher.paths && !matchesAnyPathPattern(finding.location.path, matcher.paths)) {
+    return false;
+  }
+  if (matcher.languages && (!input.language || !matcher.languages.includes(input.language))) {
     return false;
   }
   if (matcher.categories && !matcher.categories.includes(finding.category)) {
@@ -1827,6 +1837,20 @@ function ruleMatchesFinding(
   }
   if (matcher.severities && !matcher.severities.includes(finding.severity)) {
     return false;
+  }
+  if (matcher.authors) {
+    const author = input.pullRequest?.authorLogin;
+    const allowedAuthors = matcher.authors.map(normalizeComparable);
+    if (!author || !allowedAuthors.includes(normalizeComparable(author))) {
+      return false;
+    }
+  }
+  if (matcher.labels) {
+    const labels = new Set((input.pullRequest?.labels ?? []).map(normalizeComparable));
+    const requiredLabels = matcher.labels.map(normalizeComparable);
+    if (!requiredLabels.some((label) => labels.has(label))) {
+      return false;
+    }
   }
   if (matcher.titleRegex) {
     try {
