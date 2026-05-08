@@ -122,6 +122,32 @@ describe.runIf(integrationDatabaseUrl)("SandboxRepository integration", () => {
 
   it("lists cleanup targets and deletes sandbox runs with cascaded children", async () => {
     await expect(
+      sandboxRepository.listSandboxRunsForReviewRun("rrn_sandbox_repository"),
+    ).resolves.toMatchObject([
+      {
+        reviewRunId: "rrn_sandbox_repository",
+        sandboxRunId: "srun_sandbox_old_a",
+      },
+      {
+        reviewRunId: "rrn_sandbox_repository",
+        sandboxRunId: "srun_sandbox_old_b",
+      },
+      {
+        reviewRunId: "rrn_sandbox_repository",
+        sandboxRunId: "srun_sandbox_boundary",
+      },
+    ]);
+    await expect(
+      sandboxRepository.listSandboxRunsForInspection({
+        limit: 2,
+        reviewRunId: "rrn_sandbox_repository",
+        status: "completed",
+      }),
+    ).resolves.toMatchObject([
+      { sandboxRunId: "srun_sandbox_boundary" },
+      { sandboxRunId: "srun_sandbox_old_b" },
+    ]);
+    await expect(
       sandboxRepository.listSandboxRunCleanupTargets({
         cutoff: new Date("2026-05-08T00:05:00.000Z"),
         limit: 10,
@@ -146,6 +172,43 @@ describe.runIf(integrationDatabaseUrl)("SandboxRepository integration", () => {
       }),
     ).rejects.toThrow(/limit must be an integer/u);
     await expect(sandboxRepository.listSandboxArtifactUrisForRuns([])).resolves.toEqual([]);
+    await expect(sandboxRepository.listSandboxArtifactsForRuns([])).resolves.toEqual([]);
+    await expect(sandboxRepository.listSandboxPolicyDecisionsForRuns([])).resolves.toEqual([]);
+    await expect(
+      sandboxRepository.listSandboxArtifactsForRuns([
+        "srun_sandbox_old_b",
+        "srun_sandbox_old_a",
+        "srun_sandbox_old_b",
+      ]),
+    ).resolves.toMatchObject([
+      {
+        name: "log.json",
+        sandboxArtifactId: "sart_sandbox_old_a_log",
+        sandboxRunId: "srun_sandbox_old_a",
+      },
+      {
+        name: "report.json",
+        sandboxArtifactId: "sart_sandbox_old_b_report",
+        sandboxRunId: "srun_sandbox_old_b",
+      },
+      {
+        name: "trace.json",
+        sandboxArtifactId: "sart_sandbox_old_b_trace",
+        sandboxRunId: "srun_sandbox_old_b",
+      },
+    ]);
+    await expect(
+      sandboxRepository.listSandboxPolicyDecisionsForRuns([
+        "srun_sandbox_old_b",
+        "srun_sandbox_old_a",
+      ]),
+    ).resolves.toMatchObject([
+      {
+        code: "sandbox.allowed",
+        sandboxPolicyDecisionId: "spol_sandbox_old_a",
+        sandboxRunId: "srun_sandbox_old_a",
+      },
+    ]);
     await expect(
       sandboxRepository.listSandboxArtifactUrisForRuns([
         "srun_sandbox_old_b",
@@ -277,6 +340,84 @@ async function seedSandboxParents(sql: postgres.Sql): Promise<void> {
         'private'
       )
   `;
+  await sql`
+    INSERT INTO pull_request_snapshots (
+      snapshot_id,
+      schema_version,
+      provider,
+      repo_id,
+      installation_id,
+      provider_repo_id,
+      provider_pull_request_id,
+      pull_request_number,
+      title,
+      author_login,
+      state,
+      is_draft,
+      base_ref,
+      base_sha,
+      head_ref,
+      head_sha,
+      diff_hash,
+      additions,
+      deletions,
+      changed_file_count,
+      fetched_at
+    )
+    VALUES (
+      'prs_sandbox_repository',
+      'pull_request_snapshot.v1',
+      'github',
+      'repo_sandbox_repository_test',
+      'inst_sandbox_repository_test',
+      'sandbox-repository-test-repo',
+      '123',
+      123,
+      'Exercise sandbox repository',
+      'octocat',
+      'open',
+      false,
+      'main',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'feature',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'sha256:sandbox-repository-diff',
+      3,
+      1,
+      1,
+      '2026-05-08T00:00:45.000Z'::timestamptz
+    )
+  `;
+  await sql`
+    INSERT INTO review_runs (
+      review_run_id,
+      schema_version,
+      repo_id,
+      pull_request_snapshot_id,
+      pull_request_number,
+      base_sha,
+      head_sha,
+      trigger,
+      status,
+      counts,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      'rrn_sandbox_repository',
+      'review_run.v1',
+      'repo_sandbox_repository_test',
+      'prs_sandbox_repository',
+      123,
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'webhook',
+      'completed',
+      '{}'::jsonb,
+      '2026-05-08T00:01:00.000Z'::timestamptz,
+      '2026-05-08T00:06:00.000Z'::timestamptz
+    )
+  `;
 }
 
 /** Inserts sandbox run, artifact, and policy decision rows for cleanup tests. */
@@ -290,6 +431,7 @@ async function seedSandboxRuns(sql: postgres.Sql): Promise<void> {
       sandbox_run_id,
       org_id,
       repo_id,
+      review_run_id,
       request_id,
       runner_kind,
       trust_level,
@@ -307,6 +449,7 @@ async function seedSandboxRuns(sql: postgres.Sql): Promise<void> {
         'srun_sandbox_old_a',
         'org_sandbox_repository_test',
         'repo_sandbox_repository_test',
+        'rrn_sandbox_repository',
         'sandbox-request-old-a',
         'docker',
         'untrusted',
@@ -323,6 +466,7 @@ async function seedSandboxRuns(sql: postgres.Sql): Promise<void> {
         'srun_sandbox_old_b',
         'org_sandbox_repository_test',
         'repo_sandbox_repository_test',
+        'rrn_sandbox_repository',
         'sandbox-request-old-b',
         'docker',
         'untrusted',
@@ -339,6 +483,7 @@ async function seedSandboxRuns(sql: postgres.Sql): Promise<void> {
         'srun_sandbox_boundary',
         'org_sandbox_repository_test',
         'repo_sandbox_repository_test',
+        'rrn_sandbox_repository',
         'sandbox-request-boundary',
         'docker',
         'untrusted',
@@ -355,6 +500,7 @@ async function seedSandboxRuns(sql: postgres.Sql): Promise<void> {
         'srun_sandbox_other_repo',
         'org_sandbox_repository_test',
         'repo_sandbox_repository_other',
+        NULL,
         'sandbox-request-other-repo',
         'docker',
         'untrusted',

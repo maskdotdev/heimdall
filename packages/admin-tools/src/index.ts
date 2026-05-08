@@ -57,10 +57,11 @@ import {
   type ReviewStageEventRecord,
   replayRuns,
   replayStageRuns,
+  type SandboxArtifactRecord,
+  type SandboxPolicyDecisionRecord,
+  SandboxRepository,
+  type SandboxRunRecord,
   SecurityAuditRepository,
-  sandboxArtifacts,
-  sandboxPolicyDecisions,
-  sandboxRuns,
   symbols,
   usageEvents,
   type ValidatedFindingRecord,
@@ -2232,6 +2233,7 @@ export async function getReviewDebugDetails(
 ): Promise<AdminReviewDebugDetails> {
   const reviewRepository = new ReviewRepository(dependencies.db);
   const llmCallRepository = new LlmCallRepository(dependencies.db);
+  const sandboxRepository = new SandboxRepository(dependencies.db);
   const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
   if (!reviewRun) {
     throw new AdminDebugNotFoundError("review_run", reviewRunId);
@@ -2260,11 +2262,7 @@ export async function getReviewDebugDetails(
     reviewRepository.listCandidateFindingRecordsForRun(reviewRunId),
     reviewRepository.listValidatedFindingRecordsForRun(reviewRunId),
     llmCallRepository.listLlmCallsForReviewRun(reviewRunId),
-    dependencies.db
-      .select()
-      .from(sandboxRuns)
-      .where(eq(sandboxRuns.reviewRunId, reviewRunId))
-      .orderBy(asc(sandboxRuns.createdAt)),
+    sandboxRepository.listSandboxRunsForReviewRun(reviewRunId),
     listRelatedReviewJobs(dependencies.db, {
       reviewRunId,
       repoId: reviewRun.repoId,
@@ -2279,8 +2277,8 @@ export async function getReviewDebugDetails(
   ]);
   const sandboxRunIds = sandboxRunRows.map((row) => row.sandboxRunId);
   const [sandboxArtifactRows, sandboxPolicyDecisionRows] = await Promise.all([
-    listSandboxArtifactsForRuns(dependencies.db, sandboxRunIds),
-    listSandboxPolicyDecisionsForRuns(dependencies.db, sandboxRunIds),
+    sandboxRepository.listSandboxArtifactsForRuns(sandboxRunIds),
+    sandboxRepository.listSandboxPolicyDecisionsForRuns(sandboxRunIds),
   ]);
   const sandboxArtifactsByRun = rowsBySandboxRunId(sandboxArtifactRows);
   const sandboxPolicyDecisionsByRun = rowsBySandboxRunId(sandboxPolicyDecisionRows);
@@ -2331,21 +2329,12 @@ export async function listSandboxRuns(
   query: AdminSandboxRunListQuery,
   dependencies: AdminDebugServiceDependencies,
 ): Promise<readonly AdminSandboxRunDebugSummary[]> {
-  const conditions = [
-    ...(query.repoId ? [eq(sandboxRuns.repoId, query.repoId)] : []),
-    ...(query.reviewRunId ? [eq(sandboxRuns.reviewRunId, query.reviewRunId)] : []),
-    ...(query.status ? [eq(sandboxRuns.status, query.status)] : []),
-  ];
-  const sandboxRunRows = await dependencies.db
-    .select()
-    .from(sandboxRuns)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(sandboxRuns.createdAt), desc(sandboxRuns.sandboxRunId))
-    .limit(adminSandboxRunListLimit(query.limit));
+  const sandboxRepository = new SandboxRepository(dependencies.db);
+  const sandboxRunRows = await sandboxRepository.listSandboxRunsForInspection(query);
   const sandboxRunIds = sandboxRunRows.map((row) => row.sandboxRunId);
   const [sandboxArtifactRows, sandboxPolicyDecisionRows] = await Promise.all([
-    listSandboxArtifactsForRuns(dependencies.db, sandboxRunIds),
-    listSandboxPolicyDecisionsForRuns(dependencies.db, sandboxRunIds),
+    sandboxRepository.listSandboxArtifactsForRuns(sandboxRunIds),
+    sandboxRepository.listSandboxPolicyDecisionsForRuns(sandboxRunIds),
   ]);
   const sandboxArtifactsByRun = rowsBySandboxRunId(sandboxArtifactRows);
   const sandboxPolicyDecisionsByRun = rowsBySandboxRunId(sandboxPolicyDecisionRows);
@@ -3609,9 +3598,9 @@ type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
 type ReviewStageEventRow = ReviewStageEventRecord;
 type ReviewDependencyRow = ReviewDependencyRecord;
 type ReviewArtifactRow = ReviewArtifactRecord;
-type SandboxRunRow = typeof sandboxRuns.$inferSelect;
-type SandboxArtifactRow = typeof sandboxArtifacts.$inferSelect;
-type SandboxPolicyDecisionRow = typeof sandboxPolicyDecisions.$inferSelect;
+type SandboxRunRow = SandboxRunRecord;
+type SandboxArtifactRow = SandboxArtifactRecord;
+type SandboxPolicyDecisionRow = SandboxPolicyDecisionRecord;
 type CandidateFindingRow = CandidateFindingRecord;
 type ValidatedFindingRow = ValidatedFindingRecord;
 type LlmCallRow = LlmCallRecord;
@@ -3979,41 +3968,6 @@ async function listRelatedReviewJobs(
     .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
 
   return uniqueRows.map(toBackgroundJobDebugSummary);
-}
-
-/** Lists artifact rows collected by the given sandbox runs. */
-async function listSandboxArtifactsForRuns(
-  db: HeimdallDatabase,
-  sandboxRunIds: readonly string[],
-): Promise<readonly SandboxArtifactRow[]> {
-  if (sandboxRunIds.length === 0) {
-    return [];
-  }
-
-  return db
-    .select()
-    .from(sandboxArtifacts)
-    .where(inArray(sandboxArtifacts.sandboxRunId, [...sandboxRunIds]))
-    .orderBy(asc(sandboxArtifacts.createdAt), asc(sandboxArtifacts.sandboxArtifactId));
-}
-
-/** Lists policy decision rows emitted by the given sandbox runs. */
-async function listSandboxPolicyDecisionsForRuns(
-  db: HeimdallDatabase,
-  sandboxRunIds: readonly string[],
-): Promise<readonly SandboxPolicyDecisionRow[]> {
-  if (sandboxRunIds.length === 0) {
-    return [];
-  }
-
-  return db
-    .select()
-    .from(sandboxPolicyDecisions)
-    .where(inArray(sandboxPolicyDecisions.sandboxRunId, [...sandboxRunIds]))
-    .orderBy(
-      asc(sandboxPolicyDecisions.createdAt),
-      asc(sandboxPolicyDecisions.sandboxPolicyDecisionId),
-    );
 }
 
 async function listPublishOperations(
@@ -4879,15 +4833,6 @@ function sandboxPolicyDecisionCounts(
 /** Counts product-safe sandbox warnings stored as JSON. */
 function sandboxWarningCount(warningsJson: unknown): number {
   return Array.isArray(warningsJson) ? warningsJson.length : 0;
-}
-
-/** Returns a bounded sandbox run list limit for operator history views. */
-function adminSandboxRunListLimit(limit: number | undefined): number {
-  if (limit === undefined) {
-    return 25;
-  }
-
-  return Math.min(100, Math.max(1, limit));
 }
 
 /** Returns whether a sandbox run status should surface as a failure. */
