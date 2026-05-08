@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
@@ -15,6 +18,53 @@ const repoId = "repo_123";
 const commitSha = "abcdef1234567890";
 const fileId = "file_source";
 const symbolId = "sym_service";
+const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), "../fixtures");
+
+/** Expected compatibility outcome for a checked-in artifact fixture. */
+interface CompatibilityFixtureExpectation {
+  /** Fixture file name under packages/index-schema/fixtures. */
+  readonly fileName: string;
+  /** Whether the complete fixture should satisfy the current artifact schema. */
+  readonly validArtifact: boolean;
+  /** Whether the fixture manifest uses a supported artifact schema version. */
+  readonly supportedManifestVersion: boolean;
+  /** Whether every fixture record uses a supported record schema version. */
+  readonly supportedRecordVersions: boolean;
+}
+
+/** Checked-in compatibility fixtures that pin current and stale version behavior. */
+const compatibilityFixtureExpectations: readonly CompatibilityFixtureExpectation[] = [
+  {
+    fileName: "current-artifact.json",
+    supportedManifestVersion: true,
+    supportedRecordVersions: true,
+    validArtifact: true,
+  },
+  {
+    fileName: "metadata-extension-artifact.json",
+    supportedManifestVersion: true,
+    supportedRecordVersions: true,
+    validArtifact: true,
+  },
+  {
+    fileName: "stale-artifact-version.json",
+    supportedManifestVersion: false,
+    supportedRecordVersions: true,
+    validArtifact: false,
+  },
+  {
+    fileName: "stale-record-version.json",
+    supportedManifestVersion: true,
+    supportedRecordVersions: false,
+    validArtifact: false,
+  },
+  {
+    fileName: "unsafe-path-artifact.json",
+    supportedManifestVersion: true,
+    supportedRecordVersions: true,
+    validArtifact: false,
+  },
+];
 
 describe("IndexArtifactSchema", () => {
   it("accepts the current compatibility fixture for every record variant", () => {
@@ -68,7 +118,69 @@ describe("IndexArtifactSchema", () => {
 
     expect(Value.Check(IndexArtifactSchema, artifact)).toBe(false);
   });
+
+  it("keeps checked-in compatibility fixtures aligned with version policy", () => {
+    for (const fixture of compatibilityFixtureExpectations) {
+      const artifact = readArtifactFixture(fixture.fileName);
+      const manifestVersion = readManifestSchemaVersion(artifact);
+      const recordVersions = readRecordVersionInputs(artifact);
+
+      expect(Value.Check(IndexArtifactSchema, artifact), fixture.fileName).toBe(
+        fixture.validArtifact,
+      );
+      expect(isSupportedIndexManifestVersion(manifestVersion), fixture.fileName).toBe(
+        fixture.supportedManifestVersion,
+      );
+      expect(recordVersions.every(isSupportedIndexRecordVersion), fixture.fileName).toBe(
+        fixture.supportedRecordVersions,
+      );
+    }
+  });
 });
+
+/** Reads one checked-in artifact fixture as unknown boundary data. */
+function readArtifactFixture(fileName: string): unknown {
+  return JSON.parse(readFileSync(join(fixturesDir, fileName), "utf8")) as unknown;
+}
+
+/** Reads an artifact fixture manifest schema version without trusting the full schema. */
+function readManifestSchemaVersion(value: unknown): string {
+  const manifest = asRecord(asRecord(value).manifest);
+  const schemaVersion = manifest.schemaVersion;
+
+  if (typeof schemaVersion !== "string") {
+    throw new Error("Artifact fixture manifest must include a string schemaVersion.");
+  }
+
+  return schemaVersion;
+}
+
+/** Reads artifact fixture record schema versions without trusting the full schema. */
+function readRecordVersionInputs(value: unknown): readonly { readonly schemaVersion: string }[] {
+  const records = asRecord(value).records;
+
+  if (!Array.isArray(records)) {
+    throw new Error("Artifact fixture must include a records array.");
+  }
+
+  return records.map((record) => {
+    const schemaVersion = asRecord(record).schemaVersion;
+    if (typeof schemaVersion !== "string") {
+      throw new Error("Artifact fixture record must include a string schemaVersion.");
+    }
+
+    return { schemaVersion };
+  });
+}
+
+/** Narrows an unknown value to an object record for fixture boundary reads. */
+function asRecord(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Expected artifact fixture value to be an object record.");
+  }
+
+  return value as Readonly<Record<string, unknown>>;
+}
 
 /** Creates a deterministic fixture that exercises every current index record variant. */
 function canonicalIndexArtifactFixture(): IndexArtifact {
