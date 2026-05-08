@@ -242,24 +242,24 @@ export class SecurityAuditRepository {
 
   /** Inserts one security/compliance audit log row. */
   public async recordAuditLog(input: RecordAuditLogInput): Promise<AuditLogRecord> {
-    const [row] = await this.db
-      .insert(auditLogs)
-      .values({
-        action: input.action,
-        actorType: input.actorType,
-        actorUserId: input.actorUserId ?? null,
-        auditLogId: input.auditLogId,
-        metadata: input.metadata ?? null,
-        occurredAt: new Date(input.occurredAt),
-        orgId: input.orgId ?? null,
-        resourceId: input.resourceId ?? null,
-        resourceType: input.resourceType,
-      })
-      .returning();
+    const [row] = await this.db.insert(auditLogs).values(auditLogInsertValues(input)).returning();
 
     if (!row) {
       throw new Error("Database write did not return an audit log row.");
     }
+
+    return row;
+  }
+
+  /** Inserts one security/compliance audit log row and ignores duplicate audit IDs. */
+  public async recordAuditLogIfAbsent(
+    input: RecordAuditLogInput,
+  ): Promise<AuditLogRecord | undefined> {
+    const [row] = await this.db
+      .insert(auditLogs)
+      .values(auditLogInsertValues(input))
+      .onConflictDoNothing()
+      .returning();
 
     return row;
   }
@@ -413,4 +413,19 @@ function securityAuditListLimit(limit: number): number {
 /** Returns stable unique non-empty strings while preserving first-seen order. */
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
+/** Maps public audit-log input into a Drizzle insert shape. */
+function auditLogInsertValues(input: RecordAuditLogInput): typeof auditLogs.$inferInsert {
+  return {
+    action: input.action,
+    actorType: input.actorType,
+    actorUserId: input.actorUserId ?? null,
+    auditLogId: input.auditLogId,
+    metadata: input.metadata ?? null,
+    occurredAt: new Date(input.occurredAt),
+    orgId: input.orgId ?? null,
+    resourceId: input.resourceId ?? null,
+    resourceType: input.resourceType,
+  };
 }

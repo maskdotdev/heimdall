@@ -23,7 +23,6 @@ import type {
 } from "@repo/contracts";
 import { getReviewArtifactRedactionLevel, JOB_TYPES } from "@repo/contracts";
 import {
-  auditLogs,
   BackgroundJobRepository,
   type HeimdallDatabase,
   IndexVersionRepository,
@@ -35,6 +34,7 @@ import {
   RepositoryRepository,
   ReviewRepository,
   type ReviewRunMetricsInput,
+  SecurityAuditRepository,
 } from "@repo/db";
 import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
 import {
@@ -3059,25 +3059,22 @@ async function recordRepoLocalConfigChangeAudit(
     readonly timestamp: string;
   },
 ): Promise<void> {
-  await db
-    .insert(auditLogs)
-    .values({
-      action: "repo_local_config.change_detected",
-      actorType: "system",
-      actorUserId: null,
-      auditLogId: stableId("audit", ["repo_local_config.change_detected", input.reviewRunId]),
-      metadata: {
-        actor: { actorType: "system", source: "review_orchestrator" },
-        notice: input.notice,
-        repoId: input.repoId,
-        reviewRunId: input.reviewRunId,
-      },
-      occurredAt: new Date(input.timestamp),
-      orgId: input.orgId,
-      resourceId: input.reviewRunId,
-      resourceType: "review_run",
-    })
-    .onConflictDoNothing();
+  await new SecurityAuditRepository(db).recordAuditLogIfAbsent({
+    action: "repo_local_config.change_detected",
+    actorType: "system",
+    actorUserId: null,
+    auditLogId: stableId("audit", ["repo_local_config.change_detected", input.reviewRunId]),
+    metadata: {
+      actor: { actorType: "system", source: "review_orchestrator" },
+      notice: input.notice,
+      repoId: input.repoId,
+      reviewRunId: input.reviewRunId,
+    },
+    occurredAt: input.timestamp,
+    orgId: input.orgId,
+    resourceId: input.reviewRunId,
+    resourceType: "review_run",
+  });
 }
 
 /** Returns whether a changed file represents an allowed repo-local config path. */
