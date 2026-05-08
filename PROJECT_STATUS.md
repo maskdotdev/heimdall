@@ -123,9 +123,10 @@ tracked milestone.
 - Latest DB embedding milestone: `EmbeddingRepository` now exposes embeddable chunk reads, reusable
   vector cache reads, idempotent embedding storage with chunk and index progress updates, and
   pgvector similarity search. Retrieval semantic search and `@repo/embedding` batch input/cache
-  reads now call this repository boundary, and the Postgres-backed integration test verifies
-  metadata mapping, conflict-safe vector writes, progress updates, cache/content-hash reuse, and
-  nearest-neighbor ordering.
+  reads plus batch embedding writes now call this repository boundary, including embedding writes
+  that run inside the worker's existing job-progress transaction. The Postgres-backed integration
+  test verifies metadata mapping, conflict-safe vector writes, progress updates,
+  cache/content-hash reuse, and nearest-neighbor ordering.
 - Latest DB review milestone: `ReviewRepository` now returns the stored candidate row when an
   idempotent insert conflicts on review/fingerprint uniqueness, instead of echoing the rejected
   input. The Postgres-backed integration test verifies review-run upsert behavior plus

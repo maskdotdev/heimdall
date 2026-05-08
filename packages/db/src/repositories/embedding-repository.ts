@@ -2,6 +2,13 @@ import { and, asc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { codeChunkEmbeddings, codeChunks, codeIndexVersions } from "../schema";
 
+/** Database surface required for embedding repository write operations. */
+type EmbeddingRepositoryWriteDatabase = Pick<HeimdallDatabase, "insert" | "select" | "update">;
+
+/** Database surface accepted by embedding repository methods. */
+type EmbeddingRepositoryDatabase = EmbeddingRepositoryWriteDatabase &
+  Partial<Pick<HeimdallDatabase, "transaction">>;
+
 /** Chunk row shape prepared for embedding input construction. */
 export type EmbeddingInputChunk = {
   /** Stable imported chunk ID. */
@@ -141,7 +148,7 @@ export type VectorSearchChunkResult = {
 /** Query helper for chunk embedding and vector-search persistence. */
 export class EmbeddingRepository {
   /** Creates an embedding query helper. */
-  public constructor(private readonly db: HeimdallDatabase) {}
+  public constructor(private readonly db: EmbeddingRepositoryDatabase) {}
 
   /** Lists imported chunks for embedding input construction. */
   public async listEmbeddingInputChunks(
@@ -216,60 +223,11 @@ export class EmbeddingRepository {
       return { embeddedChunkCount: 0, insertedChunkIds: [] };
     }
 
-    const scope = sharedEmbeddingScope(input.embeddings);
-    const chunkIds = uniqueStrings(input.embeddings.map((embedding) => embedding.chunkId));
+    if (this.db.transaction) {
+      return this.db.transaction(async (tx) => storeChunkEmbeddings(input, tx));
+    }
 
-    return this.db.transaction(async (tx) => {
-      const insertedRows = await tx
-        .insert(codeChunkEmbeddings)
-        .values(
-          input.embeddings.map((embedding) => ({
-            chunkEmbeddingId: embedding.chunkEmbeddingId,
-            chunkId: embedding.chunkId,
-            repoId: embedding.repoId,
-            indexVersionId: embedding.indexVersionId,
-            embeddingModel: embedding.embeddingModel,
-            embeddingDimension: embedding.embeddingDimension,
-            embedding: validatedVector(embedding),
-            contentHash: embedding.contentHash,
-            inputHash: embedding.inputHash,
-            inputKind: embedding.inputKind,
-            embeddingCacheKey: embedding.embeddingCacheKey,
-            embeddingProfileVersion: embedding.embeddingProfileVersion,
-            provider: embedding.provider,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning({ chunkId: codeChunkEmbeddings.chunkId });
-
-      await tx
-        .update(codeChunks)
-        .set({ embeddingStatus: "ready" })
-        .where(inArray(codeChunks.chunkId, chunkIds));
-
-      const [progress] = await tx
-        .select({
-          embeddedChunkCount: sql<number>`count(distinct ${codeChunkEmbeddings.chunkId})::int`,
-        })
-        .from(codeChunkEmbeddings)
-        .where(
-          and(
-            eq(codeChunkEmbeddings.indexVersionId, scope.indexVersionId),
-            eq(codeChunkEmbeddings.embeddingModel, scope.embeddingModel),
-          ),
-        );
-      const embeddedChunkCount = progress?.embeddedChunkCount ?? 0;
-
-      await tx
-        .update(codeIndexVersions)
-        .set({ embeddedChunkCount })
-        .where(eq(codeIndexVersions.indexVersionId, scope.indexVersionId));
-
-      return {
-        embeddedChunkCount,
-        insertedChunkIds: insertedRows.map((row) => row.chunkId),
-      };
-    });
+    return storeChunkEmbeddings(input, this.db);
   }
 
   /** Runs pgvector cosine-nearest-neighbor search over embedded chunks. */
@@ -304,6 +262,65 @@ export class EmbeddingRepository {
 
     return rows;
   }
+}
+
+/** Stores chunk embeddings and progress updates in the provided database scope. */
+async function storeChunkEmbeddings(
+  input: StoreChunkEmbeddingsInput,
+  db: EmbeddingRepositoryWriteDatabase,
+): Promise<StoreChunkEmbeddingsResult> {
+  const scope = sharedEmbeddingScope(input.embeddings);
+  const chunkIds = uniqueStrings(input.embeddings.map((embedding) => embedding.chunkId));
+
+  const insertedRows = await db
+    .insert(codeChunkEmbeddings)
+    .values(
+      input.embeddings.map((embedding) => ({
+        chunkEmbeddingId: embedding.chunkEmbeddingId,
+        chunkId: embedding.chunkId,
+        repoId: embedding.repoId,
+        indexVersionId: embedding.indexVersionId,
+        embeddingModel: embedding.embeddingModel,
+        embeddingDimension: embedding.embeddingDimension,
+        embedding: validatedVector(embedding),
+        contentHash: embedding.contentHash,
+        inputHash: embedding.inputHash,
+        inputKind: embedding.inputKind,
+        embeddingCacheKey: embedding.embeddingCacheKey,
+        embeddingProfileVersion: embedding.embeddingProfileVersion,
+        provider: embedding.provider,
+      })),
+    )
+    .onConflictDoNothing()
+    .returning({ chunkId: codeChunkEmbeddings.chunkId });
+
+  await db
+    .update(codeChunks)
+    .set({ embeddingStatus: "ready" })
+    .where(inArray(codeChunks.chunkId, chunkIds));
+
+  const [progress] = await db
+    .select({
+      embeddedChunkCount: sql<number>`count(distinct ${codeChunkEmbeddings.chunkId})::int`,
+    })
+    .from(codeChunkEmbeddings)
+    .where(
+      and(
+        eq(codeChunkEmbeddings.indexVersionId, scope.indexVersionId),
+        eq(codeChunkEmbeddings.embeddingModel, scope.embeddingModel),
+      ),
+    );
+  const embeddedChunkCount = progress?.embeddedChunkCount ?? 0;
+
+  await db
+    .update(codeIndexVersions)
+    .set({ embeddedChunkCount })
+    .where(eq(codeIndexVersions.indexVersionId, scope.indexVersionId));
+
+  return {
+    embeddedChunkCount,
+    insertedChunkIds: insertedRows.map((row) => row.chunkId),
+  };
 }
 
 /** Converts a chunk row into an embedding input source. */

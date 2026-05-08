@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import { type EmbeddingBatchJobPayload, parseWithSchema } from "@repo/contracts";
 import {
   codeChunkEmbeddings,
-  codeChunks,
-  codeIndexVersions,
   EmbeddingRepository,
   embeddingJobItems,
   embeddingJobs,
@@ -703,55 +701,24 @@ export async function embedChunkBatch(
 
     if (chunkInputs.length > 0) {
       await options.db.transaction(async (tx) => {
-        const insertedRows = await tx
-          .insert(codeChunkEmbeddings)
-          .values(
-            chunkInputs.map((entry) => ({
-              chunkEmbeddingId: stableId("emb", [entry.row.chunkId, payload.embeddingModel]),
-              chunkId: entry.row.chunkId,
-              repoId: payload.repoId,
-              indexVersionId: payload.indexVersionId,
-              embeddingModel: payload.embeddingModel,
-              embeddingDimension: options.provider.dimensions,
-              embedding: [...requiredVectorForInput(vectorsByInputId, entry.input.inputId)],
-              contentHash: entry.row.contentHash,
-              embeddingCacheKey: requiredCacheKeyForInput(cacheKeysByInputId, entry.input.inputId),
-              embeddingProfileVersion,
-              inputHash: entry.input.inputHash,
-              inputKind: entry.input.inputKind,
-              provider: options.provider.providerId ?? "unknown",
-            })),
-          )
-          .onConflictDoNothing()
-          .returning({ chunkId: codeChunkEmbeddings.chunkId });
-        insertedChunkCount = insertedRows.length;
-
-        await tx
-          .update(codeChunks)
-          .set({ embeddingStatus: "ready" })
-          .where(
-            inArray(
-              codeChunks.chunkId,
-              chunkInputs.map((entry) => entry.row.chunkId),
-            ),
-          );
-
-        const [progress] = await tx
-          .select({
-            embeddedChunkCount: sql<number>`count(distinct ${codeChunkEmbeddings.chunkId})::int`,
-          })
-          .from(codeChunkEmbeddings)
-          .where(
-            and(
-              eq(codeChunkEmbeddings.indexVersionId, payload.indexVersionId),
-              eq(codeChunkEmbeddings.embeddingModel, payload.embeddingModel),
-            ),
-          );
-
-        await tx
-          .update(codeIndexVersions)
-          .set({ embeddedChunkCount: progress?.embeddedChunkCount ?? 0 })
-          .where(eq(codeIndexVersions.indexVersionId, payload.indexVersionId));
+        const storeResult = await new EmbeddingRepository(tx).storeChunkEmbeddings({
+          embeddings: chunkInputs.map((entry) => ({
+            chunkEmbeddingId: stableId("emb", [entry.row.chunkId, payload.embeddingModel]),
+            chunkId: entry.row.chunkId,
+            repoId: payload.repoId,
+            indexVersionId: payload.indexVersionId,
+            embeddingModel: payload.embeddingModel,
+            embeddingDimension: options.provider.dimensions,
+            embedding: [...requiredVectorForInput(vectorsByInputId, entry.input.inputId)],
+            contentHash: entry.row.contentHash,
+            embeddingCacheKey: requiredCacheKeyForInput(cacheKeysByInputId, entry.input.inputId),
+            embeddingProfileVersion,
+            inputHash: entry.input.inputHash,
+            inputKind: entry.input.inputKind,
+            provider: options.provider.providerId ?? "unknown",
+          })),
+        });
+        insertedChunkCount = storeResult.insertedChunkIds.length;
 
         await markEmbeddingJobBatchSucceeded(tx, payload, {
           embeddedChunkIds: chunkInputs.map((entry) => entry.row.chunkId),
