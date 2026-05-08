@@ -28,6 +28,11 @@ const ADMIN_TOOLS_DEBUG_BUNDLE_TEST_FILE = resolve(
 /** Observability package test file path. */
 const OBSERVABILITY_TEST_FILE = resolve("packages/observability/test/index.test.ts");
 
+/** Review orchestrator integration test file path. */
+const REVIEW_ORCHESTRATOR_INTEGRATION_TEST_FILE = resolve(
+  "packages/review-orchestrator/test/review-orchestrator.integration.test.ts",
+);
+
 /** Deterministic evaluation report files that CI should preserve. */
 const EVAL_REPORT_PATHS = [
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.md",
@@ -102,6 +107,28 @@ describe("CI workflow", () => {
     expect(observabilityTests).toContain(
       "redacts Phase 25 secret and source-code regression fixtures",
     );
+  });
+
+  it("keeps the fake PR end-to-end review path in the CI gate", () => {
+    const workflow = readFileSync(CI_WORKFLOW_FILE, "utf8");
+    const packageJson = readFileSync(PACKAGE_JSON_FILE, "utf8");
+    const integrationTests = readFileSync(REVIEW_ORCHESTRATOR_INTEGRATION_TEST_FILE, "utf8");
+
+    expect(workflow).toContain("HEIMDALL_DB_TEST_URL:");
+    expect(workflow).toContain("pnpm ci:control-plane:release");
+    expect(packageJson).toContain("pnpm test");
+    expect(integrationTests).toContain("describe.runIf(integrationDatabaseUrl)");
+    expect(integrationTests).toContain("runPullRequestReview");
+    expect(integrationTests).toContain("gitProvider: fakeGitProvider");
+    expect(integrationTests).toContain("createStaticLLMGateway");
+    expect(integrationTests).toContain("syncWorkspace: async ()");
+    expect(integrationTests).toContain(
+      "persists a review run, findings, validation output, and publish job",
+    );
+    expect(integrationTests).toContain(
+      "does not enqueue publish work when all findings are rejected",
+    );
+    expect(integrationTests).toContain("fetchPullRequestSnapshot");
   });
 
   it("keeps scheduled eval history persistence wired", () => {
