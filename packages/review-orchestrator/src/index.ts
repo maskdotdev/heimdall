@@ -24,7 +24,7 @@ import type {
 import { getReviewArtifactRedactionLevel, JOB_TYPES } from "@repo/contracts";
 import {
   auditLogs,
-  backgroundJobs,
+  BackgroundJobRepository,
   codeIndexVersions,
   type HeimdallDatabase,
   llmCallArtifacts,
@@ -4106,19 +4106,12 @@ async function enqueueIndexDependencyJob(
 ): Promise<string> {
   const envelope = createIndexDependencyJobEnvelope(input);
 
-  await db
-    .insert(backgroundJobs)
-    .values({
-      backgroundJobId: envelope.jobId,
-      queueName: "indexing",
-      jobKey: envelope.idempotencyKey,
-      jobType: JOB_TYPES.IndexRepoCommit,
-      status: "pending",
-      repoId: input.repoId,
-      payload: envelope,
-      maxAttempts: envelope.maxAttempts,
-    })
-    .onConflictDoNothing();
+  await new BackgroundJobRepository(db).insertBackgroundJob({
+    backgroundJobId: envelope.jobId,
+    queueName: "indexing",
+    envelope,
+    repoId: input.repoId,
+  });
 
   return envelope.idempotencyKey;
 }
@@ -4154,20 +4147,13 @@ async function enqueuePublishJob(
     ...(input.traceContext ? { traceContext: input.traceContext } : {}),
   };
 
-  await db
-    .insert(backgroundJobs)
-    .values({
-      backgroundJobId: envelope.jobId,
-      queueName: "publishing",
-      jobKey: idempotencyKey,
-      jobType: JOB_TYPES.PublishReview,
-      status: "pending",
-      repoId: input.repoId,
-      reviewRunId: input.reviewRunId,
-      payload: envelope,
-      maxAttempts: envelope.maxAttempts,
-    })
-    .onConflictDoNothing();
+  await new BackgroundJobRepository(db).insertBackgroundJob({
+    backgroundJobId: envelope.jobId,
+    queueName: "publishing",
+    envelope,
+    repoId: input.repoId,
+    reviewRunId: input.reviewRunId,
+  });
 
   return idempotencyKey;
 }
