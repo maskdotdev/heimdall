@@ -546,6 +546,22 @@ export type ReviewStageLogStatus =
 /** Terminal or decision status emitted on review stage metrics. */
 export type ReviewStageMetricStatus = Exclude<ReviewStageLogStatus, "started">;
 
+/** Product-safe LLM token and cost telemetry values emitted after a successful model call. */
+export type LlmUsageTelemetryInput = {
+  /** Estimated model-call cost in micro-USD. */
+  readonly costMicros: number;
+  /** Estimated input tokens for the call. */
+  readonly inputTokens: number;
+  /** Bounded model profile label selected for the call. */
+  readonly modelProfile?: string | undefined;
+  /** Estimated output tokens for the call. */
+  readonly outputTokens: number;
+  /** Provider that handled the model call. */
+  readonly provider: string;
+  /** Stable LLM task label for the call. */
+  readonly task: string;
+};
+
 /** Product-safe context attached to every structured review stage log. */
 export type ReviewStageLogContext = {
   /** Durable job ID that caused the review stage, or `unknown` when unavailable. */
@@ -1492,6 +1508,7 @@ export async function runPullRequestReview(
                     ...(dependencies.traces ? { traces: dependencies.traces } : {}),
                   },
                 ),
+              ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
               now,
               orgId: repositoryRecord.orgId,
               rateCard: dependencies.llmUsageRateCard ?? ZERO_COST_LLM_RATE_CARD,
@@ -2402,6 +2419,30 @@ export function recordReviewStageMetrics(
   metrics?.histogram(OBSERVABILITY_METRIC_NAMES.reviewStageDurationMs, Math.max(0, durationMs), {
     labels,
     unit: "ms",
+  });
+}
+
+/** Records low-cardinality LLM token and internal cost metrics for one successful model call. */
+export function recordLlmUsageTelemetry(
+  metrics: TelemetryMetricRecorder | undefined,
+  input: LlmUsageTelemetryInput,
+): void {
+  const labels = {
+    model_profile: normalizeReviewTelemetryLabel(input.modelProfile, "default"),
+    provider: normalizeReviewTelemetryLabel(input.provider, "unknown"),
+    task: normalizeReviewTelemetryLabel(input.task, "unknown"),
+  };
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.llmTokensTotal, {
+    labels: { ...labels, token_type: "input" },
+    value: Math.max(0, input.inputTokens),
+  });
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.llmTokensTotal, {
+    labels: { ...labels, token_type: "output" },
+    value: Math.max(0, input.outputTokens),
+  });
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.llmEstimatedCostMicrosTotal, {
+    labels,
+    value: Math.max(0, input.costMicros),
   });
 }
 
@@ -4313,6 +4354,8 @@ function createUsageRecordingLlmGateway(input: {
   readonly db: HeimdallDatabase;
   /** Gateway that performs the actual model work. */
   readonly gateway: LLMGateway;
+  /** Optional metric recorder used for LLM token and cost telemetry. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
   /** Clock used for deterministic timestamps. */
   readonly now: () => Date;
   /** Organization that owns the review. */
@@ -4423,6 +4466,8 @@ async function recordLlmUsage(input: {
   readonly repoId: string;
   /** Review run that caused the model call. */
   readonly reviewRunId: string;
+  /** Optional metric recorder used for LLM token and cost telemetry. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
   /** Usage ledger used for durable token events. */
   readonly usageLedger: UsageLedger;
   /** Rate card used to estimate internal model cost. */
@@ -4537,6 +4582,17 @@ async function recordLlmUsage(input: {
       task: input.task,
     },
   });
+
+  recordLlmUsageTelemetry(input.metrics, {
+    costMicros: estimate.costMicros,
+    inputTokens: estimate.inputTokens,
+    modelProfile:
+      stringMetadataValue(input.metadata, "modelProfile") ??
+      stringMetadataValue(input.metadata, "model_profile"),
+    outputTokens: estimate.outputTokens,
+    provider: estimate.provider,
+    task: input.task,
+  });
 }
 
 /** Persists redacted prompt and response artifacts for a successful LLM call. */
@@ -4618,6 +4674,18 @@ function stringMetadataValue(
 ): string | undefined {
   const value = metadata?.[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Normalizes one review telemetry label to a bounded low-cardinality value. */
+function normalizeReviewTelemetryLabel(value: string | undefined, fallback: string): string {
+  const normalized = value
+    ?.trim()
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9_.-]+/gu, "_")
+    .replaceAll(/^_+|_+$/gu, "")
+    .slice(0, 80);
+
+  return normalized && normalized.length > 0 ? normalized : fallback;
 }
 
 function withOptionalWorkspaceRoot<T extends GitHubRepositoryRef & { readonly commitSha: string }>(

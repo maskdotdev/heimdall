@@ -1207,9 +1207,11 @@ tracked milestone.
   metrics plus `retrieval.build_context` spans with only aggregate counts, mode labels, status, and
   safe correlation IDs. The local Grafana provisioning bundle now includes starter dashboards that
   graph the corresponding Prometheus metrics for API, queue, review pipeline, LLM/retrieval,
-  indexing/embedding, publishing, and webhook delivery checks. The local Prometheus configuration
-  now also loads starter alert rules linked to the Phase #25 alert runbook for API, webhook, queue,
-  review, publishing, LLM, indexing, and sandbox risks. Root scripts now expose
+  indexing/embedding, publishing, and webhook delivery checks. Review LLM usage recording now emits
+  product-safe input-token, output-token, and estimated-cost counters with bounded provider,
+  model-profile, task, and token-type labels. The local Prometheus configuration now also loads
+  starter alert rules linked to the Phase #25 alert runbook for API, webhook, queue, embedding
+  backlog, review, publishing, LLM, cost anomaly, indexing, and sandbox risks. Root scripts now expose
   `pnpm dev:observability` and `pnpm smoke:observability:config`, and the README documents the
   local Grafana, Prometheus, Tempo, and OTLP endpoints plus the environment variables required to
   send service telemetry to the stack.

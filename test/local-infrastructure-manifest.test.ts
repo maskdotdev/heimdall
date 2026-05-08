@@ -96,6 +96,11 @@ const EXPECTED_PROMETHEUS_ALERTS = [
     runbook: "docs/runbooks/observability-alerts.md#review-queue-backlog",
   },
   {
+    alert: "HeimdallEmbeddingBacklog",
+    metric: "code_review_agent_queue_oldest_job_age_ms",
+    runbook: "docs/runbooks/observability-alerts.md#embedding-backlog",
+  },
+  {
     alert: "HeimdallReviewFailureRate",
     metric: "code_review_agent_review_stages_total",
     runbook: "docs/runbooks/observability-alerts.md#review-failure-rate",
@@ -109,6 +114,11 @@ const EXPECTED_PROMETHEUS_ALERTS = [
     alert: "HeimdallLlmProviderOutage",
     metric: "code_review_agent_llm_calls_total",
     runbook: "docs/runbooks/observability-alerts.md#llm-provider-outage",
+  },
+  {
+    alert: "HeimdallCostAnomaly",
+    metric: "code_review_agent_llm_estimated_cost_micros_total",
+    runbook: "docs/runbooks/observability-alerts.md#cost-anomaly",
   },
   {
     alert: "HeimdallIndexingFailures",
