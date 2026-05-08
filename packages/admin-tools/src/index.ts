@@ -35,7 +35,6 @@ import {
   memoryCandidates,
   memoryFacts,
   PullRequestRepository,
-  providerInstallations,
   publishedCheckRuns,
   publishedFindings,
   publishedReviews,
@@ -46,6 +45,7 @@ import {
   quotaCounters,
   quotaReservations,
   RepoRuleRepository,
+  RepositoryRepository,
   ReviewRepository,
   replayRuns,
   replayStageRuns,
@@ -2168,12 +2168,8 @@ export async function getUsageCostInspection(
     throw new AdminDebugNotFoundError("review_run", reviewRunId);
   }
 
-  const [repoRow] = await dependencies.db
-    .select()
-    .from(repositories)
-    .where(eq(repositories.repoId, reviewRun.repoId))
-    .limit(1);
-  if (!repoRow) {
+  const orgId = await getRepositoryOrgId(dependencies.db, reviewRun.repoId);
+  if (!orgId) {
     throw new AdminDebugNotFoundError("repository", reviewRun.repoId);
   }
 
@@ -2197,7 +2193,7 @@ export async function getUsageCostInspection(
   ]);
 
   return buildUsageCostInspection({
-    orgId: repoRow.orgId,
+    orgId,
     repoId: reviewRun.repoId,
     reviewRunId,
     quotaDecisions: quotaRows.map((row) =>
@@ -2615,17 +2611,14 @@ async function loadRetrievalReplayRules(
   repoId: string,
   warnings: string[],
 ): Promise<readonly RepoRule[]> {
-  const [repository] = await db
-    .select({ orgId: repositories.orgId })
-    .from(repositories)
-    .where(eq(repositories.repoId, repoId));
-  if (!repository) {
+  const orgId = await getRepositoryOrgId(db, repoId);
+  if (!orgId) {
     warnings.push("Retrieval replay could not load repository rules because the repo row is gone.");
     return [];
   }
 
   return new RepoRuleRepository(db).listEffectiveRules({
-    orgId: repository.orgId,
+    orgId,
     repoId,
   });
 }
@@ -6116,12 +6109,7 @@ async function getRepositoryOrgId(
   db: HeimdallDatabase,
   repoId: string,
 ): Promise<string | undefined> {
-  const rows = await db
-    .select({ orgId: repositories.orgId })
-    .from(repositories)
-    .where(eq(repositories.repoId, repoId))
-    .limit(1);
-  return rows[0]?.orgId;
+  return new RepositoryRepository(db).getRepositoryOrgId(repoId);
 }
 
 /** Loads the GitHub repository reference needed for provider-side publisher reconciliation. */
@@ -6129,22 +6117,10 @@ async function loadGitHubRepositoryRef(
   db: HeimdallDatabase,
   repoId: string,
 ): Promise<GitHubRepositoryRef> {
-  const [repository] = await db
-    .select({
-      installationId: repositories.installationId,
-      owner: repositories.owner,
-      provider: repositories.provider,
-      providerInstallationId: providerInstallations.providerInstallationId,
-      providerRepoId: repositories.providerRepoId,
-      repo: repositories.name,
-    })
-    .from(repositories)
-    .innerJoin(
-      providerInstallations,
-      eq(providerInstallations.installationId, repositories.installationId),
-    )
-    .where(and(eq(repositories.repoId, repoId), eq(repositories.provider, "github")))
-    .limit(1);
+  const repository = await new RepositoryRepository(db).getRepositoryProviderRef({
+    provider: "github",
+    repoId,
+  });
 
   if (!repository) {
     throw new Error(`GitHub repository ${repoId} was not found.`);
