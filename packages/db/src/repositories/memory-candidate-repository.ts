@@ -71,6 +71,19 @@ export class MemoryCandidateRepository {
   /** Creates a memory candidate query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
 
+  /** Gets one durable memory candidate by ID. */
+  public async getMemoryCandidate(
+    memoryCandidateId: string,
+  ): Promise<MemoryCandidateRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(memoryCandidates)
+      .where(eq(memoryCandidates.memoryCandidateId, memoryCandidateId))
+      .limit(1);
+
+    return row ? toMemoryCandidateRecord(row) : undefined;
+  }
+
   /** Lists repository and organization memory candidates that can apply to one repository. */
   public async listRepositoryMemoryCandidates(
     input: ListRepositoryMemoryCandidatesInput,

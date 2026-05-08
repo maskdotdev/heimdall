@@ -63,6 +63,17 @@ export class MemoryFactRepository {
   /** Creates a memory fact query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
 
+  /** Gets one durable memory fact by ID. */
+  public async getMemoryFact(memoryFactId: string): Promise<MemoryFactRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(eq(memoryFacts.memoryFactId, memoryFactId))
+      .limit(1);
+
+    return row ? toMemoryFactRecord(row) : undefined;
+  }
+
   /** Lists active repository and organization memory facts visible to one review. */
   public async listActiveReviewMemoryFacts(
     input: ListActiveReviewMemoryFactsInput,

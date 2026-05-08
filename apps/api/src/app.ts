@@ -10892,11 +10892,7 @@ async function getMemoryFactRow(
   db: HeimdallDatabase,
   memoryFactId: string,
 ): Promise<MemoryFactRow> {
-  const [row] = await db
-    .select()
-    .from(memoryFacts)
-    .where(eq(memoryFacts.memoryFactId, memoryFactId))
-    .limit(1);
+  const row = await new MemoryFactRepository(db).getMemoryFact(memoryFactId);
   if (!row) {
     throw new AdminControlPlaneNotFoundError("memory_fact", memoryFactId);
   }
@@ -10909,11 +10905,7 @@ async function getMemoryCandidateRow(
   db: HeimdallDatabase,
   memoryCandidateId: string,
 ): Promise<MemoryCandidateRow> {
-  const [row] = await db
-    .select()
-    .from(memoryCandidates)
-    .where(eq(memoryCandidates.memoryCandidateId, memoryCandidateId))
-    .limit(1);
+  const row = await new MemoryCandidateRepository(db).getMemoryCandidate(memoryCandidateId);
   if (!row) {
     throw new AdminControlPlaneNotFoundError("memory_candidate", memoryCandidateId);
   }

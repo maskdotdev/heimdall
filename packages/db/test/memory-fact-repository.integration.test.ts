@@ -83,6 +83,15 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
   });
 
   it("lists repository and organization memory facts for inspection", async () => {
+    await expect(memoryFactRepository.getMemoryFact("mem_memory_fact_org")).resolves.toMatchObject({
+      body: "Prefer concise findings.",
+      memoryFactId: "mem_memory_fact_org",
+      repoId: null,
+    });
+    await expect(memoryFactRepository.getMemoryFact("mem_memory_fact_missing")).resolves.toBe(
+      undefined,
+    );
+
     const facts = await memoryFactRepository.listRepositoryMemoryFacts({
       orgId: "org_memory_fact_test",
       repoId: "repo_memory_fact_test",
@@ -107,6 +116,17 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
   });
 
   it("lists repository and organization memory candidates for inspection", async () => {
+    await expect(
+      memoryCandidateRepository.getMemoryCandidate("memcand_memory_fact_repo_recent"),
+    ).resolves.toMatchObject({
+      memoryCandidateId: "memcand_memory_fact_repo_recent",
+      proposedContent: "Suppress generated client comments.",
+      repoId: "repo_memory_fact_test",
+    });
+    await expect(
+      memoryCandidateRepository.getMemoryCandidate("memcand_memory_fact_missing"),
+    ).resolves.toBe(undefined);
+
     const candidates = await memoryCandidateRepository.listRepositoryMemoryCandidates({
       orgId: "org_memory_fact_test",
       repoId: "repo_memory_fact_test",
