@@ -19,6 +19,7 @@ import { type IndexerConfig, loadIndexerConfig, loadRuntimeConfig } from "@repo/
 import {
   type BillingReconcileJobPayload,
   type DataDeletionManifest,
+  DataDeletionManifestSchema,
   type DataDeletionPlanJobPayload,
   DataDeletionPlanJobPayloadSchema,
   type EmbeddingBatchJobPayload,
@@ -197,6 +198,12 @@ const DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE = 50;
 const DEFAULT_QUEUE_METRICS_INTERVAL_MS = 30_000;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
 const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
+/** Maximum review artifact payloads tombstoned per data-deletion batch. */
+const DATA_DELETION_REVIEW_ARTIFACT_BATCH_SIZE = 250;
+/** Maximum review artifact batches processed by one data-deletion job. */
+const DATA_DELETION_REVIEW_ARTIFACT_MAX_BATCHES = 40;
+/** Maximum sandbox runs deleted per repository during one data-deletion job. */
+const DATA_DELETION_SANDBOX_RUN_LIMIT = 1_000;
 /** Maximum chunk IDs placed in one repair-triggered embedding batch. */
 const EMBEDDING_REPAIR_BATCH_SIZE = 128;
 /** Maximum completed review runs inspected by one scheduled thread reconciliation job. */
@@ -1012,6 +1019,16 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       }
 
       await planDataDeletionRequest(options.db, payload);
+      if (payload.dryRun) {
+        return;
+      }
+
+      await throwIfWorkerJobCanceled(context);
+      await executeDataDeletionRequest(
+        options.db,
+        payload.dataDeletionRequestId,
+        options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
+      );
     },
     [JOB_TYPES.SandboxCleanup]: async (envelope, context) => {
       const payload = asSandboxCleanupPayload(envelope.payload);
@@ -1291,6 +1308,358 @@ async function planDataDeletionRequest(
     metadata,
     status: "planned",
   });
+}
+
+/** Summary returned after executing one data-deletion request. */
+export type DataDeletionExecutionSummary = {
+  /** Durable data-deletion request ID. */
+  readonly dataDeletionRequestId: string;
+  /** Whether the request had already reached a terminal state before execution. */
+  readonly alreadyTerminal: boolean;
+  /** Number of durable job rows canceled before dispatch. */
+  readonly canceledJobCount: number;
+  /** Number of code chunk embedding rows deleted. */
+  readonly deletedEmbeddingCount: number;
+  /** Number of repositories disabled by the request. */
+  readonly disabledRepositoryCount: number;
+  /** Number of review artifact payload rows selected for deletion. */
+  readonly selectedReviewArtifactCount: number;
+  /** Number of review artifact payloads deleted from backing storage or inline metadata. */
+  readonly deletedReviewArtifactPayloadCount: number;
+  /** Number of review artifact payloads already absent from backing storage. */
+  readonly missingReviewArtifactPayloadCount: number;
+  /** Number of review artifact rows updated with deletion tombstones. */
+  readonly tombstonedReviewArtifactCount: number;
+  /** Number of review artifact payload deletions that failed and should retry. */
+  readonly failedReviewArtifactPayloadCount: number;
+  /** Number of sandbox run rows selected for deletion. */
+  readonly selectedSandboxRunCount: number;
+  /** Number of sandbox run rows deleted. */
+  readonly deletedSandboxRunCount: number;
+  /** Number of local sandbox artifact files deleted. */
+  readonly deletedSandboxArtifactFileCount: number;
+  /** Number of sandbox artifact URIs skipped by local file cleanup. */
+  readonly skippedSandboxArtifactFileCount: number;
+  /** Repository IDs covered by the request. */
+  readonly repoIds: readonly string[];
+  /** Verification evidence URI stored on the request when deletion completed. */
+  readonly verificationArtifactUri?: string;
+};
+
+/** Executes a planned data-deletion request and records product-safe verification metadata. */
+export async function executeDataDeletionRequest(
+  db: HeimdallDatabase,
+  dataDeletionRequestId: string,
+  artifactPayloadStore: ReviewArtifactPayloadStore = new InlineReviewArtifactPayloadStore(),
+  now: Date = new Date(),
+): Promise<DataDeletionExecutionSummary> {
+  const repository = new DataDeletionRepository(db);
+  const request = await repository.getDataDeletionRequest(dataDeletionRequestId);
+  if (!request) {
+    throw new Error(`Data-deletion request ${dataDeletionRequestId} was not found.`);
+  }
+
+  if (request.status === "completed" || request.status === "verified") {
+    return emptyDataDeletionExecutionSummary({
+      alreadyTerminal: true,
+      dataDeletionRequestId,
+      repoIds: [],
+      verificationArtifactUri: request.verificationArtifactUri ?? undefined,
+    });
+  }
+
+  const manifest = parseWithSchema(
+    "DataDeletionManifest",
+    DataDeletionManifestSchema,
+    request.manifest,
+  );
+  const repoIds = (
+    await repository.listRepositoryIdsForDeletionScope({
+      orgId: request.orgId,
+      repoId: request.repoId,
+    })
+  ).map((row) => row.repoId);
+  const executionStartedAt = now.toISOString();
+  const metadata = dataDeletionMetadataRecord(request.metadata);
+
+  await repository.updateDataDeletionRequestStatus({
+    dataDeletionRequestId,
+    manifest,
+    metadata: {
+      ...metadata,
+      executionStartedAt,
+    },
+    now,
+    status: "in_progress",
+  });
+
+  const disabledRepositoryCount = await repository.disableRepositoriesForDeletion(repoIds);
+  const canceledJobCount = await repository.cancelPendingBackgroundJobsForDeletionScope({
+    orgId: request.orgId,
+    reason: `data deletion request ${dataDeletionRequestId}`,
+    repoIds,
+    now,
+  });
+  const reviewArtifactSummary = await deleteReviewArtifactPayloadsForDataDeletion({
+    artifactPayloadStore,
+    dataDeletionRepository: repository,
+    now,
+    reviewRepository: new ReviewRepository(db),
+    repoIds,
+  });
+  const sandboxSummary = await cleanupSandboxRunsForDataDeletion(db, repoIds, now);
+  const deletedEmbeddingCount = await repository.deleteCodeChunkEmbeddingsForRepositories(repoIds);
+  const verificationArtifactUri = dataDeletionVerificationArtifactUri(dataDeletionRequestId);
+  const summary: DataDeletionExecutionSummary = {
+    alreadyTerminal: false,
+    canceledJobCount,
+    dataDeletionRequestId,
+    deletedEmbeddingCount,
+    deletedReviewArtifactPayloadCount: reviewArtifactSummary.deletedPayloadCount,
+    deletedSandboxArtifactFileCount: sandboxSummary.deletedArtifactFileCount,
+    deletedSandboxRunCount: sandboxSummary.deletedRunCount,
+    disabledRepositoryCount,
+    failedReviewArtifactPayloadCount: reviewArtifactSummary.failedPayloadCount,
+    missingReviewArtifactPayloadCount: reviewArtifactSummary.missingPayloadCount,
+    repoIds,
+    selectedReviewArtifactCount: reviewArtifactSummary.selectedArtifactCount,
+    selectedSandboxRunCount: sandboxSummary.selectedRunCount,
+    skippedSandboxArtifactFileCount: sandboxSummary.skippedArtifactFileCount,
+    tombstonedReviewArtifactCount: reviewArtifactSummary.tombstonedArtifactCount,
+    verificationArtifactUri,
+  };
+  const completedAt = now;
+  const failed =
+    reviewArtifactSummary.failedPayloadCount > 0 || reviewArtifactSummary.batchLimitReached;
+
+  await repository.updateDataDeletionRequestStatus({
+    completedAt,
+    dataDeletionRequestId,
+    manifest: {
+      ...manifest,
+      queueKeys: [
+        ...manifest.queueKeys,
+        ...(canceledJobCount > 0 ? [`canceled:${canceledJobCount}`] : []),
+      ],
+      vectorNamespaces: [...new Set([...manifest.vectorNamespaces, ...repoIds])],
+    },
+    metadata: {
+      ...metadata,
+      executionCompletedAt: completedAt.toISOString(),
+      executionStartedAt,
+      executionSummary: summary,
+    },
+    now,
+    status: failed ? "failed" : "completed",
+    verificationArtifactUri: failed ? null : verificationArtifactUri,
+  });
+
+  if (failed) {
+    throw new Error(`Data-deletion request ${dataDeletionRequestId} did not complete.`);
+  }
+
+  return summary;
+}
+
+/** Review artifact payload deletion counters for one data-deletion execution. */
+type DataDeletionReviewArtifactPayloadSummary = {
+  /** Whether the bounded batch limit stopped processing before a clean final batch. */
+  readonly batchLimitReached: boolean;
+  /** Number of payloads removed from backing storage or inline metadata. */
+  readonly deletedPayloadCount: number;
+  /** Number of payload deletions that failed and should retry. */
+  readonly failedPayloadCount: number;
+  /** Number of payloads already missing from backing storage. */
+  readonly missingPayloadCount: number;
+  /** Number of review artifact rows selected. */
+  readonly selectedArtifactCount: number;
+  /** Number of review artifact rows updated with deletion tombstones. */
+  readonly tombstonedArtifactCount: number;
+};
+
+/** Input used to delete review artifact payloads for a data-deletion request. */
+type DeleteReviewArtifactPayloadsForDataDeletionInput = {
+  /** Store used to remove backing review artifact payload bytes. */
+  readonly artifactPayloadStore: ReviewArtifactPayloadStore;
+  /** Data-deletion query helper. */
+  readonly dataDeletionRepository: DataDeletionRepository;
+  /** Deletion timestamp. */
+  readonly now: Date;
+  /** Review query helper used to tombstone artifact rows. */
+  readonly reviewRepository: ReviewRepository;
+  /** Repository IDs covered by the deletion request. */
+  readonly repoIds: readonly string[];
+};
+
+/** Deletes review artifact payloads for a data-deletion request in bounded batches. */
+async function deleteReviewArtifactPayloadsForDataDeletion(
+  input: DeleteReviewArtifactPayloadsForDataDeletionInput,
+): Promise<DataDeletionReviewArtifactPayloadSummary> {
+  let selectedArtifactCount = 0;
+  let deletedPayloadCount = 0;
+  let missingPayloadCount = 0;
+  let tombstonedArtifactCount = 0;
+  let failedPayloadCount = 0;
+  let batchLimitReached = false;
+
+  for (
+    let batchIndex = 0;
+    batchIndex < DATA_DELETION_REVIEW_ARTIFACT_MAX_BATCHES;
+    batchIndex += 1
+  ) {
+    const artifactRows =
+      await input.dataDeletionRepository.listReviewArtifactPayloadDeletionTargets({
+        excludeUriPrefix: DELETED_REVIEW_ARTIFACT_URI_PREFIX,
+        limit: DATA_DELETION_REVIEW_ARTIFACT_BATCH_SIZE,
+        repoIds: input.repoIds,
+      });
+
+    if (artifactRows.length === 0) {
+      break;
+    }
+
+    selectedArtifactCount += artifactRows.length;
+
+    for (const artifact of artifactRows) {
+      try {
+        const result = await input.artifactPayloadStore.deleteJson({
+          metadata: artifact.metadata,
+          uri: artifact.uri,
+        });
+
+        if (result.deleted) {
+          deletedPayloadCount += 1;
+        } else {
+          missingPayloadCount += 1;
+        }
+
+        await input.reviewRepository.updateReviewArtifactPayloadTombstone({
+          metadata: reviewArtifactPayloadDeletedMetadata({
+            deletedAt: input.now.toISOString(),
+            metadata: artifact.metadata,
+            reason: "data_deletion",
+          }),
+          reviewArtifactId: artifact.reviewArtifactId,
+          sizeBytes: 0,
+          uri: deletedReviewArtifactUri(artifact.reviewArtifactId),
+        });
+        tombstonedArtifactCount += 1;
+      } catch {
+        failedPayloadCount += 1;
+      }
+    }
+
+    if (failedPayloadCount > 0 || artifactRows.length < DATA_DELETION_REVIEW_ARTIFACT_BATCH_SIZE) {
+      break;
+    }
+
+    batchLimitReached = batchIndex === DATA_DELETION_REVIEW_ARTIFACT_MAX_BATCHES - 1;
+  }
+
+  return {
+    batchLimitReached,
+    deletedPayloadCount,
+    failedPayloadCount,
+    missingPayloadCount,
+    selectedArtifactCount,
+    tombstonedArtifactCount,
+  };
+}
+
+/** Sandbox cleanup counters for one data-deletion execution. */
+type DataDeletionSandboxCleanupSummary = {
+  /** Number of local sandbox artifact files deleted. */
+  readonly deletedArtifactFileCount: number;
+  /** Number of sandbox run rows deleted. */
+  readonly deletedRunCount: number;
+  /** Number of sandbox run rows selected. */
+  readonly selectedRunCount: number;
+  /** Number of sandbox artifact URIs skipped by local file cleanup. */
+  readonly skippedArtifactFileCount: number;
+};
+
+/** Deletes sandbox run rows and local artifact files covered by a data-deletion request. */
+async function cleanupSandboxRunsForDataDeletion(
+  db: HeimdallDatabase,
+  repoIds: readonly string[],
+  now: Date,
+): Promise<DataDeletionSandboxCleanupSummary> {
+  const summaries = await Promise.all(
+    repoIds.map((repoId) =>
+      cleanupSandboxRuns(
+        db,
+        {
+          before: now.toISOString(),
+          limit: DATA_DELETION_SANDBOX_RUN_LIMIT,
+          reason: "retention_policy",
+          repoId,
+        },
+        now,
+      ),
+    ),
+  );
+
+  return summaries.reduce<DataDeletionSandboxCleanupSummary>(
+    (total, summary) => ({
+      deletedArtifactFileCount: total.deletedArtifactFileCount + summary.deletedArtifactFileCount,
+      deletedRunCount: total.deletedRunCount + summary.deletedRunCount,
+      selectedRunCount: total.selectedRunCount + summary.selectedRunCount,
+      skippedArtifactFileCount: total.skippedArtifactFileCount + summary.skippedArtifactFileCount,
+    }),
+    {
+      deletedArtifactFileCount: 0,
+      deletedRunCount: 0,
+      selectedRunCount: 0,
+      skippedArtifactFileCount: 0,
+    },
+  );
+}
+
+/** Builds a zero-count execution summary for terminal idempotent deletion calls. */
+function emptyDataDeletionExecutionSummary(input: {
+  /** Whether the request was already terminal. */
+  readonly alreadyTerminal: boolean;
+  /** Durable data-deletion request ID. */
+  readonly dataDeletionRequestId: string;
+  /** Repository IDs covered by the request. */
+  readonly repoIds: readonly string[];
+  /** Existing verification evidence URI, when present. */
+  readonly verificationArtifactUri?: string | undefined;
+}): DataDeletionExecutionSummary {
+  return {
+    alreadyTerminal: input.alreadyTerminal,
+    canceledJobCount: 0,
+    dataDeletionRequestId: input.dataDeletionRequestId,
+    deletedEmbeddingCount: 0,
+    deletedReviewArtifactPayloadCount: 0,
+    deletedSandboxArtifactFileCount: 0,
+    deletedSandboxRunCount: 0,
+    disabledRepositoryCount: 0,
+    failedReviewArtifactPayloadCount: 0,
+    missingReviewArtifactPayloadCount: 0,
+    repoIds: input.repoIds,
+    selectedReviewArtifactCount: 0,
+    selectedSandboxRunCount: 0,
+    skippedSandboxArtifactFileCount: 0,
+    tombstonedReviewArtifactCount: 0,
+    ...(input.verificationArtifactUri
+      ? { verificationArtifactUri: input.verificationArtifactUri }
+      : {}),
+  };
+}
+
+/** Converts unknown request metadata to a mutable product-safe record. */
+function dataDeletionMetadataRecord(metadata: unknown): Record<string, unknown> {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return {};
+  }
+
+  return { ...(metadata as Record<string, unknown>) };
+}
+
+/** Returns the durable verification evidence URI for a completed data-deletion request. */
+function dataDeletionVerificationArtifactUri(dataDeletionRequestId: string): string {
+  return `deletion://${dataDeletionRequestId}/verification.json`;
 }
 
 /** Builds an initial product-safe manifest for a data-deletion request. */

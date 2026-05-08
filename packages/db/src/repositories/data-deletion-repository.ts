@@ -4,12 +4,21 @@ import type {
   DataDeletionScope,
   DataDeletionStatus,
 } from "@repo/contracts";
-import { and, desc, eq, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, like, not, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { dataDeletionRequests } from "../schema";
+import {
+  backgroundJobs,
+  codeChunkEmbeddings,
+  dataDeletionRequests,
+  repositories,
+  reviewArtifacts,
+} from "../schema";
 
 /** Database surface required by the data-deletion repository. */
-type DataDeletionRepositoryDatabase = Pick<HeimdallDatabase, "insert" | "select" | "update">;
+type DataDeletionRepositoryDatabase = Pick<
+  HeimdallDatabase,
+  "delete" | "insert" | "select" | "update"
+>;
 
 /** Input used to create one durable data-deletion request. */
 export type CreateDataDeletionRequestInput = {
@@ -55,6 +64,52 @@ export type ListDataDeletionRequestsInput = {
   readonly status?: DataDeletionStatus | undefined;
   /** Maximum rows to return. */
   readonly limit: number;
+};
+
+/** Input used to resolve repository rows covered by one deletion scope. */
+export type ListDataDeletionRepositoryIdsInput = {
+  /** Organization scope when present. */
+  readonly orgId?: string | null | undefined;
+  /** Repository scope when present. */
+  readonly repoId?: string | null | undefined;
+};
+
+/** Repository identity included in a deletion scope. */
+export type DataDeletionRepositoryIdRecord = {
+  /** Stable repository ID. */
+  readonly repoId: string;
+};
+
+/** Input used to list review artifacts whose payloads should be deleted. */
+export type ListDataDeletionReviewArtifactTargetsInput = {
+  /** URI prefix that marks already deleted artifact payloads. */
+  readonly excludeUriPrefix: string;
+  /** Maximum rows to return. */
+  readonly limit: number;
+  /** Repository IDs covered by the deletion request. */
+  readonly repoIds: readonly string[];
+};
+
+/** Review artifact payload selected for data-deletion tombstoning. */
+export type DataDeletionReviewArtifactTargetRecord = {
+  /** Product-safe artifact metadata used by the payload store. */
+  readonly metadata: unknown;
+  /** Durable review artifact ID. */
+  readonly reviewArtifactId: string;
+  /** Payload URI to delete. */
+  readonly uri: string;
+};
+
+/** Input used to cancel pending or queued durable jobs for a deletion scope. */
+export type CancelPendingDataDeletionJobsInput = {
+  /** Product-safe cancellation reason. */
+  readonly reason: string;
+  /** Organization scope when present. */
+  readonly orgId?: string | null | undefined;
+  /** Repository IDs covered by the deletion request. */
+  readonly repoIds?: readonly string[] | undefined;
+  /** Current timestamp for deterministic tests. */
+  readonly now?: Date | string | undefined;
 };
 
 /** Input used to update a durable data-deletion request state. */
@@ -110,6 +165,8 @@ export type DataDeletionRequestRecord = {
 };
 
 const maxDataDeletionRequestListLimit = 100;
+const maxDataDeletionRepositoryScopeLimit = 10_000;
+const maxDataDeletionArtifactTargetLimit = 1_000;
 
 /** Query helper for durable customer-data deletion requests. */
 export class DataDeletionRepository {
@@ -198,6 +255,141 @@ export class DataDeletionRepository {
     return rows.map(toDataDeletionRequestRecord);
   }
 
+  /** Lists repository IDs covered by one deletion scope. */
+  public async listRepositoryIdsForDeletionScope(
+    input: ListDataDeletionRepositoryIdsInput,
+  ): Promise<readonly DataDeletionRepositoryIdRecord[]> {
+    const filters: SQL[] = [];
+
+    if (input.orgId) {
+      filters.push(eq(repositories.orgId, input.orgId));
+    }
+    if (input.repoId) {
+      filters.push(eq(repositories.repoId, input.repoId));
+    }
+    if (filters.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select({ repoId: repositories.repoId })
+      .from(repositories)
+      .where(and(...filters))
+      .orderBy(asc(repositories.repoId))
+      .limit(maxDataDeletionRepositoryScopeLimit);
+  }
+
+  /** Disables repositories covered by a deletion request. */
+  public async disableRepositoriesForDeletion(repoIds: readonly string[]): Promise<number> {
+    const uniqueRepoIds = uniqueStableStrings(repoIds);
+    if (uniqueRepoIds.length === 0) {
+      return 0;
+    }
+
+    const rows = await this.db
+      .update(repositories)
+      .set({ enabled: false, updatedAt: new Date() })
+      .where(inArray(repositories.repoId, [...uniqueRepoIds]))
+      .returning({ repoId: repositories.repoId });
+
+    return rows.length;
+  }
+
+  /** Lists review artifact payloads that need deletion tombstones. */
+  public async listReviewArtifactPayloadDeletionTargets(
+    input: ListDataDeletionReviewArtifactTargetsInput,
+  ): Promise<readonly DataDeletionReviewArtifactTargetRecord[]> {
+    const uniqueRepoIds = uniqueStableStrings(input.repoIds);
+    if (uniqueRepoIds.length === 0) {
+      return [];
+    }
+
+    const limit = normalizeDataDeletionArtifactTargetLimit(input.limit);
+
+    return this.db
+      .select({
+        metadata: reviewArtifacts.metadata,
+        reviewArtifactId: reviewArtifacts.reviewArtifactId,
+        uri: reviewArtifacts.uri,
+      })
+      .from(reviewArtifacts)
+      .where(
+        and(
+          inArray(reviewArtifacts.repoId, [...uniqueRepoIds]),
+          not(like(reviewArtifacts.uri, `${input.excludeUriPrefix}%`)),
+        ),
+      )
+      .orderBy(asc(reviewArtifacts.createdAt), asc(reviewArtifacts.reviewArtifactId))
+      .limit(limit);
+  }
+
+  /** Deletes code chunk embedding vectors for repositories covered by a deletion request. */
+  public async deleteCodeChunkEmbeddingsForRepositories(
+    repoIds: readonly string[],
+  ): Promise<number> {
+    const uniqueRepoIds = uniqueStableStrings(repoIds);
+    if (uniqueRepoIds.length === 0) {
+      return 0;
+    }
+
+    const rows = await this.db
+      .delete(codeChunkEmbeddings)
+      .where(inArray(codeChunkEmbeddings.repoId, [...uniqueRepoIds]))
+      .returning({ chunkEmbeddingId: codeChunkEmbeddings.chunkEmbeddingId });
+
+    return rows.length;
+  }
+
+  /** Cancels pending or queued durable jobs covered by a deletion request. */
+  public async cancelPendingBackgroundJobsForDeletionScope(
+    input: CancelPendingDataDeletionJobsInput,
+  ): Promise<number> {
+    const uniqueRepoIds = uniqueStableStrings(input.repoIds ?? []);
+    const scopeFilters: SQL[] = [];
+
+    if (input.orgId) {
+      scopeFilters.push(eq(backgroundJobs.orgId, input.orgId));
+    }
+    if (uniqueRepoIds.length > 0) {
+      scopeFilters.push(inArray(backgroundJobs.repoId, [...uniqueRepoIds]));
+    }
+
+    const scopeFilter =
+      scopeFilters.length === 1
+        ? scopeFilters[0]
+        : scopeFilters.length > 1
+          ? or(...scopeFilters)
+          : undefined;
+
+    if (!scopeFilter) {
+      return 0;
+    }
+
+    const now = input.now ? new Date(input.now) : new Date();
+    const rows = await this.db
+      .update(backgroundJobs)
+      .set({
+        completedAt: now,
+        error: {
+          message: input.reason,
+          name: "DataDeletionCanceledJobError",
+        },
+        metadata: {
+          cancellation: {
+            canceledAt: now.toISOString(),
+            reason: input.reason,
+          },
+        },
+        startedAt: null,
+        status: "canceled",
+        updatedAt: now,
+      })
+      .where(and(inArray(backgroundJobs.status, ["pending", "queued"]), scopeFilter))
+      .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
+
+    return rows.length;
+  }
+
   /** Updates one data-deletion request lifecycle state. */
   public async updateDataDeletionRequestStatus(
     input: UpdateDataDeletionRequestStatusInput,
@@ -235,6 +427,22 @@ function normalizeDataDeletionRequestLimit(limit: number): number {
   }
 
   return limit;
+}
+
+/** Returns a bounded data-deletion artifact target limit. */
+function normalizeDataDeletionArtifactTargetLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > maxDataDeletionArtifactTargetLimit) {
+    throw new Error(
+      `limit must be an integer between 1 and ${maxDataDeletionArtifactTargetLimit}.`,
+    );
+  }
+
+  return limit;
+}
+
+/** Returns stable unique string values while preserving caller order. */
+function uniqueStableStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
 }
 
 /** Maps a Drizzle data-deletion row to the repository record. */

@@ -137,6 +137,67 @@ describe.runIf(integrationDatabaseUrl)("DataDeletionRepository integration", () 
       /limit must be an integer/u,
     );
   });
+
+  it("resolves scoped deletion targets and applies durable cleanup side effects", async () => {
+    await seedDeletionExecutionRows(sql);
+
+    await expect(
+      dataDeletionRepository.listRepositoryIdsForDeletionScope({
+        orgId: "org_data_deletion",
+      }),
+    ).resolves.toEqual([{ repoId: "repo_data_deletion" }]);
+
+    await expect(
+      dataDeletionRepository.listReviewArtifactPayloadDeletionTargets({
+        excludeUriPrefix: "deleted://review_artifacts/",
+        limit: 10,
+        repoIds: ["repo_data_deletion"],
+      }),
+    ).resolves.toMatchObject([
+      {
+        reviewArtifactId: "rart_data_deletion_exec",
+        uri: "db://review_artifacts/rrn_data_deletion_exec/context/context.json",
+      },
+    ]);
+
+    await expect(
+      dataDeletionRepository.deleteCodeChunkEmbeddingsForRepositories(["repo_data_deletion"]),
+    ).resolves.toBe(1);
+    await expect(
+      dataDeletionRepository.cancelPendingBackgroundJobsForDeletionScope({
+        now: new Date("2026-05-08T03:00:00.000Z"),
+        orgId: "org_data_deletion",
+        reason: "data deletion request ddr_data_deletion",
+        repoIds: ["repo_data_deletion"],
+      }),
+    ).resolves.toBe(1);
+    await expect(
+      dataDeletionRepository.disableRepositoriesForDeletion(["repo_data_deletion"]),
+    ).resolves.toBe(1);
+
+    const [embeddingCount] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM code_chunk_embeddings
+      WHERE repo_id = 'repo_data_deletion'
+    `;
+    const [job] = await sql<{ error: { name?: string } | null; status: string }[]>`
+      SELECT error, status
+      FROM background_jobs
+      WHERE background_job_id = 'job_data_deletion_pending'
+    `;
+    const [repository] = await sql<{ enabled: boolean }[]>`
+      SELECT enabled
+      FROM repositories
+      WHERE repo_id = 'repo_data_deletion'
+    `;
+
+    expect(embeddingCount?.count).toBe(0);
+    expect(job).toMatchObject({
+      error: { name: "DataDeletionCanceledJobError" },
+      status: "canceled",
+    });
+    expect(repository?.enabled).toBe(false);
+  });
 });
 
 /** Seeds the minimal tenant scope rows referenced by deletion-request tests. */
@@ -205,6 +266,237 @@ async function seedScopeRows(sql: postgres.Sql): Promise<void> {
       now()
     )
   `;
+}
+
+/** Seeds rows touched by scoped data-deletion cleanup methods. */
+async function seedDeletionExecutionRows(sql: postgres.Sql): Promise<void> {
+  await sql`
+    INSERT INTO pull_request_snapshots (
+      snapshot_id,
+      schema_version,
+      provider,
+      repo_id,
+      installation_id,
+      provider_repo_id,
+      provider_pull_request_id,
+      pull_request_number,
+      title,
+      author_login,
+      state,
+      is_draft,
+      base_ref,
+      base_sha,
+      head_ref,
+      head_sha,
+      diff_hash,
+      additions,
+      deletions,
+      changed_file_count,
+      fetched_at
+    )
+    VALUES (
+      'prs_data_deletion_exec',
+      'pull_request_snapshot.v1',
+      'github',
+      'repo_data_deletion',
+      'inst_data_deletion',
+      '54321',
+      '99',
+      99,
+      'Deletion execution fixture',
+      'octocat',
+      'open',
+      false,
+      'main',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'branch',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'sha256:deletion',
+      1,
+      0,
+      1,
+      now()
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO review_runs (
+      review_run_id,
+      schema_version,
+      repo_id,
+      pull_request_snapshot_id,
+      pull_request_number,
+      base_sha,
+      head_sha,
+      trigger,
+      status,
+      counts,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      'rrn_data_deletion_exec',
+      'review_run.v1',
+      'repo_data_deletion',
+      'prs_data_deletion_exec',
+      99,
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'manual',
+      'completed',
+      '{}'::jsonb,
+      now(),
+      now()
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO review_artifacts (
+      review_artifact_id,
+      review_run_id,
+      repo_id,
+      kind,
+      name,
+      uri,
+      hash,
+      size_bytes,
+      metadata
+    )
+    VALUES (
+      'rart_data_deletion_exec',
+      'rrn_data_deletion_exec',
+      'repo_data_deletion',
+      'context',
+      'context.json',
+      'db://review_artifacts/rrn_data_deletion_exec/context/context.json',
+      'sha256:context',
+      128,
+      '{"payload": {"sensitive": true}}'::jsonb
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO code_index_versions (
+      index_version_id,
+      repo_id,
+      commit_sha,
+      index_key,
+      status,
+      artifact_uri,
+      indexer_name,
+      indexer_version,
+      chunker_version
+    )
+    VALUES (
+      'idx_data_deletion_exec',
+      'repo_data_deletion',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'main',
+      'ready',
+      'file:///tmp/deletion-index.json',
+      'test-indexer',
+      '1.0.0',
+      '1.0.0'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO indexed_files (
+      file_id,
+      index_version_id,
+      repo_id,
+      commit_sha,
+      path,
+      language,
+      content_hash
+    )
+    VALUES (
+      'file_data_deletion_exec',
+      'idx_data_deletion_exec',
+      'repo_data_deletion',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'src/index.ts',
+      'typescript',
+      'sha256:file'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO code_chunks (
+      chunk_id,
+      index_version_id,
+      file_id,
+      repo_id,
+      path,
+      start_line,
+      end_line,
+      content_hash
+    )
+    VALUES (
+      'chunk_data_deletion_exec',
+      'idx_data_deletion_exec',
+      'file_data_deletion_exec',
+      'repo_data_deletion',
+      'src/index.ts',
+      1,
+      2,
+      'sha256:chunk'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql.unsafe(`
+    INSERT INTO code_chunk_embeddings (
+      chunk_embedding_id,
+      chunk_id,
+      repo_id,
+      index_version_id,
+      embedding_model,
+      embedding_dimension,
+      embedding,
+      content_hash
+    )
+    VALUES (
+      'emb_data_deletion_exec',
+      'chunk_data_deletion_exec',
+      'repo_data_deletion',
+      'idx_data_deletion_exec',
+      'test-embedding',
+      1536,
+      '${testVectorLiteral()}'::vector,
+      'sha256:chunk'
+    )
+    ON CONFLICT DO NOTHING
+  `);
+  await sql`
+    INSERT INTO background_jobs (
+      background_job_id,
+      queue_name,
+      job_key,
+      job_type,
+      status,
+      org_id,
+      repo_id,
+      review_run_id,
+      payload
+    )
+    VALUES (
+      'job_data_deletion_pending',
+      'review',
+      'review:repo_data_deletion:99',
+      'pr.review.v1',
+      'pending',
+      'org_data_deletion',
+      'repo_data_deletion',
+      'rrn_data_deletion_exec',
+      '{}'::jsonb
+    )
+    ON CONFLICT DO NOTHING
+  `;
+}
+
+/** Builds a deterministic 1536-d pgvector literal for integration fixtures. */
+function testVectorLiteral(): string {
+  return `[${Array.from({ length: 1536 }, (_, index) => (index === 0 ? "1" : "0")).join(",")}]`;
 }
 
 /** Applies all generated SQL migrations in lexical order to a test schema. */
