@@ -2,7 +2,17 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { HeimdallDatabase } from "@repo/db";
+import {
+  backgroundJobs,
+  codeChunkEmbeddings,
+  codeChunks,
+  codeEdges,
+  embeddingJobItems,
+  embeddingJobs,
+  type HeimdallDatabase,
+  indexedFiles,
+  symbols,
+} from "@repo/db";
 import type { IndexArtifact } from "@repo/indexer-driver";
 import {
   OBSERVABILITY_METRIC_NAMES,
@@ -494,6 +504,125 @@ describe("importIndexArtifact telemetry", () => {
     ]);
   });
 
+  it("returns existing ready imports without rewriting rows", async () => {
+    const artifactHash = `sha256:${"c".repeat(64)}` as const;
+    const insertedRows: unknown[] = [];
+
+    const result = await importIndexArtifact(artifactWithHash(artifactWithChunk(), artifactHash), {
+      artifactUri: "file:///tmp/index-artifact.json",
+      db: createEmbeddingPlanningImportDatabaseStub(insertedRows, {
+        existingIndexVersion: {
+          artifactHash,
+          chunkCount: 7,
+          edgeCount: 3,
+          fileCount: 2,
+          indexVersionId: "idx_existing",
+          status: "ready",
+          symbolCount: 5,
+        },
+      }),
+    });
+
+    expect(result).toMatchObject({
+      chunkCount: 7,
+      edgeCount: 3,
+      fileCount: 2,
+      indexVersionId: "idx_existing",
+      symbolCount: 5,
+    });
+    expect(insertedRows).toEqual([]);
+  });
+
+  it("rejects different ready artifacts without rewriting rows", async () => {
+    const insertedRows: unknown[] = [];
+
+    await expect(
+      importIndexArtifact(artifactWithHash(artifactWithChunk(), `sha256:${"e".repeat(64)}`), {
+        artifactUri: "file:///tmp/index-artifact.json",
+        db: createEmbeddingPlanningImportDatabaseStub(insertedRows, {
+          existingIndexVersion: {
+            artifactHash: `sha256:${"f".repeat(64)}`,
+            chunkCount: 1,
+            edgeCount: 0,
+            fileCount: 1,
+            indexVersionId: "idx_existing",
+            status: "ready",
+            symbolCount: 0,
+          },
+        }),
+      }),
+    ).rejects.toThrow("different artifact hash");
+
+    expect(insertedRows).toEqual([]);
+  });
+
+  it("cleans stale rows before retrying a failed import", async () => {
+    const artifactHash = `sha256:${"d".repeat(64)}` as const;
+    const deletedTables: unknown[] = [];
+
+    await expect(
+      importIndexArtifact(artifactWithHash(artifactWithChunk(), artifactHash), {
+        artifactUri: "file:///tmp/index-artifact.json",
+        db: createEmbeddingPlanningImportDatabaseStub([], {
+          deletedTables,
+          existingIndexVersion: {
+            artifactHash,
+            chunkCount: 1,
+            edgeCount: 0,
+            fileCount: 1,
+            indexVersionId: "idx_failed",
+            status: "failed",
+            symbolCount: 0,
+          },
+        }),
+      }),
+    ).resolves.toMatchObject({
+      chunkCount: 1,
+      fileCount: 1,
+    });
+
+    expect(deletedTables).toEqual([
+      backgroundJobs,
+      embeddingJobItems,
+      codeChunkEmbeddings,
+      embeddingJobs,
+      codeEdges,
+      codeChunks,
+      symbols,
+      indexedFiles,
+    ]);
+  });
+
+  it("cleans partial rows when embedding planner writes fail", async () => {
+    const deletedTables: unknown[] = [];
+
+    await expect(
+      importIndexArtifact(artifactWithChunk(), {
+        artifactUri: "file:///tmp/index-artifact.json",
+        db: createEmbeddingPlanningImportDatabaseStub([], {
+          deletedTables,
+          failOnJobType: "embedding.batch.v1",
+        }),
+        embeddingBatchSize: 1,
+        embeddingDimensions: 2,
+        embeddingModel: "text-embedding-3-small",
+        embeddingProvider: "hash",
+        enqueueEmbeddings: true,
+      }),
+    ).rejects.toThrow("embedding planner write failed");
+
+    expect(deletedTables).toEqual([
+      backgroundJobs,
+      embeddingJobItems,
+      codeChunkEmbeddings,
+      embeddingJobs,
+      codeEdges,
+      codeChunks,
+      symbols,
+      indexedFiles,
+    ]);
+  });
+
   it("marks import batches failed when record writes fail", async () => {
     const insertedRows: unknown[] = [];
     const updatedRows: unknown[] = [];
@@ -677,6 +806,20 @@ function artifactWithChunk(): IndexArtifact {
   return artifactWithChunks(1);
 }
 
+/** Returns an artifact with an explicit manifest hash for deterministic idempotency tests. */
+function artifactWithHash(
+  artifact: IndexArtifact,
+  artifactHash: `sha256:${string}`,
+): IndexArtifact {
+  return {
+    ...artifact,
+    manifest: {
+      ...artifact.manifest,
+      artifactHash,
+    },
+  };
+}
+
 /** Creates a valid index artifact with one file and several chunks. */
 function artifactWithChunks(count: number): IndexArtifact {
   return {
@@ -762,6 +905,9 @@ function createRecordingImportDatabaseStub(
   updatedRows: unknown[] = [],
 ): HeimdallDatabase {
   const tx = {
+    delete: (_table: unknown) => ({
+      where: async (_input: unknown) => undefined,
+    }),
     insert: (_table: unknown) => ({
       values: (values: unknown) => {
         insertedRows.push(values);
@@ -792,6 +938,14 @@ function createRecordingImportDatabaseStub(
           onConflictDoUpdate: async (_input: unknown) => undefined,
         };
       },
+    }),
+    select: () => ({
+      from: () => ({
+        where: () =>
+          Object.assign(Promise.resolve([]), {
+            limit: async () => [],
+          }),
+      }),
     }),
     transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
     update: (_table: unknown) => ({
@@ -861,9 +1015,24 @@ function isEmbeddingJobItemBatch(value: unknown): value is readonly unknown[] {
 }
 
 /** Creates the DB surface needed by embedding planner import tests. */
-function createEmbeddingPlanningImportDatabaseStub(insertedRows: unknown[]): HeimdallDatabase {
+function createEmbeddingPlanningImportDatabaseStub(
+  insertedRows: unknown[],
+  options: {
+    /** Tables passed to delete statements. */
+    readonly deletedTables?: unknown[];
+    /** Job type that should fail when inserted through the root DB facade. */
+    readonly failOnJobType?: string;
+    /** Existing index version row returned by the import preflight. */
+    readonly existingIndexVersion?: Readonly<Record<string, unknown>>;
+  } = {},
+): HeimdallDatabase {
   const updatedRows: unknown[] = [];
   const tx = {
+    delete: (table: unknown) => ({
+      where: async (_input: unknown) => {
+        options.deletedTables?.push(table);
+      },
+    }),
     insert: (_table: unknown) => ({
       values: (_values: unknown) => ({
         onConflictDoNothing: async () => undefined,
@@ -886,16 +1055,25 @@ function createEmbeddingPlanningImportDatabaseStub(insertedRows: unknown[]): Hei
         insertedRows.push(values);
 
         return {
-          onConflictDoNothing: async () => undefined,
+          onConflictDoNothing: async () => {
+            if (
+              isUnknownRecord(values) &&
+              options.failOnJobType !== undefined &&
+              values.jobType === options.failOnJobType
+            ) {
+              throw new Error("embedding planner write failed");
+            }
+          },
           onConflictDoUpdate: async (_input: unknown) => undefined,
         };
       },
     }),
-    select: () => ({
+    select: (selection?: Readonly<Record<string, unknown>>) => ({
       from: () => ({
         where: () =>
-          Object.assign(Promise.resolve([{ orgId: "org_1" }]), {
-            limit: async (count: number) => [{ orgId: "org_1" }].slice(0, count),
+          Object.assign(Promise.resolve(selectRowsForImportStub(selection, options)), {
+            limit: async (count: number) =>
+              selectRowsForImportStub(selection, options).slice(0, count),
           }),
       }),
     }),
@@ -912,6 +1090,21 @@ function createEmbeddingPlanningImportDatabaseStub(insertedRows: unknown[]): Hei
   };
 
   return db as unknown as HeimdallDatabase;
+}
+
+/** Returns canned select rows for importer preflight and repository-owner lookups. */
+function selectRowsForImportStub(
+  selection: Readonly<Record<string, unknown>> | undefined,
+  options: {
+    /** Existing index version row returned by the import preflight. */
+    readonly existingIndexVersion?: Readonly<Record<string, unknown>>;
+  },
+): readonly Readonly<Record<string, unknown>>[] {
+  if (selection && "orgId" in selection) {
+    return [{ orgId: "org_1" }];
+  }
+
+  return options.existingIndexVersion ? [options.existingIndexVersion] : [];
 }
 
 function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {

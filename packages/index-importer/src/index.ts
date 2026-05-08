@@ -12,6 +12,7 @@ import {
 } from "@repo/contracts";
 import {
   backgroundJobs,
+  codeChunkEmbeddings,
   codeChunks,
   codeEdges,
   codeIndexVersions,
@@ -36,7 +37,7 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
-import { eq } from "drizzle-orm";
+import { and, eq, like, or } from "drizzle-orm";
 
 export const packageName = "@repo/index-importer" as const;
 
@@ -209,6 +210,18 @@ type IndexImportPlan = {
   readonly chunks: readonly ChunkRecord[];
   /** Edge records classified from the artifact records. */
   readonly edgeRecords: readonly Extract<IndexArtifact["records"][number], { type: "edge" }>[];
+  /** Bounded number of chunk IDs placed in one embedding batch job. */
+  readonly embeddingBatchSize: number;
+  /** Embedding vector dimensions recorded on durable planner rows. */
+  readonly embeddingDimensions: number;
+  /** Deterministic embedding job ID for this import/profile combination. */
+  readonly embeddingJobId: string;
+  /** Embedding model recorded on durable planner rows. */
+  readonly embeddingModel: string;
+  /** Embedding profile version recorded on durable planner rows. */
+  readonly embeddingProfileVersion: string;
+  /** Embedding provider recorded on durable planner rows. */
+  readonly embeddingProvider: string;
   /** File records classified from the artifact records. */
   readonly files: readonly Extract<IndexArtifact["records"][number], { type: "file" }>[];
   /** Durable import batch ID that owns progress state. */
@@ -223,6 +236,23 @@ type IndexImportPlan = {
   readonly indexVersionId: string;
   /** Symbol records classified from the artifact records. */
   readonly symbolRecords: readonly Extract<IndexArtifact["records"][number], { type: "symbol" }>[];
+};
+
+type ExistingIndexVersionForImport = {
+  /** Artifact hash stored for the existing index version, when present. */
+  readonly artifactHash: string | null;
+  /** Number of chunks recorded on the existing index version. */
+  readonly chunkCount: number;
+  /** Number of edges recorded on the existing index version. */
+  readonly edgeCount: number;
+  /** Number of files recorded on the existing index version. */
+  readonly fileCount: number;
+  /** Existing index version ID. */
+  readonly indexVersionId: string;
+  /** Number of symbols recorded on the existing index version. */
+  readonly symbolCount: number;
+  /** Existing index version status. */
+  readonly status: string;
 };
 
 type IndexImporterTelemetryState = {
@@ -360,6 +390,44 @@ export async function importIndexArtifact(
   let validationFailureCount = 0;
 
   try {
+    const existingIndexVersion = await findExistingIndexVersionForImport(
+      options.db,
+      artifact,
+      importPlan,
+    );
+    if (existingIndexVersion?.status === "ready") {
+      if (existingIndexVersion.artifactHash === importPlan.artifactHash) {
+        const result = {
+          importBatchId: importPlan.importBatchId,
+          indexVersionId: existingIndexVersion.indexVersionId,
+          fileCount: existingIndexVersion.fileCount,
+          symbolCount: existingIndexVersion.symbolCount,
+          edgeCount: existingIndexVersion.edgeCount,
+          chunkCount: existingIndexVersion.chunkCount,
+          embeddingJobCount: 0,
+        } satisfies ImportIndexArtifactResult;
+        finishIndexImporterTelemetry(options.metrics, telemetry, {
+          artifact,
+          result,
+          status: "succeeded",
+        });
+        return result;
+      }
+
+      throw new Error(
+        "A ready index version already exists for this repo, commit, and index profile with a different artifact hash.",
+      );
+    }
+    if (
+      existingIndexVersion?.status === "failed" &&
+      existingIndexVersion.artifactHash !== null &&
+      existingIndexVersion.artifactHash !== importPlan.artifactHash
+    ) {
+      throw new Error(
+        "A failed index version already exists for this repo, commit, and index profile with a different artifact hash.",
+      );
+    }
+
     await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
       phase: "validating_manifest",
     });
@@ -381,6 +449,10 @@ export async function importIndexArtifact(
     await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
       phase: "creating_index_version",
     });
+
+    if (existingIndexVersion?.status === "failed") {
+      await cleanupFailedIndexImportRows(options.db, importPlan);
+    }
 
     await options.db.transaction(async (tx) => {
       await tx
@@ -528,9 +600,8 @@ export async function importIndexArtifact(
       });
       embeddingJobCount = await enqueueEmbeddingBatches({
         artifact,
-        chunks: importPlan.chunks,
-        indexVersionId: importPlan.indexVersionId,
         options,
+        plan: importPlan,
         repoId: artifact.manifest.repoId,
       });
     }
@@ -586,6 +657,12 @@ function createIndexImportPlan(
     (record): record is ChunkRecord => record.type === "chunk",
   );
   const importLimits = resolveIndexImportLimits(options.importLimits);
+  const embeddingBatchSize = boundedEmbeddingBatchSize(options.embeddingBatchSize);
+  const embeddingModel = options.embeddingModel ?? "text-embedding-3-small";
+  const embeddingProfileVersion =
+    options.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION;
+  const embeddingProvider = options.embeddingProvider ?? "configured";
+  const embeddingDimensions = options.embeddingDimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
   const indexVersionId = stableId("idx", [
     artifact.manifest.repoId,
     artifact.manifest.commitSha,
@@ -593,11 +670,25 @@ function createIndexImportPlan(
     artifact.manifest.indexerVersion,
     artifact.manifest.chunkerVersion,
   ]);
+  const embeddingJobId = stableId("embjob", [
+    artifact.manifest.repoId,
+    indexVersionId,
+    embeddingProfileVersion,
+    embeddingProvider,
+    embeddingModel,
+    embeddingDimensions,
+  ]);
 
   return {
     artifactHash,
     chunks,
     edgeRecords,
+    embeddingBatchSize,
+    embeddingDimensions,
+    embeddingJobId,
+    embeddingModel,
+    embeddingProfileVersion,
+    embeddingProvider,
     files,
     importBatchId: stableId("imb", [
       artifact.manifest.repoId,
@@ -767,6 +858,35 @@ async function completeIndexImportBatch(
   });
 }
 
+/** Loads an existing index version for the import key that could affect retry safety. */
+async function findExistingIndexVersionForImport(
+  db: HeimdallDatabase,
+  artifact: IndexArtifact,
+  plan: IndexImportPlan,
+): Promise<ExistingIndexVersionForImport | undefined> {
+  const [row] = await db
+    .select({
+      artifactHash: codeIndexVersions.artifactHash,
+      chunkCount: codeIndexVersions.chunkCount,
+      edgeCount: codeIndexVersions.edgeCount,
+      fileCount: codeIndexVersions.fileCount,
+      indexVersionId: codeIndexVersions.indexVersionId,
+      status: codeIndexVersions.status,
+      symbolCount: codeIndexVersions.symbolCount,
+    })
+    .from(codeIndexVersions)
+    .where(
+      and(
+        eq(codeIndexVersions.repoId, artifact.manifest.repoId),
+        eq(codeIndexVersions.commitSha, artifact.manifest.commitSha),
+        eq(codeIndexVersions.indexKey, plan.indexKey),
+      ),
+    )
+    .limit(1);
+
+  return row;
+}
+
 /** Marks the visible import batch and its index version as failed. */
 async function markIndexImportBatchFailed(
   db: HeimdallDatabase,
@@ -794,6 +914,37 @@ async function markIndexImportBatchFailed(
       status: "failed",
     })
     .where(eq(codeIndexVersions.indexVersionId, plan.indexVersionId));
+
+  await cleanupFailedIndexImportRows(db, plan).catch(() => undefined);
+}
+
+/** Deletes partial child rows for a failed index version while keeping diagnostic parent rows. */
+async function cleanupFailedIndexImportRows(
+  db: HeimdallDatabase,
+  plan: IndexImportPlan,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(backgroundJobs)
+      .where(
+        or(
+          like(backgroundJobs.jobKey, `embedding:${plan.embeddingJobId}:%`),
+          eq(backgroundJobs.jobKey, `embedding:repair:${plan.embeddingJobId}`),
+          like(backgroundJobs.jobKey, `embedding:repair:${plan.embeddingJobId}:batch:%`),
+        ),
+      );
+    await tx
+      .delete(embeddingJobItems)
+      .where(eq(embeddingJobItems.embeddingJobId, plan.embeddingJobId));
+    await tx
+      .delete(codeChunkEmbeddings)
+      .where(eq(codeChunkEmbeddings.indexVersionId, plan.indexVersionId));
+    await tx.delete(embeddingJobs).where(eq(embeddingJobs.embeddingJobId, plan.embeddingJobId));
+    await tx.delete(codeEdges).where(eq(codeEdges.indexVersionId, plan.indexVersionId));
+    await tx.delete(codeChunks).where(eq(codeChunks.indexVersionId, plan.indexVersionId));
+    await tx.delete(symbols).where(eq(symbols.indexVersionId, plan.indexVersionId));
+    await tx.delete(indexedFiles).where(eq(indexedFiles.indexVersionId, plan.indexVersionId));
+  });
 }
 
 /** Serializes an import failure into product-safe database metadata. */
@@ -1015,6 +1166,15 @@ function boundedImportRecordBatchSize(value: number | undefined): number {
   return Math.min(MAX_IMPORT_RECORD_BATCH_SIZE, Math.max(1, value));
 }
 
+/** Returns a positive embedding batch size for durable planner jobs. */
+function boundedEmbeddingBatchSize(value: number | undefined): number {
+  if (value === undefined || !Number.isSafeInteger(value)) {
+    return 128;
+  }
+
+  return Math.max(1, value);
+}
+
 /** Yields stable slices of row values for bounded batch inserts. */
 function* batchRecords<T>(records: readonly T[], batchSize: number): Generator<T[]> {
   for (let offset = 0; offset < records.length; offset += batchSize) {
@@ -1026,36 +1186,26 @@ function* batchRecords<T>(records: readonly T[], batchSize: number): Generator<T
 async function enqueueEmbeddingBatches(input: {
   /** Imported artifact that created the embedding work. */
   readonly artifact: IndexArtifact;
-  /** Chunks that need embedding work planned. */
-  readonly chunks: readonly ChunkRecord[];
-  /** Durable index version ID created for the artifact. */
-  readonly indexVersionId: string;
   /** Import options that carry queue and profile settings. */
   readonly options: ImportIndexArtifactOptions;
+  /** Import plan that carries deterministic IDs and embedding settings. */
+  readonly plan: IndexImportPlan;
   /** Repository that owns the chunks. */
   readonly repoId: string;
 }): Promise<number> {
-  if (input.chunks.length === 0) {
+  if (input.plan.chunks.length === 0) {
     return 0;
   }
 
   const options = input.options;
-  const batchSize = options.embeddingBatchSize ?? 128;
-  const embeddingModel = options.embeddingModel ?? "text-embedding-3-small";
-  const embeddingProfileVersion =
-    options.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION;
-  const embeddingProvider = options.embeddingProvider ?? "configured";
-  const embeddingDimensions = options.embeddingDimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
-  const importRecordBatchSize = boundedImportRecordBatchSize(options.importRecordBatchSize);
+  const batchSize = input.plan.embeddingBatchSize;
+  const embeddingModel = input.plan.embeddingModel;
+  const embeddingProfileVersion = input.plan.embeddingProfileVersion;
+  const embeddingProvider = input.plan.embeddingProvider;
+  const embeddingDimensions = input.plan.embeddingDimensions;
+  const importRecordBatchSize = input.plan.importRecordBatchSize;
   const orgId = await loadRepositoryOrgId(options.db, input.repoId);
-  const embeddingJobId = stableId("embjob", [
-    input.repoId,
-    input.indexVersionId,
-    embeddingProfileVersion,
-    embeddingProvider,
-    embeddingModel,
-    embeddingDimensions,
-  ]);
+  const embeddingJobId = input.plan.embeddingJobId;
   let count = 0;
 
   await options.db
@@ -1064,7 +1214,7 @@ async function enqueueEmbeddingBatches(input: {
       embeddingJobId,
       orgId,
       repoId: input.repoId,
-      indexVersionId: input.indexVersionId,
+      indexVersionId: input.plan.indexVersionId,
       commitSha: input.artifact.manifest.commitSha,
       status: "pending",
       reason: "index_import",
@@ -1072,7 +1222,7 @@ async function enqueueEmbeddingBatches(input: {
       provider: embeddingProvider,
       model: embeddingModel,
       dimensions: embeddingDimensions,
-      chunkCountPlanned: input.chunks.length,
+      chunkCountPlanned: input.plan.chunks.length,
       metadata: {
         artifactId: input.artifact.manifest.artifactId,
         artifactUri: options.artifactUri,
@@ -1083,7 +1233,7 @@ async function enqueueEmbeddingBatches(input: {
     })
     .onConflictDoNothing();
 
-  const embeddingJobItemRows = input.chunks.map((chunk) => ({
+  const embeddingJobItemRows = input.plan.chunks.map((chunk) => ({
     embeddingJobItemId: stableId("embitem", [embeddingJobId, chunk.chunkId]),
     embeddingJobId,
     chunkId: chunk.chunkId,
@@ -1093,11 +1243,13 @@ async function enqueueEmbeddingBatches(input: {
     await options.db.insert(embeddingJobItems).values(batch).onConflictDoNothing();
   }
 
-  for (let index = 0; index < input.chunks.length; index += batchSize) {
-    const chunkIds = input.chunks.slice(index, index + batchSize).map((chunk) => chunk.chunkId);
+  for (let index = 0; index < input.plan.chunks.length; index += batchSize) {
+    const chunkIds = input.plan.chunks
+      .slice(index, index + batchSize)
+      .map((chunk) => chunk.chunkId);
     const payload: EmbeddingBatchJobPayload = {
       repoId: input.repoId,
-      indexVersionId: input.indexVersionId,
+      indexVersionId: input.plan.indexVersionId,
       chunkIds,
       embeddingModel,
       embeddingJobId,
@@ -1137,7 +1289,7 @@ async function enqueueEmbeddingBatches(input: {
     embeddingModel,
     embeddingProfileVersion,
     embeddingProvider,
-    indexVersionId: input.indexVersionId,
+    indexVersionId: input.plan.indexVersionId,
     orgId,
     repoId: input.repoId,
   });
