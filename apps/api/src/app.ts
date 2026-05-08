@@ -1,4 +1,7 @@
+import { Buffer } from "node:buffer";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createConnection, type Socket } from "node:net";
+import { connect as createTlsConnection } from "node:tls";
 import { openapi } from "@elysia/openapi";
 import {
   AdminDebugConfirmationError,
@@ -3014,6 +3017,12 @@ export type ApiHealthResponse = {
 /** Readiness check hook used by tests and custom API composition. */
 export type ApiReadinessCheck = () => Promise<readonly ApiHealthCheck[]>;
 
+/** Redis readiness check hook used by tests and custom API composition. */
+export type ApiRedisReadinessCheck = (redisUrl: string) => Promise<void>;
+
+/** Default timeout for dependency readiness probes that run on request path health checks. */
+const DEFAULT_API_REDIS_READINESS_TIMEOUT_MS = 1_000;
+
 /** Environment map used by API runtime secret resolution. */
 export type ApiSecretEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -3071,6 +3080,8 @@ export type CreateApiAppOptions = {
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional readiness check hook for tests or custom composition. */
   readonly readinessCheck?: ApiReadinessCheck;
+  /** Optional Redis readiness check hook for tests or custom composition. */
+  readonly redisReadinessCheck?: ApiRedisReadinessCheck;
   /** Span recorder for API request-boundary telemetry. */
   readonly traces?: TelemetrySpanRecorder;
 };
@@ -3292,7 +3303,9 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
 
     return environmentGithubWebhookHandler;
   };
-  const readinessCheck = options.readinessCheck ?? (() => checkApiReadiness(getDatabaseClient));
+  const readinessCheck =
+    options.readinessCheck ??
+    (() => checkApiReadiness(getDatabaseClient, options.redisReadinessCheck));
   const apiRequestTelemetry = new WeakMap<Request, ApiRequestTelemetryState>();
 
   return new Elysia()
@@ -7531,11 +7544,14 @@ function createApiHealthResponse(checks: readonly ApiHealthCheck[]): ApiHealthRe
 /** Runs default API readiness checks against config and critical dependencies. */
 async function checkApiReadiness(
   getDatabaseClient: () => DatabaseClient,
+  redisReadinessCheck: ApiRedisReadinessCheck = checkRedisReadiness,
 ): Promise<readonly ApiHealthCheck[]> {
   const checks: ApiHealthCheck[] = [];
+  let redisUrl: string;
 
   try {
-    loadRuntimeConfig();
+    const config = loadRuntimeConfig();
+    redisUrl = config.redisUrl;
     checks.push({ name: "config", status: "pass" });
   } catch {
     checks.push({
@@ -7557,7 +7573,117 @@ async function checkApiReadiness(
     });
   }
 
+  try {
+    await redisReadinessCheck(redisUrl);
+    checks.push({ name: "redis", status: "pass" });
+  } catch {
+    checks.push({
+      message: "Redis is unavailable.",
+      name: "redis",
+      status: "fail",
+    });
+  }
+
   return checks;
+}
+
+/** Runs a bounded Redis PING without leaking connection details. */
+function checkRedisReadiness(redisUrl: string): Promise<void> {
+  const url = parseRedisReadinessUrl(redisUrl);
+  const socket: Socket =
+    url.protocol === "rediss:"
+      ? createTlsConnection({
+          host: url.hostname,
+          port: redisReadinessPort(url),
+          servername: url.hostname,
+        })
+      : createConnection({ host: url.hostname, port: redisReadinessPort(url) });
+  let response = "";
+  let settled = false;
+
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+    const sendPing = (): void => {
+      socket.write(redisReadinessCommand(url));
+    };
+
+    socket.setTimeout(DEFAULT_API_REDIS_READINESS_TIMEOUT_MS);
+    socket.once(url.protocol === "rediss:" ? "secureConnect" : "connect", sendPing);
+    socket.on("data", (chunk) => {
+      response += chunk.toString("utf8");
+      if (redisReadinessHasError(response)) {
+        finish(new Error("Redis readiness ping failed."));
+        return;
+      }
+      if (response.includes("+PONG")) {
+        finish();
+      }
+    });
+    socket.once("error", (error) => {
+      finish(error);
+    });
+    socket.once("timeout", () => {
+      finish(new Error("Redis readiness ping timed out."));
+    });
+  });
+}
+
+/** Parses a Redis URL for readiness checks. */
+function parseRedisReadinessUrl(redisUrl: string): URL {
+  const url = new URL(redisUrl);
+  if (url.protocol !== "redis:" && url.protocol !== "rediss:") {
+    throw new Error("Redis readiness URL must use redis or rediss.");
+  }
+
+  return url;
+}
+
+/** Returns the Redis TCP port used by readiness checks. */
+function redisReadinessPort(url: URL): number {
+  const port = url.port ? Number.parseInt(url.port, 10) : 6379;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("Redis readiness URL port is invalid.");
+  }
+
+  return port;
+}
+
+/** Builds a RESP command sequence for an optional AUTH and required PING. */
+function redisReadinessCommand(url: URL): string {
+  const username = decodeURIComponent(url.username);
+  const password = decodeURIComponent(url.password);
+  const auth =
+    password.length > 0
+      ? username.length > 0
+        ? redisProtocolCommand(["AUTH", username, password])
+        : redisProtocolCommand(["AUTH", password])
+      : "";
+
+  return `${auth}${redisProtocolCommand(["PING"])}`;
+}
+
+/** Encodes one Redis RESP command. */
+function redisProtocolCommand(parts: readonly string[]): string {
+  return `*${parts.length}\r\n${parts
+    .map((part) => `$${Buffer.byteLength(part, "utf8")}\r\n${part}\r\n`)
+    .join("")}`;
+}
+
+/** Returns whether a Redis readiness response contains an error frame. */
+function redisReadinessHasError(response: string): boolean {
+  return response.split("\r\n").some((line) => line.startsWith("-"));
 }
 
 /** Creates the durable control-plane service backed by the database. */

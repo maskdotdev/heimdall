@@ -12,7 +12,7 @@ import type {
   UpdateOrgSettingsRequest,
   UpdateRepositoryControlPlaneSettingsRequest,
 } from "@repo/contracts";
-import type { HeimdallDatabase } from "@repo/db";
+import type { DatabaseClient, HeimdallDatabase } from "@repo/db";
 import {
   createMemoryObservabilitySink,
   createMemoryTelemetrySpanSink,
@@ -498,6 +498,72 @@ describe("api app", () => {
       service: "api",
       status: "pass",
     });
+  });
+
+  it("returns default readiness success when config, Postgres, and Redis pass", async () => {
+    const previousEnv = setDefaultReadinessRuntimeEnv();
+    const redisChecks: string[] = [];
+    try {
+      const app = createApiApp({
+        databaseClient: createReadyDatabaseClient(),
+        githubWebhookHandler: noopWebhookHandler(),
+        redisReadinessCheck: async (redisUrl) => {
+          redisChecks.push(redisUrl);
+        },
+      });
+
+      const response = await app.handle(new Request("http://localhost/readyz"));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        checks: [
+          { name: "config", status: "pass" },
+          { name: "postgres", status: "pass" },
+          { name: "redis", status: "pass" },
+        ],
+        ok: true,
+        service: "api",
+        status: "pass",
+      });
+      expect(redisChecks).toEqual(["redis://localhost:6379"]);
+    } finally {
+      restoreEnv(previousEnv);
+    }
+  });
+
+  it("returns default readiness failure without leaking Redis details", async () => {
+    const previousEnv = setDefaultReadinessRuntimeEnv();
+    try {
+      const app = createApiApp({
+        databaseClient: createReadyDatabaseClient(),
+        githubWebhookHandler: noopWebhookHandler(),
+        redisReadinessCheck: async () => {
+          throw new Error("connect ECONNREFUSED redis://default:secret@redis.internal:6379");
+        },
+      });
+
+      const response = await app.handle(new Request("http://localhost/readyz"));
+
+      expect(response.status).toBe(503);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        checks: [
+          { name: "config", status: "pass" },
+          { name: "postgres", status: "pass" },
+          {
+            message: "Redis is unavailable.",
+            name: "redis",
+            status: "fail",
+          },
+        ],
+        ok: false,
+        service: "api",
+        status: "fail",
+      });
+      expect(JSON.stringify(body)).not.toContain("redis://default:secret@redis.internal");
+    } finally {
+      restoreEnv(previousEnv);
+    }
   });
 
   it("records product-safe API request metrics and spans", async () => {
@@ -6612,6 +6678,55 @@ async function createSupportSession(
     supportSessionId: payload.data.supportSessionId,
     token: payload.data.token,
   };
+}
+
+/** Environment variables that can affect default API readiness configuration parsing. */
+const READINESS_RUNTIME_ENV_KEYS = [
+  "DATABASE_URL",
+  "REDIS_URL",
+  "NODE_ENV",
+  "LOG_LEVEL",
+  "HEIMDALL_ADMIN_ENABLED",
+  "HEIMDALL_ADMIN_ROUTE_EXPOSURE",
+  "HEIMDALL_ADMIN_IDENTITY_PROVIDER",
+  "HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET",
+  "HEIMDALL_ADMIN_SESSION_SECRET",
+  "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
+  "HEIMDALL_ADMIN_INTERNAL_HEADER_NAME",
+  "HEIMDALL_ADMIN_INTERNAL_HEADER_VALUE",
+  "HEIMDALL_ADMIN_GITHUB_ORG",
+] as const;
+
+/** Creates a database client stub that passes the default API Postgres readiness check. */
+function createReadyDatabaseClient(): DatabaseClient {
+  return {
+    close: async () => {},
+    db: { execute: async () => [{ ready: 1 }] } as unknown as HeimdallDatabase,
+  };
+}
+
+/** Sets deterministic runtime configuration for default API readiness route tests. */
+function setDefaultReadinessRuntimeEnv(): Record<string, string | undefined> {
+  const previousEnv: Record<string, string | undefined> = {};
+  for (const key of READINESS_RUNTIME_ENV_KEYS) {
+    previousEnv[key] = process.env[key];
+  }
+
+  process.env.DATABASE_URL = "postgres://postgres:postgres@localhost:5432/review_agent";
+  process.env.REDIS_URL = "redis://localhost:6379";
+  process.env.NODE_ENV = "test";
+  process.env.LOG_LEVEL = "info";
+  process.env.HEIMDALL_ADMIN_ENABLED = "false";
+  delete process.env.HEIMDALL_ADMIN_ROUTE_EXPOSURE;
+  delete process.env.HEIMDALL_ADMIN_IDENTITY_PROVIDER;
+  delete process.env.HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET;
+  delete process.env.HEIMDALL_ADMIN_SESSION_SECRET;
+  delete process.env.HEIMDALL_ADMIN_ALLOWED_ORIGINS;
+  delete process.env.HEIMDALL_ADMIN_INTERNAL_HEADER_NAME;
+  delete process.env.HEIMDALL_ADMIN_INTERNAL_HEADER_VALUE;
+  delete process.env.HEIMDALL_ADMIN_GITHUB_ORG;
+
+  return previousEnv;
 }
 
 /** Restores a set of environment variables after a route test mutates process.env. */
