@@ -482,6 +482,7 @@ describe("DockerContainerSandboxRunner", () => {
           if (!outputMount) {
             throw new Error("Expected Docker runner to materialize an output mount.");
           }
+          expect((await stat(outputMount.source)).mode & 0o777).toBe(0o777);
           outputSource = outputMount.source;
           await mkdir(outputMount.source, { recursive: true });
           await writeFile(join(outputMount.source, "report.json"), '{"ok":true}');

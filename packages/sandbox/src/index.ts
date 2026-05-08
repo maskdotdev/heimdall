@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1873,6 +1883,8 @@ async function materializeDockerRun(
   const outputDirectory = join(temporaryDirectory, "out");
   const artifactDirectory = join(artifactRoot, runId);
   await mkdir(outputDirectory, { recursive: true });
+  // Docker runs sandbox commands as a non-root UID, so the output bind must be writable.
+  await chmod(outputDirectory, 0o777);
   await mkdir(artifactDirectory, { recursive: true });
 
   return {
@@ -2487,8 +2499,7 @@ export function buildDockerSandboxCommand(
     "ALL",
     "--security-opt",
     "no-new-privileges:true",
-    "--security-opt",
-    dockerSeccompSecurityOption(parsedRequest.security.seccompProfile),
+    ...dockerSeccompSecurityArguments(parsedRequest.security.seccompProfile),
     "--pids-limit",
     String(parsedRequest.limits.maxPids),
     "--memory",
@@ -2560,12 +2571,15 @@ function dockerImageReference(image: SandboxImageSpec): string {
   return image.digest ? `${image.image}@${image.digest}` : image.image;
 }
 
-/** Returns Docker seccomp security option for a sandbox security policy. */
-function dockerSeccompSecurityOption(profile: SandboxSecurityPolicy["seccompProfile"]): string {
-  if (profile === "strict") return "seccomp=default";
-  if (profile === "custom") return "seccomp=default";
+/** Returns Docker seccomp arguments for a sandbox security policy. */
+function dockerSeccompSecurityArguments(
+  profile: SandboxSecurityPolicy["seccompProfile"],
+): string[] {
+  if (profile === "runtime_default" || profile === "strict" || profile === "custom") {
+    return [];
+  }
 
-  return "seccomp=default";
+  return [];
 }
 
 /** Returns optional Docker security arguments supported by request policy. */

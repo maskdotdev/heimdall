@@ -410,6 +410,9 @@ importers:
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules
+      '@repo/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@repo/static-analysis':
         specifier: workspace:*
         version: link:../static-analysis
