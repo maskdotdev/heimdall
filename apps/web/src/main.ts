@@ -2954,6 +2954,16 @@ type AdminBillingReconciliationRunSummary = {
   readonly status: string;
 };
 
+/** Durable sandbox cleanup job returned by the admin API. */
+type AdminSandboxCleanupRunSummary = {
+  /** Durable background job row ID. */
+  readonly backgroundJobId: string;
+  /** Durable job idempotency key. */
+  readonly jobKey: string;
+  /** Current durable job status. */
+  readonly status: string;
+};
+
 /** Mutable audit history view state. */
 type AuditViewState = {
   /** Organization filter. */
@@ -3000,6 +3010,20 @@ type SecurityEventViewState = {
   search: string;
   /** Loaded security event rows. */
   rows: readonly AdminSecurityEventSummary[];
+  /** Repository scope for manual sandbox cleanup. */
+  cleanupRepoId: string;
+  /** Sandbox run age in days selected for cleanup. */
+  cleanupOlderThanDays: string;
+  /** Maximum sandbox rows to process. */
+  cleanupLimit: string;
+  /** Whether the cleanup should run in dry-run mode. */
+  cleanupDryRun: string;
+  /** Last durable sandbox cleanup job created by the operator. */
+  cleanupRun?: AdminSandboxCleanupRunSummary | undefined;
+  /** Loading label for manual sandbox cleanup enqueueing. */
+  cleanupRunLoading?: string | undefined;
+  /** Error message from manual sandbox cleanup enqueueing. */
+  cleanupRunError?: string | undefined;
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -3474,6 +3498,10 @@ const state: AppState = {
     resourceId: initialRouteState.securityResourceId ?? "",
     search: initialRouteState.securitySearch ?? "",
     rows: [],
+    cleanupDryRun: "dry-run",
+    cleanupLimit: "100",
+    cleanupOlderThanDays: "30",
+    cleanupRepoId: "",
   },
   usage: {
     orgId: initialRouteState.usageOrgId ?? "",
@@ -3945,6 +3973,11 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "load-security") {
     await loadSecurityEvents();
+    return;
+  }
+
+  if (action === "run-sandbox-cleanup") {
+    await runSandboxCleanup();
     return;
   }
 
@@ -6014,6 +6047,29 @@ async function loadSecurityEvents(): Promise<void> {
     state.security.error = errorMessage(error);
   } finally {
     state.security.loading = undefined;
+    render();
+  }
+}
+
+/** Enqueues a manual sandbox cleanup job using the current security view controls. */
+async function runSandboxCleanup(): Promise<void> {
+  state.security.cleanupRunLoading = "Queueing sandbox cleanup";
+  state.security.cleanupRunError = undefined;
+  state.security.cleanupRun = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "repoId", state.security.cleanupRepoId);
+    appendQueryParam(params, "olderThanDays", state.security.cleanupOlderThanDays);
+    appendQueryParam(params, "limit", state.security.cleanupLimit);
+    params.set("dryRun", state.security.cleanupDryRun === "delete" ? "false" : "true");
+    state.security.cleanupRun = await requestAdminData<AdminSandboxCleanupRunSummary>(
+      `/admin/sandbox/cleanup/run?${params.toString()}`,
+      { method: "POST" },
+    );
+  } catch (error) {
+    state.security.cleanupRunError = errorMessage(error);
+  } finally {
+    state.security.cleanupRunLoading = undefined;
     render();
   }
 }
@@ -11224,9 +11280,56 @@ function renderSecurityEventView(): string {
           ${renderTextInput("security.orgId", "Organization ID", security.orgId, "org_...")}
         </div>
       </section>
+      ${renderSandboxCleanupPanel(security)}
       ${renderSecurityEventRows(security.rows)}
     </main>
   `;
+}
+
+/** Renders manual sandbox cleanup controls for operators. */
+function renderSandboxCleanupPanel(security: SecurityEventViewState): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Sandbox</p>
+          <h3>Retention Cleanup</h3>
+        </div>
+        <button
+          class="small"
+          data-action="run-sandbox-cleanup"
+          ${state.session?.capabilities.canManageSettings && !security.cleanupRunLoading ? "" : "disabled"}
+          type="button"
+        >
+          ${security.cleanupRunLoading ? "Queueing..." : "Queue cleanup"}
+        </button>
+      </div>
+      ${renderSandboxCleanupRunState(security)}
+      <div class="form-grid">
+        ${renderTextInput("security.cleanupRepoId", "Repository ID", security.cleanupRepoId, "repo_...")}
+        ${renderNumberInput("security.cleanupOlderThanDays", "Older than days", security.cleanupOlderThanDays, "1", "3650")}
+        ${renderNumberInput("security.cleanupLimit", "Row limit", security.cleanupLimit, "1", "1000")}
+        ${renderSelect("security.cleanupDryRun", "Mode", security.cleanupDryRun, ["dry-run", "delete"])}
+      </div>
+    </section>
+  `;
+}
+
+/** Renders the latest sandbox cleanup enqueue result. */
+function renderSandboxCleanupRunState(security: SecurityEventViewState): string {
+  if (security.cleanupRunError) {
+    return `<p class="error-line">${escapeHtml(security.cleanupRunError)}</p>`;
+  }
+  if (security.cleanupRun) {
+    return `
+      <p class="notice success">
+        Queued ${escapeHtml(shortHash(security.cleanupRun.backgroundJobId))}
+        with status ${escapeHtml(security.cleanupRun.status)}.
+      </p>
+    `;
+  }
+
+  return "";
 }
 
 /** Renders security event result rows. */
@@ -13381,9 +13484,12 @@ function updateAuditField(field: string, value: string): void {
 /** Updates one security event filter field. */
 function updateSecurityEventField(field: string, value: string): void {
   if (field in state.security) {
-    (state.security as Record<string, string | readonly AdminSecurityEventSummary[] | undefined>)[
-      field
-    ] = value;
+    (
+      state.security as Record<
+        string,
+        string | readonly AdminSecurityEventSummary[] | AdminSandboxCleanupRunSummary | undefined
+      >
+    )[field] = value;
   }
 }
 

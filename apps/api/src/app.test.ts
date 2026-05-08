@@ -5655,6 +5655,90 @@ describe("api app", () => {
     });
   });
 
+  it("enqueues scoped sandbox cleanup jobs for settings managers", async () => {
+    const cleanupQueries: unknown[] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        enqueueSandboxCleanup: async (query) => {
+          cleanupQueries.push(query);
+          return {
+            backgroundJobId: "job_sandbox_cleanup",
+            jobKey: "admin:sandbox:cleanup:repo_1:7d:dry_run:req_test",
+            status: "pending",
+          };
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.settings.manage"],
+      providerSubject: "usr_admin",
+    });
+
+    const response = await app.handle(
+      new Request(
+        "http://localhost/admin/sandbox/cleanup/run?repoId=repo_1&olderThanDays=7&limit=25",
+        {
+          headers: {
+            cookie: login.cookie,
+            origin: adminOrigin,
+            "x-csrf-token": login.csrfToken,
+          },
+          method: "POST",
+        },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(cleanupQueries).toContainEqual(
+      expect.objectContaining({
+        dryRun: true,
+        limit: 25,
+        olderThanDays: 7,
+        repoId: "repo_1",
+      }),
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        backgroundJobId: "job_sandbox_cleanup",
+        status: "pending",
+      },
+    });
+  });
+
+  it("requires repository scope for scoped sandbox cleanup operators", async () => {
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({}),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.settings.manage"],
+      providerSubject: "usr_admin",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/admin/sandbox/cleanup/run?dryRun=true", {
+        headers: {
+          cookie: login.cookie,
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "admin.sandbox_cleanup_scope_required",
+      },
+    });
+  });
+
   it("creates scoped billing checkout and portal sessions for billing managers", async () => {
     const checkoutRequests: unknown[] = [];
     const portalRequests: unknown[] = [];
@@ -6512,6 +6596,11 @@ function createMockControlPlaneService(
     enqueueBillingReconciliation: async () => ({
       backgroundJobId: "job_billing_reconcile",
       jobKey: "admin:billing:reconcile:org_1:stripe:2026-05",
+      status: "pending",
+    }),
+    enqueueSandboxCleanup: async () => ({
+      backgroundJobId: "job_sandbox_cleanup",
+      jobKey: "admin:sandbox:cleanup:repo_1:30d:dry_run:req_test",
       status: "pending",
     }),
     enqueueInstallationSync: async () => installationSyncRunFixture(),

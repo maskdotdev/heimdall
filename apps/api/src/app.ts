@@ -62,6 +62,7 @@ import {
   type Repository,
   type RepositorySettings,
   type ReviewPullRequestJobPayload,
+  type SandboxCleanupJobPayload,
   type SyncInstallationJobPayload,
   safeParseWithSchema,
   type TestRepositoryPolicyRequest,
@@ -2480,6 +2481,38 @@ type AdminBillingReconciliationRunSummary = {
   readonly status: string;
 };
 
+/** Query options for manual sandbox retention cleanup enqueueing. */
+type AdminSandboxCleanupQuery = {
+  /** Delete sandbox runs before this timestamp. */
+  readonly before?: string | undefined;
+  /** Whether the worker should only report selected rows without deleting them. */
+  readonly dryRun: boolean;
+  /** Maximum sandbox run rows to process. */
+  readonly limit: number;
+  /** Delete sandbox runs older than this many days when `before` is not set. */
+  readonly olderThanDays?: number | undefined;
+  /** Repository scope for the cleanup job. Required for scoped admins. */
+  readonly repoId?: string | undefined;
+};
+
+/** Request used to enqueue a durable sandbox cleanup job. */
+type AdminSandboxCleanupEnqueueRequest = AdminSandboxCleanupQuery & {
+  /** Product-safe trace context propagated into durable work. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
+  /** Request ID that authorized the enqueue when available. */
+  readonly requestId?: string | undefined;
+};
+
+/** Durable sandbox cleanup job returned after an operator triggers cleanup. */
+type AdminSandboxCleanupRunSummary = {
+  /** Durable background job row ID. */
+  readonly backgroundJobId: string;
+  /** Durable job idempotency key. */
+  readonly jobKey: string;
+  /** Current durable job status. */
+  readonly status: string;
+};
+
 /** Billing checkout mutation request after scope and idempotency are resolved. */
 type ScopedAdminBillingCheckoutRequest = CreateBillingCheckoutSessionRequest & {
   /** Organization that owns the checkout session. */
@@ -2883,6 +2916,10 @@ export type AdminControlPlaneService = {
   readonly enqueueBillingReconciliation: (
     query: AdminBillingReconciliationEnqueueRequest,
   ) => Promise<AdminBillingReconciliationRunSummary>;
+  /** Enqueues a durable sandbox cleanup job. */
+  readonly enqueueSandboxCleanup: (
+    query: AdminSandboxCleanupEnqueueRequest,
+  ) => Promise<AdminSandboxCleanupRunSummary>;
   /** Creates a provider checkout session for an organization billing account. */
   readonly createBillingCheckoutSession: (
     request: ScopedAdminBillingCheckoutRequest,
@@ -7042,6 +7079,54 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         },
       };
     })
+    .post("/admin/sandbox/cleanup/run", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.settings.manage",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const query = sandboxCleanupQueryFromUrl(new URL(request.url));
+      const authorizationResponse = await guardSandboxCleanupQueryScope(
+        guardResult.actor,
+        query,
+        set,
+        getAdminControlPlaneService(),
+      );
+      if (authorizationResponse) {
+        return authorizationResponse;
+      }
+
+      const run = await getAdminControlPlaneService().enqueueSandboxCleanup({
+        ...query,
+        requestId: guardResult.requestId,
+        traceContext: guardResult.traceContext,
+      });
+      await getAdminControlPlaneService().recordAuditEvent({
+        action: "sandbox.cleanup.enqueued",
+        actor: guardResult.actor,
+        metadata: {
+          before: query.before,
+          dryRun: query.dryRun,
+          jobKey: run.jobKey,
+          limit: query.limit,
+          olderThanDays: query.olderThanDays,
+          repoId: query.repoId,
+          requestId: guardResult.requestId,
+        },
+        requestId: guardResult.requestId,
+        resourceId: run.backgroundJobId,
+        resourceType: "background_job",
+        sessionId: guardResult.session.sessionId,
+      });
+
+      return { data: run };
+    })
     .get("/admin/usage", async ({ request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -7477,6 +7562,7 @@ function createAdminControlPlaneService(dependencies: {
     deleteRepositoryRule: (repoId, ruleId, audit) =>
       deleteRepositoryRule(dependencies.db, repoId, ruleId, audit),
     enqueueBillingReconciliation: (query) => enqueueBillingReconciliation(dependencies.db, query),
+    enqueueSandboxCleanup: (query) => enqueueSandboxCleanup(dependencies.db, query),
     enqueueInstallationSync: (installationId, request) =>
       enqueueInstallationSync(dependencies.db, installationId, request),
     enqueueReviewRerun: (reviewRunId, request) =>
@@ -12259,6 +12345,62 @@ function billingReconciliationJobPayload(
   };
 }
 
+/** Enqueues a durable sandbox retention cleanup job. */
+async function enqueueSandboxCleanup(
+  db: HeimdallDatabase,
+  query: AdminSandboxCleanupEnqueueRequest,
+): Promise<AdminSandboxCleanupRunSummary> {
+  const payload = sandboxCleanupJobPayload(query);
+  const cleanupTarget = payload.repoId ?? "all";
+  const cutoff = payload.before ?? `${payload.olderThanDays ?? 30}d`;
+  const mode = payload.dryRun ? "dry_run" : "delete";
+  const jobKey = [
+    "admin:sandbox:cleanup",
+    cleanupTarget,
+    cutoff,
+    mode,
+    query.requestId ?? new Date().toISOString(),
+  ].join(":");
+  const envelope: JobEnvelope<SandboxCleanupJobPayload> = {
+    attempt: 0,
+    createdAt: new Date().toISOString(),
+    idempotencyKey: jobKey,
+    jobId: stablePrefixedId("job", ["sandbox_cleanup", jobKey]),
+    jobType: JOB_TYPES.SandboxCleanup,
+    maxAttempts: 3,
+    payload,
+    schemaVersion: "sandbox_cleanup_job.v1",
+    ...(query.traceContext ? { traceContext: query.traceContext } : {}),
+  };
+  const { job } = await new BackgroundJobRepository(db).insertBackgroundJob({
+    backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+    envelope,
+    metadata: {
+      dryRun: payload.dryRun ?? false,
+      limit: payload.limit ?? 100,
+      requestId: query.requestId,
+      source: "admin_sandbox_cleanup",
+      target: cleanupTarget,
+    },
+    queueName: QUEUE_NAMES.security,
+    ...(payload.repoId ? { repoId: payload.repoId } : {}),
+  });
+
+  return toAdminBackgroundJobRunSummary(job);
+}
+
+/** Builds a contract-compatible sandbox cleanup job payload. */
+function sandboxCleanupJobPayload(query: AdminSandboxCleanupQuery): SandboxCleanupJobPayload {
+  return {
+    dryRun: query.dryRun,
+    limit: query.limit,
+    reason: "manual",
+    ...(query.before ? { before: query.before } : {}),
+    ...(query.olderThanDays ? { olderThanDays: query.olderThanDays } : {}),
+    ...(query.repoId ? { repoId: query.repoId } : {}),
+  };
+}
+
 /** Creates a provider checkout session for one scoped organization. */
 async function createBillingCheckoutSession(
   db: HeimdallDatabase,
@@ -14950,6 +15092,31 @@ function guardBillingQueryScope(
   return undefined;
 }
 
+/** Guards repository scope for manual sandbox cleanup jobs. */
+async function guardSandboxCleanupQueryScope(
+  actor: AdminActor,
+  query: AdminSandboxCleanupQuery,
+  set: AdminStatusSet,
+  service: AdminControlPlaneService,
+): Promise<AdminErrorResponse | undefined> {
+  if (query.repoId) {
+    return guardRepoIdScopedAccess(actor, query.repoId, set, service);
+  }
+
+  if (!actor.orgIds.includes("*")) {
+    set.status = 403;
+    return {
+      error: {
+        code: "admin.sandbox_cleanup_scope_required",
+        message:
+          "Sandbox cleanup requires a repoId filter unless the actor has all-organization scope.",
+      },
+    };
+  }
+
+  return undefined;
+}
+
 /** Applies security, request ID, cookie, and strict CORS response headers. */
 function setAdminResponseHeaders(
   request: Request,
@@ -16759,6 +16926,17 @@ function billingReconciliationQueryFromUrl(
     periodEnd: optionalIsoQueryString(url, "periodEnd"),
     periodKey: optionalQueryString(url, "periodKey"),
     periodStart: optionalIsoQueryString(url, "periodStart"),
+  };
+}
+
+/** Converts a URL into a manual sandbox cleanup enqueue request. */
+function sandboxCleanupQueryFromUrl(url: URL): AdminSandboxCleanupQuery {
+  return {
+    before: optionalIsoQueryString(url, "before"),
+    dryRun: optionalBooleanQuery(url, "dryRun") ?? true,
+    limit: Math.min(optionalPositiveIntegerQuery(url, "limit") ?? 100, 1_000),
+    olderThanDays: optionalPositiveIntegerQuery(url, "olderThanDays"),
+    repoId: optionalQueryString(url, "repoId"),
   };
 }
 

@@ -1090,7 +1090,8 @@ tracked milestone.
   environment overrides, and production workers now reject `fake` and `local_process` sandbox
   runners before static-analysis tool execution can start. `sandbox.cleanup.v1` jobs now provide a
   bounded scheduled/operator cleanup path for stale sandbox runs and local file artifacts, including
-  dry-run support and repository scoping. Maintenance-capable worker runtimes now enqueue
+  an audited admin API/dashboard enqueue control with dry-run defaults and repository scoping.
+  Maintenance-capable worker runtimes now enqueue
   idempotent recurring retention cleanup jobs for sandbox runs and expired review artifact payloads
   with configurable interval, limits, dry-run mode, and sandbox age.
 - Latest sandbox DB milestone: `@repo/db` now defines `sandbox_runs`, `sandbox_artifacts`, and
