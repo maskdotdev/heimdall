@@ -9,6 +9,7 @@ import {
 import type {
   CloneAuth,
   CreateOrUpdateCheckRunInput,
+  DeleteProviderCommentInput,
   ExistingBotComment,
   ExistingReviewThreadState,
   FetchFileContentInput,
@@ -23,6 +24,7 @@ import type {
   PublishReviewInput,
   PublishSummaryCommentInput,
   PullRequestSnapshotWithRawDiff,
+  RedactProviderCheckRunInput,
   SyncInstallationInput,
   SyncInstallationResult,
 } from "./types";
@@ -74,6 +76,15 @@ export class FakeGitProvider implements GitProvider {
 
   /** Check-run inputs in call order. */
   public readonly checkRuns: CreateOrUpdateCheckRunInput[] = [];
+
+  /** Issue comment IDs deleted through provider cleanup. */
+  public readonly deletedIssueComments: DeleteProviderCommentInput[] = [];
+
+  /** Pull-request review comment IDs deleted through provider cleanup. */
+  public readonly deletedReviewComments: DeleteProviderCommentInput[] = [];
+
+  /** Check-run redaction inputs in call order. */
+  public readonly redactedCheckRuns: RedactProviderCheckRunInput[] = [];
 
   private readonly repositories: readonly Repository[];
   private readonly pullRequestSnapshots: Map<string, PullRequestSnapshot>;
@@ -220,6 +231,37 @@ export class FakeGitProvider implements GitProvider {
   /** Fetches seeded review thread states. */
   public async fetchReviewThreadStates(): Promise<readonly ExistingReviewThreadState[]> {
     return this.reviewThreadStates;
+  }
+
+  /** Deletes a seeded issue comment by provider ID. */
+  public async deleteIssueComment(input: DeleteProviderCommentInput): Promise<void> {
+    this.deletedIssueComments.push(input);
+    const commentIndex = this.botComments.findIndex(
+      (comment) => comment.providerCommentId === input.providerCommentId,
+    );
+    if (commentIndex >= 0) {
+      this.botComments.splice(commentIndex, 1);
+    }
+  }
+
+  /** Deletes a seeded pull-request review comment by provider ID. */
+  public async deleteReviewComment(input: DeleteProviderCommentInput): Promise<void> {
+    this.deletedReviewComments.push(input);
+    const commentIndex = this.reviewComments.findIndex(
+      (comment) => comment.providerCommentId === input.providerCommentId,
+    );
+    if (commentIndex >= 0) {
+      this.reviewComments.splice(commentIndex, 1);
+    }
+  }
+
+  /** Records a fake check-run redaction request. */
+  public async redactCheckRun(input: RedactProviderCheckRunInput): Promise<ProviderCheckRun> {
+    this.redactedCheckRuns.push(input);
+    return {
+      providerCheckRunId: input.providerCheckRunId,
+      htmlUrl: `https://github.example/${input.owner}/${input.repo}/checks/${input.providerCheckRunId}`,
+    };
   }
 
   /** Publishes a fake review and records the input. */

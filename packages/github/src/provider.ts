@@ -30,6 +30,7 @@ import type {
   CheckRunAnnotation,
   CloneAuth,
   CreateOrUpdateCheckRunInput,
+  DeleteProviderCommentInput,
   ExistingBotComment,
   ExistingReviewThreadState,
   FetchFileContentInput,
@@ -51,6 +52,7 @@ import type {
   PublishReviewInput,
   PublishSummaryCommentInput,
   PullRequestSnapshotWithRawDiff,
+  RedactProviderCheckRunInput,
   SyncInstallationInput,
   SyncInstallationResult,
 } from "./types";
@@ -566,6 +568,32 @@ export class GitHubAppProvider implements GitProvider {
     }));
   }
 
+  /** Deletes a provider issue comment, including PR summary comments. */
+  public async deleteIssueComment(input: DeleteProviderCommentInput): Promise<void> {
+    await this.requestInstallation<void>(
+      input,
+      `/repos/${input.owner}/${input.repo}/issues/comments/${encodeURIComponent(
+        input.providerCommentId,
+      )}`,
+      {
+        method: "DELETE",
+      },
+    );
+  }
+
+  /** Deletes a provider pull-request review comment. */
+  public async deleteReviewComment(input: DeleteProviderCommentInput): Promise<void> {
+    await this.requestInstallation<void>(
+      input,
+      `/repos/${input.owner}/${input.repo}/pulls/comments/${encodeURIComponent(
+        input.providerCommentId,
+      )}`,
+      {
+        method: "DELETE",
+      },
+    );
+  }
+
   /** Publishes a PR review with inline comments. */
   public async publishReview(input: PublishReviewInput): Promise<PublishedReview> {
     return await this.withGitHubSpan(
@@ -766,6 +794,34 @@ export class GitHubAppProvider implements GitProvider {
         };
       },
     );
+  }
+
+  /** Redacts provider check-run output when GitHub does not support deleting check runs. */
+  public async redactCheckRun(input: RedactProviderCheckRunInput): Promise<ProviderCheckRun> {
+    const checkRun = await this.requestInstallation<JsonRecord>(
+      input,
+      `/repos/${input.owner}/${input.repo}/check-runs/${encodeURIComponent(
+        input.providerCheckRunId,
+      )}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "completed",
+          conclusion: "neutral",
+          output: {
+            title: "Heimdall review data removed",
+            summary: `Heimdall removed this check-run output for ${input.reason}.`,
+            text: "",
+            annotations: [],
+          },
+        }),
+      },
+    );
+
+    return {
+      providerCheckRunId: asString(checkRun, "id"),
+      ...withOptional("htmlUrl", optionalString(checkRun, "html_url")),
+    };
   }
 
   /** Publishes a summary issue comment. */

@@ -4,14 +4,18 @@ import type {
   DataDeletionScope,
   DataDeletionStatus,
 } from "@repo/contracts";
-import { and, asc, desc, eq, inArray, like, not, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, like, not, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   backgroundJobs,
   codeChunkEmbeddings,
   dataDeletionRequests,
+  publishedCheckRuns,
+  publishedFindings,
+  publishedSummaryComments,
   repositories,
   reviewArtifacts,
+  reviewRuns,
 } from "../schema";
 
 /** Database surface required by the data-deletion repository. */
@@ -88,6 +92,40 @@ export type ListDataDeletionReviewArtifactTargetsInput = {
   readonly limit: number;
   /** Repository IDs covered by the deletion request. */
   readonly repoIds: readonly string[];
+};
+
+/** Provider artifact kinds that can be cleaned up during data deletion. */
+export type DataDeletionProviderPublicationTargetKind =
+  | "check_run"
+  | "issue_comment"
+  | "review_comment";
+
+/** Input used to list provider-visible publication artifacts for deletion. */
+export type ListDataDeletionProviderPublicationTargetsInput = {
+  /** Provider discriminator. */
+  readonly provider: string;
+  /** Repository IDs covered by the deletion request. */
+  readonly repoIds: readonly string[];
+  /** Maximum rows to return. */
+  readonly limit: number;
+};
+
+/** Provider-visible publication artifact selected for data deletion. */
+export type DataDeletionProviderPublicationTargetRecord = {
+  /** Target artifact kind. */
+  readonly kind: DataDeletionProviderPublicationTargetKind;
+  /** Provider discriminator. */
+  readonly provider: string;
+  /** Provider resource ID used by the remote API. */
+  readonly providerResourceId: string;
+  /** Stable repository ID that owns the provider artifact. */
+  readonly repoId: string;
+  /** Review run that produced the provider artifact. */
+  readonly reviewRunId: string;
+  /** Source table for product-safe deletion evidence. */
+  readonly sourceTable: string;
+  /** Durable source row ID. */
+  readonly sourceRowId: string;
 };
 
 /** Review artifact payload selected for data-deletion tombstoning. */
@@ -167,6 +205,7 @@ export type DataDeletionRequestRecord = {
 const maxDataDeletionRequestListLimit = 100;
 const maxDataDeletionRepositoryScopeLimit = 10_000;
 const maxDataDeletionArtifactTargetLimit = 1_000;
+const maxDataDeletionProviderTargetLimit = 1_000;
 
 /** Query helper for durable customer-data deletion requests. */
 export class DataDeletionRepository {
@@ -340,6 +379,114 @@ export class DataDeletionRepository {
     return rows.length;
   }
 
+  /** Lists provider-visible publication artifacts that need remote cleanup. */
+  public async listProviderPublicationDeletionTargets(
+    input: ListDataDeletionProviderPublicationTargetsInput,
+  ): Promise<readonly DataDeletionProviderPublicationTargetRecord[]> {
+    const uniqueRepoIds = uniqueStableStrings(input.repoIds);
+    if (uniqueRepoIds.length === 0) {
+      return [];
+    }
+
+    const limit = normalizeDataDeletionProviderTargetLimit(input.limit);
+    const [reviewComments, summaryComments, checkRuns] = await Promise.all([
+      this.db
+        .select({
+          provider: publishedFindings.provider,
+          providerResourceId: publishedFindings.providerCommentId,
+          repoId: reviewRuns.repoId,
+          reviewRunId: publishedFindings.reviewRunId,
+          sourceRowId: publishedFindings.findingId,
+        })
+        .from(publishedFindings)
+        .innerJoin(reviewRuns, eq(reviewRuns.reviewRunId, publishedFindings.reviewRunId))
+        .where(
+          and(
+            eq(publishedFindings.provider, input.provider),
+            inArray(reviewRuns.repoId, [...uniqueRepoIds]),
+            isNotNull(publishedFindings.providerCommentId),
+          ),
+        )
+        .orderBy(asc(publishedFindings.reviewRunId), asc(publishedFindings.findingId))
+        .limit(limit),
+      this.db
+        .select({
+          provider: publishedSummaryComments.provider,
+          providerResourceId: publishedSummaryComments.providerCommentId,
+          repoId: reviewRuns.repoId,
+          reviewRunId: publishedSummaryComments.reviewRunId,
+          sourceRowId: publishedSummaryComments.publishedSummaryCommentId,
+        })
+        .from(publishedSummaryComments)
+        .innerJoin(reviewRuns, eq(reviewRuns.reviewRunId, publishedSummaryComments.reviewRunId))
+        .where(
+          and(
+            eq(publishedSummaryComments.provider, input.provider),
+            inArray(reviewRuns.repoId, [...uniqueRepoIds]),
+          ),
+        )
+        .orderBy(
+          asc(publishedSummaryComments.reviewRunId),
+          asc(publishedSummaryComments.publishedSummaryCommentId),
+        )
+        .limit(limit),
+      this.db
+        .select({
+          provider: publishedCheckRuns.provider,
+          providerResourceId: publishedCheckRuns.providerCheckRunId,
+          repoId: reviewRuns.repoId,
+          reviewRunId: publishedCheckRuns.reviewRunId,
+          sourceRowId: publishedCheckRuns.publishedCheckRunId,
+        })
+        .from(publishedCheckRuns)
+        .innerJoin(reviewRuns, eq(reviewRuns.reviewRunId, publishedCheckRuns.reviewRunId))
+        .where(
+          and(
+            eq(publishedCheckRuns.provider, input.provider),
+            inArray(reviewRuns.repoId, [...uniqueRepoIds]),
+          ),
+        )
+        .orderBy(asc(publishedCheckRuns.reviewRunId), asc(publishedCheckRuns.publishedCheckRunId))
+        .limit(limit),
+    ]);
+
+    return [
+      ...reviewComments.flatMap((row) =>
+        row.providerResourceId
+          ? [
+              {
+                kind: "review_comment" as const,
+                provider: row.provider,
+                providerResourceId: row.providerResourceId,
+                repoId: row.repoId,
+                reviewRunId: row.reviewRunId,
+                sourceRowId: row.sourceRowId,
+                sourceTable: "published_findings",
+              },
+            ]
+          : [],
+      ),
+      ...summaryComments.map((row) => ({
+        kind: "issue_comment" as const,
+        provider: row.provider,
+        providerResourceId: row.providerResourceId,
+        repoId: row.repoId,
+        reviewRunId: row.reviewRunId,
+        sourceRowId: row.sourceRowId,
+        sourceTable: "published_summary_comments",
+      })),
+      ...checkRuns.map((row) => ({
+        kind: "check_run" as const,
+        provider: row.provider,
+        providerResourceId: row.providerResourceId,
+        repoId: row.repoId,
+        reviewRunId: row.reviewRunId,
+        sourceRowId: row.sourceRowId,
+        sourceTable: "published_check_runs",
+      })),
+    ].slice(0, limit);
+  }
+
   /** Cancels pending or queued durable jobs covered by a deletion request. */
   public async cancelPendingBackgroundJobsForDeletionScope(
     input: CancelPendingDataDeletionJobsInput,
@@ -434,6 +581,17 @@ function normalizeDataDeletionArtifactTargetLimit(limit: number): number {
   if (!Number.isInteger(limit) || limit < 1 || limit > maxDataDeletionArtifactTargetLimit) {
     throw new Error(
       `limit must be an integer between 1 and ${maxDataDeletionArtifactTargetLimit}.`,
+    );
+  }
+
+  return limit;
+}
+
+/** Returns a bounded provider-artifact deletion target limit. */
+function normalizeDataDeletionProviderTargetLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > maxDataDeletionProviderTargetLimit) {
+    throw new Error(
+      `limit must be an integer between 1 and ${maxDataDeletionProviderTargetLimit}.`,
     );
   }
 

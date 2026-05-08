@@ -55,6 +55,12 @@ const textResponse = (value: string, status = 200): Response =>
     headers: { "content-type": "text/plain", "x-github-request-id": "request-1" },
   });
 
+const noContentResponse = (): Response =>
+  new Response(null, {
+    status: 204,
+    headers: { "x-github-request-id": "request-1" },
+  });
+
 const createMockFetch = (routes: readonly MockRoute[]): MockFetch => {
   const calls: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
   const fetcher: GitHubFetch = async (url, init) => {
@@ -779,6 +785,63 @@ describe("GitHubAppProvider", () => {
     ).resolves.toMatchObject({ providerCheckRunId: "15" });
   });
 
+  it("deletes provider comments and redacts check runs for data deletion", async () => {
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url, init) =>
+          url.endsWith("/repos/acme/api/issues/comments/14") && init?.method === "DELETE",
+        response: noContentResponse(),
+      },
+      {
+        match: (url, init) =>
+          url.endsWith("/repos/acme/api/pulls/comments/13") && init?.method === "DELETE",
+        response: noContentResponse(),
+      },
+      {
+        match: (url, init) =>
+          url.endsWith("/repos/acme/api/check-runs/15") && init?.method === "PATCH",
+        response: jsonResponse({ id: 15, html_url: "https://github.com/acme/api/checks/15" }),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+    const ref = {
+      provider: "github" as const,
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+    };
+
+    await expect(
+      provider.deleteIssueComment?.({ ...ref, providerCommentId: "14" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      provider.deleteReviewComment?.({ ...ref, providerCommentId: "13" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      provider.redactCheckRun?.({
+        ...ref,
+        providerCheckRunId: "15",
+        reason: "data_deletion",
+      }),
+    ).resolves.toEqual({
+      providerCheckRunId: "15",
+      htmlUrl: "https://github.com/acme/api/checks/15",
+    });
+
+    const checkRunCall = fetcher.calls.find(
+      (call) => call.url.endsWith("/repos/acme/api/check-runs/15") && call.init?.method === "PATCH",
+    );
+    expect(JSON.parse(String(checkRunCall?.init?.body))).toMatchObject({
+      conclusion: "neutral",
+      output: {
+        annotations: [],
+        title: "Heimdall review data removed",
+      },
+      status: "completed",
+    });
+  });
+
   it("dedupes summary comments by hidden marker", async () => {
     const fetcher = createMockFetch([
       tokenRoute,
@@ -924,10 +987,35 @@ describe("GitHubAppProvider", () => {
       summary: "Done",
       annotations: [] satisfies CheckRunAnnotation[],
     });
+    await provider.deleteIssueComment({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      providerCommentId: "summary_1",
+    });
+    await provider.deleteReviewComment({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      providerCommentId: "comment_1",
+    });
+    await provider.redactCheckRun({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      providerCheckRunId: "check_1",
+      reason: "data_deletion",
+    });
 
     expect(provider.publishedReviews).toHaveLength(1);
     expect(provider.publishedSummaryComments).toHaveLength(1);
     expect(provider.checkRuns).toHaveLength(1);
+    expect(provider.deletedIssueComments).toHaveLength(1);
+    expect(provider.deletedReviewComments).toHaveLength(1);
+    expect(provider.redactedCheckRuns).toHaveLength(1);
   });
 
   it("maps GitHub API errors to typed provider errors", async () => {

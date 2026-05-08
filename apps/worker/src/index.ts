@@ -56,6 +56,7 @@ import {
   type CreateFeedbackSignalInput,
   type CreateMemoryCandidateInput,
   createDatabaseClient,
+  type DataDeletionProviderPublicationTargetRecord,
   DataDeletionRepository,
   FeedbackRepository,
   type FindingOutcomeRecord,
@@ -88,6 +89,7 @@ import {
   createGitHubProvider,
   type ExistingReviewThreadState,
   type GitHubInstallationRef,
+  GitHubNotFoundError,
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
@@ -238,6 +240,8 @@ const DATA_DELETION_REVIEW_ARTIFACT_BATCH_SIZE = 250;
 const DATA_DELETION_REVIEW_ARTIFACT_MAX_BATCHES = 40;
 /** Maximum sandbox runs deleted per repository during one data-deletion job. */
 const DATA_DELETION_SANDBOX_RUN_LIMIT = 1_000;
+/** Maximum provider-visible artifacts cleaned up during one data-deletion job. */
+const DATA_DELETION_PROVIDER_ARTIFACT_LIMIT = 1_000;
 /** Maximum chunk IDs placed in one repair-triggered embedding batch. */
 const EMBEDDING_REPAIR_BATCH_SIZE = 128;
 /** Maximum completed review runs inspected by one scheduled thread reconciliation job. */
@@ -1138,6 +1142,8 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           options.db,
           payload.dataDeletionRequestId,
           options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
+          new Date(),
+          options.gitProvider,
         );
         recordWorkerDataDeletionSecurityEvent({
           payload,
@@ -1750,6 +1756,20 @@ export type DataDeletionExecutionSummary = {
   readonly deletedSandboxArtifactFileCount: number;
   /** Number of sandbox artifact URIs skipped by local file cleanup. */
   readonly skippedSandboxArtifactFileCount: number;
+  /** Number of provider-visible artifacts selected for remote cleanup. */
+  readonly selectedProviderArtifactCount: number;
+  /** Number of provider issue comments deleted remotely. */
+  readonly deletedProviderIssueCommentCount: number;
+  /** Number of provider pull-request review comments deleted remotely. */
+  readonly deletedProviderReviewCommentCount: number;
+  /** Number of provider check runs redacted remotely. */
+  readonly redactedProviderCheckRunCount: number;
+  /** Number of provider-visible artifacts already absent remotely. */
+  readonly missingProviderArtifactCount: number;
+  /** Number of provider-visible artifacts skipped because cleanup was unavailable. */
+  readonly skippedProviderArtifactCount: number;
+  /** Number of provider-visible artifact cleanup attempts that failed. */
+  readonly failedProviderArtifactCount: number;
   /** Repository IDs covered by the request. */
   readonly repoIds: readonly string[];
   /** Verification evidence URI stored on the request when deletion completed. */
@@ -1798,6 +1818,7 @@ export async function executeDataDeletionRequest(
   dataDeletionRequestId: string,
   artifactPayloadStore: ReviewArtifactPayloadStore = new InlineReviewArtifactPayloadStore(),
   now: Date = new Date(),
+  gitProvider?: GitProvider,
 ): Promise<DataDeletionExecutionSummary> {
   const repository = new DataDeletionRepository(db);
   const request = await repository.getDataDeletionRequest(dataDeletionRequestId);
@@ -1855,6 +1876,13 @@ export async function executeDataDeletionRequest(
   });
   const sandboxSummary = await cleanupSandboxRunsForDataDeletion(db, repoIds, now);
   const deletedEmbeddingCount = await repository.deleteCodeChunkEmbeddingsForRepositories(repoIds);
+  const providerSummary = await cleanupProviderArtifactsForDataDeletion({
+    dataDeletionRepository: repository,
+    db,
+    gitProvider,
+    reason: request.reason,
+    repoIds,
+  });
   const verificationArtifactUri = dataDeletionVerificationArtifactUri(dataDeletionRequestId);
   const summary: DataDeletionExecutionSummary = {
     alreadyTerminal: false,
@@ -1864,19 +1892,28 @@ export async function executeDataDeletionRequest(
     deletedReviewArtifactPayloadCount: reviewArtifactSummary.deletedPayloadCount,
     deletedSandboxArtifactFileCount: sandboxSummary.deletedArtifactFileCount,
     deletedSandboxRunCount: sandboxSummary.deletedRunCount,
+    deletedProviderIssueCommentCount: providerSummary.deletedIssueCommentCount,
+    deletedProviderReviewCommentCount: providerSummary.deletedReviewCommentCount,
     disabledRepositoryCount,
+    failedProviderArtifactCount: providerSummary.failedArtifactCount,
     failedReviewArtifactPayloadCount: reviewArtifactSummary.failedPayloadCount,
+    missingProviderArtifactCount: providerSummary.missingArtifactCount,
     missingReviewArtifactPayloadCount: reviewArtifactSummary.missingPayloadCount,
+    redactedProviderCheckRunCount: providerSummary.redactedCheckRunCount,
     repoIds,
+    selectedProviderArtifactCount: providerSummary.selectedArtifactCount,
     selectedReviewArtifactCount: reviewArtifactSummary.selectedArtifactCount,
     selectedSandboxRunCount: sandboxSummary.selectedRunCount,
+    skippedProviderArtifactCount: providerSummary.skippedArtifactCount,
     skippedSandboxArtifactFileCount: sandboxSummary.skippedArtifactFileCount,
     tombstonedReviewArtifactCount: reviewArtifactSummary.tombstonedArtifactCount,
     verificationArtifactUri,
   };
   const completedAt = now;
   const failed =
-    reviewArtifactSummary.failedPayloadCount > 0 || reviewArtifactSummary.batchLimitReached;
+    reviewArtifactSummary.failedPayloadCount > 0 ||
+    reviewArtifactSummary.batchLimitReached ||
+    providerSummary.failedArtifactCount > 0;
 
   await repository.updateDataDeletionRequestStatus({
     completedAt,
@@ -2061,6 +2098,228 @@ async function cleanupSandboxRunsForDataDeletion(
   );
 }
 
+/** Provider cleanup counters for one data-deletion execution. */
+type DataDeletionProviderCleanupSummary = {
+  /** Number of issue comments deleted remotely. */
+  readonly deletedIssueCommentCount: number;
+  /** Number of pull-request review comments deleted remotely. */
+  readonly deletedReviewCommentCount: number;
+  /** Number of cleanup attempts that failed. */
+  readonly failedArtifactCount: number;
+  /** Number of provider artifacts already absent remotely. */
+  readonly missingArtifactCount: number;
+  /** Number of check runs redacted remotely. */
+  readonly redactedCheckRunCount: number;
+  /** Number of provider artifacts selected for cleanup. */
+  readonly selectedArtifactCount: number;
+  /** Number of selected provider artifacts skipped because cleanup was unavailable. */
+  readonly skippedArtifactCount: number;
+};
+
+/** Mutable provider cleanup counters used while processing deletion targets. */
+type MutableDataDeletionProviderCleanupSummary = {
+  -readonly [Key in keyof DataDeletionProviderCleanupSummary]: DataDeletionProviderCleanupSummary[Key];
+};
+
+/** Input used to clean provider-visible artifacts for a data-deletion request. */
+type CleanupProviderArtifactsForDataDeletionInput = {
+  /** Data-deletion query helper. */
+  readonly dataDeletionRepository: DataDeletionRepository;
+  /** Database used to load provider repository references. */
+  readonly db: HeimdallDatabase;
+  /** Optional Git provider with remote cleanup methods. */
+  readonly gitProvider?: GitProvider | undefined;
+  /** Data-deletion reason. */
+  readonly reason: DataDeletionPlanJobPayload["reason"];
+  /** Repository IDs covered by the deletion request. */
+  readonly repoIds: readonly string[];
+};
+
+/** Deletes or redacts provider-visible artifacts for scoped repositories. */
+async function cleanupProviderArtifactsForDataDeletion(
+  input: CleanupProviderArtifactsForDataDeletionInput,
+): Promise<DataDeletionProviderCleanupSummary> {
+  if (!input.gitProvider || input.reason === "app_uninstalled") {
+    return emptyDataDeletionProviderCleanupSummary();
+  }
+
+  const targets = await input.dataDeletionRepository.listProviderPublicationDeletionTargets({
+    limit: DATA_DELETION_PROVIDER_ARTIFACT_LIMIT,
+    provider: "github",
+    repoIds: input.repoIds,
+  });
+  const repositoriesById = new Map<string, GitHubRepositoryRef>();
+  const summary = mutableDataDeletionProviderCleanupSummary(targets.length);
+
+  for (const target of targets) {
+    try {
+      const repository = await loadDataDeletionProviderRepositoryRef(
+        input.db,
+        repositoriesById,
+        target,
+      );
+      const result = await cleanupOneProviderArtifact({
+        gitProvider: input.gitProvider,
+        repository,
+        target,
+      });
+
+      summary.deletedIssueCommentCount += result.deletedIssueCommentCount;
+      summary.deletedReviewCommentCount += result.deletedReviewCommentCount;
+      summary.redactedCheckRunCount += result.redactedCheckRunCount;
+      summary.skippedArtifactCount += result.skippedArtifactCount;
+    } catch (error) {
+      if (error instanceof GitHubNotFoundError) {
+        summary.missingArtifactCount += 1;
+        continue;
+      }
+
+      summary.failedArtifactCount += 1;
+    }
+  }
+
+  return summary;
+}
+
+/** Cleanup result for one provider-visible artifact. */
+type CleanupOneProviderArtifactResult = {
+  /** Number of issue comments deleted remotely. */
+  readonly deletedIssueCommentCount: number;
+  /** Number of pull-request review comments deleted remotely. */
+  readonly deletedReviewCommentCount: number;
+  /** Number of check runs redacted remotely. */
+  readonly redactedCheckRunCount: number;
+  /** Number of artifacts skipped because the provider method is unavailable. */
+  readonly skippedArtifactCount: number;
+};
+
+/** Input used to clean one provider-visible artifact. */
+type CleanupOneProviderArtifactInput = {
+  /** Git provider with optional cleanup methods. */
+  readonly gitProvider: GitProvider;
+  /** Repository provider reference that owns the artifact. */
+  readonly repository: GitHubRepositoryRef;
+  /** Provider-visible artifact target. */
+  readonly target: DataDeletionProviderPublicationTargetRecord;
+};
+
+/** Cleans one provider-visible artifact and returns product-safe counters. */
+async function cleanupOneProviderArtifact(
+  input: CleanupOneProviderArtifactInput,
+): Promise<CleanupOneProviderArtifactResult> {
+  switch (input.target.kind) {
+    case "issue_comment":
+      if (!input.gitProvider.deleteIssueComment) {
+        return providerArtifactCleanupSkipped();
+      }
+      await input.gitProvider.deleteIssueComment({
+        ...input.repository,
+        providerCommentId: input.target.providerResourceId,
+      });
+      return {
+        deletedIssueCommentCount: 1,
+        deletedReviewCommentCount: 0,
+        redactedCheckRunCount: 0,
+        skippedArtifactCount: 0,
+      };
+    case "review_comment":
+      if (!input.gitProvider.deleteReviewComment) {
+        return providerArtifactCleanupSkipped();
+      }
+      await input.gitProvider.deleteReviewComment({
+        ...input.repository,
+        providerCommentId: input.target.providerResourceId,
+      });
+      return {
+        deletedIssueCommentCount: 0,
+        deletedReviewCommentCount: 1,
+        redactedCheckRunCount: 0,
+        skippedArtifactCount: 0,
+      };
+    case "check_run":
+      if (!input.gitProvider.redactCheckRun) {
+        return providerArtifactCleanupSkipped();
+      }
+      await input.gitProvider.redactCheckRun({
+        ...input.repository,
+        providerCheckRunId: input.target.providerResourceId,
+        reason: "data_deletion",
+      });
+      return {
+        deletedIssueCommentCount: 0,
+        deletedReviewCommentCount: 0,
+        redactedCheckRunCount: 1,
+        skippedArtifactCount: 0,
+      };
+  }
+
+  return providerArtifactCleanupSkipped();
+}
+
+/** Loads and caches the provider repository reference for a deletion target. */
+async function loadDataDeletionProviderRepositoryRef(
+  db: HeimdallDatabase,
+  repositoriesById: Map<string, GitHubRepositoryRef>,
+  target: DataDeletionProviderPublicationTargetRecord,
+): Promise<GitHubRepositoryRef> {
+  const cached = repositoriesById.get(target.repoId);
+  if (cached) {
+    return cached;
+  }
+
+  const repository = await new RepositoryRepository(db).getRepositoryProviderRef({
+    provider: "github",
+    repoId: target.repoId,
+  });
+  if (!repository) {
+    throw new Error(`GitHub repository ${target.repoId} was not found.`);
+  }
+
+  const providerRef: GitHubRepositoryRef = {
+    provider: "github",
+    installationId: repository.installationId,
+    providerInstallationId: repository.providerInstallationId,
+    owner: repository.owner,
+    repo: repository.repo,
+    providerRepoId: repository.providerRepoId,
+  };
+  repositoriesById.set(target.repoId, providerRef);
+  return providerRef;
+}
+
+/** Returns the zero-count provider cleanup summary. */
+function emptyDataDeletionProviderCleanupSummary(): DataDeletionProviderCleanupSummary {
+  return {
+    deletedIssueCommentCount: 0,
+    deletedReviewCommentCount: 0,
+    failedArtifactCount: 0,
+    missingArtifactCount: 0,
+    redactedCheckRunCount: 0,
+    selectedArtifactCount: 0,
+    skippedArtifactCount: 0,
+  };
+}
+
+/** Creates a mutable provider cleanup summary initialized with selected target count. */
+function mutableDataDeletionProviderCleanupSummary(
+  selectedArtifactCount: number,
+): MutableDataDeletionProviderCleanupSummary {
+  return {
+    ...emptyDataDeletionProviderCleanupSummary(),
+    selectedArtifactCount,
+  };
+}
+
+/** Returns a one-artifact skipped cleanup result. */
+function providerArtifactCleanupSkipped(): CleanupOneProviderArtifactResult {
+  return {
+    deletedIssueCommentCount: 0,
+    deletedReviewCommentCount: 0,
+    redactedCheckRunCount: 0,
+    skippedArtifactCount: 1,
+  };
+}
+
 /** Builds a zero-count execution summary for terminal idempotent deletion calls. */
 function emptyDataDeletionExecutionSummary(input: {
   /** Whether the request was already terminal. */
@@ -2077,15 +2336,22 @@ function emptyDataDeletionExecutionSummary(input: {
     canceledJobCount: 0,
     dataDeletionRequestId: input.dataDeletionRequestId,
     deletedEmbeddingCount: 0,
+    deletedProviderIssueCommentCount: 0,
+    deletedProviderReviewCommentCount: 0,
     deletedReviewArtifactPayloadCount: 0,
     deletedSandboxArtifactFileCount: 0,
     deletedSandboxRunCount: 0,
     disabledRepositoryCount: 0,
+    failedProviderArtifactCount: 0,
     failedReviewArtifactPayloadCount: 0,
+    missingProviderArtifactCount: 0,
     missingReviewArtifactPayloadCount: 0,
+    redactedProviderCheckRunCount: 0,
     repoIds: input.repoIds,
+    selectedProviderArtifactCount: 0,
     selectedReviewArtifactCount: 0,
     selectedSandboxRunCount: 0,
+    skippedProviderArtifactCount: 0,
     skippedSandboxArtifactFileCount: 0,
     tombstonedReviewArtifactCount: 0,
     ...(input.verificationArtifactUri
@@ -2130,10 +2396,17 @@ function recordWorkerDataDeletionSecurityEvent(
         ? {
             canceledJobCount: input.summary.canceledJobCount,
             deletedEmbeddingCount: input.summary.deletedEmbeddingCount,
+            deletedProviderIssueCommentCount: input.summary.deletedProviderIssueCommentCount,
+            deletedProviderReviewCommentCount: input.summary.deletedProviderReviewCommentCount,
             deletedReviewArtifactPayloadCount: input.summary.deletedReviewArtifactPayloadCount,
             deletedSandboxRunCount: input.summary.deletedSandboxRunCount,
             disabledRepositoryCount: input.summary.disabledRepositoryCount,
+            failedProviderArtifactCount: input.summary.failedProviderArtifactCount,
+            missingProviderArtifactCount: input.summary.missingProviderArtifactCount,
+            redactedProviderCheckRunCount: input.summary.redactedProviderCheckRunCount,
             repoCount: input.summary.repoIds.length,
+            selectedProviderArtifactCount: input.summary.selectedProviderArtifactCount,
+            skippedProviderArtifactCount: input.summary.skippedProviderArtifactCount,
             tombstonedReviewArtifactCount: input.summary.tombstonedReviewArtifactCount,
           }
         : {}),
@@ -2189,6 +2462,14 @@ function createDataDeletionManifest(payload: DataDeletionPlanJobPayload): DataDe
       table,
     })),
     externalProviders: [
+      ...(dataDeletionScopeIncludesRepositoryData(payload.scope) &&
+      payload.reason !== "app_uninstalled"
+        ? [
+            { action: "delete_remote_review_comments", provider: "github" },
+            { action: "delete_remote_summary_comments", provider: "github" },
+            { action: "redact_remote_check_runs", provider: "github" },
+          ]
+        : []),
       ...(payload.reason === "app_uninstalled"
         ? [{ action: "revoke_installation_state", provider: "github" }]
         : []),
@@ -2201,6 +2482,13 @@ function createDataDeletionManifest(payload: DataDeletionPlanJobPayload): DataDe
     ...(payload.repoId ? { repoId: payload.repoId } : {}),
     ...(payload.userId ? { userId: payload.userId } : {}),
   };
+}
+
+/** Returns whether a deletion scope can include provider-visible repository artifacts. */
+function dataDeletionScopeIncludesRepositoryData(
+  scope: DataDeletionPlanJobPayload["scope"],
+): boolean {
+  return scope === "organization" || scope === "repository";
 }
 
 /** Returns tables that need inspection for one deletion scope. */
