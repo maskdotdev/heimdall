@@ -29,7 +29,8 @@ import {
   IndexVersionRepository,
   llmCallArtifacts,
   llmCalls,
-  memoryFacts,
+  type MemoryFactRecord,
+  MemoryFactRepository,
   PullRequestRepository,
   RepoRuleRepository,
   RepositoryRepository,
@@ -105,7 +106,6 @@ import {
   UsageLedger,
   ZERO_COST_LLM_RATE_CARD,
 } from "@repo/usage";
-import { and, asc, desc, eq, gt, isNull, or } from "drizzle-orm";
 
 /** Default bounded wait for the index job planned alongside a review job. */
 const DEFAULT_INDEX_WAIT_TIMEOUT_MS = 10_000;
@@ -252,7 +252,7 @@ type ReviewSnapshotFetchResult = {
 };
 
 /** Durable memory fact row selected for review validation. */
-export type ReviewMemoryFactRow = typeof memoryFacts.$inferSelect;
+export type ReviewMemoryFactRow = MemoryFactRecord;
 
 /** Status values supported by the memory package durable fact type. */
 type ReviewMemoryFactStatus = MemoryFact["status"];
@@ -2387,19 +2387,11 @@ async function loadReviewMemoryFacts(
     readonly now: Date;
   },
 ): Promise<readonly MemoryFact[]> {
-  const rows = await db
-    .select()
-    .from(memoryFacts)
-    .where(
-      and(
-        eq(memoryFacts.orgId, input.orgId),
-        eq(memoryFacts.status, "active"),
-        or(eq(memoryFacts.repoId, input.repoId), isNull(memoryFacts.repoId)),
-        or(isNull(memoryFacts.expiresAt), gt(memoryFacts.expiresAt, input.now)),
-      ),
-    )
-    .orderBy(desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId))
-    .limit(REVIEW_MEMORY_FACT_LIMIT);
+  const memoryFactRepository = new MemoryFactRepository(db);
+  const rows = await memoryFactRepository.listActiveReviewMemoryFacts({
+    ...input,
+    limit: REVIEW_MEMORY_FACT_LIMIT,
+  });
 
   return rows.flatMap((row) => {
     const fact = reviewMemoryFactFromRow(row);

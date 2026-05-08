@@ -102,7 +102,12 @@ tracked milestone.
 - Latest DB index-version milestone: `IndexVersionRepository` now supports ready index lookup by
   repo/commit/index key, latest-ready lookup by repo/commit, idempotent create/update, and
   importing, ready, and failed state transitions. The Postgres-backed integration test verifies the
-  current migration chain plus terminal counts and structured failure mapping.
+  current migration chain plus terminal counts and structured failure mapping. Review orchestration
+  now uses this repository boundary for ready-index polling.
+- Latest DB memory-fact milestone: `MemoryFactRepository` now owns active repository and
+  organization memory fact reads for review validation, including status, expiration, scope, order,
+  and limit handling. Review orchestration now uses this repository boundary instead of importing
+  the raw `memory_facts` table for validation suppression inputs.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,
