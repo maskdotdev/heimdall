@@ -191,6 +191,26 @@ type TypeScriptCallFact = {
   readonly lineNumber: number;
 };
 
+/** Local TS/JS variable that is bound to a concrete same-file class instance. */
+type TypeScriptInstanceBinding = {
+  /** Qualified class name constructed by this binding. */
+  readonly classQualifiedName: string;
+  /** 1-based line where the binding starts. */
+  readonly lineNumber: number;
+  /** Local variable name used as a member-call receiver. */
+  readonly localName: string;
+  /** Enclosing callable symbol that owns this binding. */
+  readonly ownerSymbolId: string;
+};
+
+/** Resolved TS/JS same-file member call target. */
+type TypeScriptMemberCallTarget = {
+  /** Metadata that explains the conservative member-call resolution. */
+  readonly metadata: Record<string, unknown>;
+  /** Resolved callee symbol. */
+  readonly symbol: SymbolRecord;
+};
+
 /** Simple TS/JS path alias derived from tsconfig or jsconfig paths. */
 type ModuleResolutionAlias = {
   /** Original import pattern, such as @/* or @lib/*. */
@@ -1092,7 +1112,7 @@ function importedCallEdgesForSources(
           resolvedModule.file.path,
           importFact,
         );
-        const caller = symbolContainingLine(source.symbols, fact.lineNumber);
+        const caller = callableSymbolContainingLine(source.symbols, fact.lineNumber);
         if (!caller || !callee || caller.symbolId === callee.symbolId) {
           return [];
         }
@@ -1982,14 +2002,27 @@ function callEdgesForFile(
   sourceFile: ts.SourceFile,
   symbols: readonly SymbolRecord[],
 ): EdgeRecord[] {
-  const symbolsByName = new Map(symbols.map((symbol) => [symbol.name, symbol]));
+  const symbolsByName = uniqueSymbolsByName(symbols);
+  const symbolsByQualifiedName = symbolsByQualifiedNameMap(symbols);
+  const instanceBindings = typeScriptInstanceBindings(sourceFile, symbols);
   const edges: EdgeRecord[] = [];
 
   const visit = (node: ts.Node) => {
     if (ts.isCallExpression(node)) {
-      const caller = symbolContainingLine(symbols, lineRange(sourceFile, node).startLine);
-      const calleeName = callName(node.expression);
-      const callee = calleeName ? symbolsByName.get(calleeName) : undefined;
+      const lineNumber = lineRange(sourceFile, node).startLine;
+      const caller = callableSymbolContainingLine(symbols, lineNumber);
+      const memberTarget = caller
+        ? typeScriptMemberCallTarget(
+            node.expression,
+            caller,
+            lineNumber,
+            symbolsByQualifiedName,
+            instanceBindings,
+          )
+        : undefined;
+      const calleeName = ts.isIdentifier(node.expression) ? node.expression.text : undefined;
+      const callee =
+        memberTarget?.symbol ?? (calleeName ? symbolsByName.get(calleeName) : undefined);
       if (caller && callee && caller.symbolId !== callee.symbolId) {
         edges.push({
           type: "edge",
@@ -2009,6 +2042,7 @@ function callEdgesForFile(
           toKind: "symbol",
           kind: "calls",
           confidence: 0.7,
+          ...(memberTarget ? { metadata: memberTarget.metadata } : {}),
         });
       }
     }
@@ -2018,6 +2052,172 @@ function callEdgesForFile(
 
   visit(sourceFile);
   return edges;
+}
+
+/** Builds a lookup for names that resolve to exactly one symbol in the file. */
+function uniqueSymbolsByName(symbols: readonly SymbolRecord[]): ReadonlyMap<string, SymbolRecord> {
+  const symbolsByName = new Map<string, SymbolRecord>();
+  const duplicateNames = new Set<string>();
+
+  for (const symbol of symbols) {
+    if (symbolsByName.has(symbol.name)) {
+      duplicateNames.add(symbol.name);
+      continue;
+    }
+
+    symbolsByName.set(symbol.name, symbol);
+  }
+
+  for (const duplicateName of duplicateNames) {
+    symbolsByName.delete(duplicateName);
+  }
+
+  return symbolsByName;
+}
+
+/** Builds a lookup for qualified symbols in the file. */
+function symbolsByQualifiedNameMap(
+  symbols: readonly SymbolRecord[],
+): ReadonlyMap<string, SymbolRecord> {
+  return new Map(
+    symbols.flatMap((symbol) =>
+      symbol.qualifiedName ? [[symbol.qualifiedName, symbol] as const] : [],
+    ),
+  );
+}
+
+/** Finds local variables constructed from same-file classes for member-call resolution. */
+function typeScriptInstanceBindings(
+  sourceFile: ts.SourceFile,
+  symbols: readonly SymbolRecord[],
+): TypeScriptInstanceBinding[] {
+  const classSymbolsByName = uniqueClassSymbolsByName(symbols);
+  const bindings: TypeScriptInstanceBinding[] = [];
+
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const className = newExpressionClassName(node.initializer);
+      const classSymbol = className ? classSymbolsByName.get(className) : undefined;
+      const lineNumber = lineRange(sourceFile, node).startLine;
+      const owner = callableSymbolContainingLine(symbols, lineNumber);
+      if (classSymbol?.qualifiedName && owner) {
+        bindings.push({
+          classQualifiedName: classSymbol.qualifiedName,
+          lineNumber,
+          localName: node.name.text,
+          ownerSymbolId: owner.symbolId,
+        });
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return bindings;
+}
+
+/** Builds a lookup for class names that resolve to exactly one same-file class symbol. */
+function uniqueClassSymbolsByName(
+  symbols: readonly SymbolRecord[],
+): ReadonlyMap<string, SymbolRecord> {
+  return uniqueSymbolsByName(symbols.filter((symbol) => symbol.kind === "class"));
+}
+
+/** Returns the constructed class name for a simple `new ClassName()` expression. */
+function newExpressionClassName(expression: ts.Expression): string | undefined {
+  return ts.isNewExpression(expression) && ts.isIdentifier(expression.expression)
+    ? expression.expression.text
+    : undefined;
+}
+
+/** Resolves same-file member calls with explicit `this` or known instance receivers. */
+function typeScriptMemberCallTarget(
+  expression: ts.Expression,
+  caller: SymbolRecord,
+  lineNumber: number,
+  symbolsByQualifiedName: ReadonlyMap<string, SymbolRecord>,
+  instanceBindings: readonly TypeScriptInstanceBinding[],
+): TypeScriptMemberCallTarget | undefined {
+  if (!ts.isPropertyAccessExpression(expression)) {
+    return undefined;
+  }
+
+  const memberName = expression.name.text;
+  if (expression.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const classQualifiedName = enclosingClassQualifiedName(caller);
+    const symbol = classQualifiedName
+      ? symbolsByQualifiedName.get(`${classQualifiedName}.${memberName}`)
+      : undefined;
+
+    return symbol
+      ? {
+          metadata: {
+            callKind: "member_this",
+            lineNumber,
+            memberName,
+            receiverClass: classQualifiedName,
+            receiverName: "this",
+          },
+          symbol,
+        }
+      : undefined;
+  }
+
+  if (!ts.isIdentifier(expression.expression)) {
+    return undefined;
+  }
+
+  const receiverName = expression.expression.text;
+  const instanceBinding = uniqueVisibleInstanceBinding(
+    instanceBindings,
+    caller.symbolId,
+    receiverName,
+    lineNumber,
+  );
+  const symbol = instanceBinding
+    ? symbolsByQualifiedName.get(`${instanceBinding.classQualifiedName}.${memberName}`)
+    : undefined;
+
+  return symbol && instanceBinding
+    ? {
+        metadata: {
+          callKind: "member_instance",
+          lineNumber,
+          memberName,
+          receiverClass: instanceBinding.classQualifiedName,
+          receiverName,
+        },
+        symbol,
+      }
+    : undefined;
+}
+
+/** Returns the enclosing class qualified name for a class member symbol. */
+function enclosingClassQualifiedName(symbol: SymbolRecord): string | undefined {
+  if (!symbol.qualifiedName || (symbol.kind !== "method" && symbol.kind !== "property")) {
+    return undefined;
+  }
+
+  const parts = symbol.qualifiedName.split(".");
+  return parts.length > 1 ? parts.slice(0, -1).join(".") : undefined;
+}
+
+/** Finds a single visible instance binding for a receiver in the caller scope. */
+function uniqueVisibleInstanceBinding(
+  instanceBindings: readonly TypeScriptInstanceBinding[],
+  ownerSymbolId: string,
+  receiverName: string,
+  lineNumber: number,
+): TypeScriptInstanceBinding | undefined {
+  const matches = instanceBindings.filter(
+    (binding) =>
+      binding.ownerSymbolId === ownerSymbolId &&
+      binding.localName === receiverName &&
+      binding.lineNumber < lineNumber,
+  );
+
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 /** Extracts import statements from Python source text. */
@@ -2164,15 +2364,18 @@ function symbolContainingLine(
     )[0];
 }
 
-function callName(expression: ts.Expression): string | undefined {
-  if (ts.isIdentifier(expression)) {
-    return expression.text;
-  }
-  if (ts.isPropertyAccessExpression(expression)) {
-    return expression.name.text;
-  }
-
-  return undefined;
+/** Returns the narrowest callable symbol containing a line. */
+function callableSymbolContainingLine(
+  symbols: readonly SymbolRecord[],
+  line: number,
+): SymbolRecord | undefined {
+  return symbolContainingLine(
+    symbols.filter(
+      (symbol) =>
+        symbol.kind === "component" || symbol.kind === "function" || symbol.kind === "method",
+    ),
+    line,
+  );
 }
 
 function symbolName(node: ts.Node): string | undefined {

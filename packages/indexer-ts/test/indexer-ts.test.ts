@@ -455,6 +455,87 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("resolves member calls through same-file class receivers", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await mkdir(join(workspacePath, "src"), { recursive: true });
+    await writeFile(
+      join(workspacePath, "src", "service.ts"),
+      [
+        "export class UserService {",
+        "  updateEmail(id: string, email: string) {",
+        '    return id + ":" + email.trim();',
+        "  }",
+        "",
+        "  renameSelf(id: string, email: string) {",
+        "    return this.updateEmail(id, email);",
+        "  }",
+        "}",
+        "",
+        "export class AuditService {",
+        "  updateEmail(id: string, email: string) {",
+        '    return email + ":" + id;',
+        "  }",
+        "}",
+        "",
+        "export function renameUser(id: string, email: string) {",
+        "  const service = new UserService();",
+        "  return service.updateEmail(id, email);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const symbolIdsByQualifiedName = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "symbol" && record.qualifiedName
+          ? [[record.qualifiedName, record.symbolId] as const]
+          : [],
+      ),
+    );
+    const memberCallEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" &&
+      record.kind === "calls" &&
+      typeof record.metadata?.callKind === "string"
+        ? [
+            {
+              callKind: record.metadata.callKind,
+              fromId: record.fromId,
+              receiverClass: record.metadata.receiverClass,
+              receiverName: record.metadata.receiverName,
+              toId: record.toId,
+            },
+          ]
+        : [],
+    );
+
+    expect(memberCallEdges).toEqual([
+      {
+        callKind: "member_this",
+        fromId: symbolIdsByQualifiedName.get("UserService.renameSelf"),
+        receiverClass: "UserService",
+        receiverName: "this",
+        toId: symbolIdsByQualifiedName.get("UserService.updateEmail"),
+      },
+      {
+        callKind: "member_instance",
+        fromId: symbolIdsByQualifiedName.get("renameUser"),
+        receiverClass: "UserService",
+        receiverName: "service",
+        toId: symbolIdsByQualifiedName.get("UserService.updateEmail"),
+      },
+    ]);
+    expect(memberCallEdges.map((edge) => edge.toId)).not.toContain(
+      symbolIdsByQualifiedName.get("AuditService.updateEmail"),
+    );
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("emits files, symbols, and chunks for Python sources", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await writeFile(
