@@ -170,7 +170,7 @@ import {
 import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } from "@repo/security";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
-import { Worker } from "bullmq";
+import { Queue as BullMqQueue, Worker } from "bullmq";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -187,6 +187,8 @@ const DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE = 100;
 const DEFAULT_STALE_INDEX_IMPORT_TIMEOUT_MS = 30 * 60 * 1000;
 /** Default stale index import batches repaired by one worker maintenance pass. */
 const DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE = 50;
+/** Default delay between queue health metric samples. */
+const DEFAULT_QUEUE_METRICS_INTERVAL_MS = 30_000;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
 const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
 /** Maximum chunk IDs placed in one repair-triggered embedding batch. */
@@ -203,6 +205,19 @@ const ALL_WORKER_QUEUE_NAMES = [
   QUEUE_NAMES.publishing,
   QUEUE_NAMES.billing,
 ] as const satisfies readonly QueueName[];
+/** BullMQ statuses that contribute queue depth gauges. */
+const WORKER_QUEUE_METRIC_STATUSES = [
+  "waiting",
+  "delayed",
+  "active",
+  "completed",
+  "failed",
+] as const satisfies readonly WorkerQueueMetricStatus[];
+/** BullMQ statuses considered pending when estimating oldest job age. */
+const WORKER_QUEUE_OLDEST_JOB_STATUSES = [
+  "waiting",
+  "delayed",
+] as const satisfies readonly WorkerQueueOldestJobStatus[];
 
 /** Worker role names accepted by runtime queue selection. */
 export type WorkerRuntimeRole =
@@ -357,6 +372,8 @@ type WorkerQueueMaintenanceConfig = {
   readonly indexImportRecoveryBatchSize: number;
   /** Import duration after which an index import batch is considered stale. */
   readonly indexImportStaleTimeoutMs: number;
+  /** Milliseconds between queue health metric samples. */
+  readonly metricsIntervalMs: number;
   /** Maximum stale running rows to repair in one pass. */
   readonly recoveryBatchSize: number;
   /** Milliseconds between stale running recovery passes. */
@@ -403,6 +420,47 @@ export type WorkerRuntime = {
   readonly logger: StructuredTelemetryLogger;
   /** Stops workers, dispatcher resources, Redis, and database connections. */
   readonly close: () => Promise<void>;
+};
+
+/** BullMQ statuses sampled by worker queue health metrics. */
+export type WorkerQueueMetricStatus = "waiting" | "delayed" | "active" | "completed" | "failed";
+
+/** BullMQ statuses inspected to estimate oldest pending queue age. */
+export type WorkerQueueOldestJobStatus = "waiting" | "delayed";
+
+/** Minimal job record needed to derive queue age metrics. */
+export type WorkerQueueMetricJob = {
+  /** BullMQ job creation timestamp in milliseconds since Unix epoch. */
+  readonly timestamp?: number | undefined;
+};
+
+/** Queue client boundary used by worker queue metric sampling. */
+export type WorkerQueueMetricsClient = {
+  /** Logical Heimdall queue name represented by this client. */
+  readonly queueName: QueueName;
+  /** Closes queue resources when the worker runtime stops. */
+  readonly close?: (() => Promise<void>) | undefined;
+  /** Reads current BullMQ counts for selected statuses. */
+  readonly getJobCounts: (
+    ...statuses: WorkerQueueMetricStatus[]
+  ) => Promise<Readonly<Record<string, number>>>;
+  /** Reads jobs for selected statuses and range. */
+  readonly getJobs: (
+    statuses: readonly WorkerQueueOldestJobStatus[],
+    start: number,
+    end: number,
+    asc: boolean,
+  ) => Promise<readonly WorkerQueueMetricJob[]>;
+};
+
+/** Input used when recording worker queue health metrics. */
+export type RecordWorkerQueueMetricsInput = {
+  /** Metric recorder receiving queue depth and age gauges. */
+  readonly metrics: TelemetryMetricRecorder;
+  /** Queue clients to sample. */
+  readonly queues: readonly WorkerQueueMetricsClient[];
+  /** Current time used by deterministic tests. */
+  readonly now?: Date;
 };
 
 /** Redis commands required by the cross-process publisher throttle. */
@@ -1472,6 +1530,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
   const workerQueueNames = createWorkerQueueNamesFromEnvironment(process.env);
   const workerRoleLabel = createWorkerRoleLabelFromEnvironment(process.env);
+  const queueMetricsClients = createWorkerQueueMetricsClients(process.env, workerConnection);
   const reviewIndexDependencyMode = createWorkerReviewIndexDependencyModeFromEnvironment(
     process.env,
   );
@@ -1552,6 +1611,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const dispatch = async () => {
     await dispatchPendingJobs({ store, queueProducer });
   };
+  const recordQueueMetrics = async () => {
+    await recordWorkerQueueMetrics({
+      metrics: observability.metrics,
+      queues: queueMetricsClients,
+    });
+  };
   const dispatchInterval = setInterval(() => {
     dispatch().catch((error: unknown) => {
       observability.logger.error("outbox dispatch failed", {
@@ -1568,9 +1633,23 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       });
     });
   }, queueMaintenance.recoveryIntervalMs);
+  const queueMetricsInterval =
+    queueMetricsClients.length === 0
+      ? undefined
+      : setInterval(() => {
+          recordQueueMetrics().catch((error: unknown) => {
+            observability.logger.error("worker queue metrics failed", {
+              error,
+              target: "worker.queue_metrics",
+            });
+          });
+        }, queueMaintenance.metricsIntervalMs);
 
   await recoverStaleRunningJobs();
   await dispatch();
+  if (queueMetricsClients.length > 0) {
+    await recordQueueMetrics();
+  }
   observability.logger.info("worker service started", {
     attributes: {
       "event.name": "worker.service.started",
@@ -1588,6 +1667,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     close: async () => {
       clearInterval(dispatchInterval);
       clearInterval(staleRunningRecoveryInterval);
+      if (queueMetricsInterval) {
+        clearInterval(queueMetricsInterval);
+      }
       observability.logger.info("worker service stopping", {
         attributes: { "event.name": "worker.service.stopping" },
       });
@@ -1595,6 +1677,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
         labels: { status: "stopping" },
       });
       await Promise.all(workers.map((worker) => worker.close()));
+      await Promise.all(queueMetricsClients.map((client) => client.close?.() ?? Promise.resolve()));
       await queueProducer.close();
       await workerConnection.quit();
       await databaseClient.close();
@@ -2144,6 +2227,68 @@ export async function verifyWorkerIndexerCapabilities(
   return capabilities;
 }
 
+/** Records queue depth and oldest-pending-age gauges for each sampled worker queue. */
+export async function recordWorkerQueueMetrics(
+  input: RecordWorkerQueueMetricsInput,
+): Promise<void> {
+  const nowMs = input.now?.getTime() ?? Date.now();
+  await Promise.all(
+    input.queues.map(async (queue) => {
+      const counts = await queue.getJobCounts(...WORKER_QUEUE_METRIC_STATUSES);
+      for (const status of WORKER_QUEUE_METRIC_STATUSES) {
+        input.metrics.gauge(
+          OBSERVABILITY_METRIC_NAMES.queueDepth,
+          nonNegativeMetricValue(counts[status]),
+          {
+            labels: {
+              queue_name: queue.queueName,
+              status,
+            },
+          },
+        );
+      }
+
+      const oldestJobs = await queue.getJobs(WORKER_QUEUE_OLDEST_JOB_STATUSES, 0, 0, true);
+      const oldestTimestamp = oldestQueueJobTimestamp(oldestJobs);
+      input.metrics.gauge(
+        OBSERVABILITY_METRIC_NAMES.queueOldestJobAgeMs,
+        oldestTimestamp === undefined ? 0 : Math.max(0, nowMs - oldestTimestamp),
+        {
+          labels: {
+            queue_name: queue.queueName,
+          },
+        },
+      );
+    }),
+  );
+}
+
+/** Creates queue metric clients for all logical queues when this runtime owns health sampling. */
+function createWorkerQueueMetricsClients(
+  env: WorkerRuntimeRoleEnvironment,
+  connection: IORedis,
+): readonly WorkerQueueMetricsClient[] {
+  if (!shouldRecordWorkerQueueMetrics(env)) {
+    return [];
+  }
+
+  return ALL_WORKER_QUEUE_NAMES.map((queueName) => {
+    const queue = new BullMqQueue(queueName, { connection });
+    return {
+      close: () => queue.close(),
+      getJobCounts: (...statuses) => queue.getJobCounts(...statuses),
+      getJobs: (statuses, start, end, asc) => queue.getJobs([...statuses], start, end, asc),
+      queueName,
+    };
+  });
+}
+
+/** Returns whether this worker runtime should emit global queue health gauges. */
+function shouldRecordWorkerQueueMetrics(env: WorkerRuntimeRoleEnvironment): boolean {
+  const roles = createWorkerRolesFromEnvironment(env);
+  return roles.includes("all") || roles.includes("maintenance");
+}
+
 /** Creates the queue names registered by this worker runtime from environment role values. */
 export function createWorkerQueueNamesFromEnvironment(
   env: WorkerRuntimeRoleEnvironment,
@@ -2245,6 +2390,20 @@ function queueNamesForWorkerRole(role: WorkerRuntimeRole): readonly QueueName[] 
   }
 }
 
+/** Coerces untrusted queue metric counts to non-negative finite values. */
+function nonNegativeMetricValue(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Returns the oldest finite job timestamp from sampled queue jobs. */
+function oldestQueueJobTimestamp(jobs: readonly WorkerQueueMetricJob[]): number | undefined {
+  const timestamps = jobs
+    .map((job) => job.timestamp)
+    .filter((timestamp): timestamp is number => typeof timestamp === "number")
+    .filter((timestamp) => Number.isFinite(timestamp));
+  return timestamps.length === 0 ? undefined : Math.min(...timestamps);
+}
+
 /** Creates queue maintenance settings from worker environment values. */
 function createWorkerQueueMaintenanceConfig(
   env: Readonly<Record<string, string | undefined>>,
@@ -2256,6 +2415,9 @@ function createWorkerQueueMaintenanceConfig(
     indexImportStaleTimeoutMs:
       optionalPositiveInteger(env.HEIMDALL_INDEX_IMPORT_STALE_TIMEOUT_MS) ??
       DEFAULT_STALE_INDEX_IMPORT_TIMEOUT_MS,
+    metricsIntervalMs:
+      optionalPositiveInteger(env.HEIMDALL_QUEUE_METRICS_INTERVAL_MS) ??
+      DEFAULT_QUEUE_METRICS_INTERVAL_MS,
     recoveryBatchSize:
       optionalPositiveInteger(env.HEIMDALL_QUEUE_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE) ??
       DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE,
