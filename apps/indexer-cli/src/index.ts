@@ -1,7 +1,19 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { IndexManifest, IndexRecord } from "@repo/index-schema";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
+
+/** Artifact output layouts supported by the CLI. */
+export type IndexerCliOutputFormat = "json" | "split";
+
+/** In-memory artifact shape that can be written to either supported CLI layout. */
+type WritableIndexArtifact = {
+  /** Artifact manifest. */
+  readonly manifest: IndexManifest;
+  /** Artifact records in canonical order. */
+  readonly records: readonly IndexRecord[];
+};
 
 /** CLI request shape accepted through flags or request JSON. */
 export type IndexerCliRequest = {
@@ -15,6 +27,8 @@ export type IndexerCliRequest = {
   readonly previousIndexVersionId?: string;
   /** Optional artifact output path. Use "-" or omit to write to stdout. */
   readonly outputPath?: string;
+  /** Artifact output layout. */
+  readonly outputFormat: IndexerCliOutputFormat;
   /** Whether JSON output should be formatted with indentation. */
   readonly pretty: boolean;
 };
@@ -81,14 +95,22 @@ type IndexerCliFlagValues = {
   readonly previousIndexVersionId?: string;
   /** Output artifact path flag. */
   readonly outputPath?: string;
+  /** Output artifact layout flag. */
+  readonly outputFormat?: IndexerCliOutputFormat;
   /** Whether pretty output was requested. */
   readonly pretty: boolean;
 };
 
+/** Canonical split artifact manifest file name. */
+const INDEX_MANIFEST_FILE_NAME = "index-manifest.json";
+
+/** Canonical split artifact records file name. */
+const INDEX_RECORDS_FILE_NAME = "records.jsonl";
+
 const HELP_TEXT = `Usage:
   indexer capabilities --json
-  indexer index --repo-id <repo_id> --commit-sha <sha> --workspace <path> [--output <path>] [--pretty]
-  indexer index --request <request.json> [--output <path>] [--pretty]
+  indexer index --repo-id <repo_id> --commit-sha <sha> --workspace <path> [--output <path>] [--format json|split] [--pretty]
+  indexer index --request <request.json> [--output <path>] [--format json|split] [--pretty]
 
 Options:
   capabilities --json                Print indexer capability metadata as JSON.
@@ -97,8 +119,9 @@ Options:
   --workspace <path>               Local workspace path to index.
   --previous-index-version-id <id> Previous index version for incremental context.
   --request <path>                 JSON request with repoId, commitSha, and workspacePath.
-  --output <path>                  Artifact JSON output path. Use "-" or omit for stdout.
-  --pretty                         Format artifact JSON with indentation.
+  --output <path>                  Artifact output path. Use "-" or omit for JSON stdout.
+  --format <json|split>            Artifact output layout. Defaults to json.
+  --pretty                         Format JSON artifact output with indentation.
 `;
 
 /** Runs the indexer CLI and returns a process-style exit code. */
@@ -116,6 +139,12 @@ export async function runIndexerCli(
       `${parsed.message ? `${parsed.message}\n\n` : ""}${HELP_TEXT}`,
     );
     return parsed.help ? 0 : 1;
+  }
+
+  const splitOutputPath = splitArtifactOutputPath(parsed.request);
+  if (parsed.request.outputFormat === "split" && !splitOutputPath) {
+    io.stderr.write("Split artifact output requires --output <directory>.\n");
+    return 1;
   }
 
   const driver = createTypeScriptIndexerDriver();
@@ -136,6 +165,27 @@ export async function runIndexerCli(
     return 1;
   }
 
+  if (parsed.request.outputFormat === "split") {
+    if (!splitOutputPath) {
+      io.stderr.write("Split artifact output requires --output <directory>.\n");
+      return 1;
+    }
+
+    const outputPath = resolve(splitOutputPath);
+    await writeSplitIndexArtifact(outputPath, result.artifact);
+    io.stdout.write(
+      JSON.stringify({
+        artifactId: result.artifact.manifest.artifactId,
+        format: "split",
+        outputPath,
+        recordCount: result.artifact.manifest.recordCount,
+      }),
+    );
+    io.stdout.write("\n");
+
+    return 0;
+  }
+
   const json = `${JSON.stringify(result.artifact, null, parsed.request.pretty ? 2 : 0)}\n`;
   if (!parsed.request.outputPath || parsed.request.outputPath === "-") {
     io.stdout.write(json);
@@ -148,6 +198,7 @@ export async function runIndexerCli(
   io.stdout.write(
     JSON.stringify({
       artifactId: result.artifact.manifest.artifactId,
+      format: "json",
       outputPath,
       recordCount: result.artifact.manifest.recordCount,
     }),
@@ -206,6 +257,7 @@ function parseFlagValues(flags: readonly string[]): ParseIndexerCliFlagsResult {
     workspacePath?: string;
     previousIndexVersionId?: string;
     outputPath?: string;
+    outputFormat?: IndexerCliOutputFormat;
     pretty: boolean;
   } = { pretty: false };
 
@@ -233,6 +285,16 @@ function parseFlagValues(flags: readonly string[]): ParseIndexerCliFlagsResult {
       values.previousIndexVersionId = value;
     } else if (flag === "--output") {
       values.outputPath = value;
+    } else if (flag === "--format") {
+      const outputFormat = outputFormatValue(value);
+      if (!outputFormat) {
+        return {
+          ok: false,
+          help: false,
+          message: `Invalid artifact output format: ${value}`,
+        };
+      }
+      values.outputFormat = outputFormat;
     } else {
       return { ok: false, help: false, message: `Unknown option: ${flag}` };
     }
@@ -274,6 +336,17 @@ function completeRequest(
   const previousIndexVersionId =
     flags.previousIndexVersionId ?? stringValue(request.previousIndexVersionId);
   const outputPath = flags.outputPath ?? stringValue(request.outputPath);
+  const requestOutputFormat = outputFormatValue(request.outputFormat);
+
+  if (!flags.outputFormat && request.outputFormat !== undefined && !requestOutputFormat) {
+    return {
+      ok: false,
+      help: false,
+      message: `Invalid artifact output format: ${String(request.outputFormat)}`,
+    };
+  }
+
+  const outputFormat = flags.outputFormat ?? requestOutputFormat ?? ("json" as const);
 
   if (!repoId || !commitSha || !workspacePath) {
     return {
@@ -287,6 +360,7 @@ function completeRequest(
     ok: true,
     request: {
       commitSha,
+      outputFormat,
       pretty: flags.pretty || request.pretty === true,
       repoId,
       workspacePath,
@@ -294,6 +368,36 @@ function completeRequest(
       ...(outputPath ? { outputPath } : {}),
     },
   };
+}
+
+/** Returns the split artifact output directory when the request has one. */
+function splitArtifactOutputPath(request: IndexerCliRequest): string | undefined {
+  return request.outputPath && request.outputPath !== "-" ? request.outputPath : undefined;
+}
+
+/** Writes an index artifact as a canonical split artifact directory. */
+async function writeSplitIndexArtifact(
+  outputPath: string,
+  artifact: WritableIndexArtifact,
+): Promise<void> {
+  await mkdir(outputPath, { recursive: true });
+
+  const recordsJsonl = artifact.records.map((record) => JSON.stringify(record)).join("\n");
+  await writeFile(
+    join(outputPath, INDEX_RECORDS_FILE_NAME),
+    recordsJsonl.length > 0 ? `${recordsJsonl}\n` : "",
+    "utf8",
+  );
+  await writeFile(
+    join(outputPath, INDEX_MANIFEST_FILE_NAME),
+    `${JSON.stringify(artifact.manifest, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+/** Returns a supported artifact output format when the input is valid. */
+function outputFormatValue(value: unknown): IndexerCliOutputFormat | undefined {
+  return value === "json" || value === "split" ? value : undefined;
 }
 
 /** Returns the string value when the input is a string. */

@@ -33,6 +33,7 @@ describe("parseIndexerCliArgs", () => {
       request: {
         commitSha: "abcdef1",
         outputPath: "-",
+        outputFormat: "json",
         pretty: true,
         repoId: "repo_test",
         workspacePath: root,
@@ -44,6 +45,27 @@ describe("parseIndexerCliArgs", () => {
     await expect(parseIndexerCliArgs(["index", "--repo-id", "repo_test"])).resolves.toEqual({
       help: false,
       message: "repoId, commitSha, and workspacePath are required.",
+      ok: false,
+    });
+  });
+
+  it("rejects invalid request JSON output formats", async () => {
+    const root = await createTempWorkspace();
+    const requestPath = join(root, "request.json");
+    await writeFile(
+      requestPath,
+      JSON.stringify({
+        commitSha: "abcdef1",
+        outputFormat: "tar",
+        repoId: "repo_test",
+        workspacePath: root,
+      }),
+      "utf8",
+    );
+
+    await expect(parseIndexerCliArgs(["index", "--request", requestPath])).resolves.toEqual({
+      help: false,
+      message: "Invalid artifact output format: tar",
       ok: false,
     });
   });
@@ -87,6 +109,7 @@ describe("runIndexerCli", () => {
     expect(output.stderr()).toBe("");
     expect(JSON.parse(output.stdout())).toEqual(
       expect.objectContaining({
+        format: "json",
         outputPath,
         recordCount: expect.any(Number),
       }),
@@ -110,6 +133,89 @@ describe("runIndexerCli", () => {
     expect(artifact.records).toContainEqual(
       expect.objectContaining({ path: "src/example.ts", type: "file" }),
     );
+  });
+
+  it("indexes a local TypeScript workspace and writes a canonical split artifact directory", async () => {
+    const root = await createTempWorkspace();
+    const outputPath = join(root, "artifact");
+
+    const output = memoryIo();
+    const exitCode = await runIndexerCli(
+      [
+        "index",
+        "--repo-id",
+        "repo_test",
+        "--commit-sha",
+        "abcdef1",
+        "--workspace",
+        root,
+        "--output",
+        outputPath,
+        "--format",
+        "split",
+      ],
+      output.io,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output.stderr()).toBe("");
+    expect(JSON.parse(output.stdout())).toEqual(
+      expect.objectContaining({
+        format: "split",
+        outputPath,
+        recordCount: expect.any(Number),
+      }),
+    );
+
+    const manifest = JSON.parse(
+      await readFile(join(outputPath, "index-manifest.json"), "utf8"),
+    ) as {
+      readonly commitSha: string;
+      readonly fileCount: number;
+      readonly recordCount: number;
+      readonly repoId: string;
+    };
+    const recordsText = await readFile(join(outputPath, "records.jsonl"), "utf8");
+    const records = recordsText
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { readonly path?: string; readonly type: string });
+
+    expect(recordsText.endsWith("\n")).toBe(true);
+    expect(recordsText).not.toContain("\n\n");
+    expect(manifest).toMatchObject({
+      commitSha: "abcdef1",
+      fileCount: 1,
+      repoId: "repo_test",
+    });
+    expect(manifest.recordCount).toBe(records.length);
+    expect(records).toContainEqual(
+      expect.objectContaining({ path: "src/example.ts", type: "file" }),
+    );
+  });
+
+  it("rejects split artifacts without a directory output path", async () => {
+    const root = await createTempWorkspace();
+    const output = memoryIo();
+
+    const exitCode = await runIndexerCli(
+      [
+        "index",
+        "--repo-id",
+        "repo_test",
+        "--commit-sha",
+        "abcdef1",
+        "--workspace",
+        root,
+        "--format",
+        "split",
+      ],
+      output.io,
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output.stdout()).toBe("");
+    expect(output.stderr()).toBe("Split artifact output requires --output <directory>.\n");
   });
 });
 
