@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lt } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { sandboxArtifacts, sandboxPolicyDecisions, sandboxRuns } from "../schema";
 
@@ -10,6 +10,15 @@ export type SandboxArtifactInsert = typeof sandboxArtifacts.$inferInsert;
 
 /** Insert row accepted for a persisted sandbox policy decision. */
 export type SandboxPolicyDecisionInsert = typeof sandboxPolicyDecisions.$inferInsert;
+
+/** Durable sandbox run row returned for debug inspection. */
+export type SandboxRunRecord = typeof sandboxRuns.$inferSelect;
+
+/** Durable sandbox artifact row returned for debug inspection. */
+export type SandboxArtifactRecord = typeof sandboxArtifacts.$inferSelect;
+
+/** Durable sandbox policy decision row returned for debug inspection. */
+export type SandboxPolicyDecisionRecord = typeof sandboxPolicyDecisions.$inferSelect;
 
 /** Input used to upsert a sandbox run and replace its child rows. */
 export type UpsertSandboxRunWithChildrenInput = {
@@ -31,6 +40,18 @@ export type ListSandboxRunCleanupTargetsInput = {
   readonly repoId?: string | undefined;
 };
 
+/** Input used to list sandbox runs for operator inspection. */
+export type ListSandboxRunsForInspectionInput = {
+  /** Maximum sandbox runs to return. */
+  readonly limit?: number | undefined;
+  /** Optional repository scope for sandbox run history. */
+  readonly repoId?: string | undefined;
+  /** Optional review run scope for sandbox run history. */
+  readonly reviewRunId?: string | undefined;
+  /** Optional sandbox run status filter. */
+  readonly status?: string | undefined;
+};
+
 /** Sandbox run selected for retention cleanup. */
 export type SandboxRunCleanupTargetRecord = {
   /** Durable sandbox run ID. */
@@ -47,6 +68,70 @@ export type SandboxArtifactUriRecord = {
 export class SandboxRepository {
   /** Creates a sandbox query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
+
+  /** Lists sandbox runs linked to one review run in creation order. */
+  public async listSandboxRunsForReviewRun(
+    reviewRunId: string,
+  ): Promise<readonly SandboxRunRecord[]> {
+    return this.db
+      .select()
+      .from(sandboxRuns)
+      .where(eq(sandboxRuns.reviewRunId, reviewRunId))
+      .orderBy(asc(sandboxRuns.createdAt), asc(sandboxRuns.sandboxRunId));
+  }
+
+  /** Lists product-safe sandbox run history for operator inspection. */
+  public async listSandboxRunsForInspection(
+    input: ListSandboxRunsForInspectionInput,
+  ): Promise<readonly SandboxRunRecord[]> {
+    const conditions = [
+      ...(input.repoId ? [eq(sandboxRuns.repoId, input.repoId)] : []),
+      ...(input.reviewRunId ? [eq(sandboxRuns.reviewRunId, input.reviewRunId)] : []),
+      ...(input.status ? [eq(sandboxRuns.status, input.status)] : []),
+    ];
+
+    return this.db
+      .select()
+      .from(sandboxRuns)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(sandboxRuns.createdAt), desc(sandboxRuns.sandboxRunId))
+      .limit(sandboxInspectionLimit(input.limit));
+  }
+
+  /** Lists artifact rows attached to the given sandbox runs. */
+  public async listSandboxArtifactsForRuns(
+    sandboxRunIds: readonly string[],
+  ): Promise<readonly SandboxArtifactRecord[]> {
+    const uniqueSandboxRunIds = uniqueStableStrings(sandboxRunIds);
+    if (uniqueSandboxRunIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(sandboxArtifacts)
+      .where(inArray(sandboxArtifacts.sandboxRunId, uniqueSandboxRunIds))
+      .orderBy(asc(sandboxArtifacts.createdAt), asc(sandboxArtifacts.sandboxArtifactId));
+  }
+
+  /** Lists policy decision rows attached to the given sandbox runs. */
+  public async listSandboxPolicyDecisionsForRuns(
+    sandboxRunIds: readonly string[],
+  ): Promise<readonly SandboxPolicyDecisionRecord[]> {
+    const uniqueSandboxRunIds = uniqueStableStrings(sandboxRunIds);
+    if (uniqueSandboxRunIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(sandboxPolicyDecisions)
+      .where(inArray(sandboxPolicyDecisions.sandboxRunId, uniqueSandboxRunIds))
+      .orderBy(
+        asc(sandboxPolicyDecisions.createdAt),
+        asc(sandboxPolicyDecisions.sandboxPolicyDecisionId),
+      );
+  }
 
   /** Upserts one sandbox run and replaces child artifact and policy decision rows. */
   public async upsertSandboxRunWithChildren(
@@ -132,6 +217,15 @@ function sandboxCleanupLimit(limit: number | undefined): number {
   }
 
   return limit;
+}
+
+/** Returns a bounded sandbox run inspection limit. */
+function sandboxInspectionLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return 25;
+  }
+
+  return Math.min(100, Math.max(1, limit));
 }
 
 /** Returns stable unique string values while preserving caller order. */

@@ -205,9 +205,12 @@ tracked milestone.
 - Latest DB sandbox milestone: `SandboxRepository` now owns sandbox run upsert with artifact and
   policy-decision child-row replacement, stale sandbox run cleanup target selection, sandbox
   artifact URI lookup for backing-file cleanup, and sandbox run deletion with database cascades for
-  child rows. The worker uses this boundary for sandbox run persistence and `sandbox.cleanup.v1`
-  jobs, and the Postgres-backed integration test verifies idempotent upsert replacement, ordered
-  repo-scoped cleanup selection, limit validation, URI reads, and cascaded child deletion.
+  child rows. It also owns review-run and operator sandbox inspection reads with child artifact and
+  policy-decision lookups, so admin review debug and sandbox history views no longer import raw
+  sandbox tables. The worker uses this boundary for sandbox run persistence and
+  `sandbox.cleanup.v1` jobs, and the Postgres-backed integration test verifies idempotent upsert
+  replacement, ordered repo-scoped cleanup selection, limit validation, debug reads, URI reads, and
+  cascaded child deletion.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,
