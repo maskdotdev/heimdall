@@ -90,6 +90,9 @@ type AdminReviewArtifactDownloadUrlFixture = Awaited<
 type AdminReviewMetricsFixture = Awaited<
   ReturnType<AdminControlPlaneService["getReviewMetricsSummary"]>
 >;
+type AdminQueueHealthFixture = Awaited<
+  ReturnType<AdminControlPlaneService["listQueueHealthSnapshots"]>
+>[number];
 type AdminReviewFindingFixture = Awaited<ReturnType<AdminControlPlaneService["getReviewFinding"]>>;
 type AdminReviewFindingFeedbackEventFixture = Awaited<
   ReturnType<AdminControlPlaneService["listFindingFeedbackEvents"]>
@@ -6302,6 +6305,7 @@ describe("api app", () => {
     const repositoryQueries: unknown[] = [];
     const reviewQueries: unknown[] = [];
     const reviewMetricQueries: unknown[] = [];
+    const queueHealthQueries: unknown[] = [];
     const auditQueries: unknown[] = [];
     const app = createApiApp({
       adminControlPlaneAuth: auth,
@@ -6328,6 +6332,17 @@ describe("api app", () => {
         getReviewMetricsSummary: async (query) => {
           reviewMetricQueries.push(query);
           return reviewMetricsFixture();
+        },
+        listQueueHealthSnapshots: async (query) => {
+          queueHealthQueries.push(query);
+          return [
+            queueHealthFixture({
+              activeCount: 1,
+              oldestWaitingAgeMs: 42_000,
+              queueName: "review",
+              waitingCount: 2,
+            }),
+          ];
         },
       }),
       githubWebhookHandler: noopWebhookHandler(),
@@ -6362,6 +6377,14 @@ describe("api app", () => {
     await expect(overviewResponse.json()).resolves.toMatchObject({
       data: {
         recentAuditLogs: [{ action: "repo.settings.updated" }],
+        queueHealth: [
+          {
+            activeCount: 1,
+            oldestWaitingAgeMs: 42_000,
+            queueName: "review",
+            waitingCount: 2,
+          },
+        ],
         recentReviews: [{ reviewRunId: "rrn_1", repoFullName: "octo-org/heimdall" }],
         repositories: [{ fullName: "octo-org/heimdall", latestReviewRunId: "rrn_1" }],
         reviewMetrics: {
@@ -6384,6 +6407,7 @@ describe("api app", () => {
     expect(reviewMetricQueries).toEqual([
       expect.objectContaining({ limit: 12, orgIds: ["org_1"] }),
     ]);
+    expect(queueHealthQueries).toEqual([expect.objectContaining({ limit: 12 })]);
     expect(repositoriesResponse.status).toBe(200);
     await expect(repositoriesResponse.json()).resolves.toMatchObject({
       data: {
@@ -6881,6 +6905,7 @@ function createMockControlPlaneService(
     getReviewFinding: async () => reviewFindingFixture(),
     getReviewMetricsSummary: async () => reviewMetricsFixture(),
     getReviewRun: async () => reviewRunSummaryFixture,
+    listQueueHealthSnapshots: async () => [queueHealthFixture()],
     listReviewArtifacts: async () => [reviewArtifactFixture()],
     listFindingFeedbackEvents: async () => [findingFeedbackEventFixture()],
     listOrganizations: async () => [organizationFixture()],
@@ -8386,6 +8411,23 @@ function reviewMetricsFixture(
     supersededRuns: 0,
     totalRuns: 4,
     validatedFindings: 3,
+    ...overrides,
+  };
+}
+
+/** Queue health sample fixture used by dashboard overview route tests. */
+function queueHealthFixture(
+  overrides: Partial<AdminQueueHealthFixture> = {},
+): AdminQueueHealthFixture {
+  return {
+    activeCount: 0,
+    completedCount: 14,
+    delayedCount: 1,
+    failedCount: 0,
+    oldestWaitingAgeMs: 0,
+    queueName: "review",
+    sampledAt: "2026-05-05T12:30:00.000Z",
+    waitingCount: 0,
     ...overrides,
   };
 }

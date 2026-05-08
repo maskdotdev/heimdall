@@ -1682,6 +1682,26 @@ type ApiHealthResponse = {
   readonly timestamp: string;
 };
 
+/** Queue health sample shown in the operator overview. */
+type AdminQueueHealthSnapshot = {
+  /** Number of active jobs currently running. */
+  readonly activeCount: number;
+  /** Number of completed jobs retained by the queue backend. */
+  readonly completedCount: number;
+  /** Number of delayed jobs currently scheduled. */
+  readonly delayedCount: number;
+  /** Number of failed jobs retained by the queue backend. */
+  readonly failedCount: number;
+  /** Age of the oldest waiting or delayed job in milliseconds. */
+  readonly oldestWaitingAgeMs: number;
+  /** Logical queue name sampled from the worker runtime. */
+  readonly queueName: string;
+  /** ISO timestamp for the queue backend sample. */
+  readonly sampledAt: string;
+  /** Number of jobs currently waiting. */
+  readonly waitingCount: number;
+};
+
 /** Dashboard overview response. */
 type AdminDashboardOverview = {
   /** Scoped repositories available to the actor. */
@@ -1690,6 +1710,8 @@ type AdminDashboardOverview = {
   readonly recentReviews: readonly AdminReviewRunSummary[];
   /** Durable review rollup metrics for the current actor scope. */
   readonly reviewMetrics: AdminReviewMetricsSummary;
+  /** Latest queue health samples written by maintenance-capable workers. */
+  readonly queueHealth: readonly AdminQueueHealthSnapshot[];
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
   /** Product-safe API readiness summary. */
@@ -2507,6 +2529,8 @@ type OverviewViewState = {
   auditLogs: readonly AdminAuditLogSummary[];
   /** Latest product-safe runtime health returned by the overview endpoint. */
   runtimeHealth?: ApiHealthResponse | undefined;
+  /** Latest queue health samples returned by the overview endpoint. */
+  queueHealth: readonly AdminQueueHealthSnapshot[];
   /** Durable review rollup metrics returned by the overview endpoint. */
   reviewMetrics?: AdminReviewMetricsSummary | undefined;
   /** Whether the overview route has returned at least once in this session. */
@@ -3486,6 +3510,7 @@ const state: AppState = {
     repositories: [],
     reviews: [],
     auditLogs: [],
+    queueHealth: [],
     loaded: false,
     repositoriesLoaded: false,
     reviewsLoaded: false,
@@ -5663,6 +5688,7 @@ async function loadOverview(): Promise<void> {
     state.overview.reviews = data.recentReviews;
     state.overview.auditLogs = data.recentAuditLogs;
     state.overview.runtimeHealth = data.runtimeHealth;
+    state.overview.queueHealth = data.queueHealth;
     state.overview.reviewMetrics = data.reviewMetrics;
     state.overview.loaded = true;
     state.overview.repositoriesLoaded = true;
@@ -8961,6 +8987,7 @@ function renderOverviewView(): string {
       ${renderOverviewNotice(overview)}
       ${renderOverviewStats(stats)}
       ${renderRuntimeHealthPanel(overview.runtimeHealth)}
+      ${renderQueueHealthPanel(overview.queueHealth)}
       <section class="overview-grid">
         ${renderRepositoryDiscovery(overview)}
         ${renderReviewHistoryDiscovery(overview)}
@@ -9041,6 +9068,52 @@ function renderOverviewStats(stats: OverviewStats): string {
       ${renderMetric("Avg Findings", stats.averagePublishedFindings.toFixed(2))}
       ${renderMetric("Est. Cost", formatUsd(stats.estimatedCostUsd))}
     </section>
+  `;
+}
+
+/** Renders latest durable queue-health samples on the operator overview. */
+function renderQueueHealthPanel(queueHealth: readonly AdminQueueHealthSnapshot[]): string {
+  if (queueHealth.length === 0) {
+    return "";
+  }
+
+  const hasStaleBacklog = queueHealth.some((sample) => sample.oldestWaitingAgeMs >= 300_000);
+
+  return `
+    <section class="panel runtime-health-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Workers</p>
+          <h3>Queue Health</h3>
+        </div>
+        <span class="status ${hasStaleBacklog ? "bad" : "ok"}">
+          ${hasStaleBacklog ? "backlog" : "current"}
+        </span>
+      </div>
+      <div class="setup-list">
+        ${queueHealth.map(renderQueueHealthSample).join("")}
+      </div>
+    </section>
+  `;
+}
+
+/** Renders one durable queue health sample. */
+function renderQueueHealthSample(sample: AdminQueueHealthSnapshot): string {
+  const pendingCount = sample.waitingCount + sample.delayedCount;
+  const hasStaleBacklog = sample.oldestWaitingAgeMs >= 300_000;
+
+  return `
+    <div class="setup-row">
+      <span class="status ${hasStaleBacklog ? "bad" : "ok"}">
+        ${hasStaleBacklog ? "lag" : "ok"}
+      </span>
+      <div>
+        <strong>${escapeHtml(sample.queueName)}</strong>
+        <code>${pendingCount} pending, ${sample.activeCount} active, oldest ${formatDurationMs(
+          sample.oldestWaitingAgeMs,
+        )}</code>
+      </div>
+    </div>
   `;
 }
 
@@ -13333,6 +13406,7 @@ function updateOverviewField(field: string, value: string): void {
         | readonly AdminRepositorySummary[]
         | readonly AdminReviewRunSummary[]
         | readonly AdminAuditLogSummary[]
+        | readonly AdminQueueHealthSnapshot[]
         | boolean
         | undefined
       >
