@@ -54,12 +54,14 @@ import {
   type PublishedFindingFeedbackTargetRecord,
   type PublishedSummaryFeedbackTargetRecord,
   QueueHealthRepository,
+  type RecordSecurityEventInput,
   RepositoryRepository,
   ReviewRepository,
   type SandboxArtifactInsert,
   type SandboxPolicyDecisionInsert,
   SandboxRepository,
   type SandboxRunInsert,
+  SecurityAuditRepository,
 } from "@repo/db";
 import {
   createEmbeddingProviderFromEnvironment,
@@ -174,7 +176,14 @@ import {
   type SandboxTelemetryOptions,
   withSandboxTelemetry,
 } from "@repo/sandbox";
-import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } from "@repo/security";
+import {
+  createLocalEnvSecretsManager,
+  parseSecretRef,
+  recordSecurityEvent,
+  type SecretsManager,
+  type SecurityEvent,
+  type SecurityEventSink,
+} from "@repo/security";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Queue as BullMqQueue, Worker } from "bullmq";
@@ -316,6 +325,8 @@ export type CreateWorkerHandlersOptions = {
   readonly billingReconciler?: (payload: BillingReconcileJobPayload) => Promise<void>;
   /** Optional test hook for data-deletion planning jobs. */
   readonly dataDeletionPlanner?: (payload: DataDeletionPlanJobPayload) => Promise<void>;
+  /** Optional sink used to record worker-originated security events. */
+  readonly securityEventSink?: SecurityEventSink;
   /** Optional test hook for embedding repair jobs. */
   readonly embeddingRepairer?: (payload: EmbeddingRepairJobPayload) => Promise<void>;
   /** Optional test hook for sandbox cleanup jobs. */
@@ -1012,23 +1023,39 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     },
     [JOB_TYPES.DataDeletionPlan]: async (envelope, context) => {
       const payload = asDataDeletionPlanPayload(envelope.payload);
-      await throwIfWorkerJobCanceled(context);
-      if (options.dataDeletionPlanner) {
-        await options.dataDeletionPlanner(payload);
-        return;
-      }
+      try {
+        await throwIfWorkerJobCanceled(context);
+        if (options.dataDeletionPlanner) {
+          await options.dataDeletionPlanner(payload);
+          return;
+        }
 
-      await planDataDeletionRequest(options.db, payload);
-      if (payload.dryRun) {
-        return;
-      }
+        await planDataDeletionRequest(options.db, payload);
+        if (payload.dryRun) {
+          return;
+        }
 
-      await throwIfWorkerJobCanceled(context);
-      await executeDataDeletionRequest(
-        options.db,
-        payload.dataDeletionRequestId,
-        options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
-      );
+        await throwIfWorkerJobCanceled(context);
+        const summary = await executeDataDeletionRequest(
+          options.db,
+          payload.dataDeletionRequestId,
+          options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
+        );
+        recordWorkerDataDeletionSecurityEvent({
+          payload,
+          securityEventSink: options.securityEventSink,
+          summary,
+          type: "data_deletion_completed",
+        });
+      } catch (error) {
+        recordWorkerDataDeletionSecurityEvent({
+          error,
+          payload,
+          securityEventSink: options.securityEventSink,
+          type: "data_deletion_failed",
+        });
+        throw error;
+      }
     },
     [JOB_TYPES.SandboxCleanup]: async (envelope, context) => {
       const payload = asSandboxCleanupPayload(envelope.payload);
@@ -1346,6 +1373,20 @@ export type DataDeletionExecutionSummary = {
   readonly verificationArtifactUri?: string;
 };
 
+/** Input used to record a worker-originated data-deletion security event. */
+type RecordWorkerDataDeletionSecurityEventInput = {
+  /** Error that caused the deletion workflow to fail. */
+  readonly error?: unknown;
+  /** Data-deletion planning payload being handled. */
+  readonly payload: DataDeletionPlanJobPayload;
+  /** Optional sink configured for worker-originated security events. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+  /** Execution summary when deletion completed. */
+  readonly summary?: DataDeletionExecutionSummary | undefined;
+  /** Normalized security event type. */
+  readonly type: "data_deletion_completed" | "data_deletion_failed";
+};
+
 /** Executes a planned data-deletion request and records product-safe verification metadata. */
 export async function executeDataDeletionRequest(
   db: HeimdallDatabase,
@@ -1660,6 +1701,46 @@ function dataDeletionMetadataRecord(metadata: unknown): Record<string, unknown> 
 /** Returns the durable verification evidence URI for a completed data-deletion request. */
 function dataDeletionVerificationArtifactUri(dataDeletionRequestId: string): string {
   return `deletion://${dataDeletionRequestId}/verification.json`;
+}
+
+/** Records a product-safe security event for worker data-deletion workflow outcomes. */
+function recordWorkerDataDeletionSecurityEvent(
+  input: RecordWorkerDataDeletionSecurityEventInput,
+): void {
+  if (!input.securityEventSink) {
+    return;
+  }
+
+  recordSecurityEvent(input.securityEventSink, {
+    actorId: input.payload.requestedBy,
+    metadata: {
+      dataDeletionRequestId: input.payload.dataDeletionRequestId,
+      dryRun: input.payload.dryRun ?? false,
+      ...(input.error
+        ? { errorName: input.error instanceof Error ? input.error.name : "UnknownError" }
+        : {}),
+      reason: input.payload.reason,
+      scope: input.payload.scope,
+      ...(input.summary
+        ? {
+            canceledJobCount: input.summary.canceledJobCount,
+            deletedEmbeddingCount: input.summary.deletedEmbeddingCount,
+            deletedReviewArtifactPayloadCount: input.summary.deletedReviewArtifactPayloadCount,
+            deletedSandboxRunCount: input.summary.deletedSandboxRunCount,
+            disabledRepositoryCount: input.summary.disabledRepositoryCount,
+            repoCount: input.summary.repoIds.length,
+            tombstonedReviewArtifactCount: input.summary.tombstonedReviewArtifactCount,
+          }
+        : {}),
+    },
+    orgId: input.payload.orgId,
+    repoId: input.payload.repoId,
+    resourceId: input.payload.dataDeletionRequestId,
+    resourceType: "data_deletion_request",
+    severity: input.type === "data_deletion_failed" ? "high" : "info",
+    source: "worker",
+    type: input.type,
+  });
 }
 
 /** Builds an initial product-safe manifest for a data-deletion request. */
@@ -2030,6 +2111,53 @@ export async function createWorkerEmbeddingProviderFromEnvironment(
   });
 }
 
+/** Options used to create a worker security-event sink backed by Postgres. */
+export type WorkerPostgresSecurityEventSinkOptions = {
+  /** Database facade that receives durable security events. */
+  readonly db: HeimdallDatabase;
+  /** Optional product-safe error hook for failed background writes. */
+  readonly onError?: (error: unknown, event: SecurityEvent) => void;
+};
+
+/** Creates a worker security-event sink that writes normalized events to Postgres. */
+export function createWorkerPostgresSecurityEventSink(
+  options: WorkerPostgresSecurityEventSinkOptions,
+): SecurityEventSink {
+  return {
+    record: (event) => {
+      try {
+        const write = new SecurityAuditRepository(options.db).recordSecurityEvent(
+          workerSecurityEventRecordFromEvent(event),
+        );
+        void Promise.resolve(write).catch((error: unknown) => {
+          options.onError?.(error, event);
+        });
+      } catch (error) {
+        options.onError?.(error, event);
+      }
+    },
+  };
+}
+
+/** Converts a normalized worker security event into a durable security event record. */
+function workerSecurityEventRecordFromEvent(event: SecurityEvent): RecordSecurityEventInput {
+  const createdAt = new Date(event.createdAt);
+  return {
+    actorId: event.actorId ?? null,
+    createdAt,
+    metadata: event.metadata,
+    orgId: event.orgId ?? null,
+    repoId: event.repoId ?? null,
+    resourceId: event.resourceId ?? null,
+    resourceType: event.resourceType ?? null,
+    securityEventId: event.id,
+    severity: event.severity,
+    source: event.source,
+    status: event.status,
+    type: event.type,
+  };
+}
+
 /** Starts BullMQ workers and a polling outbox dispatcher. */
 export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const observability = createObservabilityRuntime({
@@ -2044,6 +2172,18 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   }
 
   const databaseClient = createDatabaseClient();
+  const securityEventSink = createWorkerPostgresSecurityEventSink({
+    db: databaseClient.db,
+    onError: (error, event) => {
+      observability.logger.warn("worker security event persistence failed", {
+        attributes: {
+          "error.name": error instanceof Error ? error.name : "UnknownError",
+          "event.name": "worker.security_event.persistence_failed",
+          "security_event.type": event.type,
+        },
+      });
+    },
+  });
   const store = new DrizzleDurableJobStore(databaseClient.db);
   const queueProducer = new BullMqQueueProducer(config.redisUrl);
   const workerConnection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -2112,6 +2252,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ...(billingProvider ? { billingProvider } : {}),
       db: databaseClient.db,
       gitProvider,
+      securityEventSink,
       ...(llmGateway ? { llmGateway } : {}),
       ...(staticAnalysisRunner ? { staticAnalysisRunner } : {}),
       ...(reviewIndexDependencyMode ? { reviewIndexDependencyMode } : {}),
