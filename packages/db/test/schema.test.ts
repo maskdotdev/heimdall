@@ -28,6 +28,8 @@ import {
   evalRuns,
   evalSuites,
   evalVariants,
+  feedbackEvents,
+  feedbackSignals,
   findingDuplicateGroups,
   findingValidationEvents,
   indexedFiles,
@@ -104,6 +106,10 @@ const optionalIndexRecordsMigrationPath = resolve(
   testDirectory,
   "../migrations/0023_purple_mercury.sql",
 );
+const feedbackTimelineMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0024_swift_tinkerer.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -140,6 +146,8 @@ describe("database schema foundation", () => {
     expect(findingDuplicateGroups.findingDuplicateGroupId.name).toBe("finding_duplicate_group_id");
     expect(publishPlans.publishPlanId.name).toBe("publish_plan_id");
     expect(memoryCandidates.memoryCandidateId.name).toBe("memory_candidate_id");
+    expect(feedbackEvents.feedbackEventId.name).toBe("feedback_event_id");
+    expect(feedbackSignals.feedbackSignalId.name).toBe("feedback_signal_id");
     expect(publishedReviews.publishedReviewId.name).toBe("published_review_id");
     expect(publishedSummaryComments.publishedSummaryCommentId.name).toBe(
       "published_summary_comment_id",
@@ -202,6 +210,7 @@ describe("database schema foundation", () => {
       "utf8",
     );
     const optionalIndexRecordsMigration = await readFile(optionalIndexRecordsMigrationPath, "utf8");
+    const feedbackTimelineMigration = await readFile(feedbackTimelineMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -240,6 +249,8 @@ describe("database schema foundation", () => {
     expect(duplicateGroupsMigration).toContain('CREATE TABLE "finding_duplicate_groups"');
     expect(publishPlansMigration).toContain('CREATE TABLE "publish_plans"');
     expect(memoryCandidatesMigration).toContain('CREATE TABLE "memory_candidates"');
+    expect(feedbackTimelineMigration).toContain('CREATE TABLE "feedback_events"');
+    expect(feedbackTimelineMigration).toContain('CREATE TABLE "feedback_signals"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_runs"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_artifacts"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_policy_decisions"');
@@ -438,6 +449,8 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('eval_case_results')::text) AS eval_case_results_table,
         (SELECT to_regclass('eval_human_labels')::text) AS eval_human_labels_table,
         (SELECT to_regclass('eval_baselines')::text) AS eval_baselines_table,
+        (SELECT to_regclass('feedback_events')::text) AS feedback_events_table,
+        (SELECT to_regclass('feedback_signals')::text) AS feedback_signals_table,
         (SELECT to_regclass('review_run_metrics')::text) AS review_run_metrics_table,
         (SELECT to_regclass('users')::text) AS users_table,
         (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
@@ -456,6 +469,8 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       eval_runs_table: "eval_runs",
       eval_suites_table: "eval_suites",
       eval_variants_table: "eval_variants",
+      feedback_events_table: "feedback_events",
+      feedback_signals_table: "feedback_signals",
       finding_duplicate_groups_table: "finding_duplicate_groups",
       finding_validation_events_table: "finding_validation_events",
       memory_candidates_table: "memory_candidates",

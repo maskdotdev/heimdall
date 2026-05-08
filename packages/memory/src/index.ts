@@ -792,6 +792,20 @@ export function classifyFeedbackEvent(
       ]);
     }
 
+    if (event.eventKind === "reaction_added") {
+      const feedbackKind = stringPayloadField(event.payloadRedacted, "feedbackKind");
+      if (feedbackKind === "positive_reaction") {
+        return finish([
+          signal("positive_reaction", "positive", 0.25, 0.6, "User reacted positively."),
+        ]);
+      }
+      if (feedbackKind === "negative_reaction") {
+        return finish([
+          signal("negative_reaction", "negative", 0.4, 0.65, "User reacted negatively."),
+        ]);
+      }
+    }
+
     const body = normalizeText(input.redactedText ?? "");
     if (body.includes("fixed") || body.includes("thanks")) {
       return finish([
@@ -1930,6 +1944,12 @@ function stableId(prefix: string, parts: readonly string[]): string {
 /** Estimates prompt token usage from text. */
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/** Reads one string field from a redacted payload object. */
+function stringPayloadField(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /** Creates a SHA-256 digest. */

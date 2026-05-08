@@ -1466,6 +1466,50 @@ type AdminReviewFindingOutcomeSummary = {
   readonly createdAt: string;
 };
 
+/** Feedback signal attached to one finding feedback event. */
+type AdminReviewFindingFeedbackSignalSummary = {
+  /** Feedback signal row ID. */
+  readonly feedbackSignalId: string;
+  /** Classified signal kind. */
+  readonly signalKind: string;
+  /** Signal polarity. */
+  readonly polarity: string;
+  /** Signal strength. */
+  readonly strength: number;
+  /** Classifier confidence. */
+  readonly confidence: number;
+  /** Product-safe signal reason. */
+  readonly reason: string;
+  /** Signal creation timestamp. */
+  readonly createdAt: string;
+};
+
+/** Feedback event attached to one finding. */
+type AdminReviewFindingFeedbackEventSummary = {
+  /** Feedback event row ID. */
+  readonly feedbackEventId: string;
+  /** Provider that delivered the feedback. */
+  readonly provider: string;
+  /** Feedback source. */
+  readonly source: string;
+  /** Normalized event kind. */
+  readonly eventKind: string;
+  /** Provider event ID when available. */
+  readonly externalEventId?: string | undefined;
+  /** Actor login when available. */
+  readonly actorLogin?: string | undefined;
+  /** Pull request number when available. */
+  readonly pullRequestNumber?: number | undefined;
+  /** Provider comment ID when available. */
+  readonly externalCommentId?: string | undefined;
+  /** Redacted event metadata. */
+  readonly payloadRedacted?: Record<string, unknown> | undefined;
+  /** Event receipt timestamp. */
+  readonly receivedAt: string;
+  /** Classified signals for this event. */
+  readonly signals: readonly AdminReviewFindingFeedbackSignalSummary[];
+};
+
 /** Finding row returned by scoped review finding APIs. */
 type AdminReviewFindingSummary = {
   /** Canonical validated finding ID. */
@@ -2136,6 +2180,8 @@ type ProductReviewDetailState = {
   artifactPayload?: AdminReviewArtifactPayloadSummary | undefined;
   /** Selected finding detail. */
   selectedFinding?: AdminReviewFindingSummary | undefined;
+  /** Feedback timeline for the selected finding. */
+  selectedFindingFeedbackEvents?: readonly AdminReviewFindingFeedbackEventSummary[] | undefined;
   /** Outcome note draft for finding feedback. */
   outcomeNote: string;
   /** Suppress-similar reason draft. */
@@ -4522,14 +4568,20 @@ async function loadProductFindingDetail(
   render();
 
   try {
-    const data = await requestProductData<{ readonly finding: AdminReviewFindingSummary }>(
-      `/api/v1/findings/${encodeURIComponent(findingId)}`,
-    );
-    detail.selectedFinding = data.finding;
-    detail.outcomeNote = data.finding.latestOutcome?.notes ?? "";
+    const [findingData, feedbackData] = await Promise.all([
+      requestProductData<{ readonly finding: AdminReviewFindingSummary }>(
+        `/api/v1/findings/${encodeURIComponent(findingId)}`,
+      ),
+      requestProductData<{
+        readonly feedbackEvents: readonly AdminReviewFindingFeedbackEventSummary[];
+      }>(`/api/v1/findings/${encodeURIComponent(findingId)}/feedback-events`),
+    ]);
+    detail.selectedFinding = findingData.finding;
+    detail.selectedFindingFeedbackEvents = feedbackData.feedbackEvents;
+    detail.outcomeNote = findingData.finding.latestOutcome?.notes ?? "";
     detail.suppressionReason = "";
     detail.findings = detail.findings.map((finding) =>
-      finding.findingId === data.finding.findingId ? data.finding : finding,
+      finding.findingId === findingData.finding.findingId ? findingData.finding : finding,
     );
     replaceDashboardRouteFromState(historyMode);
   } catch (error) {
@@ -7231,6 +7283,7 @@ function renderProductFindingDetail(
           <div><dt>Publication</dt><dd>${escapeHtml(finding.publication?.status ?? "not published")}</dd></div>
           <div><dt>Latest outcome</dt><dd>${escapeHtml(finding.latestOutcome?.outcome ?? "none")}</dd></div>
         </dl>
+        ${renderProductFindingFeedbackTimeline(detail.selectedFindingFeedbackEvents)}
         ${renderProductFindingJson("Validation", finding.validation)}
         ${renderProductFindingJson("Evidence", finding.evidence)}
         ${renderProductFindingOutcomeControls(finding, detail.outcomeNote, canWriteFindings)}
@@ -7247,6 +7300,57 @@ function renderProductFindingJson(title: string, value: unknown): string {
       <summary class="finding-json-summary">${escapeHtml(title)}</summary>
       <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
     </details>
+  `;
+}
+
+/** Renders the selected finding feedback timeline. */
+function renderProductFindingFeedbackTimeline(
+  events: readonly AdminReviewFindingFeedbackEventSummary[] | undefined,
+): string {
+  if (!events) {
+    return `<p class="inline-empty">Open a finding to load feedback events.</p>`;
+  }
+  if (events.length === 0) {
+    return `<p class="inline-empty">No feedback events have been recorded for this finding.</p>`;
+  }
+
+  return `
+    <details class="finding-json finding-feedback-timeline" open>
+      <summary class="finding-json-summary">Feedback timeline</summary>
+      <div class="timeline-list">
+        ${events.map(renderProductFindingFeedbackEvent).join("")}
+      </div>
+    </details>
+  `;
+}
+
+/** Renders one selected finding feedback timeline event. */
+function renderProductFindingFeedbackEvent(event: AdminReviewFindingFeedbackEventSummary): string {
+  const signals = event.signals.length
+    ? event.signals.map(renderProductFindingFeedbackSignal).join("")
+    : `<span class="muted-text">No classified signals</span>`;
+
+  return `
+    <div class="timeline-item">
+      <div>
+        <strong>${escapeHtml(event.eventKind)}</strong>
+        <small>${escapeHtml(event.actorLogin ?? event.provider)} · ${escapeHtml(formatTime(event.receivedAt))}</small>
+      </div>
+      <div class="timeline-signals">${signals}</div>
+    </div>
+  `;
+}
+
+/** Renders one selected finding feedback signal chip. */
+function renderProductFindingFeedbackSignal(
+  signal: AdminReviewFindingFeedbackSignalSummary,
+): string {
+  return `
+    <span class="signal-chip ${statusClass(signal.polarity)}" title="${escapeAttribute(
+      signal.reason,
+    )}">
+      ${escapeHtml(signal.signalKind)} · ${formatPercent(signal.confidence)}
+    </span>
   `;
 }
 

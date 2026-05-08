@@ -918,6 +918,21 @@ describe("createWorkerHandlers", () => {
 
     expect(insertedOutcomes).toEqual([
       expect.objectContaining({
+        eventKind: "reaction_added",
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        orgId: "org_1",
+        payloadRedacted: expect.objectContaining({
+          feedbackKind: "negative_reaction",
+        }),
+        publishedFindingId: "pub_1",
+        repoId: "repo_1",
+      }),
+      expect.objectContaining({
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        polarity: "negative",
+        signalKind: "negative_reaction",
+      }),
+      expect.objectContaining({
         candidateFindingId: "cf_1",
         orgId: "org_1",
         outcome: "negative_reaction",
@@ -926,7 +941,7 @@ describe("createWorkerHandlers", () => {
         source: "provider_webhook",
       }),
     ]);
-    expect(insertedOutcomes[0]).toEqual(
+    expect(insertedOutcomes[2]).toEqual(
       expect.objectContaining({
         metadata: expect.objectContaining({
           actorLogin: "maintainer",
@@ -1023,6 +1038,22 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(insertedRows).toEqual([
+      expect.objectContaining({
+        eventKind: "issue_comment_created",
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        payloadRedacted: expect.objectContaining({
+          feedbackCommand: expect.objectContaining({
+            commandKind: "suppress_similar",
+          }),
+          feedbackKind: "comment_reply",
+        }),
+        publishedFindingId: "pub_1",
+      }),
+      expect.objectContaining({
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        polarity: "suppression",
+        signalKind: "explicit_suppress_command",
+      }),
       expect.objectContaining({
         outcome: "dismissed",
         publishedFindingId: "pub_1",

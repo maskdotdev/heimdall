@@ -126,6 +126,24 @@ describe("memory package", () => {
     expect(outcome.negativeScore).toBe(1);
   });
 
+  it("classifies provider reaction events from redacted payload metadata", () => {
+    const signals = classifyFeedbackEvent({
+      event: {
+        ...feedbackEvent,
+        eventKind: "reaction_added",
+        id: "fevt_reaction",
+        payloadRedacted: { feedbackKind: "negative_reaction" },
+      },
+    });
+
+    expect(signals).toEqual([
+      expect.objectContaining({
+        polarity: "negative",
+        signalKind: "negative_reaction",
+      }),
+    ]);
+  });
+
   it("records feedback and memory telemetry without comment text or paths", () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];

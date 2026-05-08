@@ -38,6 +38,8 @@ import {
   backgroundJobs,
   billingProviderRequests,
   createDatabaseClient,
+  feedbackEvents,
+  feedbackSignals,
   findingOutcomes,
   type HeimdallDatabase,
   memoryCandidates,
@@ -93,8 +95,12 @@ import {
   REVIEW_FINDINGS_MODEL_PROFILE,
 } from "@repo/llm-gateway";
 import {
+  classifyFeedbackEvent,
   createMemoryCandidatesFromCommand,
   type FeedbackCommand,
+  type FeedbackEvent,
+  type FeedbackEventKind,
+  type FeedbackSignal,
   type MemoryAppliesTo,
   MemoryAppliesToSchema,
   type MemoryCandidate,
@@ -2405,6 +2411,9 @@ async function recordOutcomeFromProviderFeedback(
     return;
   }
 
+  const feedbackEvent = providerFeedbackEventFromPayload(payload, published, receivedAt);
+  await persistFeedbackEventAndSignals(db, feedbackEvent, feedbackCommandFromPayload(payload));
+
   if (outcome) {
     await db
       .insert(findingOutcomes)
@@ -2533,6 +2542,152 @@ async function findPublishedFindingForProviderFeedback(
   }
 
   return undefined;
+}
+
+/** Builds a normalized durable feedback event from a provider memory job payload. */
+function providerFeedbackEventFromPayload(
+  payload: UpdateMemoryJobPayload,
+  published: {
+    readonly orgId: string;
+    readonly publishedFindingId: string;
+    readonly repoId: string;
+    readonly publishedFindingReviewRunId?: string | undefined;
+    readonly finding: {
+      readonly reviewRunId: string;
+    };
+  },
+  receivedAt: string,
+): FeedbackEvent {
+  return {
+    id: stableWorkerId("fevt", [
+      "provider_feedback",
+      payload.externalEventId ??
+        payload.externalReactionId ??
+        payload.externalParentCommentId ??
+        payload.externalCommentId ??
+        receivedAt,
+    ]),
+    orgId: published.orgId,
+    repoId: published.repoId,
+    provider: payload.provider ?? "github",
+    source: "webhook",
+    eventKind: feedbackEventKindFromPayload(payload),
+    ...(payload.externalEventId ? { externalEventId: payload.externalEventId } : {}),
+    ...(payload.actorLogin
+      ? {
+          actor: {
+            providerLogin: payload.actorLogin,
+            isBot: payload.actorLogin.endsWith("[bot]"),
+          },
+        }
+      : {}),
+    ...(payload.pullRequestNumber ? { pullRequestNumber: payload.pullRequestNumber } : {}),
+    reviewRunId: published.publishedFindingReviewRunId ?? published.finding.reviewRunId,
+    publishedFindingId: published.publishedFindingId,
+    ...((payload.externalParentCommentId ?? payload.externalCommentId)
+      ? { externalCommentId: payload.externalParentCommentId ?? payload.externalCommentId }
+      : {}),
+    payloadRedacted: providerFeedbackPayloadRedacted(payload),
+    receivedAt,
+  };
+}
+
+/** Persists one normalized feedback event and its deterministic classified signals. */
+async function persistFeedbackEventAndSignals(
+  db: HeimdallDatabase,
+  event: FeedbackEvent,
+  command: FeedbackCommand | undefined,
+): Promise<void> {
+  await db.insert(feedbackEvents).values(feedbackEventRow(event)).onConflictDoNothing();
+
+  const signals = classifyFeedbackEvent({ command, event });
+  for (const signal of signals) {
+    await db.insert(feedbackSignals).values(feedbackSignalRow(signal)).onConflictDoNothing();
+  }
+}
+
+/** Converts one memory feedback event into the database insert shape. */
+function feedbackEventRow(event: FeedbackEvent): typeof feedbackEvents.$inferInsert {
+  return {
+    ...(event.actor?.association ? { actorAssociation: event.actor.association } : {}),
+    actorIsBot: event.actor?.isBot ?? false,
+    ...(event.actor?.permission ? { actorPermission: event.actor.permission } : {}),
+    ...(event.actor?.providerLogin ? { actorLogin: event.actor.providerLogin } : {}),
+    ...(event.actor?.providerUserId ? { actorProviderUserId: event.actor.providerUserId } : {}),
+    eventKind: event.eventKind,
+    ...(event.externalCommentId ? { externalCommentId: event.externalCommentId } : {}),
+    ...(event.externalEventId ? { externalEventId: event.externalEventId } : {}),
+    ...(event.externalThreadId ? { externalThreadId: event.externalThreadId } : {}),
+    feedbackEventId: event.id,
+    orgId: event.orgId,
+    payloadRedacted: event.payloadRedacted,
+    provider: event.provider,
+    ...(event.publishedFindingId ? { publishedFindingId: event.publishedFindingId } : {}),
+    ...(event.pullRequestNumber ? { pullRequestNumber: event.pullRequestNumber } : {}),
+    receivedAt: new Date(event.receivedAt),
+    repoId: event.repoId,
+    ...(event.reviewRunId ? { reviewRunId: event.reviewRunId } : {}),
+    source: event.source,
+    ...(event.webhookEventId ? { webhookEventId: event.webhookEventId } : {}),
+  };
+}
+
+/** Converts one memory feedback signal into the database insert shape. */
+function feedbackSignalRow(signal: FeedbackSignal): typeof feedbackSignals.$inferInsert {
+  return {
+    confidence: signal.confidence,
+    createdAt: new Date(signal.createdAt),
+    feedbackEventId: signal.feedbackEventId,
+    feedbackSignalId: signal.id,
+    polarity: signal.polarity,
+    ...(signal.publishedFindingId ? { publishedFindingId: signal.publishedFindingId } : {}),
+    reason: signal.reason,
+    signalKind: signal.signalKind,
+    strength: signal.strength,
+  };
+}
+
+/** Maps provider memory-job metadata to the normalized feedback event vocabulary. */
+function feedbackEventKindFromPayload(payload: UpdateMemoryJobPayload): FeedbackEventKind {
+  if (payload.reason === "provider_reaction") {
+    return "reaction_added";
+  }
+  if (payload.externalParentCommentId) {
+    return payload.feedbackKind === "comment_deleted"
+      ? "review_comment_deleted"
+      : payload.feedbackKind === "comment_edited"
+        ? "review_comment_edited"
+        : "review_comment_created";
+  }
+  return payload.feedbackKind === "comment_deleted"
+    ? "issue_comment_deleted"
+    : payload.feedbackKind === "comment_edited"
+      ? "issue_comment_edited"
+      : "issue_comment_created";
+}
+
+/** Builds product-safe provider feedback metadata for timeline inspection. */
+function providerFeedbackPayloadRedacted(payload: UpdateMemoryJobPayload): Record<string, unknown> {
+  return {
+    ...(payload.bodyHash ? { bodyHash: payload.bodyHash } : {}),
+    ...(payload.externalCommentId ? { externalCommentId: payload.externalCommentId } : {}),
+    ...(payload.externalEventId ? { externalEventId: payload.externalEventId } : {}),
+    ...(payload.externalParentCommentId
+      ? { externalParentCommentId: payload.externalParentCommentId }
+      : {}),
+    ...(payload.externalReactionId ? { externalReactionId: payload.externalReactionId } : {}),
+    ...(payload.feedbackKind ? { feedbackKind: payload.feedbackKind } : {}),
+    ...(payload.feedbackCommand
+      ? {
+          feedbackCommand: {
+            commandHash: payload.feedbackCommand.commandHash,
+            commandKind: payload.feedbackCommand.commandKind,
+            confidence: payload.feedbackCommand.confidence,
+          },
+        }
+      : {}),
+    reason: payload.reason,
+  };
 }
 
 /** Maps provider feedback kind to the durable finding outcome vocabulary. */

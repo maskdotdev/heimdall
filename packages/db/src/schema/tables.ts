@@ -1176,6 +1176,68 @@ export const publishOperations = pgTable("publish_operations", {
 });
 
 /** Feedback and outcome events for findings. */
+export const feedbackEvents = pgTable(
+  "feedback_events",
+  {
+    feedbackEventId: text("feedback_event_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    provider: text("provider").notNull(),
+    source: text("source").notNull(),
+    eventKind: text("event_kind").notNull(),
+    externalEventId: text("external_event_id"),
+    webhookEventId: text("webhook_event_id"),
+    actorLogin: text("actor_login"),
+    actorProviderUserId: text("actor_provider_user_id"),
+    actorAssociation: text("actor_association"),
+    actorPermission: text("actor_permission"),
+    actorIsBot: boolean("actor_is_bot").notNull().default(false),
+    pullRequestNumber: integer("pull_request_number"),
+    reviewRunId: text("review_run_id").references(() => reviewRuns.reviewRunId),
+    publishedFindingId: text("published_finding_id").references(() => publishedFindings.findingId),
+    externalCommentId: text("external_comment_id"),
+    externalThreadId: text("external_thread_id"),
+    payloadRedacted: jsonb("payload_redacted").notNull().default(sql`'{}'::jsonb`),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("feedback_events_org_repo_received_idx").on(table.orgId, table.repoId, table.receivedAt),
+    index("feedback_events_published_finding_idx").on(table.publishedFindingId),
+    index("feedback_events_external_comment_idx").on(table.provider, table.externalCommentId),
+    uniqueIndex("feedback_events_provider_external_unique").on(
+      table.provider,
+      table.externalEventId,
+    ),
+  ],
+);
+
+/** Signals classified from feedback events. */
+export const feedbackSignals = pgTable(
+  "feedback_signals",
+  {
+    feedbackSignalId: text("feedback_signal_id").primaryKey(),
+    feedbackEventId: text("feedback_event_id")
+      .notNull()
+      .references(() => feedbackEvents.feedbackEventId),
+    publishedFindingId: text("published_finding_id").references(() => publishedFindings.findingId),
+    signalKind: text("signal_kind").notNull(),
+    polarity: text("polarity").notNull(),
+    strength: real("strength").notNull(),
+    confidence: real("confidence").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("feedback_signals_event_idx").on(table.feedbackEventId),
+    index("feedback_signals_published_finding_idx").on(table.publishedFindingId),
+  ],
+);
+
 export const findingOutcomes = pgTable("finding_outcomes", {
   findingOutcomeId: text("finding_outcome_id").primaryKey(),
   orgId: text("org_id")

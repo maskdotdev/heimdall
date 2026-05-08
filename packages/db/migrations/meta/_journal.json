@@ -169,6 +169,13 @@
       "when": 1778211368177,
       "tag": "0023_purple_mercury",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1778218858146,
+      "tag": "0024_swift_tinkerer",
+      "breakpoints": true
     }
   ]
 }

@@ -89,6 +89,9 @@ type AdminReviewMetricsFixture = Awaited<
   ReturnType<AdminControlPlaneService["getReviewMetricsSummary"]>
 >;
 type AdminReviewFindingFixture = Awaited<ReturnType<AdminControlPlaneService["getReviewFinding"]>>;
+type AdminReviewFindingFeedbackEventFixture = Awaited<
+  ReturnType<AdminControlPlaneService["listFindingFeedbackEvents"]>
+>[number];
 type AdminFindingOutcomeRecordFixture = Awaited<
   ReturnType<AdminControlPlaneService["recordFindingOutcome"]>
 >;
@@ -1188,6 +1191,11 @@ describe("api app", () => {
         headers: productHeaders,
       }),
     );
+    const feedbackResponse = await app.handle(
+      new Request("http://localhost/api/v1/findings/fnd_validated_1/feedback-events", {
+        headers: productHeaders,
+      }),
+    );
     const outcomeResponse = await app.handle(
       new Request("http://localhost/api/v1/findings/fnd_validated_1/outcome", {
         body: JSON.stringify({ notes: "Resolved by the author.", outcome: "resolved" }),
@@ -1217,6 +1225,7 @@ describe("api app", () => {
     expect(findingsResponse.status).toBe(200);
     expect(artifactsResponse.status).toBe(200);
     expect(findingResponse.status).toBe(200);
+    expect(feedbackResponse.status).toBe(200);
     expect(outcomeResponse.status).toBe(200);
     expect(suppressionResponse.status).toBe(201);
     expect(rerunResponse.status).toBe(202);
@@ -1258,6 +1267,16 @@ describe("api app", () => {
     });
     await expect(findingsResponse.json()).resolves.toMatchObject({
       data: { findings: [{ findingId: "fnd_validated_1" }] },
+    });
+    await expect(feedbackResponse.json()).resolves.toMatchObject({
+      data: {
+        feedbackEvents: [
+          {
+            eventKind: "reaction_added",
+            signals: [{ signalKind: "negative_reaction" }],
+          },
+        ],
+      },
     });
     await expect(artifactsResponse.json()).resolves.toMatchObject({
       data: {
@@ -6069,6 +6088,7 @@ function createMockControlPlaneService(
     getReviewMetricsSummary: async () => reviewMetricsFixture(),
     getReviewRun: async () => reviewRunSummaryFixture,
     listReviewArtifacts: async () => [reviewArtifactFixture()],
+    listFindingFeedbackEvents: async () => [findingFeedbackEventFixture()],
     listOrganizations: async () => [organizationFixture()],
     listProductUsageEvents: async () => [productUsageEventFixture()],
     listProviderInstallations: async () => [providerInstallationFixture()],
@@ -6366,6 +6386,37 @@ function findingOutcomeRecordFixture(
     auditLogId: "audit_finding_outcome",
     finding: reviewFindingFixture({ latestOutcome: outcome }),
     outcome,
+    ...overrides,
+  };
+}
+
+/** Creates a finding feedback timeline fixture. */
+function findingFeedbackEventFixture(
+  overrides: Partial<AdminReviewFindingFeedbackEventFixture> = {},
+): AdminReviewFindingFeedbackEventFixture {
+  return {
+    actorLogin: "maintainer",
+    eventKind: "reaction_added",
+    externalCommentId: "123",
+    externalEventId: "fb_1",
+    feedbackEventId: "fevt_1",
+    payloadRedacted: {
+      feedbackKind: "negative_reaction",
+    },
+    provider: "github",
+    receivedAt: "2026-05-05T12:41:00.000Z",
+    signals: [
+      {
+        confidence: 0.65,
+        createdAt: "2026-05-05T12:41:00.000Z",
+        feedbackSignalId: "fsig_1",
+        polarity: "negative",
+        reason: "User reacted negatively.",
+        signalKind: "negative_reaction",
+        strength: 0.4,
+      },
+    ],
+    source: "webhook",
     ...overrides,
   };
 }

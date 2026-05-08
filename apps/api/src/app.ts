@@ -88,6 +88,8 @@ import {
   type EvalRunRow,
   type EvalSuiteRow,
   EvaluationRepository,
+  feedbackEvents,
+  feedbackSignals,
   findingOutcomes,
   type HeimdallDatabase,
   invoices,
@@ -1221,6 +1223,50 @@ type AdminReviewFindingOutcomeSummary = {
   readonly metadata?: Record<string, unknown> | undefined;
 };
 
+/** Feedback signal row attached to one feedback timeline event. */
+type AdminReviewFindingFeedbackSignalSummary = {
+  /** Feedback signal row ID. */
+  readonly feedbackSignalId: string;
+  /** Signal kind classified by the memory package. */
+  readonly signalKind: string;
+  /** Signal polarity used by outcome scoring. */
+  readonly polarity: string;
+  /** Signal strength from zero to one. */
+  readonly strength: number;
+  /** Classifier confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe signal reason. */
+  readonly reason: string;
+  /** Signal creation timestamp. */
+  readonly createdAt: string;
+};
+
+/** Normalized feedback event shown in finding timelines. */
+type AdminReviewFindingFeedbackEventSummary = {
+  /** Feedback event row ID. */
+  readonly feedbackEventId: string;
+  /** Provider that delivered the feedback. */
+  readonly provider: string;
+  /** Feedback source, such as webhook or dashboard. */
+  readonly source: string;
+  /** Normalized feedback event kind. */
+  readonly eventKind: string;
+  /** External provider event ID when available. */
+  readonly externalEventId?: string | undefined;
+  /** Actor login when available. */
+  readonly actorLogin?: string | undefined;
+  /** Pull request number when available. */
+  readonly pullRequestNumber?: number | undefined;
+  /** Provider comment ID when available. */
+  readonly externalCommentId?: string | undefined;
+  /** Redacted provider metadata for debugging. */
+  readonly payloadRedacted?: Record<string, unknown> | undefined;
+  /** Event receipt timestamp. */
+  readonly receivedAt: string;
+  /** Deterministic signals classified from this event. */
+  readonly signals: readonly AdminReviewFindingFeedbackSignalSummary[];
+};
+
 /** Finding row returned by review history APIs. */
 type AdminReviewFindingSummary = {
   /** Validated finding ID used as the canonical API ID. */
@@ -1331,6 +1377,44 @@ type AdminReviewFindingOutcomeLookup = {
   readonly byCandidateFindingId: ReadonlyMap<string, AdminReviewFindingOutcomeSummary>;
   /** Latest outcome keyed by published finding ID. */
   readonly byPublishedFindingId: ReadonlyMap<string, AdminReviewFindingOutcomeSummary>;
+};
+
+/** Joined feedback event and optional signal row selected for timelines. */
+type AdminReviewFindingFeedbackTimelineRow = {
+  /** Actor login when available. */
+  readonly actorLogin: string | null;
+  /** Feedback event kind. */
+  readonly eventKind: string;
+  /** External provider comment ID when available. */
+  readonly externalCommentId: string | null;
+  /** External provider event ID when available. */
+  readonly externalEventId: string | null;
+  /** Feedback event row ID. */
+  readonly feedbackEventId: string;
+  /** Feedback signal row ID when present. */
+  readonly feedbackSignalId: string | null;
+  /** Redacted provider payload. */
+  readonly payloadRedacted: unknown;
+  /** Signal polarity when present. */
+  readonly polarity: string | null;
+  /** Provider name. */
+  readonly provider: string;
+  /** Pull request number when available. */
+  readonly pullRequestNumber: number | null;
+  /** Signal reason when present. */
+  readonly reason: string | null;
+  /** Feedback receipt timestamp. */
+  readonly receivedAt: Date;
+  /** Signal confidence when present. */
+  readonly signalConfidence: number | null;
+  /** Signal creation timestamp when present. */
+  readonly signalCreatedAt: Date | null;
+  /** Signal kind when present. */
+  readonly signalKind: string | null;
+  /** Feedback source. */
+  readonly source: string;
+  /** Signal strength when present. */
+  readonly strength: number | null;
 };
 
 /** Artifact metadata row returned by scoped review artifact APIs. */
@@ -2594,6 +2678,10 @@ export type AdminControlPlaneService = {
   ) => Promise<readonly AdminReviewFindingSummary[]>;
   /** Gets one review finding by validated, candidate, or published finding ID. */
   readonly getReviewFinding: (findingId: string) => Promise<AdminReviewFindingSummary>;
+  /** Lists feedback events and signals attached to one review finding. */
+  readonly listFindingFeedbackEvents: (
+    findingId: string,
+  ) => Promise<readonly AdminReviewFindingFeedbackEventSummary[]>;
   /** Records an outcome for one review finding. */
   readonly recordFindingOutcome: (
     findingId: string,
@@ -4857,6 +4945,42 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         return handleAdminControlPlaneError(error, set);
       }
     })
+    .get("/api/v1/findings/:findingId/feedback-events", async ({ params, request, set }) => {
+      const guardResult = await guardApiV1Session(
+        request,
+        set,
+        adminAuth,
+        productSessionAuth,
+        getProductSessionService,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      try {
+        const finding = await getAdminControlPlaneService().getReviewFinding(params.findingId);
+        const authorizationResponse = guardApiV1ScopedAccess(
+          guardResult,
+          finding.orgId,
+          finding.repoId,
+          "finding:read",
+          set,
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const timeline = await getAdminControlPlaneService().listFindingFeedbackEvents(
+          params.findingId,
+        );
+
+        return { data: { feedbackEvents: timeline, finding } };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
     .patch("/api/v1/findings/:findingId/outcome", async ({ params, request, set }) => {
       const guardResult = await guardApiV1Session(
         request,
@@ -7058,6 +7182,7 @@ function createAdminControlPlaneService(dependencies: {
     getReviewMetricsSummary: (query) => getReviewMetricsSummary(dependencies.db, query),
     getReviewRun: (reviewRunId) => getReviewRun(dependencies.db, reviewRunId),
     getEntitlementSummary: (query) => getEntitlementSummary(dependencies.db, query),
+    listFindingFeedbackEvents: (findingId) => listFindingFeedbackEvents(dependencies.db, findingId),
     listReviewArtifacts: (reviewRunId) => listReviewArtifacts(dependencies.db, reviewRunId),
     listBillingMeterEvents: (query) => listBillingMeterEvents(dependencies.db, query),
     listRepositoryMemoryCandidates: (repoId, query) =>
@@ -9713,6 +9838,44 @@ async function getReviewFinding(
   return toAdminReviewFindingSummary(row, outcomes);
 }
 
+/** Lists normalized feedback events and classified signals for one finding. */
+async function listFindingFeedbackEvents(
+  db: HeimdallDatabase,
+  findingId: string,
+): Promise<readonly AdminReviewFindingFeedbackEventSummary[]> {
+  const finding = await getReviewFinding(db, findingId);
+  if (!finding.publishedFindingId) {
+    return [];
+  }
+
+  const rows = await db
+    .select({
+      actorLogin: feedbackEvents.actorLogin,
+      eventKind: feedbackEvents.eventKind,
+      externalCommentId: feedbackEvents.externalCommentId,
+      externalEventId: feedbackEvents.externalEventId,
+      feedbackEventId: feedbackEvents.feedbackEventId,
+      feedbackSignalId: feedbackSignals.feedbackSignalId,
+      payloadRedacted: feedbackEvents.payloadRedacted,
+      polarity: feedbackSignals.polarity,
+      provider: feedbackEvents.provider,
+      pullRequestNumber: feedbackEvents.pullRequestNumber,
+      reason: feedbackSignals.reason,
+      receivedAt: feedbackEvents.receivedAt,
+      signalConfidence: feedbackSignals.confidence,
+      signalCreatedAt: feedbackSignals.createdAt,
+      signalKind: feedbackSignals.signalKind,
+      source: feedbackEvents.source,
+      strength: feedbackSignals.strength,
+    })
+    .from(feedbackEvents)
+    .leftJoin(feedbackSignals, eq(feedbackSignals.feedbackEventId, feedbackEvents.feedbackEventId))
+    .where(eq(feedbackEvents.publishedFindingId, finding.publishedFindingId))
+    .orderBy(desc(feedbackEvents.receivedAt), asc(feedbackSignals.createdAt));
+
+  return feedbackTimelineFromRows(rows);
+}
+
 /** Selects the joined columns used by review finding DTO mappers. */
 function adminReviewFindingSelect() {
   return {
@@ -9908,6 +10071,54 @@ function latestFindingOutcome(
   return candidateOutcome.occurredAt >= publishedOutcome.occurredAt
     ? candidateOutcome
     : publishedOutcome;
+}
+
+/** Groups joined feedback event and signal rows into timeline DTOs. */
+function feedbackTimelineFromRows(
+  rows: readonly AdminReviewFindingFeedbackTimelineRow[],
+): readonly AdminReviewFindingFeedbackEventSummary[] {
+  const events = new Map<string, AdminReviewFindingFeedbackEventSummary>();
+  for (const row of rows) {
+    const existing = events.get(row.feedbackEventId);
+    const event =
+      existing ??
+      ({
+        ...(row.actorLogin ? { actorLogin: row.actorLogin } : {}),
+        eventKind: row.eventKind,
+        ...(row.externalCommentId ? { externalCommentId: row.externalCommentId } : {}),
+        ...(row.externalEventId ? { externalEventId: row.externalEventId } : {}),
+        feedbackEventId: row.feedbackEventId,
+        ...(asOptionalRecord(row.payloadRedacted)
+          ? { payloadRedacted: asOptionalRecord(row.payloadRedacted) }
+          : {}),
+        provider: row.provider,
+        ...(row.pullRequestNumber ? { pullRequestNumber: row.pullRequestNumber } : {}),
+        receivedAt: row.receivedAt.toISOString(),
+        signals: [],
+        source: row.source,
+      } satisfies AdminReviewFindingFeedbackEventSummary);
+
+    if (!existing) {
+      events.set(row.feedbackEventId, event);
+    }
+    if (row.feedbackSignalId && row.signalKind && row.polarity && row.reason) {
+      const signal = {
+        confidence: row.signalConfidence ?? 0,
+        createdAt: (row.signalCreatedAt ?? row.receivedAt).toISOString(),
+        feedbackSignalId: row.feedbackSignalId,
+        polarity: row.polarity,
+        reason: row.reason,
+        signalKind: row.signalKind,
+        strength: row.strength ?? 0,
+      } satisfies AdminReviewFindingFeedbackSignalSummary;
+      events.set(row.feedbackEventId, {
+        ...event,
+        signals: [...event.signals, signal],
+      });
+    }
+  }
+
+  return [...events.values()];
 }
 
 /** Records one idempotent finding outcome and audits the user action. */

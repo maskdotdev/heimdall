@@ -1180,6 +1180,52 @@ button.small {
   overflow: auto;
 }
 
+.finding-feedback-timeline {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.timeline-list {
+  display: grid;
+  gap: 0.625rem;
+  margin-top: 0.75rem;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, auto);
+  gap: 0.75rem;
+  align-items: start;
+  padding-block: 0.25rem;
+}
+
+.timeline-item small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--text-tertiary);
+}
+
+.timeline-signals {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.375rem;
+}
+
+.signal-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  max-width: 100%;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: 0.78rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
 .finding-outcome-controls,
 .finding-suppression-controls {
   display: grid;
