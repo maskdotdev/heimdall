@@ -26,6 +26,7 @@ export const validRepoRuleFixture = {
     paths: ["**/*.generated.ts"],
     languages: ["typescript"],
     severities: ["low", "medium"],
+    confidenceLessThan: 0.8,
   },
   instruction: "Do not publish findings for generated files.",
   priority: 100,

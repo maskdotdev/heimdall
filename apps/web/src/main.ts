@@ -2067,6 +2067,8 @@ type AdminRepoRuleSummary = {
     readonly labels?: readonly string[];
     /** Finding title regex matched by the rule. */
     readonly titleRegex?: string;
+    /** Finding confidence must be less than this value to match. */
+    readonly confidenceLessThan?: number;
   };
   /** Rule instruction consumed by the policy engine. */
   readonly instruction: string;
@@ -2266,6 +2268,8 @@ type RuleFormState = {
   matcherCategories: string;
   /** Severity matchers, one per line. */
   matcherSeverities: string;
+  /** Optional confidence upper bound for matching findings. */
+  matcherConfidenceLessThan: string;
   /** Finding title regular expression. */
   titleRegex: string;
   /** Rule instruction. */
@@ -9785,6 +9789,17 @@ function renderRepositoryRuleForm(form: RuleFormState, options: SettingsFormRend
         ${renderTextarea(`${options.ruleFieldPrefix}.matcherSeverities`, "Severity matchers", form.matcherSeverities)}
       </div>
       <label>
+        <span>Confidence less than</span>
+        <input
+          data-field="${escapeAttribute(`${options.ruleFieldPrefix}.matcherConfidenceLessThan`)}"
+          max="1"
+          min="0"
+          step="0.01"
+          type="number"
+          value="${escapeAttribute(form.matcherConfidenceLessThan)}"
+        />
+      </label>
+      <label>
         <span>Title regex</span>
         <input
           data-field="${escapeAttribute(`${options.ruleFieldPrefix}.titleRegex`)}"
@@ -9869,6 +9884,9 @@ function ruleMatcherLabel(rule: { readonly matcher: AdminRepoRuleSummary["matche
     matcherPart("languages", rule.matcher.languages),
     matcherPart("categories", rule.matcher.categories),
     matcherPart("severities", rule.matcher.severities),
+    rule.matcher.confidenceLessThan !== undefined
+      ? `confidence<${formatPercent(rule.matcher.confidenceLessThan)}`
+      : "",
     rule.matcher.titleRegex ? `title:${rule.matcher.titleRegex}` : "",
   ].filter((part) => part.length > 0);
 
@@ -13299,6 +13317,7 @@ function defaultRuleForm(): RuleFormState {
     matcherPaths: "",
     matcherCategories: "",
     matcherSeverities: "",
+    matcherConfidenceLessThan: "",
     titleRegex: "",
     instruction: "",
   };
@@ -13315,6 +13334,8 @@ function ruleFormFromSummary(rule: AdminRepoRuleSummary): RuleFormState {
     matcherPaths: (rule.matcher.paths ?? []).join("\n"),
     matcherCategories: (rule.matcher.categories ?? []).join("\n"),
     matcherSeverities: (rule.matcher.severities ?? []).join("\n"),
+    matcherConfidenceLessThan:
+      rule.matcher.confidenceLessThan !== undefined ? String(rule.matcher.confidenceLessThan) : "",
     titleRegex: rule.matcher.titleRegex ?? "",
     instruction: rule.instruction,
   };
@@ -13334,6 +13355,10 @@ function ruleRequestFromForm(form: RuleFormState): Record<string, unknown> {
   }
   if (severities.length > 0) {
     matcher.severities = severities;
+  }
+  const confidenceLessThan = optionalBoundedDecimal(form.matcherConfidenceLessThan, 0, 1);
+  if (confidenceLessThan !== undefined) {
+    matcher.confidenceLessThan = confidenceLessThan;
   }
   if (form.titleRegex.trim().length > 0) {
     matcher.titleRegex = form.titleRegex.trim();
@@ -13378,6 +13403,19 @@ function optionalBoundedNumber(
   }
 
   return boundedNumber(value, minimum, maximum);
+}
+
+/** Parses an optional bounded decimal from a form field. */
+function optionalBoundedDecimal(
+  value: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+
+  return boundedDecimal(value, minimum, maximum);
 }
 
 /** Parses a bounded decimal number. */

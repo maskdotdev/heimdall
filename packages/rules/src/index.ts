@@ -2999,17 +2999,12 @@ function compileRepoLocalRule(input: CompileRepoLocalRuleInput): readonly RepoRu
   }
 
   if (action.minimumConfidence !== undefined) {
-    input.warnings.push({
-      code: "repo_local_rule_minimum_confidence_not_compiled",
-      message:
-        "Repo-local minimum-confidence rule actions require a confidence-aware runtime matcher and were not compiled.",
-      details: {
-        ruleIndex: input.ruleIndex,
-        ruleName: input.rule.name,
-        sourceHash: input.repoLocalConfig.sourceHash,
-        sourcePath: input.repoLocalConfig.sourcePath,
-      },
-    });
+    rules.push(
+      createRepoLocalSuppressionRule(input, "minimum_confidence", {
+        ...baseMatcher,
+        confidenceLessThan: action.minimumConfidence,
+      }),
+    );
   }
 
   return rules;
@@ -3436,6 +3431,12 @@ function ruleMatchesFinding(rule: RepoRule, input: EvaluateFindingPolicyInput): 
     return false;
   }
   if (matcher.severities && !matcher.severities.includes(finding.severity)) {
+    return false;
+  }
+  if (
+    matcher.confidenceLessThan !== undefined &&
+    finding.confidence >= matcher.confidenceLessThan
+  ) {
     return false;
   }
   if (matcher.authors) {

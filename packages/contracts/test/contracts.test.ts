@@ -502,7 +502,7 @@ describe("contract validation", () => {
       safeParseWithSchema("CreateRepoRuleRequest", CreateRepoRuleRequestSchema, {
         name: "Suppress generated files",
         effect: "suppress",
-        matcher: { paths: ["**/*.generated.ts"] },
+        matcher: { confidenceLessThan: 0.8, paths: ["**/*.generated.ts"] },
         instruction: "Do not publish generated-file findings.",
         priority: 100,
         enabled: true,

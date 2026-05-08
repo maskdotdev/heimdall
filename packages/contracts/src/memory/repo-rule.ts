@@ -22,6 +22,7 @@ export const RepoRuleMatcherSchema = Type.Object(
     authors: Type.Optional(Type.Array(Type.String())),
     labels: Type.Optional(Type.Array(Type.String())),
     titleRegex: Type.Optional(Type.String()),
+    confidenceLessThan: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
   },
   { additionalProperties: false },
 );

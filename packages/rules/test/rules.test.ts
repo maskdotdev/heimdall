@@ -256,12 +256,15 @@ describe("buildReviewPolicySnapshot", () => {
     });
   });
 
-  it("warns when repo-local rule actions need unsupported confidence matching", () => {
+  it("compiles repo-local minimum confidence actions into confidence suppression rules", () => {
     const parsed = parseRepoLocalConfig({
       content: [
         "version: 1",
         "rules:",
-        "  - name: Require high confidence generated findings",
+        "  - name: Require high confidence client findings",
+        "    when:",
+        "      paths:",
+        "        - src/client/**",
         "    action:",
         "      minimum_confidence: 0.9",
       ].join("\n"),
@@ -279,12 +282,46 @@ describe("buildReviewPolicySnapshot", () => {
       timestamp: now,
       reviewRunId: ids.reviewRunId,
     });
+    const policy = result.snapshot.effectivePolicy;
+    const generatedLocation = {
+      path: "src/client/api.ts",
+      line: 8,
+      side: "RIGHT" as const,
+      isInDiff: true,
+    };
+    const belowConfidence = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          confidence: 0.82,
+          location: generatedLocation,
+        },
+      }),
+    );
+    const atThreshold = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          confidence: 0.9,
+          location: generatedLocation,
+        },
+      }),
+    );
 
-    expect(result.snapshot.effectivePolicy.rules).toEqual([]);
-    expect(result.warnings.map((warning) => warning.code)).toEqual([
-      "repo_local_rule_minimum_confidence_not_compiled",
-      "repo_local_rules_not_compiled",
-    ]);
+    expect(result.warnings).toEqual([]);
+    expect(policy.rules).toHaveLength(1);
+    expect(policy.rules[0]?.matcher).toMatchObject({
+      confidenceLessThan: 0.9,
+      paths: ["src/client/**"],
+    });
+    expect(belowConfidence).toMatchObject({
+      reasonCode: "suppressed_by_repo_rule",
+      shouldPublish: false,
+    });
+    expect(atThreshold).toMatchObject({
+      reasonCode: "allowed",
+      shouldPublish: true,
+    });
   });
 
   it("applies organization settings as policy defaults and guardrails", () => {
@@ -839,6 +876,46 @@ describe("evaluateFindingPolicy", () => {
       trace: { matchedRuleIds: [ids.ruleId] },
     });
     expect(missingLabel).toMatchObject({
+      shouldPublish: true,
+      reasonCode: "allowed",
+      trace: { matchedRuleIds: [] },
+    });
+  });
+
+  it("matches suppression rules by confidence threshold", () => {
+    const policy = createPolicyFixture({
+      rules: [
+        createRuleFixture({
+          effect: "suppress",
+          matcher: { confidenceLessThan: 0.8, paths: ["src/**"] },
+        }),
+      ],
+    });
+    const lowConfidence = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          confidence: 0.79,
+          location: { path: "src/auth/session.ts", line: 4, side: "RIGHT" },
+        },
+      }),
+    );
+    const thresholdConfidence = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          confidence: 0.8,
+          location: { path: "src/auth/session.ts", line: 4, side: "RIGHT" },
+        },
+      }),
+    );
+
+    expect(lowConfidence).toMatchObject({
+      shouldPublish: false,
+      reasonCode: "suppressed_by_repo_rule",
+      trace: { matchedRuleIds: [ids.ruleId] },
+    });
+    expect(thresholdConfidence).toMatchObject({
       shouldPublish: true,
       reasonCode: "allowed",
       trace: { matchedRuleIds: [] },
