@@ -128,6 +128,9 @@ importers:
 
   apps/admin-gateway:
     dependencies:
+      '@repo/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@repo/security':
         specifier: workspace:*
         version: link:../../packages/security

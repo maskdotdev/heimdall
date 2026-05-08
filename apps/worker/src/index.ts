@@ -373,6 +373,8 @@ export type WorkerEmbeddingProviderOptions = {
 
 /** Runtime handle returned by the worker process bootstrap. */
 export type WorkerRuntime = {
+  /** Structured logger owned by the worker observability runtime. */
+  readonly logger: StructuredTelemetryLogger;
   /** Stops workers, dispatcher resources, Redis, and database connections. */
   readonly close: () => Promise<void>;
 };
@@ -1452,7 +1454,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       indexerTimeoutMs,
       ...(workspaceRoot ? { workspaceRoot } : {}),
     }) ?? createTypeScriptIndexerDriver();
-  await verifyWorkerIndexerCapabilities(indexerDriver);
+  await verifyWorkerIndexerCapabilities(indexerDriver, { logger: observability.logger });
   await cleanupWorkerRepoSyncWorktrees({
     env: process.env,
     logger: observability.logger,
@@ -1530,12 +1532,18 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   };
   const dispatchInterval = setInterval(() => {
     dispatch().catch((error: unknown) => {
-      console.error("outbox dispatch failed", error);
+      observability.logger.error("outbox dispatch failed", {
+        error,
+        target: "worker.outbox",
+      });
     });
   }, 5_000);
   const staleRunningRecoveryInterval = setInterval(() => {
     recoverStaleRunningJobs().catch((error: unknown) => {
-      console.error("worker maintenance recovery failed", error);
+      observability.logger.error("worker maintenance recovery failed", {
+        error,
+        target: "worker.maintenance",
+      });
     });
   }, queueMaintenance.recoveryIntervalMs);
 
@@ -1552,6 +1560,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   });
 
   return {
+    logger: observability.logger,
     close: async () => {
       clearInterval(dispatchInterval);
       clearInterval(staleRunningRecoveryInterval);
@@ -2082,23 +2091,31 @@ export function createWorkerIndexerDriverFromEnvironment(
   });
 }
 
+/** Options used while verifying worker indexer capabilities. */
+export type VerifyWorkerIndexerCapabilitiesOptions = {
+  /** Optional structured logger that receives product-safe capability metadata. */
+  readonly logger?: StructuredTelemetryLogger;
+};
+
 /** Verifies the selected worker indexer before accepting jobs. */
 export async function verifyWorkerIndexerCapabilities(
   driver: CodeIndexerDriver,
+  options: VerifyWorkerIndexerCapabilitiesOptions = {},
 ): Promise<IndexerCapabilities> {
   const capabilities = await driver.getCapabilities();
   assertIndexerSupportsCurrentArtifactSchema(capabilities);
-  console.info(
-    "indexer.capabilities",
-    JSON.stringify({
-      driverName: capabilities.driverName,
-      driverVersion: capabilities.driverVersion,
-      supportedArtifactSchemaVersions: capabilities.supportedArtifactSchemaVersions,
-      supportedLanguages: capabilities.supportedLanguages,
-      supportedRecordTypes: capabilities.supportedRecordTypes,
-      supportsRemoteArtifacts: capabilities.supportsRemoteArtifacts,
-    }),
-  );
+  options.logger?.info("indexer capabilities verified", {
+    attributes: {
+      "indexer.driver_name": capabilities.driverName,
+      "indexer.driver_version": capabilities.driverVersion,
+      "indexer.remote_artifacts_supported": capabilities.supportsRemoteArtifacts,
+      "indexer.supported_artifact_schema_version_count":
+        capabilities.supportedArtifactSchemaVersions.length,
+      "indexer.supported_language_count": capabilities.supportedLanguages.length,
+      "indexer.supported_record_type_count": capabilities.supportedRecordTypes.length,
+    },
+    target: "worker.indexer",
+  });
 
   return capabilities;
 }
@@ -3465,13 +3482,19 @@ if (import.meta.main) {
 
   process.on("SIGTERM", () => {
     shutdown().catch((error: unknown) => {
-      console.error("worker shutdown failed", error);
+      runtime.logger.error("worker shutdown failed", {
+        error,
+        target: "worker.shutdown",
+      });
       process.exit(1);
     });
   });
   process.on("SIGINT", () => {
     shutdown().catch((error: unknown) => {
-      console.error("worker shutdown failed", error);
+      runtime.logger.error("worker shutdown failed", {
+        error,
+        target: "worker.shutdown",
+      });
       process.exit(1);
     });
   });
