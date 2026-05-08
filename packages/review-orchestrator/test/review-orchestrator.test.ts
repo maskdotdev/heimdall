@@ -20,6 +20,7 @@ import {
   createIndexDependencyJobKey,
   createStaticAnalysisRequestForReview,
   decideReviewGate,
+  detectRepoLocalConfigChange,
   loadTrustedRepoLocalConfig,
   ReviewIndexDependencyPendingError,
   ReviewInputSnapshotMismatchError,
@@ -252,6 +253,125 @@ describe("loadTrustedRepoLocalConfig", () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("detectRepoLocalConfigChange", () => {
+  it("warns when a pull request changes an allowed repo-local config path", () => {
+    const notice = detectRepoLocalConfigChange({
+      repoLocalConfigEnabled: true,
+      snapshot: reviewablePullRequestSnapshot({
+        changedFiles: [
+          {
+            additions: 3,
+            changes: 4,
+            deletions: 1,
+            hunks: [],
+            isBinary: false,
+            isGenerated: false,
+            isTest: false,
+            language: "unknown",
+            newContentHash:
+              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            oldContentHash:
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            path: ".github/ai-reviewer.yml",
+            status: "modified",
+          },
+        ],
+      }),
+      trustedConfig: {
+        schemaVersion: "repo_local_config.v1",
+        configVersion: 1,
+        sourceCommitSha: "1111111",
+        sourceHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        sourcePath: ".github/ai-reviewer.yml",
+      },
+    });
+
+    expect(notice).toMatchObject({
+      baseSha: "1111111",
+      changedFiles: [
+        {
+          newContentHash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          oldContentHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          path: ".github/ai-reviewer.yml",
+          status: "modified",
+        },
+      ],
+      headSha: "2222222",
+      schemaVersion: "repo_local_config_change_notice.v1",
+      trustedConfigSource: {
+        sourceHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        sourcePath: ".github/ai-reviewer.yml",
+      },
+      warning: {
+        code: "repo_local_config_changed_in_pull_request",
+      },
+    });
+    expect(notice?.warning.details).toMatchObject({
+      activePolicySource: "repo_local_config",
+      changedPaths: [".github/ai-reviewer.yml"],
+    });
+  });
+
+  it("does not warn for config-like changes when repo-local config is disabled", () => {
+    expect(
+      detectRepoLocalConfigChange({
+        repoLocalConfigEnabled: false,
+        snapshot: reviewablePullRequestSnapshot({
+          changedFiles: [
+            {
+              additions: 1,
+              changes: 1,
+              deletions: 0,
+              hunks: [],
+              isBinary: false,
+              isGenerated: false,
+              isTest: false,
+              language: "unknown",
+              path: ".ai-reviewer.yml",
+              status: "added",
+            },
+          ],
+        }),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("detects renamed repo-local config files from either side of the rename", () => {
+    const notice = detectRepoLocalConfigChange({
+      repoLocalConfigEnabled: true,
+      snapshot: reviewablePullRequestSnapshot({
+        changedFiles: [
+          {
+            additions: 2,
+            changes: 4,
+            deletions: 2,
+            hunks: [],
+            isBinary: false,
+            isGenerated: false,
+            isTest: false,
+            language: "unknown",
+            oldPath: ".ai-reviewer.yml",
+            path: "docs/ai-reviewer.yml",
+            status: "renamed",
+          },
+        ],
+      }),
+    });
+
+    expect(notice?.changedFiles).toEqual([
+      expect.objectContaining({
+        oldPath: ".ai-reviewer.yml",
+        path: "docs/ai-reviewer.yml",
+        status: "renamed",
+      }),
+    ]);
+    expect(notice?.warning.details).toMatchObject({
+      activePolicySource: "repository_settings",
+      changedPaths: ["docs/ai-reviewer.yml", ".ai-reviewer.yml"],
+    });
   });
 });
 

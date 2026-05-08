@@ -5,6 +5,7 @@ import {
   reviewArtifactPayloadDescriptor,
 } from "@repo/artifacts";
 import type {
+  ChangedFile,
   ContextBundle,
   ContextItem,
   IndexRepoCommitJobPayload,
@@ -22,6 +23,7 @@ import type {
 } from "@repo/contracts";
 import { getReviewArtifactRedactionLevel, JOB_TYPES } from "@repo/contracts";
 import {
+  auditLogs,
   backgroundJobs,
   codeIndexVersions,
   type HeimdallDatabase,
@@ -63,8 +65,10 @@ import {
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { createReviewEngine, validateCandidateFindings } from "@repo/review-engine";
 import {
+  type BuildReviewPolicySnapshotResult,
   buildReviewPolicySnapshot,
   MAX_REPO_LOCAL_CONFIG_BYTES,
+  type PolicyWarning,
   parseRepoLocalConfig,
   REPO_LOCAL_CONFIG_ALLOWED_PATHS,
   type RepoLocalConfig,
@@ -291,6 +295,54 @@ type ReviewStalenessStopResult = {
   readonly reviewRun: ReviewRun;
   /** Product-safe top-level telemetry outcome. */
   readonly telemetryOutcome: Extract<ReviewTelemetryOutcome, "skipped" | "superseded">;
+};
+
+/** Product-safe metadata for one repo-local config file changed by a pull request. */
+export type RepoLocalConfigChangedFile = {
+  /** Current repository-relative config path. */
+  readonly path: string;
+  /** Previous repository-relative path when the config file was renamed. */
+  readonly oldPath?: string | undefined;
+  /** Provider-normalized file status. */
+  readonly status: ChangedFile["status"];
+  /** Added lines reported by the provider. */
+  readonly additions: number;
+  /** Deleted lines reported by the provider. */
+  readonly deletions: number;
+  /** Previous content hash when the provider supplied one. */
+  readonly oldContentHash?: string | undefined;
+  /** New content hash when the provider supplied one. */
+  readonly newContentHash?: string | undefined;
+};
+
+/** Product-safe source metadata for the trusted repo-local config applied to a review. */
+export type TrustedRepoLocalConfigSource = {
+  /** Config schema version parsed from the trusted config file. */
+  readonly configVersion: number;
+  /** Trusted commit SHA used to load the config file. */
+  readonly sourceCommitSha: string;
+  /** SHA-256 hash of the trusted config file content. */
+  readonly sourceHash: string;
+  /** Repository-relative trusted config path. */
+  readonly sourcePath: string;
+};
+
+/** Product-safe warning and audit payload for a repo-local config change in a PR. */
+export type RepoLocalConfigChangeNotice = {
+  /** Notice schema version. */
+  readonly schemaVersion: "repo_local_config_change_notice.v1";
+  /** Pull request number that changed config. */
+  readonly pullRequestNumber: number;
+  /** Trusted base commit SHA used for this review's policy. */
+  readonly baseSha: string;
+  /** Pull request head commit SHA that contains the config change. */
+  readonly headSha: string;
+  /** Changed repo-local config files. */
+  readonly changedFiles: readonly RepoLocalConfigChangedFile[];
+  /** Non-fatal policy warning shown in review metadata and traces. */
+  readonly warning: PolicyWarning;
+  /** Trusted base config source when one was active for this review. */
+  readonly trustedConfigSource?: TrustedRepoLocalConfigSource | undefined;
 };
 
 /** Product-safe retrieval trace artifact persisted next to a context bundle. */
@@ -586,6 +638,14 @@ export async function runPullRequestReview(
     ...(dependencies.traces ? { traces: dependencies.traces } : {}),
     reviewRunId,
   });
+  const repoLocalConfigChange = detectRepoLocalConfigChange({
+    repoLocalConfigEnabled: orgSettings?.allowRepoLocalConfig === true,
+    snapshot,
+    ...(repoLocalConfig ? { trustedConfig: repoLocalConfig } : {}),
+  });
+  const policyWarnings = repoLocalConfigChange
+    ? [...policyResult.warnings, repoLocalConfigChange.warning]
+    : policyResult.warnings;
   const planSnapshot = await entitlementService.compilePlanSnapshot({
     now: startedAt,
     orgId: repositoryRecord.orgId,
@@ -594,6 +654,8 @@ export async function runPullRequestReview(
     createReviewRun({
       input,
       planSnapshot,
+      policyWarnings,
+      ...(repoLocalConfigChange ? { repoLocalConfigChange } : {}),
       policySnapshot: policyResult.snapshot,
       snapshot,
       reviewRunId,
@@ -601,6 +663,22 @@ export async function runPullRequestReview(
       timestamp: startedAt,
     }),
   );
+  if (repoLocalConfigChange) {
+    await recordRepoLocalConfigChangeAudit(dependencies.db, {
+      notice: repoLocalConfigChange,
+      orgId: repositoryRecord.orgId,
+      repoId: snapshot.repoId,
+      reviewRunId,
+      timestamp: startedAt,
+    });
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "policy",
+      status: "warning",
+      message: repoLocalConfigChange.warning.message,
+      metadata: { repoLocalConfigChange },
+    });
+  }
   let quotaReservation: ReserveQuotaResult | undefined;
   let quotaReservationFinalized = false;
   let currentStage = "snapshot";
@@ -918,7 +996,7 @@ export async function runPullRequestReview(
         repoId: snapshot.repoId,
         kind: "policy_snapshot",
         name: "policy-snapshot.json",
-        payload: policyResult,
+        payload: policySnapshotArtifactPayload(policyResult, policyWarnings, repoLocalConfigChange),
         createdAt: now().toISOString(),
       }),
       await persistArtifact(reviewRepository, artifactPayloadStore, {
@@ -982,6 +1060,8 @@ export async function runPullRequestReview(
               }
             : {}),
           policy: policySnapshotMetadata(policyResult.snapshot),
+          ...(policyWarnings.length > 0 ? { policyWarnings } : {}),
+          ...(repoLocalConfigChange ? { repoLocalConfigChange } : {}),
           plan: planSnapshotMetadata(planSnapshot),
           generatedAt: now().toISOString(),
         },
@@ -2655,6 +2735,150 @@ export async function loadTrustedRepoLocalConfig(input: {
   return undefined;
 }
 
+/** Detects allowed repo-local config files changed by a PR and builds warning metadata. */
+export function detectRepoLocalConfigChange(input: {
+  /** Whether organization settings allow repo-local config to affect reviews. */
+  readonly repoLocalConfigEnabled: boolean;
+  /** Pull request snapshot whose changed files are inspected. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Trusted base config source used by the active review policy, when present. */
+  readonly trustedConfig?: RepoLocalConfig | undefined;
+}): RepoLocalConfigChangeNotice | undefined {
+  if (!input.repoLocalConfigEnabled) {
+    return undefined;
+  }
+
+  const changedFiles = input.snapshot.changedFiles
+    .filter(isRepoLocalConfigChangedFile)
+    .map(repoLocalConfigChangedFileMetadata);
+  if (changedFiles.length === 0) {
+    return undefined;
+  }
+
+  const changedPaths = uniqueStrings(
+    changedFiles.flatMap((file) => [file.path, ...(file.oldPath ? [file.oldPath] : [])]),
+  );
+  const trustedConfigSource = input.trustedConfig
+    ? trustedRepoLocalConfigSource(input.trustedConfig)
+    : undefined;
+  const warning: PolicyWarning = {
+    code: "repo_local_config_changed_in_pull_request",
+    message:
+      "This pull request changes repo-local reviewer configuration. Heimdall used the trusted base-branch config for this review; changes can affect reviews after merge.",
+    details: {
+      activePolicySource: trustedConfigSource ? "repo_local_config" : "repository_settings",
+      baseSha: input.snapshot.baseSha,
+      changedPaths,
+      headSha: input.snapshot.headSha,
+      pullRequestNumber: input.snapshot.pullRequestNumber,
+      ...(trustedConfigSource ? { trustedConfigSource } : {}),
+    },
+  };
+
+  return {
+    schemaVersion: "repo_local_config_change_notice.v1",
+    baseSha: input.snapshot.baseSha,
+    changedFiles,
+    headSha: input.snapshot.headSha,
+    pullRequestNumber: input.snapshot.pullRequestNumber,
+    ...(trustedConfigSource ? { trustedConfigSource } : {}),
+    warning,
+  };
+}
+
+/** Inserts an idempotent system audit row for one detected repo-local config change. */
+async function recordRepoLocalConfigChangeAudit(
+  db: HeimdallDatabase,
+  input: {
+    /** Product-safe config-change notice being audited. */
+    readonly notice: RepoLocalConfigChangeNotice;
+    /** Organization that owns the reviewed repository. */
+    readonly orgId: string;
+    /** Repository that owns the pull request. */
+    readonly repoId: string;
+    /** Review run that detected the config change. */
+    readonly reviewRunId: string;
+    /** Timestamp to store on the audit row. */
+    readonly timestamp: string;
+  },
+): Promise<void> {
+  await db
+    .insert(auditLogs)
+    .values({
+      action: "repo_local_config.change_detected",
+      actorType: "system",
+      actorUserId: null,
+      auditLogId: stableId("audit", ["repo_local_config.change_detected", input.reviewRunId]),
+      metadata: {
+        actor: { actorType: "system", source: "review_orchestrator" },
+        notice: input.notice,
+        repoId: input.repoId,
+        reviewRunId: input.reviewRunId,
+      },
+      occurredAt: new Date(input.timestamp),
+      orgId: input.orgId,
+      resourceId: input.reviewRunId,
+      resourceType: "review_run",
+    })
+    .onConflictDoNothing();
+}
+
+/** Returns whether a changed file represents an allowed repo-local config path. */
+function isRepoLocalConfigChangedFile(file: ChangedFile): boolean {
+  return isRepoLocalConfigPath(file.path) || isRepoLocalConfigPath(file.oldPath);
+}
+
+/** Returns product-safe changed-file metadata for one repo-local config file. */
+function repoLocalConfigChangedFileMetadata(file: ChangedFile): RepoLocalConfigChangedFile {
+  return {
+    additions: file.additions,
+    deletions: file.deletions,
+    ...(file.newContentHash ? { newContentHash: file.newContentHash } : {}),
+    ...(file.oldContentHash ? { oldContentHash: file.oldContentHash } : {}),
+    ...(file.oldPath ? { oldPath: file.oldPath } : {}),
+    path: file.path,
+    status: file.status,
+  };
+}
+
+/** Returns whether a repository path is an allowed repo-local config filename. */
+function isRepoLocalConfigPath(path: string | undefined): boolean {
+  return (
+    path !== undefined &&
+    REPO_LOCAL_CONFIG_ALLOWED_PATHS.some((allowedPath) => allowedPath === path)
+  );
+}
+
+/** Returns stable unique strings while preserving first-seen order. */
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+/** Returns source metadata for a trusted repo-local config without copying file content. */
+function trustedRepoLocalConfigSource(config: RepoLocalConfig): TrustedRepoLocalConfigSource {
+  return {
+    configVersion: config.configVersion,
+    sourceCommitSha: config.sourceCommitSha,
+    sourceHash: config.sourceHash,
+    sourcePath: config.sourcePath,
+  };
+}
+
+/** Builds the persisted policy artifact payload with orchestration-level warnings attached. */
+function policySnapshotArtifactPayload(
+  result: BuildReviewPolicySnapshotResult,
+  warnings: readonly PolicyWarning[],
+  repoLocalConfigChange: RepoLocalConfigChangeNotice | undefined,
+): BuildReviewPolicySnapshotResult & {
+  readonly repoLocalConfigChange?: RepoLocalConfigChangeNotice | undefined;
+} {
+  return {
+    ...result,
+    ...(repoLocalConfigChange ? { repoLocalConfigChange } : {}),
+    warnings,
+  };
+}
+
 /** Loads a GitHub repository reference for review orchestration. */
 export async function loadGitHubReviewRepositoryRef(
   db: HeimdallDatabase,
@@ -2986,6 +3210,8 @@ async function transitionReviewRunStage(
 function createReviewRun(input: {
   readonly input: ReviewPullRequestInput;
   readonly planSnapshot: PlanSnapshot;
+  readonly policyWarnings: readonly PolicyWarning[];
+  readonly repoLocalConfigChange?: RepoLocalConfigChangeNotice | undefined;
   readonly policySnapshot: ReviewPolicySnapshot;
   readonly snapshot: PullRequestSnapshot;
   readonly reviewRunId: string;
@@ -3017,6 +3243,10 @@ function createReviewRun(input: {
       jobBaseSha: input.input.baseSha,
       jobHeadSha: input.input.headSha,
       planSnapshot: planSnapshotMetadata(input.planSnapshot),
+      ...(input.policyWarnings.length > 0 ? { policyWarnings: input.policyWarnings } : {}),
+      ...(input.repoLocalConfigChange
+        ? { repoLocalConfigChange: input.repoLocalConfigChange }
+        : {}),
       policySnapshot: policySnapshotMetadata(input.policySnapshot),
     },
   };
@@ -3050,10 +3280,22 @@ function reviewRunTotalDurationMs(reviewRun: ReviewRun): number | null {
 
 /** Returns compact policy metadata safe to store on review runs and traces. */
 function policySnapshotMetadata(snapshot: ReviewPolicySnapshot): Record<string, unknown> {
+  const decisionInputs = snapshot.decisionInputs;
+
   return {
     policyHash: snapshot.policyHash,
     policySnapshotId: snapshot.policySnapshotId,
     publishing: snapshot.effectivePolicy.publishing,
+    ...(decisionInputs.repoLocalConfigSourcePath
+      ? {
+          repoLocalConfig: {
+            configVersion: decisionInputs.repoLocalConfigVersion,
+            sourceCommitSha: decisionInputs.repoLocalConfigSourceCommitSha,
+            sourceHash: decisionInputs.repoLocalConfigSourceHash,
+            sourcePath: decisionInputs.repoLocalConfigSourcePath,
+          },
+        }
+      : {}),
     reviewPolicy: snapshot.effectivePolicy.reviewPolicy,
     sandbox: snapshot.effectivePolicy.sandbox,
   };
