@@ -3,12 +3,18 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type ChunkRecord,
   diffIndexArtifacts,
+  type EdgeRecord,
+  type FileRecord,
+  INDEX_ARTIFACT_SCHEMA_VERSION,
+  INDEX_RECORD_SCHEMA_VERSION,
   type IndexArtifact,
+  type SymbolRecord,
   stringifyIndexManifestJson,
   validateIndexArtifact,
 } from "./index";
-import { readIndexArtifactPath } from "./node";
+import { readIndexArtifactPath, writeSplitIndexArtifactDirectory } from "./node";
 
 /** Minimal writer used by the index-schema CLI runner and tests. */
 export type IndexSchemaCliWriter = {
@@ -36,6 +42,17 @@ type ArtifactDiffCommand = {
   readonly baselinePath: string;
   /** Candidate whole-artifact JSON file or split artifact directory. */
   readonly candidatePath: string;
+};
+
+/** Names of built-in fixtures that the CLI can generate. */
+type GeneratedFixtureName = "minimal-valid-artifact" | "valid-typescript-artifact";
+
+/** Parsed generate-fixture command input. */
+type GenerateFixtureCommand = {
+  /** Built-in fixture to generate. */
+  readonly fixtureName: GeneratedFixtureName;
+  /** Output split artifact directory. */
+  readonly outputPath: string;
 };
 
 /** Machine-readable validation summary printed by the validate command. */
@@ -80,15 +97,39 @@ type ArtifactRecordCountSummary = {
   readonly symbolCount: number;
 };
 
+/** Machine-readable summary printed by the generate-fixture command. */
+type GenerateFixtureSummary = {
+  /** Artifact ID generated for the fixture. */
+  readonly artifactId: string;
+  /** Built-in fixture name. */
+  readonly fixtureName: GeneratedFixtureName;
+  /** Output split artifact directory. */
+  readonly outputPath: string;
+  /** Total record count declared by the generated manifest. */
+  readonly recordCount: number;
+  /** Whether the generated fixture passed schema-owned validation after writing. */
+  readonly valid: boolean;
+};
+
+const GENERATED_FIXTURE_NAMES = [
+  "minimal-valid-artifact",
+  "valid-typescript-artifact",
+] as const satisfies readonly GeneratedFixtureName[];
+
 const HELP_TEXT = `Usage:
   index-schema validate <artifact-path>
   index-schema print-manifest <artifact-path>
   index-schema count-records <artifact-path>
   index-schema diff <baseline-artifact> <candidate-artifact>
+  index-schema generate-fixture <name> --output <artifact-dir>
 
 Options:
   --artifact <path>  Artifact JSON file or split artifact directory for single-artifact commands.
+  --output <path>    Output split artifact directory for generate-fixture.
   --help, -h         Print this help text.
+
+Fixtures:
+  ${GENERATED_FIXTURE_NAMES.join(", ")}
 `;
 
 /** Runs the index-schema CLI and returns a process-style exit code. */
@@ -114,6 +155,9 @@ export async function runIndexSchemaCli(
     }
     if (command === "diff") {
       return runDiffCommand(args, io);
+    }
+    if (command === "generate-fixture") {
+      return runGenerateFixtureCommand(args, io);
     }
 
     io.stderr.write(`Unknown index-schema command: ${command}\n\n${HELP_TEXT}`);
@@ -213,6 +257,38 @@ async function runDiffCommand(args: readonly string[], io: IndexSchemaCliIo): Pr
   return 0;
 }
 
+/** Generates a built-in split artifact fixture and prints a JSON summary. */
+async function runGenerateFixtureCommand(
+  args: readonly string[],
+  io: IndexSchemaCliIo,
+): Promise<number> {
+  const parsed = parseGenerateFixtureCommand(args);
+  if (!parsed.ok) {
+    io[parsed.help ? "stdout" : "stderr"].write(
+      `${parsed.message ? `${parsed.message}\n\n` : ""}${HELP_TEXT}`,
+    );
+    return parsed.help ? 0 : 1;
+  }
+
+  const outputPath = resolve(parsed.command.outputPath);
+  await writeSplitIndexArtifactDirectory(
+    outputPath,
+    generatedFixtureArtifact(parsed.command.fixtureName),
+  );
+  const artifact = await readIndexArtifactPath(outputPath);
+  const validationErrors = validateIndexArtifact(artifact);
+  const summary = {
+    artifactId: artifact.manifest.artifactId,
+    fixtureName: parsed.command.fixtureName,
+    outputPath,
+    recordCount: artifact.manifest.recordCount,
+    valid: validationErrors.length === 0,
+  } satisfies GenerateFixtureSummary;
+
+  io.stdout.write(`${JSON.stringify(summary)}\n`);
+  return validationErrors.length === 0 ? 0 : 6;
+}
+
 /** Converts an artifact and validation errors into CLI output. */
 function validationSummary(
   artifact: IndexArtifact,
@@ -250,6 +326,142 @@ function recordCountSummary(artifact: IndexArtifact): ArtifactRecordCountSummary
     recordCount: artifact.manifest.recordCount,
     recordFileCount: artifact.manifest.recordFiles?.length ?? 0,
     symbolCount: artifact.manifest.symbolCount,
+  };
+}
+
+/** Builds one built-in fixture artifact. */
+function generatedFixtureArtifact(fixtureName: GeneratedFixtureName): IndexArtifact {
+  if (fixtureName === "minimal-valid-artifact") {
+    return fixtureArtifact({
+      artifactId: "art_fixture_minimal_valid",
+      languages: [],
+      records: [],
+    });
+  }
+
+  return validTypeScriptFixtureArtifact();
+}
+
+/** Builds the built-in valid TypeScript fixture artifact. */
+function validTypeScriptFixtureArtifact(): IndexArtifact {
+  const file = generatedFileRecord();
+  const symbol = generatedSymbolRecord(file);
+  const chunk = generatedChunkRecord(file, symbol);
+  const edge = generatedExternalEdgeRecord(file);
+
+  return fixtureArtifact({
+    artifactId: "art_fixture_valid_typescript",
+    languages: ["typescript"],
+    records: [file, symbol, chunk, edge],
+  });
+}
+
+/** Builds a complete fixture artifact manifest around supplied records. */
+function fixtureArtifact(input: {
+  /** Generated artifact ID. */
+  readonly artifactId: string;
+  /** Languages to declare in the manifest. */
+  readonly languages: IndexArtifact["manifest"]["languages"];
+  /** Records to include in the fixture. */
+  readonly records: readonly IndexArtifact["records"][number][];
+}): IndexArtifact {
+  return {
+    manifest: {
+      artifactId: input.artifactId,
+      chunkCount: input.records.filter((record) => record.type === "chunk").length,
+      chunkerVersion: "fixture-chunker.v1",
+      commitSha: "abcdef1234567890",
+      edgeCount: input.records.filter((record) => record.type === "edge").length,
+      fileCount: input.records.filter((record) => record.type === "file").length,
+      generatedAt: "2026-05-07T12:00:00.000Z",
+      indexerName: "fixture-indexer",
+      indexerVersion: "0.0.0",
+      languages: [...input.languages],
+      parserVersions: { typescript: "5.0.0" },
+      recordCount: input.records.length,
+      recordSchemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+      repoId: "repo_fixture_generated",
+      schemaVersion: INDEX_ARTIFACT_SCHEMA_VERSION,
+      symbolCount: input.records.filter((record) => record.type === "symbol").length,
+    },
+    records: [...input.records],
+  };
+}
+
+/** Creates the file record for the built-in TypeScript fixture. */
+function generatedFileRecord(): FileRecord {
+  return {
+    commitSha: "abcdef1234567890",
+    contentHash: `sha256:${"a".repeat(64)}`,
+    fileId: "file_fixture_valid_typescript",
+    isBinary: false,
+    isGenerated: false,
+    isTest: false,
+    isVendored: false,
+    language: "typescript",
+    lineCount: 5,
+    path: "src/example.ts",
+    repoId: "repo_fixture_generated",
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    sizeBytes: 96,
+    type: "file",
+  };
+}
+
+/** Creates the symbol record for the built-in TypeScript fixture. */
+function generatedSymbolRecord(file: FileRecord): SymbolRecord {
+  return {
+    commitSha: file.commitSha,
+    contentHash: `sha256:${"b".repeat(64)}`,
+    fileId: file.fileId,
+    kind: "function",
+    language: file.language,
+    name: "greet",
+    path: file.path,
+    qualifiedName: "greet",
+    range: { endLine: 3, startLine: 1 },
+    repoId: file.repoId,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    signature: "export function greet(name: string): string",
+    symbolId: "sym_fixture_valid_typescript_greet",
+    type: "symbol",
+  };
+}
+
+/** Creates the chunk record for the built-in TypeScript fixture. */
+function generatedChunkRecord(file: FileRecord, symbol: SymbolRecord): ChunkRecord {
+  return {
+    chunkId: "chunk_fixture_valid_typescript_greet",
+    commitSha: file.commitSha,
+    contentHash: `sha256:${"c".repeat(64)}`,
+    fileId: file.fileId,
+    kind: "symbol",
+    language: file.language,
+    path: file.path,
+    range: symbol.range,
+    repoId: file.repoId,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    symbolId: symbol.symbolId,
+    text: 'export function greet(name: string): string {\n  return "hello " + name;\n}',
+    tokenEstimate: 16,
+    type: "chunk",
+  };
+}
+
+/** Creates an external import edge for the built-in TypeScript fixture. */
+function generatedExternalEdgeRecord(file: FileRecord): EdgeRecord {
+  return {
+    commitSha: file.commitSha,
+    confidence: 1,
+    edgeId: "edge_fixture_valid_typescript_external",
+    fromId: file.fileId,
+    fromKind: "file",
+    kind: "imports",
+    repoId: file.repoId,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    toId: "external:node:path",
+    toKind: "external",
+    type: "edge",
   };
 }
 
@@ -306,6 +518,49 @@ function parseArtifactDiffCommand(
     message: "Expected baseline and candidate artifact paths.",
     ok: false,
   };
+}
+
+/** Parses generate-fixture command arguments. */
+function parseGenerateFixtureCommand(
+  args: readonly string[],
+):
+  | { readonly ok: true; readonly command: GenerateFixtureCommand }
+  | { readonly ok: false; readonly help: boolean; readonly message?: string } {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    return { help: true, ok: false };
+  }
+
+  const [fixtureName, outputFlag, outputPath] = args;
+  if (!isGeneratedFixtureName(fixtureName)) {
+    return {
+      help: false,
+      message: `Unknown generated fixture ${fixtureName ?? ""}. Expected one of: ${GENERATED_FIXTURE_NAMES.join(", ")}.`,
+      ok: false,
+    };
+  }
+  if (outputFlag !== "--output" || !outputPath || outputPath.startsWith("--")) {
+    return {
+      help: false,
+      message: "Expected generate-fixture <name> --output <artifact-dir>.",
+      ok: false,
+    };
+  }
+  if (args.length !== 3) {
+    return {
+      help: false,
+      message: "Unexpected extra generate-fixture arguments.",
+      ok: false,
+    };
+  }
+
+  return { command: { fixtureName, outputPath }, ok: true };
+}
+
+/** Returns whether a string is a supported generated fixture name. */
+function isGeneratedFixtureName(value: unknown): value is GeneratedFixtureName {
+  return (
+    typeof value === "string" && GENERATED_FIXTURE_NAMES.includes(value as GeneratedFixtureName)
+  );
 }
 
 /** Formats an unknown error as a CLI-safe message. */

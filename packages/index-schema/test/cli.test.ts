@@ -124,12 +124,69 @@ describe("runIndexSchemaCli", () => {
       }),
     );
   });
+
+  it("generates a valid split artifact fixture", async () => {
+    const root = await createTempRoot();
+    const outputPath = join(root, "generated-typescript");
+    const output = memoryIo();
+
+    const exitCode = await runIndexSchemaCli(
+      ["generate-fixture", "valid-typescript-artifact", "--output", outputPath],
+      output.io,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output.stderr()).toBe("");
+    expect(JSON.parse(output.stdout())).toEqual({
+      artifactId: "art_fixture_valid_typescript",
+      fixtureName: "valid-typescript-artifact",
+      outputPath,
+      recordCount: 4,
+      valid: true,
+    });
+
+    const validationOutput = memoryIo();
+    const validationExitCode = await runIndexSchemaCli(
+      ["validate", outputPath],
+      validationOutput.io,
+    );
+
+    expect(validationExitCode).toBe(0);
+    expect(JSON.parse(validationOutput.stdout())).toEqual(
+      expect.objectContaining({
+        artifactId: "art_fixture_valid_typescript",
+        recordCount: 4,
+        valid: true,
+      }),
+    );
+  });
+
+  it("rejects unknown generated fixture names", async () => {
+    const root = await createTempRoot();
+    const output = memoryIo();
+
+    const exitCode = await runIndexSchemaCli(
+      ["generate-fixture", "unknown-fixture", "--output", join(root, "fixture")],
+      output.io,
+    );
+
+    expect(exitCode).toBe(1);
+    expect(output.stdout()).toBe("");
+    expect(output.stderr()).toContain("Unknown generated fixture unknown-fixture");
+  });
 });
+
+/** Creates a temporary directory and schedules cleanup after the test. */
+async function createTempRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "heimdall-index-schema-cli-"));
+  tempRoots.push(root);
+
+  return root;
+}
 
 /** Writes a split artifact fixture into a temporary directory. */
 async function writeArtifactFixture(artifact: IndexArtifact): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "heimdall-index-schema-cli-"));
-  tempRoots.push(root);
+  const root = await createTempRoot();
   await writeSplitIndexArtifactDirectory(root, artifact);
 
   return root;
