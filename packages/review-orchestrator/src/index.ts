@@ -186,6 +186,8 @@ export type ReviewOrchestratorDependencies = {
   readonly quotaService?: QuotaService;
   /** Whether indexed retrieval is available for this run. */
   readonly indexAvailable?: boolean;
+  /** Missing-index behavior after the bounded index wait. Defaults to diff fallback. */
+  readonly indexDependencyMode?: ReviewIndexDependencyMode;
   /** Maximum time to wait for a newly queued index to become ready before diff fallback. */
   readonly indexWaitTimeoutMs?: number;
   /** Poll interval used while waiting for a newly queued index to become ready. */
@@ -199,6 +201,9 @@ export type ReviewOrchestratorDependencies = {
   /** Optional span recorder used for review pipeline instrumentation. */
   readonly traces?: TelemetrySpanRecorder;
 };
+
+/** Missing-index behavior after review orchestration's bounded index wait. */
+export type ReviewIndexDependencyMode = "fallback" | "pause";
 
 /** PR snapshot fetch result used by review orchestration. */
 type ReviewSnapshotFetchResult = {
@@ -418,6 +423,30 @@ export class ReviewInputSnapshotMismatchError extends Error {
   ) {
     super(message);
     this.name = "ReviewInputSnapshotMismatchError";
+  }
+}
+
+/** Error raised when a review intentionally pauses until an index dependency is ready. */
+export class ReviewIndexDependencyPendingError extends Error {
+  /** Stable product-safe error code. */
+  public readonly code = "review_orchestrator.index_dependency_pending";
+
+  /** Creates an index dependency pause error. */
+  public constructor(
+    /** Product-safe dependency metadata useful for logs and durable job retry state. */
+    public readonly metadata: {
+      /** Commit SHA that needs an index. */
+      readonly commitSha: string;
+      /** Durable index job idempotency key. */
+      readonly indexJobKey: string;
+      /** Repository that owns the missing index. */
+      readonly repoId: string;
+      /** Review run waiting on the dependency. */
+      readonly reviewRunId: string;
+    },
+  ) {
+    super(`Review ${metadata.reviewRunId} is waiting for index ${metadata.indexJobKey}.`);
+    this.name = "ReviewIndexDependencyPendingError";
   }
 }
 
@@ -846,13 +875,56 @@ export async function runPullRequestReview(
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "index",
-      status: indexVersionId ? "completed" : "degraded",
+      status: indexVersionId
+        ? "completed"
+        : dependencies.indexDependencyMode === "pause"
+          ? "paused"
+          : "degraded",
       metadata: {
         commitSha: snapshot.headSha,
         ...(indexVersionId ? { indexVersionId } : {}),
         ...(indexDependencyJobKey ? { queuedIndexJobKey: indexDependencyJobKey } : {}),
       },
     });
+    if (!indexVersionId && dependencies.indexDependencyMode === "pause" && indexDependencyJobKey) {
+      const pausedAt = now().toISOString();
+      if (quotaReservation?.reservation?.status === "reserved" && !quotaReservationFinalized) {
+        await quotaService.releaseReservation({
+          now: pausedAt,
+          quotaReservationId: quotaReservation.reservation.quotaReservationId,
+        });
+        quotaReservationFinalized = true;
+      }
+      reviewRun = await reviewRepository.upsertReviewRun({
+        ...reviewRun,
+        status: "waiting_for_index",
+        summary: "Review paused while the repository index is queued.",
+        updatedAt: pausedAt,
+        metadata: {
+          ...reviewRun.metadata,
+          indexDependency: {
+            commitSha: snapshot.headSha,
+            indexJobKey: indexDependencyJobKey,
+            mode: "pause",
+          },
+          ...(quotaReservation?.reservation
+            ? {
+                quota: {
+                  decision: quotaReservation.decision,
+                  releasedReservationId: quotaReservation.reservation.quotaReservationId,
+                },
+              }
+            : {}),
+        },
+      });
+      await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
+      throw new ReviewIndexDependencyPendingError({
+        commitSha: snapshot.headSha,
+        indexJobKey: indexDependencyJobKey,
+        repoId: snapshot.repoId,
+        reviewRunId,
+      });
+    }
     currentStage = "staleness";
     const afterIndexStaleness = await stopReviewRunIfStale({
       artifactRefs: artifacts,
@@ -1552,6 +1624,14 @@ export async function runPullRequestReview(
 
     return result;
   } catch (error) {
+    if (error instanceof ReviewIndexDependencyPendingError) {
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage,
+        error,
+        outcome: "failed",
+      });
+      throw error;
+    }
     const failedAt = now().toISOString();
     if (quotaReservation?.reservation?.status === "reserved" && !quotaReservationFinalized) {
       await quotaService.releaseReservation({

@@ -23,6 +23,7 @@ import {
   createWorkerIndexerDriverFromEnvironment,
   createWorkerLlmBudgetFromEnvironment,
   createWorkerLlmGatewayFromEnvironment,
+  createWorkerReviewIndexDependencyModeFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
   type RedisPublishThrottleClient,
@@ -331,6 +332,33 @@ describe("createWorkerLlmGatewayFromEnvironment", () => {
         LLM_PROVIDER: "bogus",
       }),
     ).rejects.toThrow("Unsupported LLM_PROVIDER: bogus");
+  });
+});
+
+describe("createWorkerReviewIndexDependencyModeFromEnvironment", () => {
+  it("leaves review index dependency behavior unset by default", () => {
+    expect(createWorkerReviewIndexDependencyModeFromEnvironment({})).toBeUndefined();
+  });
+
+  it("parses supported review index dependency modes", () => {
+    expect(
+      createWorkerReviewIndexDependencyModeFromEnvironment({
+        HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: "pause",
+      }),
+    ).toBe("pause");
+    expect(
+      createWorkerReviewIndexDependencyModeFromEnvironment({
+        HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: " FALLBACK ",
+      }),
+    ).toBe("fallback");
+  });
+
+  it("rejects unsupported review index dependency modes", () => {
+    expect(() =>
+      createWorkerReviewIndexDependencyModeFromEnvironment({
+        HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: "wait",
+      }),
+    ).toThrow("Unsupported HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: wait");
   });
 });
 

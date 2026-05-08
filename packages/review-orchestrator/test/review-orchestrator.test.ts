@@ -14,6 +14,7 @@ import {
   createIndexDependencyJobEnvelope,
   createIndexDependencyJobKey,
   createStaticAnalysisRequestForReview,
+  ReviewIndexDependencyPendingError,
   ReviewInputSnapshotMismatchError,
   type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
@@ -191,6 +192,28 @@ describe("createIndexDependencyJobEnvelope", () => {
       traceContext: { requestId: "req_review" },
     });
     expect(envelope.jobId).toMatch(/^job_/u);
+  });
+});
+
+describe("ReviewIndexDependencyPendingError", () => {
+  it("exposes product-safe retry metadata for paused review runs", () => {
+    const error = new ReviewIndexDependencyPendingError({
+      commitSha: reviewInput.headSha,
+      indexJobKey: "github:index:repo_test:2222222",
+      repoId: reviewInput.repoId,
+      reviewRunId: "rrn_review",
+    });
+
+    expect(error).toMatchObject({
+      code: "review_orchestrator.index_dependency_pending",
+      metadata: {
+        commitSha: reviewInput.headSha,
+        indexJobKey: "github:index:repo_test:2222222",
+        repoId: reviewInput.repoId,
+        reviewRunId: "rrn_review",
+      },
+      name: "ReviewIndexDependencyPendingError",
+    });
   });
 });
 

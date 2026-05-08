@@ -126,7 +126,7 @@ import {
   QUEUE_NAMES,
 } from "@repo/queue";
 import { syncRepositoryWorkspace } from "@repo/repo-sync";
-import { runPullRequestReview } from "@repo/review-orchestrator";
+import { type ReviewIndexDependencyMode, runPullRequestReview } from "@repo/review-orchestrator";
 import {
   createDockerContainerSandboxRunner,
   createFakeSandboxRunner,
@@ -200,6 +200,8 @@ export type CreateWorkerHandlersOptions = {
   readonly llmGateway?: LLMGateway;
   /** Optional static-analysis runner used by review jobs. */
   readonly staticAnalysisRunner?: ToolRunner;
+  /** Optional missing-index behavior for review orchestration. */
+  readonly reviewIndexDependencyMode?: ReviewIndexDependencyMode;
   /** Optional review artifact payload store used by review orchestration. */
   readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
   /** Optional shared throttle for provider-visible publisher writes. */
@@ -228,6 +230,9 @@ export type WorkerStaticAnalysisRunnerEnvironment = Readonly<Record<string, stri
 
 /** Environment values used to select the worker LLM gateway. */
 export type WorkerLlmGatewayEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Environment values used to select review index dependency behavior. */
+export type WorkerReviewIndexDependencyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** Environment values used to select the worker embedding provider. */
 export type WorkerEmbeddingProviderEnvironment = Readonly<Record<string, string | undefined>>;
@@ -675,6 +680,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.staticAnalysisRunner
           ? { staticAnalysisRunner: options.staticAnalysisRunner }
           : {}),
+        ...(options.reviewIndexDependencyMode
+          ? { indexDependencyMode: options.reviewIndexDependencyMode }
+          : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
@@ -1010,6 +1018,21 @@ export function createWorkerLlmBudgetFromEnvironment(
   };
 }
 
+/** Creates the optional review index dependency mode from worker environment configuration. */
+export function createWorkerReviewIndexDependencyModeFromEnvironment(
+  env: WorkerReviewIndexDependencyEnvironment,
+): ReviewIndexDependencyMode | undefined {
+  const mode = optionalEnvString(env.HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE)?.toLowerCase();
+  if (!mode) {
+    return undefined;
+  }
+  if (mode === "fallback" || mode === "pause") {
+    return mode;
+  }
+
+  throw new Error(`Unsupported HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: ${mode}`);
+}
+
 /** Creates the worker embedding provider selected by environment configuration. */
 export async function createWorkerEmbeddingProviderFromEnvironment(
   env: WorkerEmbeddingProviderEnvironment,
@@ -1107,6 +1130,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;
   const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
+  const reviewIndexDependencyMode = createWorkerReviewIndexDependencyModeFromEnvironment(
+    process.env,
+  );
   const indexerDriver =
     createWorkerIndexerDriverFromEnvironment(process.env, {
       indexArtifactRoot,
@@ -1122,6 +1148,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       gitProvider,
       ...(llmGateway ? { llmGateway } : {}),
       ...(staticAnalysisRunner ? { staticAnalysisRunner } : {}),
+      ...(reviewIndexDependencyMode ? { reviewIndexDependencyMode } : {}),
       ...(artifactPayloadStore ? { artifactPayloadStore } : {}),
       publishThrottle,
       ...(workspaceRoot ? { workspaceRoot } : {}),
