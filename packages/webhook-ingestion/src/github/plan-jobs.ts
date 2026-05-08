@@ -1,4 +1,5 @@
 import {
+  type DataDeletionPlanJobPayload,
   JOB_TYPES,
   type JobPayload,
   type OrgSettings,
@@ -12,7 +13,7 @@ import type {
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
 import { buildReviewPolicySnapshot, shouldReviewPr } from "@repo/rules";
-import { newId } from "../ids";
+import { newId, stableId } from "../ids";
 import type { PlannedJob } from "../types";
 import type {
   NormalizedGitHubFeedback,
@@ -95,6 +96,33 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
           provider: "github",
           reason: "installed",
         },
+        options.traceContext,
+      ),
+    });
+  }
+
+  if (options.installation && options.eventName === "installation" && action === "deleted") {
+    const dataDeletionRequestId = stableId("ddr", [
+      "github",
+      options.deliveryId,
+      "installation_deleted",
+    ]);
+    const payload: DataDeletionPlanJobPayload = {
+      dataDeletionRequestId,
+      orgId: options.installation.orgId,
+      reason: "app_uninstalled",
+      requestedAt: createdAt(),
+      requestedBy: "system:github_webhook",
+      scope: "organization",
+    };
+
+    jobs.push({
+      queueName: QUEUE_NAMES.security,
+      orgId: options.installation.orgId,
+      envelope: envelope(
+        JOB_TYPES.DataDeletionPlan,
+        `github:data-deletion:${options.installation.installationId}:${options.deliveryId}`,
+        payload,
         options.traceContext,
       ),
     });

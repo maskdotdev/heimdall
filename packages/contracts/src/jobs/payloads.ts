@@ -5,6 +5,7 @@ import { ReviewTriggerSchema } from "../enums/review";
 import {
   ArtifactIdSchema,
   ChunkIdSchema,
+  DataDeletionRequestIdSchema,
   FindingIdSchema,
   IndexVersionIdSchema,
   InstallationIdSchema,
@@ -16,6 +17,7 @@ import {
 } from "../primitives/ids";
 import { IsoDateTimeSchema } from "../primitives/time";
 import { GitCommitShaSchema } from "../pull-request/pull-request";
+import { DataDeletionReasonSchema, DataDeletionScopeSchema } from "../security/data-deletion";
 
 export const SyncInstallationReasonSchema = Type.Union([
   Type.Literal("installed"),
@@ -189,6 +191,24 @@ export const BillingReconcileJobPayloadSchema = Type.Object(
 );
 export type BillingReconcileJobPayload = Static<typeof BillingReconcileJobPayloadSchema>;
 
+/** Payload used by customer-data deletion planning jobs. */
+export const DataDeletionPlanJobPayloadSchema = Type.Object(
+  {
+    dataDeletionRequestId: DataDeletionRequestIdSchema,
+    reason: DataDeletionReasonSchema,
+    requestedAt: IsoDateTimeSchema,
+    requestedBy: Type.String({ minLength: 1 }),
+    scope: DataDeletionScopeSchema,
+    dryRun: Type.Optional(Type.Boolean()),
+    orgId: Type.Optional(OrgIdSchema),
+    repoId: Type.Optional(RepoIdSchema),
+    sourceWebhookEventId: Type.Optional(Type.String({ minLength: 1 })),
+    userId: Type.Optional(UserIdSchema),
+  },
+  { additionalProperties: false },
+);
+export type DataDeletionPlanJobPayload = Static<typeof DataDeletionPlanJobPayloadSchema>;
+
 /** Reason a sandbox cleanup job was scheduled. */
 export const SandboxCleanupReasonSchema = Type.Union([
   Type.Literal("scheduled"),
@@ -241,6 +261,7 @@ export const JobPayloadSchema = Type.Union([
   PublishReviewJobPayloadSchema,
   UpdateMemoryJobPayloadSchema,
   BillingReconcileJobPayloadSchema,
+  DataDeletionPlanJobPayloadSchema,
   SandboxCleanupJobPayloadSchema,
   ReviewArtifactCleanupJobPayloadSchema,
 ]);

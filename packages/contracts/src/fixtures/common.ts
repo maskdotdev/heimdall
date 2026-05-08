@@ -31,4 +31,5 @@ export const ids = {
   entitlementId: "ent_01HXAMPLE",
   quotaCounterId: "qctr_01HXAMPLE",
   quotaReservationId: "qres_01HXAMPLE",
+  dataDeletionRequestId: "ddr_01HXAMPLE",
 } as const;

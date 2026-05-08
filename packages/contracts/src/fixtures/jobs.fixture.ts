@@ -1,5 +1,6 @@
 import type {
   BillingReconcileJobPayload,
+  DataDeletionPlanJobPayload,
   EmbeddingBatchJobPayload,
   EmbeddingRepairJobPayload,
   IndexRepoCommitJobPayload,
@@ -73,6 +74,16 @@ export const validBillingReconcileJobPayloadFixture = {
   periodStart: "2026-05-01T00:00:00.000Z",
   provider: "stripe",
 } satisfies BillingReconcileJobPayload;
+
+export const validDataDeletionPlanJobPayloadFixture = {
+  dataDeletionRequestId: ids.dataDeletionRequestId,
+  orgId: ids.orgId,
+  reason: "app_uninstalled",
+  requestedAt: "2026-05-08T12:00:00.000Z",
+  requestedBy: "system:github_webhook",
+  scope: "organization",
+  sourceWebhookEventId: "webhook_01HXAMPLE",
+} satisfies DataDeletionPlanJobPayload;
 
 export const validSandboxCleanupJobPayloadFixture = {
   before: "2026-05-01T00:00:00.000Z",
