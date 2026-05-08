@@ -403,6 +403,60 @@ describe("static analysis", () => {
     expect(report.rawOutputPolicy).toEqual(STATIC_ANALYSIS_RAW_OUTPUT_POLICY);
   });
 
+  it("classifies report diagnostics against optional baseline diagnostics", async () => {
+    const baselineDiagnostic = createNormalizedToolDiagnostic({
+      location: { filePath: "src/math.ts", startLine: 2 },
+      message: "Unexpected number coercion.",
+      ruleId: "no-unsafe-number",
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "eslint",
+      toolRunId: "str_base",
+    });
+
+    const report = await runStaticAnalysis({
+      baselineDiagnosticsByTool: {
+        eslint: [baselineDiagnostic],
+      },
+      request,
+      runner: createFakeToolRunner([{ executable: "eslint", stdout: "[]" }]),
+      diagnosticsByTool: {
+        eslint: [
+          {
+            location: { filePath: "src/math.ts", startLine: 2 },
+            message: "Unexpected number coercion.",
+            ruleId: "no-unsafe-number",
+            snapshot: validPullRequestSnapshotFixture,
+            tool: "eslint",
+            toolRunId: "ignored_existing",
+          },
+          {
+            location: { filePath: "src/math.ts", startLine: 2 },
+            message: "'total' is not defined.",
+            ruleId: "no-undef",
+            snapshot: validPullRequestSnapshotFixture,
+            tool: "eslint",
+            toolRunId: "ignored_new",
+          },
+        ],
+      },
+    });
+
+    expect(report.summary).toMatchObject({
+      diagnosticCount: 2,
+      newDiagnosticCount: 1,
+    });
+    expect(
+      report.diagnostics.map((diagnostic) => ({
+        baselineStatus: diagnostic.baselineStatus,
+        introducedByPr: diagnostic.introducedByPr,
+        ruleId: diagnostic.ruleId,
+      })),
+    ).toEqual([
+      { baselineStatus: "existing", introducedByPr: false, ruleId: "no-unsafe-number" },
+      { baselineStatus: "new", introducedByPr: true, ruleId: "no-undef" },
+    ]);
+  });
+
   it("records static-analysis telemetry without raw output or workspace paths", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];

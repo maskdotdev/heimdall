@@ -519,6 +519,10 @@ export type RunStaticAnalysisInput = StaticAnalysisTelemetryOptions & {
   readonly runner: ToolRunner;
   /** Additional deterministic diagnostic fixtures, keyed by tool name. */
   readonly diagnosticsByTool?: Partial<Record<StaticToolName, readonly CreateDiagnosticInput[]>>;
+  /** Optional base-commit diagnostics used to classify head diagnostics by baseline status. */
+  readonly baselineDiagnosticsByTool?:
+    | Partial<Record<StaticToolName, readonly NormalizedToolDiagnostic[]>>
+    | undefined;
 };
 
 /** Final telemetry status for a static-analysis run. */
@@ -1384,13 +1388,21 @@ function normalizeStaticAnalysisDiagnosticsWithTelemetry(
           toolRunId: context.toolRunId,
         }),
     );
-    const diagnostics = [...context.parsedOutput.diagnostics, ...fixtureDiagnostics].slice(
+    const headDiagnostics = [...context.parsedOutput.diagnostics, ...fixtureDiagnostics].slice(
       0,
       context.maxDiagnosticsPerTool,
     );
+    const baselineDiagnostics = input.baselineDiagnosticsByTool?.[context.runPlan.tool] ?? [];
+    const diagnostics =
+      baselineDiagnostics.length > 0
+        ? compareStaticAnalysisDiagnosticBaselines({
+            baseDiagnostics: baselineDiagnostics,
+            headDiagnostics,
+          }).diagnostics
+        : headDiagnostics;
     const warnings: StaticAnalysisWarning[] = [];
     const wasTruncated =
-      context.parsedOutput.diagnostics.length + fixtureDiagnostics.length > diagnostics.length;
+      context.parsedOutput.diagnostics.length + fixtureDiagnostics.length > headDiagnostics.length;
     if (wasTruncated) {
       warnings.push(
         warning("tool_diagnostic_budget_truncated", "Static analysis diagnostics were truncated.", {
@@ -1413,7 +1425,11 @@ function normalizeStaticAnalysisDiagnosticsWithTelemetry(
     span?.end({
       attributes: {
         "static_analysis.diagnostic_count": diagnostics.length,
+        "static_analysis.baseline_diagnostic_count": baselineDiagnostics.length,
         "static_analysis.fixture_diagnostic_count": fixtureDiagnostics.length,
+        "static_analysis.new_diagnostic_count": diagnostics.filter(
+          (diagnostic) => diagnostic.baselineStatus === "new",
+        ).length,
         "static_analysis.truncated": wasTruncated,
         "static_analysis.warning_count": warnings.length,
       },
