@@ -602,6 +602,7 @@ async function enqueueEmbeddingBatches(input: {
     options.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION;
   const embeddingProvider = options.embeddingProvider ?? "configured";
   const embeddingDimensions = options.embeddingDimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
+  const importRecordBatchSize = boundedImportRecordBatchSize(options.importRecordBatchSize);
   const orgId = await loadRepositoryOrgId(options.db, input.repoId);
   const embeddingJobId = stableId("embjob", [
     input.repoId,
@@ -638,17 +639,15 @@ async function enqueueEmbeddingBatches(input: {
     })
     .onConflictDoNothing();
 
-  await options.db
-    .insert(embeddingJobItems)
-    .values(
-      input.chunks.map((chunk) => ({
-        embeddingJobItemId: stableId("embitem", [embeddingJobId, chunk.chunkId]),
-        embeddingJobId,
-        chunkId: chunk.chunkId,
-        status: "pending",
-      })),
-    )
-    .onConflictDoNothing();
+  const embeddingJobItemRows = input.chunks.map((chunk) => ({
+    embeddingJobItemId: stableId("embitem", [embeddingJobId, chunk.chunkId]),
+    embeddingJobId,
+    chunkId: chunk.chunkId,
+    status: "pending",
+  }));
+  for (const batch of batchRecords(embeddingJobItemRows, importRecordBatchSize)) {
+    await options.db.insert(embeddingJobItems).values(batch).onConflictDoNothing();
+  }
 
   for (let index = 0; index < input.chunks.length; index += batchSize) {
     const chunkIds = input.chunks.slice(index, index + batchSize).map((chunk) => chunk.chunkId);

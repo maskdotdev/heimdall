@@ -373,6 +373,31 @@ describe("importIndexArtifact telemetry", () => {
     );
   });
 
+  it("writes embedding planner items in bounded insert batches", async () => {
+    const insertedRows: unknown[] = [];
+    const result = await importIndexArtifact(artifactWithChunks(5), {
+      artifactUri: "file:///tmp/index-artifact.json",
+      db: createEmbeddingPlanningImportDatabaseStub(insertedRows),
+      embeddingBatchSize: 5,
+      embeddingDimensions: 2,
+      embeddingModel: "text-embedding-3-small",
+      embeddingProvider: "hash",
+      enqueueEmbeddings: true,
+      importRecordBatchSize: 2,
+    });
+
+    expect(result).toMatchObject({
+      chunkCount: 5,
+      embeddingJobCount: 1,
+    });
+    expect(
+      insertedRows
+        .slice(1, 4)
+        .filter(isUnknownArray)
+        .map((batch) => batch.length),
+    ).toEqual([2, 2, 1]);
+  });
+
   it("records validation failure telemetry without importing records", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -473,13 +498,18 @@ function emptyArtifact(): IndexArtifact {
 
 /** Creates a minimal valid index artifact with one file and one chunk. */
 function artifactWithChunk(): IndexArtifact {
+  return artifactWithChunks(1);
+}
+
+/** Creates a valid index artifact with one file and several chunks. */
+function artifactWithChunks(count: number): IndexArtifact {
   return {
     manifest: {
       ...emptyArtifact().manifest,
-      chunkCount: 1,
+      chunkCount: count,
       fileCount: 1,
       languages: ["typescript"],
-      recordCount: 2,
+      recordCount: count + 1,
     },
     records: [
       {
@@ -498,21 +528,21 @@ function artifactWithChunk(): IndexArtifact {
         isTest: false,
         isVendored: false,
       },
-      {
-        type: "chunk",
-        schemaVersion: "index_record.v1",
-        chunkId: "chunk_1",
+      ...Array.from({ length: count }, (_, index) => ({
+        type: "chunk" as const,
+        schemaVersion: "index_record.v1" as const,
+        chunkId: `chunk_${index + 1}`,
         fileId: "file_1",
         repoId: "repo_1",
         commitSha: "abc1234",
         path: "src/index.ts",
-        language: "typescript",
+        language: "typescript" as const,
         range: { endLine: 2, startLine: 1 },
-        kind: "file",
-        text: "export const value = 1;",
-        contentHash: `sha256:${"b".repeat(64)}`,
+        kind: "file" as const,
+        text: `export const value${index + 1} = ${index + 1};`,
+        contentHash: `sha256:${(index + 1).toString(16).padStart(64, "b")}`,
         tokenEstimate: 8,
-      },
+      })),
     ],
   };
 }
