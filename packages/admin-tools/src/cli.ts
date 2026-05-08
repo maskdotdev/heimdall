@@ -12,6 +12,7 @@ import {
   type AdminBackgroundJobDebugDetails,
   type AdminDebugService,
   type AdminIndexVersionInspection,
+  type AdminMemoryRulesDebugDetails,
   type AdminPublisherDebugDetails,
   type AdminReplayAuditActor,
   type AdminReplayExecutionResult,
@@ -195,6 +196,16 @@ export type AdminCliCommand =
     }
   | {
       /** Command discriminator. */
+      readonly kind: "memory_rules_inspect";
+      /** Repository whose effective memory and rules should be inspected. */
+      readonly repoId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
       readonly kind: "index_inspect";
       /** Imported index version to inspect. */
       readonly indexVersionId: string;
@@ -309,6 +320,8 @@ export async function runAdminCli(
         return await runPublisherReplayCommand(command, handle.service, env);
       case "usage_inspect":
         return await runUsageInspectCommand(command, handle.service);
+      case "memory_rules_inspect":
+        return await runMemoryRulesInspectCommand(command, handle.service);
       case "index_inspect":
         return await runIndexInspectCommand(command, handle.service);
       case "index_import":
@@ -456,6 +469,19 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
     };
   }
 
+  if (
+    (domain === "memory-rules" || domain === "memory" || domain === "rules") &&
+    action === "inspect" &&
+    reviewRunId
+  ) {
+    return {
+      kind: "memory_rules_inspect",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      json,
+      repoId: reviewRunId,
+    };
+  }
+
   if (domain === "index" && action === "inspect" && reviewRunId) {
     return {
       kind: "index_inspect",
@@ -513,6 +539,7 @@ export function adminCliUsage(): string {
     "  admin publisher inspect <reviewRunId> [--json] [--database-url <url>]",
     "  admin publisher replay <reviewRunId> [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin usage inspect <reviewRunId> [--json] [--database-url <url>]",
+    "  admin memory-rules inspect <repoId> [--json] [--database-url <url>]",
     "  admin index inspect <indexVersionId> [--json] [--database-url <url>]",
     "  admin index import --artifact <uri> --repo-id <repoId> --commit <sha> [--enqueue-embeddings] [--json] [--database-url <url>]",
     "  admin index cleanup <indexVersionId> [--force] [--json] [--database-url <url>]",
@@ -780,6 +807,18 @@ async function runUsageInspectCommand(
   return {
     exitCode: 0,
     stdout: command.json ? jsonOutput(inspection) : formatUsageInspection(inspection),
+  };
+}
+
+/** Runs repository memory/rules inspection and formats the result. */
+async function runMemoryRulesInspectCommand(
+  command: Extract<AdminCliCommand, { kind: "memory_rules_inspect" }>,
+  service: AdminDebugService,
+): Promise<AdminCliResult> {
+  const details = await service.getMemoryRulesDebugDetails(command.repoId);
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(details) : formatMemoryRulesInspection(details),
   };
 }
 
@@ -1226,6 +1265,26 @@ function formatUsageInspection(inspection: AdminUsageCostInspection): string {
   ].join("\n");
 }
 
+/** Formats memory and rules inspection details for terminal output. */
+function formatMemoryRulesInspection(details: AdminMemoryRulesDebugDetails): string {
+  const availableTools = details.evaluationTools.filter((tool) => tool.status === "available");
+  return [
+    `Memory/rules inspection: ${details.repository.repoId}`,
+    `Repository: ${details.repository.fullName}`,
+    `Organization: ${details.repository.orgId}`,
+    `Enabled: ${details.repository.enabled}`,
+    `Memory facts: ${details.memoryFacts.length}`,
+    `Memory candidates: ${details.memoryCandidates.length}`,
+    `Rules: ${details.rules.length}`,
+    `Candidate approval: ${formatBooleanCapability(details.candidateActions.canApprove)}`,
+    `Candidate rejection: ${formatBooleanCapability(details.candidateActions.canReject)}`,
+    `Evaluation tools: ${availableTools.length}/${details.evaluationTools.length} available`,
+    ...(details.warnings.length > 0
+      ? ["Warnings:", ...details.warnings.map((warning) => `- ${warning}`)]
+      : []),
+  ].join("\n");
+}
+
 /** Formats an index version inspection result for terminal output. */
 function formatIndexVersionInspection(inspection: AdminIndexVersionInspection): string {
   return [
@@ -1305,6 +1364,11 @@ function formatBillableUnits(units: Readonly<Record<string, number>>): string {
   }
 
   return entries.map(([key, value]) => `${key}=${value}`).join(", ");
+}
+
+/** Formats a boolean capability for terminal summaries. */
+function formatBooleanCapability(value: boolean): string {
+  return value ? "available" : "unavailable";
 }
 
 /** Serializes CLI output as redacted, stable JSON. */

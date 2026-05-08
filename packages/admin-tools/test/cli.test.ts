@@ -121,6 +121,12 @@ describe("parseAdminCliCommand", () => {
       reviewRunId: "rrn_1",
     });
 
+    expect(parseAdminCliCommand(["memory-rules", "inspect", "repo_1", "--json"])).toEqual({
+      json: true,
+      kind: "memory_rules_inspect",
+      repoId: "repo_1",
+    });
+
     expect(parseAdminCliCommand(["index", "inspect", "idx_1", "--json"])).toEqual({
       indexVersionId: "idx_1",
       json: true,
@@ -169,6 +175,7 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin publisher inspect <reviewRunId>");
     expect(adminCliUsage()).toContain("admin publisher replay <reviewRunId>");
     expect(adminCliUsage()).toContain("admin usage inspect <reviewRunId>");
+    expect(adminCliUsage()).toContain("admin memory-rules inspect <repoId>");
     expect(adminCliUsage()).toContain("admin index inspect <indexVersionId>");
     expect(adminCliUsage()).toContain("admin index import --artifact <uri>");
     expect(adminCliUsage()).toContain("admin index cleanup <indexVersionId>");
