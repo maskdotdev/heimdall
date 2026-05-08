@@ -363,6 +363,62 @@ describe("S3CompatibleReviewArtifactPayloadStore", () => {
       url: "https://objects.example.test/heimdall-artifacts/rrn_test/context_bundle/context-bundle.json",
     });
   });
+
+  it("copies object-storage payloads with signed CopyObject requests", async () => {
+    const requests: { readonly url: string; readonly init: RequestInit | undefined }[] = [];
+    const fetch = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ init, url: input.toString() });
+      return new Response(null, { status: init?.method === "PUT" ? 200 : 404 });
+    };
+    const store = new S3CompatibleReviewArtifactPayloadStore({
+      accessKeyId: "AKIA_TEST",
+      bucket: "heimdall-artifacts",
+      endpoint: "https://objects.example.test",
+      fetch,
+      keyPrefix: "copied",
+      now: () => new Date("2026-05-07T12:00:00.000Z"),
+      region: "auto",
+      secretAccessKey: "secret",
+    });
+
+    const record = await store.copyJson({
+      hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      kind: "index_artifact",
+      name: "abc1234",
+      reviewRunId: "index-artifacts",
+      sizeBytes: 128,
+      sourceUri: "s3://heimdall-artifacts/remote/repo_1/artifact.json",
+    });
+
+    expect(record).toMatchObject({
+      hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      mediaType: REVIEW_ARTIFACT_JSON_MEDIA_TYPE,
+      mode: OBJECT_REVIEW_ARTIFACT_STORAGE_MODE,
+      sizeBytes: 128,
+      uri: expect.stringMatching(
+        /^s3:\/\/heimdall-artifacts\/copied\/index-artifacts\/index_artifact\/abc1234-/u,
+      ),
+    });
+    expect(requests).toEqual([
+      expect.objectContaining({
+        init: expect.objectContaining({
+          headers: expect.objectContaining({
+            authorization: expect.stringContaining(
+              "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-copy-source;x-amz-date;x-amz-meta-sha256;x-amz-meta-size-bytes;x-amz-metadata-directive",
+            ),
+            "content-type": REVIEW_ARTIFACT_JSON_MEDIA_TYPE,
+            "x-amz-copy-source": "/heimdall-artifacts/remote/repo_1/artifact.json",
+            "x-amz-date": "20260507T120000Z",
+            "x-amz-metadata-directive": "REPLACE",
+          }),
+          method: "PUT",
+        }),
+        url: expect.stringMatching(
+          /^https:\/\/objects\.example\.test\/heimdall-artifacts\/copied\/index-artifacts\/index_artifact\/abc1234-/u,
+        ),
+      }),
+    ]);
+  });
 });
 
 describe("createReviewArtifactPayloadStoreFromEnvironment", () => {

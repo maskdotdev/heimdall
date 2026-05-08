@@ -134,10 +134,20 @@ export type StoredIndexArtifact = {
   readonly sizeBytes: number;
 };
 
+/** Input used to copy an existing object-storage index artifact into the configured store. */
+export type CopyIndexArtifactInput = {
+  /** Complete artifact parsed by the indexer boundary. */
+  readonly artifact: IndexArtifact;
+  /** Durable source object URI returned by the indexer boundary. */
+  readonly sourceUri: string;
+};
+
 /** Store that writes index artifacts to durable storage before import. */
 export type IndexArtifactStore = {
   /** Stores one complete index artifact and returns its durable URI metadata. */
   readonly putArtifact: (artifact: IndexArtifact) => Promise<StoredIndexArtifact>;
+  /** Copies an existing object-storage artifact into the configured store when supported. */
+  readonly copyArtifact?: (input: CopyIndexArtifactInput) => Promise<StoredIndexArtifact>;
 };
 
 /** Options for S3/R2-compatible whole-artifact JSON storage. */
@@ -427,18 +437,28 @@ export function createS3CompatibleIndexArtifactStore(
   const store = new S3CompatibleReviewArtifactPayloadStore(options);
 
   return {
+    copyArtifact: async (input) => {
+      const artifactSize = byteLength(JSON.stringify(input.artifact));
+      const result = await store.copyJson({
+        hash: hashArtifact(input.artifact),
+        kind: input.artifact.manifest.repoId,
+        metadata: indexArtifactObjectMetadata(input.artifact),
+        name: input.artifact.manifest.commitSha,
+        reviewRunId: "index-artifacts",
+        sizeBytes: artifactSize,
+        sourceUri: normalizeObjectArtifactUri(input.sourceUri),
+      });
+
+      return {
+        hash: result.hash,
+        sizeBytes: result.sizeBytes,
+        uri: result.uri,
+      };
+    },
     putArtifact: async (artifact) => {
       const result = await store.putJson({
         kind: artifact.manifest.repoId,
-        metadata: {
-          artifactId: artifact.manifest.artifactId,
-          artifactKind: "index_artifact",
-          commitSha: artifact.manifest.commitSha,
-          indexerName: artifact.manifest.indexerName,
-          indexerVersion: artifact.manifest.indexerVersion,
-          recordCount: artifact.manifest.recordCount,
-          repoId: artifact.manifest.repoId,
-        },
+        metadata: indexArtifactObjectMetadata(artifact),
         name: artifact.manifest.commitSha,
         payload: artifact,
         reviewRunId: "index-artifacts",
@@ -1910,4 +1930,17 @@ function booleanEnv(value: string | undefined): boolean | undefined {
 /** Computes a stable SHA-256 hash for an index artifact payload. */
 function hashArtifact(artifact: IndexArtifact): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(JSON.stringify(artifact)).digest("hex")}`;
+}
+
+/** Returns product-safe object metadata for durable index artifact storage. */
+function indexArtifactObjectMetadata(artifact: IndexArtifact): Record<string, unknown> {
+  return {
+    artifactId: artifact.manifest.artifactId,
+    artifactKind: "index_artifact",
+    commitSha: artifact.manifest.commitSha,
+    indexerName: artifact.manifest.indexerName,
+    indexerVersion: artifact.manifest.indexerVersion,
+    recordCount: artifact.manifest.recordCount,
+    repoId: artifact.manifest.repoId,
+  };
 }

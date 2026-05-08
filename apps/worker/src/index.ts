@@ -689,6 +689,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
               artifact: result.artifact,
               root: options.indexArtifactRoot ?? DEFAULT_INDEX_ARTIFACT_ROOT,
               ...(options.indexArtifactStore ? { artifactStore: options.indexArtifactStore } : {}),
+              ...(result.artifactUri ? { sourceArtifactUri: result.artifactUri } : {}),
               uploadMode: artifactUploadMode,
             }));
           await importIndexArtifactFromUri({
@@ -2397,6 +2398,8 @@ export async function persistIndexArtifact(artifact: IndexArtifact, root: string
 export async function persistIndexArtifactForImport(input: {
   /** Complete artifact returned by the selected indexer driver. */
   readonly artifact: IndexArtifact;
+  /** Optional object-storage URI returned by the selected indexer driver. */
+  readonly sourceArtifactUri?: string;
   /** Local artifact root used when upload mode is `local_only`. */
   readonly root: string;
   /** Upload mode selected by central indexer runtime configuration. */
@@ -2411,7 +2414,13 @@ export async function persistIndexArtifactForImport(input: {
       );
     }
 
-    const storedArtifact = await input.artifactStore.putArtifact(input.artifact);
+    const storedArtifact =
+      input.sourceArtifactUri && input.artifactStore.copyArtifact
+        ? await input.artifactStore.copyArtifact({
+            artifact: input.artifact,
+            sourceUri: input.sourceArtifactUri,
+          })
+        : await input.artifactStore.putArtifact(input.artifact);
     return storedArtifact.uri;
   }
 

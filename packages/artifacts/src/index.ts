@@ -109,6 +109,26 @@ export type StoreJsonReviewArtifactPayloadInput = {
   readonly metadata?: Record<string, unknown>;
 };
 
+/** Input used to copy an existing JSON review artifact payload inside object storage. */
+export type CopyJsonReviewArtifactPayloadInput = {
+  /** Durable source object URI to copy from. */
+  readonly sourceUri: string;
+  /** Review run that owns the destination artifact. */
+  readonly reviewRunId: string;
+  /** Destination artifact kind. */
+  readonly kind: string;
+  /** Human-readable destination artifact name scoped to the review run and kind. */
+  readonly name: string;
+  /** SHA-256 hash for the source object bytes. */
+  readonly hash: `sha256:${string}`;
+  /** Source object size in bytes. */
+  readonly sizeBytes: number;
+  /** Optional URI override for custom storage backends. */
+  readonly uri?: string;
+  /** Optional metadata merged into the persisted artifact row metadata. */
+  readonly metadata?: Record<string, unknown>;
+};
+
 /** Input used to read a JSON review artifact payload. */
 export type ReadJsonReviewArtifactPayloadInput = {
   /** Durable artifact URI from the review_artifacts row. */
@@ -173,6 +193,16 @@ export type DeleteJsonReviewArtifactPayloadResult = {
   readonly deleted: boolean;
 };
 
+/** Minimal artifact identity fields used for filesystem paths and object keys. */
+type ReviewArtifactPathInput = {
+  /** Review run that owns the artifact. */
+  readonly reviewRunId: string;
+  /** Artifact kind. */
+  readonly kind: string;
+  /** Human-readable artifact name scoped to the review run and kind. */
+  readonly name: string;
+};
+
 /** Storage boundary for review artifact JSON payloads. */
 export type ReviewArtifactPayloadStore = {
   /** Stores a JSON payload and returns DB metadata plus the durable descriptor. */
@@ -191,6 +221,10 @@ export type ReviewArtifactPayloadStore = {
   readonly createSignedGetUrl?: (
     input: CreateSignedReviewArtifactPayloadUrlInput,
   ) => Promise<CreateSignedReviewArtifactPayloadUrlResult>;
+  /** Copies a JSON payload inside object storage when the backing store supports it. */
+  readonly copyJson?: (
+    input: CopyJsonReviewArtifactPayloadInput,
+  ) => Promise<ReviewArtifactPayloadRecord>;
 };
 
 /** Database-backed JSON payload store used until object storage is configured. */
@@ -452,6 +486,55 @@ export class S3CompatibleReviewArtifactPayloadStore implements ReviewArtifactPay
     return { deleted: true };
   }
 
+  /** Copies an existing JSON payload with an S3-compatible server-side copy request. */
+  public async copyJson(
+    input: CopyJsonReviewArtifactPayloadInput,
+  ): Promise<ReviewArtifactPayloadRecord> {
+    const source = parseS3ArtifactUri(input.sourceUri);
+    if (!source) {
+      throw new Error("Object storage artifact copy requires an s3:// source URI.");
+    }
+    if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0) {
+      throw new Error("Object storage artifact copy requires a non-negative source size.");
+    }
+
+    const key = reviewArtifactObjectKey(input, input.hash, this.keyPrefix);
+    const url = this.objectUrl(key);
+    const descriptor = {
+      hash: input.hash,
+      mediaType: REVIEW_ARTIFACT_JSON_MEDIA_TYPE,
+      mode: OBJECT_REVIEW_ARTIFACT_STORAGE_MODE,
+      sizeBytes: input.sizeBytes,
+      uri: input.uri ?? `s3://${this.bucket}/${key}`,
+    } satisfies ReviewArtifactPayloadDescriptor;
+    const response = await this.fetch(url, {
+      headers: this.signHeaders({
+        contentHash: SHA256_EMPTY_PAYLOAD,
+        contentType: REVIEW_ARTIFACT_JSON_MEDIA_TYPE,
+        extraHeaders: {
+          "x-amz-copy-source": s3CopySourceHeader(source),
+          "x-amz-meta-sha256": input.hash,
+          "x-amz-meta-size-bytes": String(input.sizeBytes),
+          "x-amz-metadata-directive": "REPLACE",
+        },
+        method: "PUT",
+        url,
+      }),
+      method: "PUT",
+    });
+    if (!response.ok) {
+      throw new Error(`Object storage artifact copy failed with HTTP ${response.status}.`);
+    }
+
+    return {
+      ...descriptor,
+      metadata: {
+        ...input.metadata,
+        [REVIEW_ARTIFACT_PAYLOAD_STORAGE_METADATA_KEY]: descriptor,
+      },
+    };
+  }
+
   /** Creates a short-lived signed GET URL for an S3-compatible object. */
   public async createSignedGetUrl(
     input: CreateSignedReviewArtifactPayloadUrlInput,
@@ -513,10 +596,13 @@ export class S3CompatibleReviewArtifactPayloadStore implements ReviewArtifactPay
     readonly contentHash: `sha256:${string}`;
     /** Optional content type for requests with a body. */
     readonly contentType?: string;
+    /** Optional additional headers that must be signed with the request. */
+    readonly extraHeaders?: Record<string, string>;
   }): Record<string, string> {
     return signS3Request({
       accessKeyId: this.accessKeyId,
       contentHash: input.contentHash,
+      ...(input.extraHeaders ? { extraHeaders: input.extraHeaders } : {}),
       method: input.method,
       now: this.now(),
       region: this.region,
@@ -684,7 +770,7 @@ function reviewArtifactPayloadDescriptorFromMetadata(
 /** Returns the filesystem path used for a stored review artifact payload. */
 function reviewArtifactPayloadPath(
   rootDir: string,
-  input: StoreJsonReviewArtifactPayloadInput,
+  input: ReviewArtifactPathInput,
   hash: `sha256:${string}`,
 ): string {
   return join(
@@ -697,7 +783,7 @@ function reviewArtifactPayloadPath(
 
 /** Returns the object key used for an S3-compatible review artifact payload. */
 function reviewArtifactObjectKey(
-  input: StoreJsonReviewArtifactPayloadInput,
+  input: ReviewArtifactPathInput,
   hash: `sha256:${string}`,
   keyPrefix?: string,
 ): string {
@@ -709,6 +795,14 @@ function reviewArtifactObjectKey(
   ];
 
   return segments.join("/");
+}
+
+/** Returns the URL-encoded S3 CopyObject source header value for a source object. */
+function s3CopySourceHeader(source: { readonly bucket: string; readonly key: string }): string {
+  const encodedBucket = encodeURIComponent(source.bucket);
+  const encodedKey = source.key.split("/").map(encodeURIComponent).join("/");
+
+  return `/${encodedBucket}/${encodedKey}`;
 }
 
 /** Parses an s3://bucket/key artifact URI. */
@@ -853,11 +947,14 @@ function signS3Request(input: {
   readonly contentHash: `sha256:${string}`;
   /** Optional content type for requests with a body. */
   readonly contentType?: string;
+  /** Optional additional headers that must be signed with the request. */
+  readonly extraHeaders?: Record<string, string>;
 }): Record<string, string> {
   const amzDate = sigV4Timestamp(input.now);
   const dateStamp = amzDate.slice(0, 8);
   const payloadHash = input.contentHash.slice("sha256:".length);
   const headers: Record<string, string> = {
+    ...(input.extraHeaders ?? {}),
     "x-amz-content-sha256": payloadHash,
     "x-amz-date": amzDate,
     ...(input.contentType ? { "content-type": input.contentType } : {}),
