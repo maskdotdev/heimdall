@@ -114,6 +114,8 @@ import {
   ProviderInstallationRepository,
   providerInstallations,
   pullRequestSnapshots,
+  QueueHealthRepository,
+  type QueueHealthSnapshotRecord,
   quotaCounters,
   type RecordSecurityEventInput,
   RepoRuleRepository,
@@ -2005,10 +2007,38 @@ type AdminDashboardOverview = {
   readonly recentReviews: readonly AdminReviewRunSummary[];
   /** Durable review rollup metrics for the current actor scope. */
   readonly reviewMetrics: AdminReviewMetricsSummary;
+  /** Latest queue health samples written by maintenance-capable workers. */
+  readonly queueHealth: readonly AdminQueueHealthSnapshotSummary[];
   /** Recent audit entries when the actor has audit access. */
   readonly recentAuditLogs: readonly AdminAuditLogSummary[];
   /** Product-safe runtime readiness summary for dashboard visibility. */
   readonly runtimeHealth: ApiHealthResponse;
+};
+
+/** Queue health sample shown in admin operator surfaces. */
+type AdminQueueHealthSnapshotSummary = {
+  /** Number of active jobs currently running. */
+  readonly activeCount: number;
+  /** Number of completed jobs retained by the queue backend. */
+  readonly completedCount: number;
+  /** Number of delayed jobs currently scheduled. */
+  readonly delayedCount: number;
+  /** Number of failed jobs retained by the queue backend. */
+  readonly failedCount: number;
+  /** Age of the oldest waiting or delayed job in milliseconds. */
+  readonly oldestWaitingAgeMs: number;
+  /** Logical queue name sampled from the worker runtime. */
+  readonly queueName: string;
+  /** ISO timestamp for the queue backend sample. */
+  readonly sampledAt: string;
+  /** Number of jobs currently waiting. */
+  readonly waitingCount: number;
+};
+
+/** Query used to list queue health samples for operator views. */
+type AdminQueueHealthQuery = {
+  /** Maximum number of logical queue rows to return. */
+  readonly limit?: number | undefined;
 };
 
 /** Durable review metrics returned by dashboard overview APIs. */
@@ -2721,6 +2751,10 @@ export type AdminControlPlaneService = {
   readonly getReviewMetricsSummary: (
     query: AdminReviewRunListQuery,
   ) => Promise<AdminReviewMetricsSummary>;
+  /** Lists latest durable queue health samples for operator views. */
+  readonly listQueueHealthSnapshots: (
+    query: AdminQueueHealthQuery,
+  ) => Promise<readonly AdminQueueHealthSnapshotSummary[]>;
   /** Lists persisted evaluation suites and latest run hints. */
   readonly listEvaluationSuites: (
     query: AdminEvaluationSuiteListQuery,
@@ -6488,20 +6522,28 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       const auditQuery = actorHasPermission(guardResult.actor, "admin.audit.view")
         ? overviewAuditQueryForActor(guardResult.actor, limit)
         : undefined;
-      const [repositories, recentReviews, reviewMetrics, recentAuditLogs, runtimeHealth] =
-        await Promise.all([
-          service.listRepositories(repositoryQuery),
-          service.listReviewRuns(reviewQuery),
-          service.getReviewMetricsSummary(reviewQuery),
-          auditQuery ? service.listAuditLogs(auditQuery) : Promise.resolve([]),
-          readinessCheck().then(createApiHealthResponse),
-        ]);
+      const [
+        repositories,
+        recentReviews,
+        reviewMetrics,
+        queueHealth,
+        recentAuditLogs,
+        runtimeHealth,
+      ] = await Promise.all([
+        service.listRepositories(repositoryQuery),
+        service.listReviewRuns(reviewQuery),
+        service.getReviewMetricsSummary(reviewQuery),
+        service.listQueueHealthSnapshots({ limit }),
+        auditQuery ? service.listAuditLogs(auditQuery) : Promise.resolve([]),
+        readinessCheck().then(createApiHealthResponse),
+      ]);
 
       return {
         data: {
           repositories,
           recentAuditLogs,
           recentReviews,
+          queueHealth,
           reviewMetrics,
           runtimeHealth,
         } satisfies AdminDashboardOverview,
@@ -7781,6 +7823,7 @@ function createAdminControlPlaneService(dependencies: {
     getReviewMetricsSummary: (query) => getReviewMetricsSummary(dependencies.db, query),
     getReviewRun: (reviewRunId) => getReviewRun(dependencies.db, reviewRunId),
     getEntitlementSummary: (query) => getEntitlementSummary(dependencies.db, query),
+    listQueueHealthSnapshots: (query) => listQueueHealthSnapshots(dependencies.db, query),
     listFindingFeedbackEvents: (findingId) => listFindingFeedbackEvents(dependencies.db, findingId),
     listReviewArtifacts: (reviewRunId) => listReviewArtifacts(dependencies.db, reviewRunId),
     listBillingMeterEvents: (query) => listBillingMeterEvents(dependencies.db, query),
@@ -9415,6 +9458,48 @@ async function getReviewMetricsSummary(
     supersededRuns: metrics.supersededRuns,
     totalRuns: metrics.totalRuns,
     validatedFindings: metrics.validatedFindings,
+  };
+}
+
+/** Lists the latest queue health sample for each logical queue. */
+async function listQueueHealthSnapshots(
+  db: HeimdallDatabase,
+  query: AdminQueueHealthQuery = {},
+): Promise<readonly AdminQueueHealthSnapshotSummary[]> {
+  const limit = boundedListLimit(query.limit);
+  const rows = await new QueueHealthRepository(db).listRecentQueueHealthSnapshots({
+    limit: 500,
+  });
+  const seenQueueNames = new Set<string>();
+  const latestRows: QueueHealthSnapshotRecord[] = [];
+
+  for (const row of rows) {
+    if (seenQueueNames.has(row.queueName)) {
+      continue;
+    }
+    seenQueueNames.add(row.queueName);
+    latestRows.push(row);
+    if (latestRows.length >= limit) {
+      break;
+    }
+  }
+
+  return latestRows.map(toAdminQueueHealthSnapshotSummary);
+}
+
+/** Converts a durable queue health row into a product-safe admin summary. */
+function toAdminQueueHealthSnapshotSummary(
+  row: QueueHealthSnapshotRecord,
+): AdminQueueHealthSnapshotSummary {
+  return {
+    activeCount: row.activeCount,
+    completedCount: row.completedCount,
+    delayedCount: row.delayedCount,
+    failedCount: row.failedCount,
+    oldestWaitingAgeMs: row.oldestWaitingAgeMs,
+    queueName: row.queueName,
+    sampledAt: row.sampledAt.toISOString(),
+    waitingCount: row.waitingCount,
   };
 }
 
