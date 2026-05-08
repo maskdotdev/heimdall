@@ -12,6 +12,7 @@ import {
 } from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertSafeRepositoryWorkspaceCleanupPath,
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   type GitCommandRunner,
@@ -288,11 +289,32 @@ describe("repo sync workspace", () => {
   it("removes a retained workspace", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-cleanup-test-"));
     workspaceRoots.push(workspaceRoot);
-    const workspacePath = await mkdtemp(join(workspaceRoot, "workspace-"));
+    const workspacePath = await mkdtemp(join(workspaceRoot, "heimdall-repo-"));
 
-    await cleanupRepositoryWorkspace(workspacePath);
+    await cleanupRepositoryWorkspace(workspacePath, { workspaceRoot });
 
     await expect(access(workspacePath)).rejects.toThrow();
+  });
+
+  it("refuses to remove unmanaged workspace paths", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-cleanup-test-"));
+    workspaceRoots.push(workspaceRoot);
+    const unmanagedPath = await mkdtemp(join(workspaceRoot, "workspace-"));
+    const outsideRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-"));
+    workspaceRoots.push(outsideRoot);
+
+    expect(() => assertSafeRepositoryWorkspaceCleanupPath("heimdall-repo-relative")).toThrow(
+      "relative repository workspace path",
+    );
+    await expect(cleanupRepositoryWorkspace(unmanagedPath, { workspaceRoot })).rejects.toThrow(
+      "unmanaged repository workspace path",
+    );
+    await expect(cleanupRepositoryWorkspace(outsideRoot, { workspaceRoot })).rejects.toThrow(
+      "outside the configured root",
+    );
+
+    await expect(access(unmanagedPath)).resolves.toBeUndefined();
+    await expect(access(outsideRoot)).resolves.toBeUndefined();
   });
 });
 

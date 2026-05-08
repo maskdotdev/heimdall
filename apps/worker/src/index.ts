@@ -137,7 +137,7 @@ import {
   dispatchPendingJobs,
   QUEUE_NAMES,
 } from "@repo/queue";
-import { syncRepositoryWorkspace } from "@repo/repo-sync";
+import { cleanupRepositoryWorkspace, syncRepositoryWorkspace } from "@repo/repo-sync";
 import { type ReviewIndexDependencyMode, runPullRequestReview } from "@repo/review-orchestrator";
 import {
   createDockerContainerSandboxRunner,
@@ -617,7 +617,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           timestamp: new Date().toISOString(),
         });
       } finally {
-        await rm(workspace.workspacePath, { force: true, recursive: true });
+        await cleanupRepositoryWorkspace(workspace.workspacePath, {
+          ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+        });
       }
     },
     [JOB_TYPES.EmbeddingBatch]: async (envelope) => {

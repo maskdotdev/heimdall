@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import {
@@ -15,6 +15,7 @@ import {
 } from "@repo/observability";
 
 const execFileAsync = promisify(execFile);
+const managedWorkspacePrefix = "heimdall-repo-";
 
 /** Git command runner used by repo sync and tests. */
 export type GitCommandRunner = (
@@ -56,6 +57,12 @@ export type SyncRepositoryWorkspaceDependencies = {
   readonly traces?: TelemetrySpanRecorder;
 };
 
+/** Options used when removing a retained repository workspace. */
+export type CleanupRepositoryWorkspaceOptions = {
+  /** Optional root that must contain the workspace path. */
+  readonly workspaceRoot?: string;
+};
+
 /** Result returned after a repository workspace sync finishes. */
 export type SyncRepositoryWorkspaceResult = {
   /** Temporary workspace path used for the checkout. */
@@ -86,7 +93,8 @@ export async function syncRepositoryWorkspace(
   dependencies: SyncRepositoryWorkspaceDependencies,
 ): Promise<SyncRepositoryWorkspaceResult> {
   const telemetry = startRepoSyncTelemetry(input, dependencies);
-  const workspacePath = await mkdtemp(join(input.workspaceRoot ?? tmpdir(), "heimdall-repo-"));
+  const workspaceRoot = resolve(input.workspaceRoot ?? tmpdir());
+  const workspacePath = await mkdtemp(join(workspaceRoot, managedWorkspacePrefix));
   const git = dependencies.gitRunner ?? runGit;
   let cleanedUp = false;
   let askPassPath: string | undefined;
@@ -113,7 +121,7 @@ export async function syncRepositoryWorkspace(
     }
 
     if (!input.keepWorkspace) {
-      await rm(workspacePath, { force: true, recursive: true });
+      await cleanupRepositoryWorkspace(workspacePath, { workspaceRoot });
       cleanedUp = true;
     }
 
@@ -132,7 +140,7 @@ export async function syncRepositoryWorkspace(
       await removeGitAskPassScript(askPassPath);
     }
     if (!cleanedUp) {
-      await rm(workspacePath, { force: true, recursive: true });
+      await cleanupRepositoryWorkspace(workspacePath, { workspaceRoot });
     }
     finishRepoSyncTelemetry(dependencies.metrics, telemetry, {
       cleanedUp: true,
@@ -208,8 +216,44 @@ function finishRepoSyncTelemetry(
 }
 
 /** Removes a retained repository workspace. */
-export async function cleanupRepositoryWorkspace(workspacePath: string): Promise<void> {
+export async function cleanupRepositoryWorkspace(
+  workspacePath: string,
+  options: CleanupRepositoryWorkspaceOptions = {},
+): Promise<void> {
+  assertSafeRepositoryWorkspaceCleanupPath(workspacePath, options);
   await rm(workspacePath, { force: true, recursive: true });
+}
+
+/** Validates that a cleanup target looks like a repo-sync managed workspace. */
+export function assertSafeRepositoryWorkspaceCleanupPath(
+  workspacePath: string,
+  options: CleanupRepositoryWorkspaceOptions = {},
+): void {
+  if (!isAbsolute(workspacePath)) {
+    throw new Error("Refusing to clean up a relative repository workspace path.");
+  }
+
+  const resolvedWorkspacePath = resolve(workspacePath);
+  const workspaceDirectoryName = basename(resolvedWorkspacePath);
+  if (
+    !workspaceDirectoryName.startsWith(managedWorkspacePrefix) ||
+    workspaceDirectoryName.length <= managedWorkspacePrefix.length
+  ) {
+    throw new Error("Refusing to clean up an unmanaged repository workspace path.");
+  }
+
+  if (
+    options.workspaceRoot &&
+    !isPathInsideRoot(resolve(options.workspaceRoot), resolvedWorkspacePath)
+  ) {
+    throw new Error("Refusing to clean up a repository workspace outside the configured root.");
+  }
+}
+
+/** Returns true when a path is contained by a configured root directory. */
+function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
+  const relativePath = relative(rootPath, candidatePath);
+  return relativePath.length > 0 && !relativePath.startsWith("..") && !isAbsolute(relativePath);
 }
 
 /** Creates an HTTPS clone URL containing short-lived credentials for Git. */
