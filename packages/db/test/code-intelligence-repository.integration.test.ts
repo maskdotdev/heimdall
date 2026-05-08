@@ -143,6 +143,20 @@ describe.runIf(integrationDatabaseUrl)("CodeIntelligenceRepository integration",
       query: "handle",
     });
     expect(fullTextChunks.map((row) => row.chunk.chunkId)).toContain("chunk_code_intel_handle");
+
+    await expect(
+      codeIntelligenceRepository.countIndexVersionRecords("idx_code_intel_new"),
+    ).resolves.toEqual({
+      chunks: 3,
+      dependencies: 1,
+      diagnostics: 0,
+      edges: 3,
+      embeddings: 0,
+      files: 4,
+      routes: 1,
+      symbols: 3,
+      testMappings: 1,
+    });
   });
 });
 

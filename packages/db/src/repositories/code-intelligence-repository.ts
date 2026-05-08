@@ -16,9 +16,11 @@ import {
 import { and, asc, desc, eq, gte, inArray, lte, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
+  codeChunkEmbeddings,
   codeChunks,
   codeDependencies,
   codeEdges,
+  codeIndexDiagnostics,
   codeIndexVersions,
   codeRoutes,
   codeTestMappings,
@@ -134,6 +136,28 @@ export type ScoredChunkRecord = {
   readonly chunk: ChunkRecord;
   /** Search rank score. */
   readonly score: number;
+};
+
+/** Actual persisted row counts for one imported index version. */
+export type CodeIntelligenceIndexVersionRecordCounts = {
+  /** Persisted indexed file rows. */
+  readonly files: number;
+  /** Persisted symbol rows. */
+  readonly symbols: number;
+  /** Persisted code edge rows. */
+  readonly edges: number;
+  /** Persisted code chunk rows. */
+  readonly chunks: number;
+  /** Persisted index diagnostic rows. */
+  readonly diagnostics: number;
+  /** Persisted dependency rows. */
+  readonly dependencies: number;
+  /** Persisted route rows. */
+  readonly routes: number;
+  /** Persisted related-test mapping rows. */
+  readonly testMappings: number;
+  /** Persisted code chunk embedding rows. */
+  readonly embeddings: number;
 };
 
 type SymbolRow = typeof symbols.$inferSelect;
@@ -422,6 +446,45 @@ export class CodeIntelligenceRepository {
     }));
   }
 
+  /** Counts persisted index records for admin inspection and import reconciliation. */
+  public async countIndexVersionRecords(
+    indexVersionId: string,
+  ): Promise<CodeIntelligenceIndexVersionRecordCounts> {
+    const [
+      files,
+      symbolsCount,
+      edges,
+      chunks,
+      diagnostics,
+      dependencies,
+      routes,
+      testMappings,
+      embeddings,
+    ] = await Promise.all([
+      this.countIndexedFiles(indexVersionId),
+      this.countSymbols(indexVersionId),
+      this.countCodeEdges(indexVersionId),
+      this.countCodeChunks(indexVersionId),
+      this.countCodeIndexDiagnostics(indexVersionId),
+      this.countCodeDependencies(indexVersionId),
+      this.countCodeRoutes(indexVersionId),
+      this.countCodeTestMappings(indexVersionId),
+      this.countCodeChunkEmbeddings(indexVersionId),
+    ]);
+
+    return {
+      chunks,
+      dependencies,
+      diagnostics,
+      edges,
+      embeddings,
+      files,
+      routes,
+      symbols: symbolsCount,
+      testMappings,
+    };
+  }
+
   /** Lists chunks from specific indexed file IDs. */
   private async listChunksForFileIds(
     indexVersionId: string,
@@ -479,6 +542,96 @@ export class CodeIntelligenceRepository {
     return rows
       .filter((row) => stems.some((stem) => row.filePath.includes(stem)))
       .map((row) => toChunkRecord(row.chunk, row.commitSha));
+  }
+
+  /** Counts imported file rows for one index version. */
+  private async countIndexedFiles(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(indexedFiles)
+      .where(eq(indexedFiles.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported symbol rows for one index version. */
+  private async countSymbols(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(symbols)
+      .where(eq(symbols.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported edge rows for one index version. */
+  private async countCodeEdges(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeEdges)
+      .where(eq(codeEdges.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported chunk rows for one index version. */
+  private async countCodeChunks(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeChunks)
+      .where(eq(codeChunks.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported diagnostic rows for one index version. */
+  private async countCodeIndexDiagnostics(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeIndexDiagnostics)
+      .where(eq(codeIndexDiagnostics.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported dependency rows for one index version. */
+  private async countCodeDependencies(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeDependencies)
+      .where(eq(codeDependencies.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported route rows for one index version. */
+  private async countCodeRoutes(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeRoutes)
+      .where(eq(codeRoutes.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts imported related-test mapping rows for one index version. */
+  private async countCodeTestMappings(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeTestMappings)
+      .where(eq(codeTestMappings.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
+  }
+
+  /** Counts stored embedding rows for one index version. */
+  private async countCodeChunkEmbeddings(indexVersionId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ value: sql<number>`count(*)::int` })
+      .from(codeChunkEmbeddings)
+      .where(eq(codeChunkEmbeddings.indexVersionId, indexVersionId));
+
+    return numericCount(row?.value);
   }
 }
 
@@ -643,6 +796,11 @@ function jsonStringArray(value: unknown): readonly string[] {
 /** Returns unique strings while preserving first-seen order. */
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+/** Converts a count query result into a safe number. */
+function numericCount(value: number | undefined): number {
+  return Number(value ?? 0);
 }
 
 /** Returns whether a value is a non-empty string. */

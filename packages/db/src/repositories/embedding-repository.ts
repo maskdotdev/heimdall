@@ -1,6 +1,12 @@
-import { and, asc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { codeChunkEmbeddings, codeChunks, codeIndexVersions } from "../schema";
+import {
+  codeChunkEmbeddings,
+  codeChunks,
+  codeIndexVersions,
+  embeddingJobItems,
+  embeddingJobs,
+} from "../schema";
 
 /** Database surface required for embedding repository write operations. */
 type EmbeddingRepositoryWriteDatabase = Pick<HeimdallDatabase, "insert" | "select" | "update">;
@@ -62,6 +68,12 @@ export type ReusableEmbeddingVector = {
   /** Stored vector values. */
   readonly embedding: readonly number[];
 };
+
+/** Durable embedding job row returned for admin inspection. */
+export type EmbeddingJobRecord = typeof embeddingJobs.$inferSelect;
+
+/** Durable embedding job item row returned for admin inspection. */
+export type EmbeddingJobItemRecord = typeof embeddingJobItems.$inferSelect;
 
 /** Input for loading reusable embedding vectors. */
 export type ListReusableEmbeddingVectorsInput = {
@@ -213,6 +225,48 @@ export class EmbeddingRepository {
       );
 
     return rows.map((row) => ({ ...row, embedding: [...row.embedding] }));
+  }
+
+  /** Lists embedding jobs attached to one index version, newest first. */
+  public async listEmbeddingJobsForIndexVersion(
+    indexVersionId: string,
+  ): Promise<readonly EmbeddingJobRecord[]> {
+    return this.db
+      .select()
+      .from(embeddingJobs)
+      .where(eq(embeddingJobs.indexVersionId, indexVersionId))
+      .orderBy(desc(embeddingJobs.createdAt), desc(embeddingJobs.embeddingJobId));
+  }
+
+  /** Gets one durable embedding job row by ID. */
+  public async getEmbeddingJobRecord(
+    embeddingJobId: string,
+  ): Promise<EmbeddingJobRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(embeddingJobs)
+      .where(eq(embeddingJobs.embeddingJobId, embeddingJobId))
+      .limit(1);
+
+    return row;
+  }
+
+  /** Lists a bounded sample of durable embedding job item rows for one job. */
+  public async listEmbeddingJobItemsForJob(
+    embeddingJobId: string,
+    limit = 50,
+  ): Promise<readonly EmbeddingJobItemRecord[]> {
+    const boundedLimit = boundedDebugResultLimit(limit);
+    if (boundedLimit === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(embeddingJobItems)
+      .where(eq(embeddingJobItems.embeddingJobId, embeddingJobId))
+      .orderBy(asc(embeddingJobItems.createdAt), asc(embeddingJobItems.embeddingJobItemId))
+      .limit(boundedLimit);
   }
 
   /** Stores chunk embeddings idempotently and updates chunk/index progress rows. */
@@ -436,6 +490,15 @@ function boundedResultLimit(limit: number): number {
   }
 
   return Math.max(0, Math.min(limit, 100));
+}
+
+/** Clamps debug listing limits to a bounded database query size. */
+function boundedDebugResultLimit(limit: number): number {
+  if (!Number.isInteger(limit)) {
+    throw new Error("Debug listing limit must be an integer.");
+  }
+
+  return Math.max(0, Math.min(limit, 200));
 }
 
 /** Returns a de-duplicated list of strings while preserving first-seen order. */

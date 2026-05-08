@@ -105,6 +105,63 @@ describe.runIf(integrationDatabaseUrl)("IndexVersionRepository integration", () 
       indexVersionId: "idx_repository_importing_upsert",
       repoId: "repo_index_version_test",
     });
+    await sql`
+      INSERT INTO index_import_batches (
+        index_import_batch_id,
+        repo_id,
+        commit_sha,
+        index_key,
+        index_version_id,
+        artifact_uri,
+        artifact_hash,
+        status,
+        phase,
+        record_count,
+        file_count,
+        symbol_count,
+        edge_count,
+        chunk_count,
+        diagnostic_count,
+        dependency_count,
+        route_count,
+        test_mapping_count,
+        embedding_job_count,
+        finished_at
+      )
+      VALUES (
+        'iib_repository_importing_upsert',
+        'repo_index_version_test',
+        'abcdef123456',
+        'tree-sitter:importing:chunks-v1',
+        'idx_repository_importing_upsert',
+        'smoke://index-version/importing-upsert',
+        ${`sha256:${"d".repeat(64)}`},
+        'complete',
+        'complete',
+        36,
+        3,
+        6,
+        7,
+        8,
+        2,
+        4,
+        5,
+        1,
+        1,
+        '2026-05-08T00:05:00.000Z'::timestamptz
+      )
+    `;
+    await expect(
+      indexVersionRepository.listIndexImportBatchesForIndexVersion(
+        "idx_repository_importing_upsert",
+      ),
+    ).resolves.toMatchObject([
+      {
+        chunkCount: 8,
+        indexImportBatchId: "iib_repository_importing_upsert",
+        status: "complete",
+      },
+    ]);
     await expect(
       indexVersionRepository.findIndexVersionForImport({
         artifactHash: `sha256:${"d".repeat(64)}`,

@@ -1,7 +1,7 @@
 import type { CodeIndexVersion, ContractError } from "@repo/contracts";
 import { and, desc, eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { codeIndexVersions } from "../schema";
+import { codeIndexVersions, indexImportBatches } from "../schema";
 import { toCodeIndexVersion } from "./row-mappers";
 
 type CodeIndexVersionRow = typeof codeIndexVersions.$inferSelect;
@@ -80,6 +80,9 @@ export type IndexVersionRecord = {
   /** Creation timestamp. */
   readonly createdAt: Date;
 };
+
+/** Durable index import batch row returned for admin inspection. */
+export type IndexImportBatchRecord = typeof indexImportBatches.$inferSelect;
 
 /** Natural import key for one deterministic index artifact import. */
 export type IndexVersionImportLookupInput = {
@@ -314,6 +317,17 @@ export class IndexVersionRepository {
       .limit(1);
 
     return row?.status;
+  }
+
+  /** Lists import batches attached to one index version, newest first. */
+  public async listIndexImportBatchesForIndexVersion(
+    indexVersionId: string,
+  ): Promise<readonly IndexImportBatchRecord[]> {
+    return this.db
+      .select()
+      .from(indexImportBatches)
+      .where(eq(indexImportBatches.indexVersionId, indexVersionId))
+      .orderBy(desc(indexImportBatches.updatedAt), desc(indexImportBatches.indexImportBatchId));
   }
 
   /** Finds an existing index version for an artifact import idempotency key. */

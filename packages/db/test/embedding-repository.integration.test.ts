@@ -113,6 +113,34 @@ describe.runIf(integrationDatabaseUrl)("EmbeddingRepository integration", () => 
     ]);
     expect(searchResults[0]?.score).toBeGreaterThan(searchResults[1]?.score ?? 0);
 
+    await expect(
+      embeddingRepository.listEmbeddingJobsForIndexVersion("idx_embedding_repository"),
+    ).resolves.toMatchObject([
+      {
+        chunkCountPlanned: 2,
+        embeddingJobId: "embjob_embedding_repository",
+        status: "failed",
+      },
+    ]);
+    await expect(
+      embeddingRepository.getEmbeddingJobRecord("embjob_embedding_repository"),
+    ).resolves.toMatchObject({
+      embeddingJobId: "embjob_embedding_repository",
+      provider: "hash",
+      status: "failed",
+    });
+    await expect(
+      embeddingRepository.listEmbeddingJobItemsForJob("embjob_embedding_repository", 1),
+    ).resolves.toMatchObject([
+      {
+        chunkId: "chunk_embedding_alpha",
+        embeddingJobItemId: "embitem_embedding_alpha",
+      },
+    ]);
+    await expect(
+      embeddingRepository.listEmbeddingJobItemsForJob("embjob_embedding_repository", 0),
+    ).resolves.toEqual([]);
+
     const [progress] = await sql`
       SELECT
         (SELECT embedded_chunk_count FROM code_index_versions WHERE index_version_id = 'idx_embedding_repository')::int
@@ -281,6 +309,89 @@ async function seedEmbeddingRows(sql: postgres.Sql): Promise<void> {
           text: "export function beta(): string { return 'beta'; }",
           tokenEstimate: 8,
         })}::jsonb
+      )
+  `;
+  await sql`
+    INSERT INTO embedding_jobs (
+      embedding_job_id,
+      org_id,
+      repo_id,
+      index_version_id,
+      commit_sha,
+      status,
+      reason,
+      embedding_profile_version,
+      provider,
+      model,
+      dimensions,
+      chunk_count_planned,
+      chunk_count_embedded,
+      chunk_count_failed,
+      attempts,
+      last_error_code,
+      last_error_message,
+      started_at,
+      finished_at
+    )
+    VALUES (
+      'embjob_embedding_repository',
+      'org_embedding_repository_test',
+      'repo_embedding_repository_test',
+      'idx_embedding_repository',
+      'abcdef123456',
+      'failed',
+      'index_import',
+      'code_embedding_profile.v1',
+      'hash',
+      'text-embedding-3-small',
+      1536,
+      2,
+      1,
+      1,
+      1,
+      'embedding.provider_error',
+      'Provider rejected one chunk.',
+      '2026-05-08T00:02:00.000Z'::timestamptz,
+      '2026-05-08T00:03:00.000Z'::timestamptz
+    )
+  `;
+  await sql`
+    INSERT INTO embedding_job_items (
+      embedding_job_item_id,
+      embedding_job_id,
+      chunk_id,
+      status,
+      cache_key,
+      attempts,
+      last_error_code,
+      last_error_message,
+      started_at,
+      finished_at
+    )
+    VALUES
+      (
+        'embitem_embedding_alpha',
+        'embjob_embedding_repository',
+        'chunk_embedding_alpha',
+        'embedded',
+        ${cacheHash("alpha")},
+        1,
+        null,
+        null,
+        '2026-05-08T00:02:00.000Z'::timestamptz,
+        '2026-05-08T00:02:05.000Z'::timestamptz
+      ),
+      (
+        'embitem_embedding_beta',
+        'embjob_embedding_repository',
+        'chunk_embedding_beta',
+        'failed',
+        ${cacheHash("beta")},
+        1,
+        'embedding.provider_error',
+        'Provider rejected this chunk.',
+        '2026-05-08T00:02:00.000Z'::timestamptz,
+        '2026-05-08T00:03:00.000Z'::timestamptz
       )
   `;
 }
