@@ -87,6 +87,28 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
       auditLogId: "audit_security_audit",
       resourceType: "review_artifact",
     });
+    await securityAuditRepository.recordAuditLog({
+      action: "repo.settings.updated",
+      actorType: "admin",
+      actorUserId: "admin_security_audit",
+      auditLogId: "audit_security_audit_settings",
+      metadata: { requestId: "request_security_audit_settings" },
+      occurredAt: new Date("2026-05-08T00:05:00.000Z"),
+      resourceId: "repo_security_audit",
+      resourceType: "repository",
+    });
+    await securityAuditRepository.recordSecurityEvent({
+      actorId: "admin_security_audit",
+      createdAt: new Date("2026-05-08T00:06:00.000Z"),
+      metadata: { marker: "security-list-target" },
+      resourceId: "repo_security_audit",
+      resourceType: "repository",
+      securityEventId: "sec_security_audit_settings",
+      severity: "high",
+      source: "api",
+      status: "triaged",
+      type: "repo_settings_changed",
+    });
 
     const [counts] = await sql`
       SELECT
@@ -96,8 +118,8 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
     `;
     expect(counts).toEqual({
       artifact_access_events: 1,
-      audit_logs: 1,
-      security_events: 1,
+      audit_logs: 2,
+      security_events: 2,
     });
 
     const [securityEvent] = await sql`
@@ -111,6 +133,34 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
       severity: "medium",
       type: "review_artifact_payload_read",
     });
+    await expect(securityAuditRepository.listAuditLogs({ limit: 10 })).resolves.toMatchObject([
+      { auditLogId: "audit_security_audit_settings" },
+      { auditLogId: "audit_security_audit" },
+    ]);
+    await expect(
+      securityAuditRepository.listAuditLogs({
+        action: "review_artifact.payload_read",
+        limit: 10,
+        search: "request_security_audit",
+      }),
+    ).resolves.toMatchObject([{ auditLogId: "audit_security_audit" }]);
+    await expect(securityAuditRepository.listSecurityEvents({ limit: 10 })).resolves.toMatchObject([
+      { securityEventId: "sec_security_audit_settings" },
+      { securityEventId: "sec_security_audit" },
+    ]);
+    await expect(
+      securityAuditRepository.listSecurityEvents({
+        limit: 10,
+        search: "security-list-target",
+        severity: "high",
+      }),
+    ).resolves.toMatchObject([{ securityEventId: "sec_security_audit_settings" }]);
+    await expect(securityAuditRepository.listAuditLogs({ limit: 0 })).rejects.toThrow(
+      /limit must be an integer/u,
+    );
+    await expect(securityAuditRepository.listSecurityEvents({ limit: 101 })).rejects.toThrow(
+      /limit must be an integer/u,
+    );
   });
 });
 

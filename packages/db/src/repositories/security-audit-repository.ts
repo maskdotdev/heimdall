@@ -1,3 +1,4 @@
+import { and, desc, eq, ilike, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { artifactAccessEvents, auditLogs, securityEvents } from "../schema";
 
@@ -103,7 +104,81 @@ export type AuditLogRecord = {
   readonly metadata: unknown;
 };
 
-/** Query helper for durable security and audit event writes. */
+/** Input used to list audit logs with scoped filters. */
+export type ListAuditLogsInput = {
+  /** Organization filter. */
+  readonly orgId?: string | undefined;
+  /** Resource type filter. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID filter. */
+  readonly resourceId?: string | undefined;
+  /** Actor user ID filter. */
+  readonly actorUserId?: string | undefined;
+  /** Action filter. */
+  readonly action?: string | undefined;
+  /** Free-text search over action, resource, actor, and metadata. */
+  readonly search?: string | undefined;
+  /** Maximum number of rows to return. */
+  readonly limit: number;
+};
+
+/** Security event row returned by admin inspection queries. */
+export type SecurityEventRecord = {
+  /** Stable security event ID. */
+  readonly securityEventId: string;
+  /** Organization scope when present. */
+  readonly orgId: string | null;
+  /** Repository scope when present. */
+  readonly repoId: string | null;
+  /** Security event type. */
+  readonly type: string;
+  /** Event severity. */
+  readonly severity: string;
+  /** Event source subsystem. */
+  readonly source: string;
+  /** Triage status. */
+  readonly status: string;
+  /** Actor ID when known. */
+  readonly actorId: string | null;
+  /** Resource type when known. */
+  readonly resourceType: string | null;
+  /** Resource ID when known. */
+  readonly resourceId: string | null;
+  /** Product-safe event metadata. */
+  readonly metadata: unknown;
+  /** Event creation timestamp. */
+  readonly createdAt: Date;
+  /** Event update timestamp. */
+  readonly updatedAt: Date;
+};
+
+/** Input used to list security events with scoped filters. */
+export type ListSecurityEventsInput = {
+  /** Organization filter. */
+  readonly orgId?: string | undefined;
+  /** Repository filter. */
+  readonly repoId?: string | undefined;
+  /** Security event type filter. */
+  readonly type?: string | undefined;
+  /** Severity filter. */
+  readonly severity?: string | undefined;
+  /** Source subsystem filter. */
+  readonly source?: string | undefined;
+  /** Triage status filter. */
+  readonly status?: string | undefined;
+  /** Actor ID filter. */
+  readonly actorId?: string | undefined;
+  /** Resource type filter. */
+  readonly resourceType?: string | undefined;
+  /** Resource ID filter. */
+  readonly resourceId?: string | undefined;
+  /** Free-text search over type, actor, resource, and metadata. */
+  readonly search?: string | undefined;
+  /** Maximum number of rows to return. */
+  readonly limit: number;
+};
+
+/** Query helper for durable security and audit events. */
 export class SecurityAuditRepository {
   /** Creates a security audit query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
@@ -173,4 +248,126 @@ export class SecurityAuditRepository {
 
     return row;
   }
+
+  /** Lists audit logs with scoped filters and deterministic ordering. */
+  public async listAuditLogs(input: ListAuditLogsInput): Promise<readonly AuditLogRecord[]> {
+    const conditions = auditLogFilters(input);
+    return this.db
+      .select()
+      .from(auditLogs)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(auditLogs.occurredAt), desc(auditLogs.auditLogId))
+      .limit(securityAuditListLimit(input.limit));
+  }
+
+  /** Lists security events with scoped filters and deterministic ordering. */
+  public async listSecurityEvents(
+    input: ListSecurityEventsInput,
+  ): Promise<readonly SecurityEventRecord[]> {
+    const conditions = securityEventFilters(input);
+    return this.db
+      .select()
+      .from(securityEvents)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(securityEvents.createdAt), desc(securityEvents.securityEventId))
+      .limit(securityAuditListLimit(input.limit));
+  }
+}
+
+/** Builds audit log filters for admin inspection. */
+function auditLogFilters(input: ListAuditLogsInput): SQL[] {
+  const conditions: SQL[] = [];
+  if (input.orgId) {
+    conditions.push(eq(auditLogs.orgId, input.orgId));
+  }
+  if (input.resourceType) {
+    conditions.push(eq(auditLogs.resourceType, input.resourceType));
+  }
+  if (input.resourceId) {
+    conditions.push(eq(auditLogs.resourceId, input.resourceId));
+  }
+  if (input.actorUserId) {
+    conditions.push(eq(auditLogs.actorUserId, input.actorUserId));
+  }
+  if (input.action) {
+    conditions.push(eq(auditLogs.action, input.action));
+  }
+
+  const search = input.search?.trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const searchCondition = or(
+      ilike(auditLogs.action, pattern),
+      ilike(auditLogs.resourceType, pattern),
+      ilike(auditLogs.resourceId, pattern),
+      ilike(auditLogs.actorUserId, pattern),
+      ilike(sql<string>`${auditLogs.metadata}::text`, pattern),
+    );
+    if (searchCondition) {
+      conditions.push(searchCondition);
+    }
+  }
+
+  return conditions;
+}
+
+/** Builds security event filters for admin inspection. */
+function securityEventFilters(input: ListSecurityEventsInput): SQL[] {
+  const conditions: SQL[] = [];
+  if (input.orgId) {
+    conditions.push(eq(securityEvents.orgId, input.orgId));
+  }
+  if (input.repoId) {
+    conditions.push(eq(securityEvents.repoId, input.repoId));
+  }
+  if (input.type) {
+    conditions.push(eq(securityEvents.type, input.type));
+  }
+  if (input.severity) {
+    conditions.push(eq(securityEvents.severity, input.severity));
+  }
+  if (input.source) {
+    conditions.push(eq(securityEvents.source, input.source));
+  }
+  if (input.status) {
+    conditions.push(eq(securityEvents.status, input.status));
+  }
+  if (input.actorId) {
+    conditions.push(eq(securityEvents.actorId, input.actorId));
+  }
+  if (input.resourceType) {
+    conditions.push(eq(securityEvents.resourceType, input.resourceType));
+  }
+  if (input.resourceId) {
+    conditions.push(eq(securityEvents.resourceId, input.resourceId));
+  }
+
+  const search = input.search?.trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const searchCondition = or(
+      ilike(securityEvents.securityEventId, pattern),
+      ilike(securityEvents.type, pattern),
+      ilike(securityEvents.severity, pattern),
+      ilike(securityEvents.source, pattern),
+      ilike(securityEvents.status, pattern),
+      ilike(securityEvents.actorId, pattern),
+      ilike(securityEvents.resourceType, pattern),
+      ilike(securityEvents.resourceId, pattern),
+      ilike(sql<string>`${securityEvents.metadata}::text`, pattern),
+    );
+    if (searchCondition) {
+      conditions.push(searchCondition);
+    }
+  }
+
+  return conditions;
+}
+
+/** Validates a bounded security/audit inspection list limit. */
+function securityAuditListLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new RangeError("Security audit list limit must be an integer from 1 through 100.");
+  }
+  return limit;
 }

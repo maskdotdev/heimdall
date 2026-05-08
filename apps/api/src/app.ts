@@ -78,7 +78,6 @@ import {
   ValidateRepoLocalConfigFileRequestSchema,
 } from "@repo/contracts";
 import {
-  auditLogs,
   type BackgroundJobRecord,
   BackgroundJobRepository,
   BillingRepository,
@@ -124,7 +123,6 @@ import {
   reviewRunMetrics,
   reviewRuns,
   SecurityAuditRepository,
-  securityEvents,
   subscriptions,
   usageEvents,
   WebhookRepository,
@@ -11613,43 +11611,7 @@ async function listAuditLogs(
   db: HeimdallDatabase,
   query: AdminAuditLogQuery,
 ): Promise<readonly AdminAuditLogSummary[]> {
-  const conditions: SQL[] = [];
-  if (query.orgId) {
-    conditions.push(eq(auditLogs.orgId, query.orgId));
-  }
-  if (query.resourceType) {
-    conditions.push(eq(auditLogs.resourceType, query.resourceType));
-  }
-  if (query.resourceId) {
-    conditions.push(eq(auditLogs.resourceId, query.resourceId));
-  }
-  if (query.actorUserId) {
-    conditions.push(eq(auditLogs.actorUserId, query.actorUserId));
-  }
-  if (query.action) {
-    conditions.push(eq(auditLogs.action, query.action));
-  }
-  if (query.search) {
-    const pattern = `%${query.search}%`;
-    const searchCondition = or(
-      ilike(auditLogs.action, pattern),
-      ilike(auditLogs.resourceType, pattern),
-      ilike(auditLogs.resourceId, pattern),
-      ilike(auditLogs.actorUserId, pattern),
-      ilike(sql<string>`${auditLogs.metadata}::text`, pattern),
-    );
-    if (searchCondition) {
-      conditions.push(searchCondition);
-    }
-  }
-
-  const rows = await db
-    .select()
-    .from(auditLogs)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(auditLogs.occurredAt))
-    .limit(query.limit);
-
+  const rows = await new SecurityAuditRepository(db).listAuditLogs(query);
   return rows.map(toAuditLogSummary);
 }
 
@@ -11658,59 +11620,7 @@ async function listSecurityEvents(
   db: HeimdallDatabase,
   query: AdminSecurityEventQuery,
 ): Promise<readonly AdminSecurityEventSummary[]> {
-  const conditions: SQL[] = [];
-  if (query.orgId) {
-    conditions.push(eq(securityEvents.orgId, query.orgId));
-  }
-  if (query.repoId) {
-    conditions.push(eq(securityEvents.repoId, query.repoId));
-  }
-  if (query.type) {
-    conditions.push(eq(securityEvents.type, query.type));
-  }
-  if (query.severity) {
-    conditions.push(eq(securityEvents.severity, query.severity));
-  }
-  if (query.source) {
-    conditions.push(eq(securityEvents.source, query.source));
-  }
-  if (query.status) {
-    conditions.push(eq(securityEvents.status, query.status));
-  }
-  if (query.actorId) {
-    conditions.push(eq(securityEvents.actorId, query.actorId));
-  }
-  if (query.resourceType) {
-    conditions.push(eq(securityEvents.resourceType, query.resourceType));
-  }
-  if (query.resourceId) {
-    conditions.push(eq(securityEvents.resourceId, query.resourceId));
-  }
-  if (query.search) {
-    const pattern = `%${query.search}%`;
-    const searchCondition = or(
-      ilike(securityEvents.securityEventId, pattern),
-      ilike(securityEvents.type, pattern),
-      ilike(securityEvents.severity, pattern),
-      ilike(securityEvents.source, pattern),
-      ilike(securityEvents.status, pattern),
-      ilike(securityEvents.actorId, pattern),
-      ilike(securityEvents.resourceType, pattern),
-      ilike(securityEvents.resourceId, pattern),
-      ilike(sql<string>`${securityEvents.metadata}::text`, pattern),
-    );
-    if (searchCondition) {
-      conditions.push(searchCondition);
-    }
-  }
-
-  const rows = await db
-    .select()
-    .from(securityEvents)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(securityEvents.createdAt), desc(securityEvents.securityEventId))
-    .limit(query.limit);
-
+  const rows = await new SecurityAuditRepository(db).listSecurityEvents(query);
   return rows.map(toSecurityEventSummary);
 }
 
