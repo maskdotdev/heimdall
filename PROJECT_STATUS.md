@@ -108,12 +108,14 @@ tracked milestone.
   index imports, and admin tooling now use this repository boundary for ready-index polling,
   index-import lifecycle reads/writes, and index-version inspection reads.
 - Latest DB memory milestone: `MemoryFactRepository` now owns active repository and organization
-  memory fact reads for review validation, including status, expiration, scope, order, and limit
-  handling. `MemoryCandidateRepository` now owns repository and organization memory candidate
-  inspection reads plus single-row candidate lookups. Review orchestration now uses the memory fact
-  repository boundary instead of importing the raw `memory_facts` table for validation suppression
-  inputs, while the API and admin tooling use repository boundaries for repository-scoped memory
-  fact and candidate inspection reads plus API single-row memory lookups.
+  memory fact reads for review validation, repository-scoped inspection reads, single-row lookups,
+  conflict-safe fact creation, fact updates, and fact disabling, including status, expiration,
+  scope, order, and limit handling. `MemoryCandidateRepository` now owns repository and
+  organization memory candidate inspection reads plus single-row candidate lookups. Review
+  orchestration now uses the memory fact repository boundary instead of importing the raw
+  `memory_facts` table for validation suppression inputs, while the API and admin tooling use
+  repository boundaries for repository-scoped memory fact and candidate inspection reads, API
+  single-row memory lookups, and API memory fact mutation paths.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,

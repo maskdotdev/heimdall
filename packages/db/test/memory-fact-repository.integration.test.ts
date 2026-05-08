@@ -115,6 +115,104 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
     expect(filteredFacts.map((fact) => fact.memoryFactId)).toEqual(["mem_memory_fact_expired"]);
   });
 
+  it("creates, reuses, updates, and disables memory facts", async () => {
+    const memoryFactId = "mem_memory_fact_created";
+    const expiresAt = new Date("2026-06-08T00:00:00.000Z");
+    const created = await memoryFactRepository.createMemoryFactIfAbsent({
+      body: "Created repository fact.",
+      confidence: 0.8,
+      expiresAt,
+      factType: "team_preference",
+      memoryFactId,
+      metadata: { source: "manual" },
+      orgId: "org_memory_fact_other",
+      repoId: "repo_memory_fact_other",
+      status: "active",
+    });
+
+    expect(created).toMatchObject({
+      body: "Created repository fact.",
+      confidence: 0.8,
+      expiresAt,
+      factType: "team_preference",
+      memoryFactId,
+      metadata: { source: "manual" },
+      orgId: "org_memory_fact_other",
+      repoId: "repo_memory_fact_other",
+      status: "active",
+    });
+
+    const replayed = await memoryFactRepository.createMemoryFactIfAbsent({
+      body: "Ignored conflicting fact.",
+      confidence: 0.1,
+      expiresAt: null,
+      factType: "suppression",
+      memoryFactId,
+      metadata: { source: "ignored" },
+      orgId: "org_memory_fact_other",
+      repoId: "repo_memory_fact_other",
+      status: "disabled",
+    });
+    expect(replayed).toMatchObject({
+      body: "Created repository fact.",
+      confidence: 0.8,
+      metadata: { source: "manual" },
+      status: "active",
+    });
+
+    const updatedAt = new Date("2026-05-08T12:00:00.000Z");
+    const updated = await memoryFactRepository.updateMemoryFact({
+      body: "Updated repository fact.",
+      confidence: 0.73,
+      expiresAt: null,
+      factType: "repo_fact",
+      memoryFactId,
+      metadata: { source: "manual", updated: true },
+      status: "active",
+      updatedAt,
+    });
+    expect(updated).toMatchObject({
+      body: "Updated repository fact.",
+      confidence: 0.73,
+      expiresAt: null,
+      factType: "repo_fact",
+      metadata: { source: "manual", updated: true },
+      status: "active",
+      updatedAt,
+    });
+
+    await expect(
+      memoryFactRepository.updateMemoryFact({
+        body: "Missing repository fact.",
+        confidence: 0.5,
+        expiresAt: null,
+        factType: "repo_fact",
+        memoryFactId: "mem_memory_fact_missing",
+        metadata: { source: "manual" },
+        status: "active",
+      }),
+    ).resolves.toBeUndefined();
+
+    const disabledAt = new Date("2026-05-08T13:00:00.000Z");
+    const disabled = await memoryFactRepository.disableMemoryFact({
+      memoryFactId,
+      metadata: { disabled: true, source: "manual" },
+      updatedAt: disabledAt,
+    });
+    expect(disabled).toMatchObject({
+      metadata: { disabled: true, source: "manual" },
+      status: "disabled",
+      updatedAt: disabledAt,
+    });
+
+    await expect(
+      memoryFactRepository.disableMemoryFact({
+        memoryFactId: "mem_memory_fact_missing",
+        metadata: { source: "manual" },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("lists repository and organization memory candidates for inspection", async () => {
     await expect(
       memoryCandidateRepository.getMemoryCandidate("memcand_memory_fact_repo_recent"),

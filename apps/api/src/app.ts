@@ -10644,22 +10644,17 @@ async function createRepositoryMemoryFact(
       source: request.source,
       subject: request.subject ?? defaultMemorySubject(request.text),
     });
-    const [inserted] = await transactionDb
-      .insert(memoryFacts)
-      .values({
-        body: request.text,
-        confidence: request.confidence,
-        expiresAt: request.expiresAt ? new Date(request.expiresAt) : null,
-        factType: request.kind,
-        memoryFactId,
-        metadata,
-        orgId: settings.repository.orgId,
-        repoId,
-        status: request.enabled ? "active" : "disabled",
-      })
-      .onConflictDoNothing()
-      .returning();
-    const row = inserted ?? (await getMemoryFactRow(transactionDb, memoryFactId));
+    const row = await new MemoryFactRepository(transactionDb).createMemoryFactIfAbsent({
+      body: request.text,
+      confidence: request.confidence,
+      expiresAt: request.expiresAt ? new Date(request.expiresAt) : null,
+      factType: request.kind,
+      memoryFactId,
+      metadata,
+      orgId: settings.repository.orgId,
+      repoId,
+      status: request.enabled ? "active" : "disabled",
+    });
     const summary = toAdminMemoryFactSummary(row);
     await insertAuditLog(transactionDb, {
       actor: request.actor,
@@ -10800,24 +10795,21 @@ async function updateMemoryFact(
         stringField(currentMetadata, "subject") ??
         defaultMemorySubject(request.text ?? current.body),
     });
-    const [updated] = await transactionDb
-      .update(memoryFacts)
-      .set({
-        body: request.text ?? current.body,
-        confidence: request.confidence ?? current.confidence,
-        expiresAt:
-          request.expiresAt === undefined
-            ? current.expiresAt
-            : request.expiresAt
-              ? new Date(request.expiresAt)
-              : null,
-        factType: request.kind ?? current.factType,
-        metadata,
-        status: nextStatus,
-        updatedAt: new Date(),
-      })
-      .where(eq(memoryFacts.memoryFactId, memoryFactId))
-      .returning();
+    const updated = await new MemoryFactRepository(transactionDb).updateMemoryFact({
+      body: request.text ?? current.body,
+      confidence: request.confidence ?? current.confidence,
+      expiresAt:
+        request.expiresAt === undefined
+          ? current.expiresAt
+          : request.expiresAt
+            ? new Date(request.expiresAt)
+            : null,
+      factType: request.kind ?? current.factType,
+      memoryFactId,
+      metadata,
+      status: nextStatus,
+      updatedAt: new Date(),
+    });
     const summary = toAdminMemoryFactSummary(requireReturnedRow(updated));
     await insertAuditLog(transactionDb, {
       actor: request.actor,
@@ -10858,15 +10850,11 @@ async function deleteMemoryFact(
       deletedByUserId: request.actor.actorUserId,
       deletedRequestId: request.requestId,
     };
-    const [updated] = await transactionDb
-      .update(memoryFacts)
-      .set({
-        metadata,
-        status: "disabled",
-        updatedAt: new Date(),
-      })
-      .where(eq(memoryFacts.memoryFactId, memoryFactId))
-      .returning();
+    const updated = await new MemoryFactRepository(transactionDb).disableMemoryFact({
+      memoryFactId,
+      metadata,
+      updatedAt: new Date(),
+    });
     const summary = toAdminMemoryFactSummary(requireReturnedRow(updated));
     await insertAuditLog(transactionDb, {
       actor: request.actor,
@@ -11001,30 +10989,26 @@ async function createOrGetMemoryFactFromCandidate(
     candidate.approvedMemoryFactId ??
     stablePrefixedId("mem", ["memory_candidate", candidate.memoryCandidateId]);
   const factType = memoryFactKindForCandidate(candidate.candidateKind);
-  const [inserted] = await db
-    .insert(memoryFacts)
-    .values({
-      body: candidate.proposedContent,
-      confidence: normalizedConfidence(candidate.confidence),
-      expiresAt: candidate.expiresAt,
-      factType,
-      memoryFactId,
-      metadata: memoryFactMetadata({
-        actorUserId: request.actor.actorUserId,
-        idempotencyKey: request.idempotencyKey,
-        inputMetadata: memoryFactMetadataFromCandidate(candidate, request),
-        requestId: request.requestId,
-        source: "feedback",
-        subject: defaultMemorySubject(candidate.proposedContent),
-      }),
-      orgId: candidate.orgId,
-      repoId: candidate.repoId,
-      status: "active",
-    })
-    .onConflictDoNothing()
-    .returning();
+  const row = await new MemoryFactRepository(db).createMemoryFactIfAbsent({
+    body: candidate.proposedContent,
+    confidence: normalizedConfidence(candidate.confidence),
+    expiresAt: candidate.expiresAt,
+    factType,
+    memoryFactId,
+    metadata: memoryFactMetadata({
+      actorUserId: request.actor.actorUserId,
+      idempotencyKey: request.idempotencyKey,
+      inputMetadata: memoryFactMetadataFromCandidate(candidate, request),
+      requestId: request.requestId,
+      source: "feedback",
+      subject: defaultMemorySubject(candidate.proposedContent),
+    }),
+    orgId: candidate.orgId,
+    repoId: candidate.repoId,
+    status: "active",
+  });
 
-  return toAdminMemoryFactSummary(inserted ?? (await getMemoryFactRow(db, memoryFactId)));
+  return toAdminMemoryFactSummary(row);
 }
 
 /** Marks one memory candidate approved after its durable memory fact exists. */

@@ -58,6 +58,58 @@ export type ListRepositoryMemoryFactsInput = {
   readonly limit?: number | undefined;
 };
 
+/** Input used to insert a durable memory fact when the ID is not already present. */
+export type CreateMemoryFactInput = {
+  /** Stable memory fact ID. */
+  readonly memoryFactId: string;
+  /** Organization that owns the memory fact. */
+  readonly orgId: string;
+  /** Optional repository scope for repository-specific facts. */
+  readonly repoId: string | null;
+  /** Durable memory fact kind stored by the memory system. */
+  readonly factType: string;
+  /** Human-readable memory fact content. */
+  readonly body: string;
+  /** Durable memory fact lifecycle status. */
+  readonly status: string;
+  /** Confidence score assigned to the fact. */
+  readonly confidence: number;
+  /** Optional expiration timestamp for temporary facts. */
+  readonly expiresAt: Date | null;
+  /** Product metadata used by callers to derive memory scope and source details. */
+  readonly metadata: unknown;
+};
+
+/** Input used to replace mutable fields for one durable memory fact. */
+export type UpdateMemoryFactInput = {
+  /** Stable memory fact ID. */
+  readonly memoryFactId: string;
+  /** Durable memory fact kind stored by the memory system. */
+  readonly factType: string;
+  /** Human-readable memory fact content. */
+  readonly body: string;
+  /** Durable memory fact lifecycle status. */
+  readonly status: string;
+  /** Confidence score assigned to the fact. */
+  readonly confidence: number;
+  /** Optional expiration timestamp for temporary facts. */
+  readonly expiresAt: Date | null;
+  /** Product metadata used by callers to derive memory scope and source details. */
+  readonly metadata: unknown;
+  /** Timestamp to store as the last update time. */
+  readonly updatedAt?: Date | undefined;
+};
+
+/** Input used to disable one durable memory fact. */
+export type DisableMemoryFactInput = {
+  /** Stable memory fact ID. */
+  readonly memoryFactId: string;
+  /** Product metadata to store with the disabled fact. */
+  readonly metadata: unknown;
+  /** Timestamp to store as the last update time. */
+  readonly updatedAt?: Date | undefined;
+};
+
 /** Query helper for durable memory facts. */
 export class MemoryFactRepository {
   /** Creates a memory fact query helper. */
@@ -70,6 +122,74 @@ export class MemoryFactRepository {
       .from(memoryFacts)
       .where(eq(memoryFacts.memoryFactId, memoryFactId))
       .limit(1);
+
+    return row ? toMemoryFactRecord(row) : undefined;
+  }
+
+  /** Creates one durable memory fact or returns the existing row for the same ID. */
+  public async createMemoryFactIfAbsent(input: CreateMemoryFactInput): Promise<MemoryFactRecord> {
+    const [inserted] = await this.db
+      .insert(memoryFacts)
+      .values({
+        body: input.body,
+        confidence: input.confidence,
+        expiresAt: input.expiresAt,
+        factType: input.factType,
+        memoryFactId: input.memoryFactId,
+        metadata: input.metadata,
+        orgId: input.orgId,
+        repoId: input.repoId,
+        status: input.status,
+      })
+      .onConflictDoNothing()
+      .returning();
+
+    if (inserted) {
+      return toMemoryFactRecord(inserted);
+    }
+
+    const existing = await this.getMemoryFact(input.memoryFactId);
+    if (!existing) {
+      throw new Error(`Memory fact ${input.memoryFactId} was not found after conflict handling.`);
+    }
+
+    return existing;
+  }
+
+  /** Updates one durable memory fact and returns the stored row when it exists. */
+  public async updateMemoryFact(
+    input: UpdateMemoryFactInput,
+  ): Promise<MemoryFactRecord | undefined> {
+    const [row] = await this.db
+      .update(memoryFacts)
+      .set({
+        body: input.body,
+        confidence: input.confidence,
+        expiresAt: input.expiresAt,
+        factType: input.factType,
+        metadata: input.metadata,
+        status: input.status,
+        updatedAt: input.updatedAt ?? new Date(),
+      })
+      .where(eq(memoryFacts.memoryFactId, input.memoryFactId))
+      .returning();
+
+    return row ? toMemoryFactRecord(row) : undefined;
+  }
+
+  /** Disables one durable memory fact and returns the stored row when it exists. */
+  public async disableMemoryFact(
+    input: DisableMemoryFactInput,
+  ): Promise<MemoryFactRecord | undefined> {
+    const [row] = await this.db
+      .update(memoryFacts)
+      .set({
+        metadata: input.metadata,
+        status: "disabled",
+        updatedAt: input.updatedAt ?? new Date(),
+      })
+      .where(eq(memoryFacts.memoryFactId, input.memoryFactId))
+      .returning();
 
     return row ? toMemoryFactRecord(row) : undefined;
   }
