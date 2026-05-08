@@ -1327,6 +1327,7 @@ function createEmbeddingDatabaseStub(options: {
 
           return Object.assign(Promise.resolve(selectedRows), {
             limit: async (count: number) => selectedRows.slice(0, count),
+            orderBy: async () => selectedRows,
           });
         },
       }),

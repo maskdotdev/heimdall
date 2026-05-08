@@ -4,6 +4,7 @@ import {
   codeChunkEmbeddings,
   codeChunks,
   codeIndexVersions,
+  EmbeddingRepository,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
@@ -19,7 +20,7 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import { type Static, Type } from "@sinclair/typebox";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 export const packageName = "@repo/embedding" as const;
 
@@ -581,19 +582,14 @@ export async function embedChunkBatch(
 
   try {
     await markEmbeddingJobBatchStarted(payload, options);
-    const rows = await options.db
-      .select()
-      .from(codeChunks)
-      .where(
-        and(
-          eq(codeChunks.indexVersionId, payload.indexVersionId),
-          inArray(codeChunks.chunkId, payload.chunkIds),
-        ),
-      );
+    const embeddingRepository = new EmbeddingRepository(options.db);
+    const rows = await embeddingRepository.listEmbeddingInputChunks({
+      chunkIds: payload.chunkIds,
+      indexVersionId: payload.indexVersionId,
+    });
     const chunkInputs = rows
       .map((row) => {
-        const text = textFromMetadata(row.metadata);
-        if (!text) {
+        if (row.text.trim().length === 0) {
           return undefined;
         }
 
@@ -604,10 +600,10 @@ export async function embedChunkBatch(
               endLine: row.endLine,
               path: row.path,
               startLine: row.startLine,
-              text,
-              ...optionalStringProperty("kind", stringFromMetadata(row.metadata, "kind")),
-              ...optionalStringProperty("language", stringFromMetadata(row.metadata, "language")),
-              ...optionalStringProperty("symbolId", row.symbolId ?? undefined),
+              text: row.text,
+              ...optionalStringProperty("kind", row.kind),
+              ...optionalStringProperty("language", row.language),
+              ...optionalStringProperty("symbolId", row.symbolId),
             },
             options.inputOptions,
           ),
@@ -1644,25 +1640,15 @@ async function loadCachedEmbeddingVectors(input: {
     return new Map();
   }
 
-  const cachedRows = await input.db
-    .select({
-      contentHash: codeChunkEmbeddings.contentHash,
-      embedding: codeChunkEmbeddings.embedding,
-      embeddingCacheKey: codeChunkEmbeddings.embeddingCacheKey,
-    })
-    .from(codeChunkEmbeddings)
-    .where(
-      and(
-        eq(codeChunkEmbeddings.repoId, input.payload.repoId),
-        eq(codeChunkEmbeddings.embeddingModel, input.payload.embeddingModel),
-        eq(codeChunkEmbeddings.embeddingDimension, input.provider.dimensions),
-        eq(
-          codeChunkEmbeddings.embeddingProfileVersion,
-          input.payload.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
-        ),
-        embeddingReuseLookupCondition({ cacheKeys, contentHashes }),
-      ),
-    );
+  const cachedRows = await new EmbeddingRepository(input.db).listReusableEmbeddingVectors({
+    cacheKeys,
+    contentHashes,
+    embeddingDimension: input.provider.dimensions,
+    embeddingModel: input.payload.embeddingModel,
+    embeddingProfileVersion:
+      input.payload.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+    repoId: input.payload.repoId,
+  });
   const validatedVectors = validateEmbeddingVectors(
     cachedRows.map((row) => row.embedding),
     cachedRows.length,
@@ -1742,27 +1728,6 @@ function assignProviderVectorsByContentHash(input: {
       input.vectorsByInputId.set(entry.input.inputId, vector);
     }
   }
-}
-
-/** Builds the reusable embedding lookup predicate for exact cache-key and content-hash hits. */
-function embeddingReuseLookupCondition(input: {
-  /** Exact cache keys computed for current provider inputs. */
-  readonly cacheKeys: readonly `sha256:${string}`[];
-  /** Imported chunk content hashes eligible for profile-level reuse. */
-  readonly contentHashes: readonly string[];
-}) {
-  if (input.cacheKeys.length > 0 && input.contentHashes.length > 0) {
-    return or(
-      inArray(codeChunkEmbeddings.embeddingCacheKey, [...input.cacheKeys]),
-      inArray(codeChunkEmbeddings.contentHash, [...input.contentHashes]),
-    );
-  }
-
-  if (input.cacheKeys.length > 0) {
-    return inArray(codeChunkEmbeddings.embeddingCacheKey, [...input.cacheKeys]);
-  }
-
-  return inArray(codeChunkEmbeddings.contentHash, [...input.contentHashes]);
 }
 
 /** Loads the owning organization for a repository before recording provider usage. */
@@ -2109,26 +2074,6 @@ function validateEmbeddingVectors(
   }
 
   return vectors;
-}
-
-/** Extracts chunk text from importer-owned chunk metadata. */
-function textFromMetadata(metadata: unknown): string | undefined {
-  if (metadata && typeof metadata === "object" && "text" in metadata) {
-    const text = (metadata as { readonly text?: unknown }).text;
-    return typeof text === "string" && text.trim().length > 0 ? text : undefined;
-  }
-
-  return undefined;
-}
-
-/** Extracts a string field from importer-owned chunk metadata. */
-function stringFromMetadata(metadata: unknown, fieldName: string): string | undefined {
-  if (metadata && typeof metadata === "object" && fieldName in metadata) {
-    const value = (metadata as Readonly<Record<string, unknown>>)[fieldName];
-    return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-  }
-
-  return undefined;
 }
 
 /** Creates an exact-optional string property only when a value exists. */
