@@ -13,8 +13,8 @@ import type {
 } from "@repo/contracts";
 import { ContextBundleSchema, JOB_TYPES, parseWithSchema } from "@repo/contracts";
 import {
+  type AuditLogRecord,
   adminActions,
-  auditLogs,
   type BackgroundJobRecord,
   BackgroundJobRepository,
   candidateFindings,
@@ -56,6 +56,7 @@ import {
   reviewArtifacts,
   reviewRunDependencies,
   reviewRunStageEvents,
+  SecurityAuditRepository,
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
@@ -2180,7 +2181,7 @@ export async function cancelBackgroundJob(
       status: "completed",
       ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
     });
-    await tx.insert(auditLogs).values({
+    await new SecurityAuditRepository(tx).recordAuditLog({
       auditLogId,
       action: "job.cancel",
       actorType: actor.actorType,
@@ -2492,7 +2493,7 @@ export async function exportReviewRunDebugBundle(
       reviewRunId,
       status: "completed",
     });
-    await tx.insert(auditLogs).values({
+    await new SecurityAuditRepository(tx).recordAuditLog({
       auditLogId,
       orgId: repoOrgId,
       actorType: actor.actorType,
@@ -2583,7 +2584,7 @@ export async function createReviewRunEvalImportDraft(
       status: "completed",
       ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
     });
-    await tx.insert(auditLogs).values({
+    await new SecurityAuditRepository(tx).recordAuditLog({
       auditLogId,
       orgId: repoOrgId,
       actorType: actor.actorType,
@@ -3623,7 +3624,7 @@ export async function executePublisherReplay(
 
 type WebhookEventRow = typeof webhookEvents.$inferSelect;
 type BackgroundJobRow = BackgroundJobRecord;
-type AuditLogRow = typeof auditLogs.$inferSelect;
+type AuditLogRow = AuditLogRecord;
 type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
 type ReviewStageEventRow = typeof reviewRunStageEvents.$inferSelect;
 type ReviewDependencyRow = typeof reviewRunDependencies.$inferSelect;
@@ -3959,17 +3960,12 @@ async function listReplayAuditLogs(
     return [];
   }
 
-  const rows = await db
-    .select()
-    .from(auditLogs)
-    .where(
-      and(
-        eq(auditLogs.resourceType, input.resourceType),
-        eq(auditLogs.resourceId, input.resourceId),
-        inArray(auditLogs.action, [...input.actions]),
-      ),
-    )
-    .orderBy(desc(auditLogs.occurredAt));
+  const rows = await new SecurityAuditRepository(db).listAuditLogsForResourceActions({
+    actions: input.actions,
+    limit: 100,
+    resourceId: input.resourceId,
+    resourceType: input.resourceType,
+  });
 
   return rows.map(toReplayAuditSummary);
 }
@@ -5681,7 +5677,7 @@ async function insertReplayAuditLog(
   },
 ): Promise<string> {
   const auditLogId = newId("audit");
-  await db.insert(auditLogs).values({
+  await new SecurityAuditRepository(db).recordAuditLog({
     auditLogId,
     orgId: input.orgId,
     actorType: input.actor.actorType,

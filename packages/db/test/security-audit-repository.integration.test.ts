@@ -97,9 +97,29 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
       resourceId: "repo_security_audit",
       resourceType: "repository",
     });
+    await securityAuditRepository.recordAuditLog({
+      action: "job.replay.dispatch",
+      actorType: "admin",
+      actorUserId: "admin_security_audit",
+      auditLogId: "audit_security_audit_replay",
+      metadata: { replayRunId: "replay_security_audit" },
+      occurredAt: new Date("2026-05-08T00:06:00.000Z"),
+      resourceId: "job_security_audit",
+      resourceType: "background_job",
+    });
+    await securityAuditRepository.recordAuditLog({
+      action: "job.cancel",
+      actorType: "admin",
+      actorUserId: "admin_security_audit",
+      auditLogId: "audit_security_audit_cancel",
+      metadata: { previousStatus: "queued" },
+      occurredAt: new Date("2026-05-08T00:07:00.000Z"),
+      resourceId: "job_security_audit",
+      resourceType: "background_job",
+    });
     await securityAuditRepository.recordSecurityEvent({
       actorId: "admin_security_audit",
-      createdAt: new Date("2026-05-08T00:06:00.000Z"),
+      createdAt: new Date("2026-05-08T00:08:00.000Z"),
       metadata: { marker: "security-list-target" },
       resourceId: "repo_security_audit",
       resourceType: "repository",
@@ -118,7 +138,7 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
     `;
     expect(counts).toEqual({
       artifact_access_events: 1,
-      audit_logs: 2,
+      audit_logs: 4,
       security_events: 2,
     });
 
@@ -134,6 +154,8 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
       type: "review_artifact_payload_read",
     });
     await expect(securityAuditRepository.listAuditLogs({ limit: 10 })).resolves.toMatchObject([
+      { auditLogId: "audit_security_audit_cancel" },
+      { auditLogId: "audit_security_audit_replay" },
       { auditLogId: "audit_security_audit_settings" },
       { auditLogId: "audit_security_audit" },
     ]);
@@ -144,6 +166,17 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
         search: "request_security_audit",
       }),
     ).resolves.toMatchObject([{ auditLogId: "audit_security_audit" }]);
+    await expect(
+      securityAuditRepository.listAuditLogsForResourceActions({
+        actions: ["job.replay.dispatch", "job.cancel"],
+        limit: 10,
+        resourceId: "job_security_audit",
+        resourceType: "background_job",
+      }),
+    ).resolves.toMatchObject([
+      { action: "job.cancel", auditLogId: "audit_security_audit_cancel" },
+      { action: "job.replay.dispatch", auditLogId: "audit_security_audit_replay" },
+    ]);
     await expect(securityAuditRepository.listSecurityEvents({ limit: 10 })).resolves.toMatchObject([
       { securityEventId: "sec_security_audit_settings" },
       { securityEventId: "sec_security_audit" },

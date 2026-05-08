@@ -1,6 +1,9 @@
-import { and, desc, eq, ilike, or, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { artifactAccessEvents, auditLogs, securityEvents } from "../schema";
+
+/** Database surface used by security audit repository methods. */
+type SecurityAuditRepositoryDatabase = Pick<HeimdallDatabase, "insert" | "select">;
 
 /** Input used to record one sensitive artifact access event. */
 export type RecordArtifactAccessEventInput = {
@@ -122,6 +125,18 @@ export type ListAuditLogsInput = {
   readonly limit: number;
 };
 
+/** Input used to list audit logs for one resource and a bounded set of actions. */
+export type ListAuditLogsForResourceActionsInput = {
+  /** Resource type filter. */
+  readonly resourceType: string;
+  /** Resource ID filter. */
+  readonly resourceId: string;
+  /** Action filters. */
+  readonly actions: readonly string[];
+  /** Maximum number of rows to return. */
+  readonly limit: number;
+};
+
 /** Security event row returned by admin inspection queries. */
 export type SecurityEventRecord = {
   /** Stable security event ID. */
@@ -181,7 +196,7 @@ export type ListSecurityEventsInput = {
 /** Query helper for durable security and audit events. */
 export class SecurityAuditRepository {
   /** Creates a security audit query helper. */
-  public constructor(private readonly db: HeimdallDatabase) {}
+  public constructor(private readonly db: SecurityAuditRepositoryDatabase) {}
 
   /** Records one sensitive artifact access event. */
   public async recordArtifactAccessEvent(input: RecordArtifactAccessEventInput): Promise<void> {
@@ -256,6 +271,29 @@ export class SecurityAuditRepository {
       .select()
       .from(auditLogs)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(auditLogs.occurredAt), desc(auditLogs.auditLogId))
+      .limit(securityAuditListLimit(input.limit));
+  }
+
+  /** Lists audit logs for one resource and a bounded set of actions. */
+  public async listAuditLogsForResourceActions(
+    input: ListAuditLogsForResourceActionsInput,
+  ): Promise<readonly AuditLogRecord[]> {
+    const actions = uniqueStrings(input.actions);
+    if (actions.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.resourceType, input.resourceType),
+          eq(auditLogs.resourceId, input.resourceId),
+          inArray(auditLogs.action, actions),
+        ),
+      )
       .orderBy(desc(auditLogs.occurredAt), desc(auditLogs.auditLogId))
       .limit(securityAuditListLimit(input.limit));
   }
@@ -370,4 +408,9 @@ function securityAuditListLimit(limit: number): number {
     throw new RangeError("Security audit list limit must be an integer from 1 through 100.");
   }
   return limit;
+}
+
+/** Returns stable unique non-empty strings while preserving first-seen order. */
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
 }
