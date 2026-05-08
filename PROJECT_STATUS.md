@@ -80,9 +80,10 @@ tracked milestone.
   planning state and repository/settings persistence, `@repo/embedding`, index imports, and admin
   tooling use it for org scope lookup, publisher, review orchestration, the worker, and admin
   tooling use it for GitHub repository references or provider-feedback org scoping, the API uses it
-  for admin repository discovery, and the API and worker use the provider-installation boundary for
-  product session installation visibility, onboarding installation summaries, admin installation
-  list/detail reads, and GitHub installation runtime refs. The Postgres-backed integration test
+  for admin repository discovery, admin tooling uses it for memory/rules repository summaries, and
+  the API and worker use the provider-installation boundary for product session installation
+  visibility, onboarding installation summaries, admin installation list/detail reads, and GitHub
+  installation runtime refs. The Postgres-backed integration test
   applies the current migration chain in
   an isolated schema and verifies provider lookup, owning-org lookup, provider-ref lookup with
   installation scoping, enabled-only filtering, org scoping, cursor advancement,

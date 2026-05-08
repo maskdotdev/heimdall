@@ -6,6 +6,7 @@ import type {
   JobPayload,
   PublishReviewJobPayload,
   RepoRule,
+  Repository,
   ReviewPullRequestJobPayload,
   ReviewRun,
   ValidatedFinding,
@@ -49,7 +50,6 @@ import {
   ReviewRepository,
   replayRuns,
   replayStageRuns,
-  repositories,
   reviewArtifacts,
   reviewRunDependencies,
   reviewRunStageEvents,
@@ -2435,7 +2435,7 @@ export async function getMemoryRulesDebugDetails(
   repoId: string,
   dependencies: AdminDebugServiceDependencies,
 ): Promise<AdminMemoryRulesDebugDetails> {
-  const repository = await getRepositoryRow(repoId, dependencies.db);
+  const repository = await getRepositoryForDebug(repoId, dependencies.db);
   const [facts, candidates, rules] = await Promise.all([
     listMemoryFactsForRepository(dependencies.db, {
       orgId: repository.orgId,
@@ -3422,7 +3422,6 @@ type PublishedCheckRunRow = typeof publishedCheckRuns.$inferSelect;
 type PublishedReviewRow = typeof publishedReviews.$inferSelect;
 type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
-type RepositoryRow = typeof repositories.$inferSelect;
 type MemoryFactRow = typeof memoryFacts.$inferSelect;
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
 type IndexVersionRow = typeof codeIndexVersions.$inferSelect;
@@ -3677,19 +3676,15 @@ async function listEmbeddingJobItemDebugSummaries(
   return rows.map(toEmbeddingJobItemDebugSummary);
 }
 
-/** Gets one repository row or raises an admin debug not-found error. */
-async function getRepositoryRow(repoId: string, db: HeimdallDatabase): Promise<RepositoryRow> {
-  const [row] = await db
-    .select()
-    .from(repositories)
-    .where(eq(repositories.repoId, repoId))
-    .limit(1);
+/** Gets one repository contract or raises an admin debug not-found error. */
+async function getRepositoryForDebug(repoId: string, db: HeimdallDatabase): Promise<Repository> {
+  const repository = await new RepositoryRepository(db).getRepository(repoId);
 
-  if (!row) {
+  if (!repository) {
     throw new AdminDebugNotFoundError("repository", repoId);
   }
 
-  return row;
+  return repository;
 }
 
 /** Lists memory facts that can apply to a repository. */
@@ -3938,7 +3933,7 @@ function toWebhookDebugSummary(row: WebhookEventRow): AdminWebhookEventDebugSumm
 }
 
 /** Converts a repository row to a memory and rules inspector summary. */
-function toMemoryRulesRepositorySummary(row: RepositoryRow): AdminMemoryRulesRepositorySummary {
+function toMemoryRulesRepositorySummary(row: Repository): AdminMemoryRulesRepositorySummary {
   return {
     repoId: row.repoId,
     orgId: row.orgId,
