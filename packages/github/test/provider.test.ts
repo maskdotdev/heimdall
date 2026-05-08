@@ -578,6 +578,70 @@ describe("GitHubAppProvider", () => {
     });
   });
 
+  it("fetches repository file content from a specific ref", async () => {
+    const content = "version: 1\nreview:\n  mode: summary_only\n";
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url) =>
+          url.endsWith("/repos/acme/api/contents/.github/ai-reviewer.yml?ref=abcdef1"),
+        response: jsonResponse({
+          content: Buffer.from(content, "utf8").toString("base64"),
+          encoding: "base64",
+          sha: "blobsha",
+          type: "file",
+        }),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+    if (!provider.fetchFileContent) {
+      throw new Error("GitHub provider does not expose fetchFileContent.");
+    }
+
+    await expect(
+      provider.fetchFileContent({
+        provider: "github",
+        installationId: "99",
+        owner: "acme",
+        repo: "api",
+        path: ".github/ai-reviewer.yml",
+        ref: "abcdef1",
+      }),
+    ).resolves.toEqual({
+      content,
+      path: ".github/ai-reviewer.yml",
+      ref: "abcdef1",
+      sha: "blobsha",
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+    });
+  });
+
+  it("returns undefined for missing repository file content", async () => {
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url) =>
+          url.endsWith("/repos/acme/api/contents/.github/ai-reviewer.yml?ref=abcdef1"),
+        response: jsonResponse({ message: "Not Found" }, 404),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+    if (!provider.fetchFileContent) {
+      throw new Error("GitHub provider does not expose fetchFileContent.");
+    }
+
+    await expect(
+      provider.fetchFileContent({
+        provider: "github",
+        installationId: "99",
+        owner: "acme",
+        repo: "api",
+        path: ".github/ai-reviewer.yml",
+        ref: "abcdef1",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("skips already published review comments by hidden marker", async () => {
     const fetcher = createMockFetch([
       tokenRoute,

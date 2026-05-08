@@ -285,6 +285,30 @@ export type PullRequestSnapshotWithRawDiff = {
   readonly rawDiffBytes: number;
 };
 
+/** Repository file content fetched at a trusted provider ref. */
+export type GitProviderFileContent = {
+  /** Repository-relative file path that was fetched. */
+  readonly path: string;
+  /** Provider ref used to fetch the file. */
+  readonly ref: string;
+  /** Provider blob SHA, when returned by the provider. */
+  readonly sha?: string;
+  /** UTF-8 decoded file content. */
+  readonly content: string;
+  /** UTF-8 content size in bytes. */
+  readonly sizeBytes: number;
+};
+
+/** Input for fetching repository file content at a specific ref. */
+export type FetchFileContentInput = GitHubRepositoryRef & {
+  /** Repository-relative file path to fetch. */
+  readonly path: string;
+  /** Provider ref or commit SHA to fetch from. */
+  readonly ref: string;
+  /** Optional maximum decoded content size. */
+  readonly maxBytes?: number;
+};
+
 /** Provider-neutral GitHub adapter consumed by workers and publishers. */
 export interface GitProvider {
   /** Provider discriminator. */
@@ -317,6 +341,8 @@ export interface GitProvider {
     readonly sha: string;
     readonly metadata: Record<string, unknown>;
   }>;
+  /** Fetches one repository file at a specific ref, returning undefined when it is absent. */
+  fetchFileContent?(input: FetchFileContentInput): Promise<GitProviderFileContent | undefined>;
   /** Fetches existing bot issue comments for dedupe. */
   fetchExistingBotComments(input: GitHubPullRequestRef): Promise<readonly ExistingBotComment[]>;
   /** Fetches existing bot inline review comments for dedupe and reconciliation. */

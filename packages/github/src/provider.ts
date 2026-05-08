@@ -32,6 +32,7 @@ import type {
   CreateOrUpdateCheckRunInput,
   ExistingBotComment,
   ExistingReviewThreadState,
+  FetchFileContentInput,
   GitHubFetch,
   GitHubInstallationRef,
   GitHubProviderConfig,
@@ -43,6 +44,7 @@ import type {
   GitHubRequestObservation,
   GitHubRequestObserver,
   GitProvider,
+  GitProviderFileContent,
   ProviderCheckRun,
   PublishedReview,
   PublishedSummaryComment,
@@ -121,6 +123,9 @@ const stableId = (prefix: string, parts: readonly (number | string | undefined)[
     .update(parts.filter((part): part is number | string => part !== undefined).join(":"))
     .digest("base64url")
     .slice(0, 26)}`;
+
+const encodeGitHubContentPath = (path: string): string =>
+  path.split("/").map(encodeURIComponent).join("/");
 
 const asRecord = (value: unknown, name: string): JsonRecord => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -496,6 +501,52 @@ export class GitHubAppProvider implements GitProvider {
       sha: asString(commit, "sha"),
       metadata: branch,
     };
+  }
+
+  /** Fetches one repository file at a specific ref. */
+  public async fetchFileContent(
+    input: FetchFileContentInput,
+  ): Promise<GitProviderFileContent | undefined> {
+    try {
+      const response = await this.requestInstallation<JsonRecord>(
+        input,
+        `/repos/${input.owner}/${input.repo}/contents/${encodeGitHubContentPath(
+          input.path,
+        )}?ref=${encodeURIComponent(input.ref)}`,
+      );
+      const type = asString(response, "type");
+      if (type !== "file") {
+        return undefined;
+      }
+
+      const encoding = asString(response, "encoding");
+      if (encoding !== "base64") {
+        throw new GitHubValidationError("GitHub repository content is not base64 encoded.", {});
+      }
+
+      const content = asString(response, "content").replaceAll(/\s+/gu, "");
+      const decoded = Buffer.from(content, "base64");
+      if (input.maxBytes !== undefined && decoded.byteLength > input.maxBytes) {
+        throw new GitHubValidationError(
+          "GitHub repository content exceeds configured size limit.",
+          {},
+        );
+      }
+
+      return {
+        content: decoded.toString("utf8"),
+        path: input.path,
+        ref: input.ref,
+        ...withOptional("sha", optionalString(response, "sha")),
+        sizeBytes: decoded.byteLength,
+      };
+    } catch (error) {
+      if (error instanceof GitHubNotFoundError) {
+        return undefined;
+      }
+
+      throw error;
+    }
   }
 
   /** Fetches existing bot issue comments for dedupe. */
@@ -1444,6 +1495,10 @@ function githubOperationLabel(method: string, routeTemplate: string): string {
 function githubRouteToken(segments: readonly string[], index: number): string {
   const segment = segments[index] ?? "";
   const previous = segments[index - 1];
+  const contentsIndex = segments.indexOf("contents");
+  if (contentsIndex >= 0 && index > contentsIndex) {
+    return "{path}";
+  }
   if (segment === "comments" || segment === "check-runs" || segment === "files") {
     return segment;
   }

@@ -1,5 +1,7 @@
 import { JOB_TYPES, type PullRequestSnapshot } from "@repo/contracts";
+import { validOrgSettingsFixture } from "@repo/contracts/fixtures/repository.fixture";
 import { validContextBundleFixture } from "@repo/contracts/fixtures/review.fixture";
+import { createFakeGitProvider } from "@repo/github";
 import {
   createMemoryTelemetrySpanSink,
   createTelemetrySpanRecorder,
@@ -18,6 +20,7 @@ import {
   createIndexDependencyJobKey,
   createStaticAnalysisRequestForReview,
   decideReviewGate,
+  loadTrustedRepoLocalConfig,
   ReviewIndexDependencyPendingError,
   ReviewInputSnapshotMismatchError,
   type ReviewMemoryFactRow,
@@ -137,6 +140,118 @@ describe("checkReviewRunCurrent", () => {
         currentCheckInput,
       ),
     ).resolves.toBe("unknown");
+  });
+});
+
+describe("loadTrustedRepoLocalConfig", () => {
+  it("loads repo-local config from the trusted base SHA", async () => {
+    const gitProvider = createFakeGitProvider({
+      fileContents: [
+        {
+          content: [
+            "version: 1",
+            "review:",
+            "  mode: summary_only",
+            "paths:",
+            "  ignored:",
+            "    - dist/**",
+          ].join("\n"),
+          owner: "octo-org",
+          path: ".github/ai-reviewer.yml",
+          ref: "1111111",
+          repo: "heimdall-test",
+          sha: "blobsha",
+        },
+      ],
+    });
+
+    const config = await loadTrustedRepoLocalConfig({
+      baseSha: "1111111",
+      gitProvider,
+      orgSettings: { ...validOrgSettingsFixture, allowRepoLocalConfig: true },
+      repository: {
+        provider: "github",
+        installationId: "inst_test",
+        owner: "octo-org",
+        repo: "heimdall-test",
+        providerRepoId: "98765",
+      },
+    });
+
+    expect(config).toMatchObject({
+      sourceCommitSha: "1111111",
+      sourcePath: ".github/ai-reviewer.yml",
+      review: { mode: "summary_only" },
+      paths: { ignored: ["dist/**"] },
+    });
+  });
+
+  it("continues past invalid repo-local config files", async () => {
+    const gitProvider = createFakeGitProvider({
+      fileContents: [
+        {
+          content: "version: 2\nreview:\n  mode: summary_only\n",
+          owner: "octo-org",
+          path: ".ai-reviewer.yml",
+          ref: "1111111",
+          repo: "heimdall-test",
+        },
+        {
+          content: "version: 1\nreview:\n  mode: summary_only\n",
+          owner: "octo-org",
+          path: ".github/ai-reviewer.yml",
+          ref: "1111111",
+          repo: "heimdall-test",
+        },
+      ],
+    });
+
+    const config = await loadTrustedRepoLocalConfig({
+      baseSha: "1111111",
+      gitProvider,
+      orgSettings: { ...validOrgSettingsFixture, allowRepoLocalConfig: true },
+      repository: {
+        provider: "github",
+        installationId: "inst_test",
+        owner: "octo-org",
+        repo: "heimdall-test",
+        providerRepoId: "98765",
+      },
+    });
+
+    expect(config).toMatchObject({
+      sourcePath: ".github/ai-reviewer.yml",
+      review: { mode: "summary_only" },
+    });
+  });
+
+  it("skips repo-local config when organization settings do not allow it", async () => {
+    const gitProvider = createFakeGitProvider({
+      fileContents: [
+        {
+          content: "version: 1\nreview:\n  mode: summary_only\n",
+          owner: "octo-org",
+          path: ".github/ai-reviewer.yml",
+          ref: "1111111",
+          repo: "heimdall-test",
+        },
+      ],
+    });
+
+    await expect(
+      loadTrustedRepoLocalConfig({
+        baseSha: "1111111",
+        gitProvider,
+        orgSettings: { ...validOrgSettingsFixture, allowRepoLocalConfig: false },
+        repository: {
+          provider: "github",
+          installationId: "inst_test",
+          owner: "octo-org",
+          repo: "heimdall-test",
+          providerRepoId: "98765",
+        },
+      }),
+    ).resolves.toBeUndefined();
   });
 });
 

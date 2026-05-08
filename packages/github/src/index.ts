@@ -1,5 +1,5 @@
 export * from "./errors";
-export type { FakeGitProviderOptions } from "./fake-provider";
+export type { FakeGitProviderFileContent, FakeGitProviderOptions } from "./fake-provider";
 export { createFakeGitProvider, FakeGitProvider } from "./fake-provider";
 export {
   buildGitHubReviewCommentMarker,

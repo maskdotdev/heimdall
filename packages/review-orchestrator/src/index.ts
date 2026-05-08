@@ -10,6 +10,7 @@ import type {
   IndexRepoCommitJobPayload,
   JobEnvelope,
   LineRange,
+  OrgSettings,
   PlanSnapshot,
   PublishReviewJobPayload,
   PullRequestSnapshot,
@@ -63,6 +64,10 @@ import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { createReviewEngine, validateCandidateFindings } from "@repo/review-engine";
 import {
   buildReviewPolicySnapshot,
+  MAX_REPO_LOCAL_CONFIG_BYTES,
+  parseRepoLocalConfig,
+  REPO_LOCAL_CONFIG_ALLOWED_PATHS,
+  type RepoLocalConfig,
   type ReviewPolicySnapshot,
   type ShouldReviewPrDecision,
   shouldReviewPr,
@@ -559,6 +564,12 @@ export async function runPullRequestReview(
       : undefined;
   const repositorySettings = await repositoryRepository.getSettings(input.repoId);
   const orgSettings = await repositoryRepository.getOrgSettings(repositoryRecord.orgId);
+  const repoLocalConfig = await loadTrustedRepoLocalConfig({
+    baseSha: snapshot.baseSha,
+    gitProvider: dependencies.gitProvider,
+    orgSettings,
+    repository,
+  });
   const activeRules = await new RepoRuleRepository(dependencies.db).listEffectiveRules({
     orgId: repositoryRecord.orgId,
     repoId: input.repoId,
@@ -568,6 +579,7 @@ export async function runPullRequestReview(
     ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
     repository: repositoryRecord,
     ...(orgSettings ? { orgSettings } : {}),
+    ...(repoLocalConfig ? { repoLocalConfig } : {}),
     ...(repositorySettings ? { settings: repositorySettings } : {}),
     ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
     timestamp: startedAt,
@@ -2600,6 +2612,47 @@ function reviewStalenessCheckpointLabel(checkpoint: ReviewStalenessCheckpoint): 
   if (checkpoint === "before_review") return "before review";
 
   return "before publish";
+}
+
+/** Loads trusted repo-local config from the PR base SHA when organization policy allows it. */
+export async function loadTrustedRepoLocalConfig(input: {
+  /** Pull request base commit SHA used as the trusted config ref. */
+  readonly baseSha: string;
+  /** Git provider that can fetch repository file content by ref. */
+  readonly gitProvider: GitProvider;
+  /** Organization settings that gate repo-local config usage. */
+  readonly orgSettings: OrgSettings | undefined;
+  /** GitHub repository reference for the reviewed repository. */
+  readonly repository: GitHubRepositoryRef;
+}): Promise<RepoLocalConfig | undefined> {
+  if (input.orgSettings?.allowRepoLocalConfig !== true || !input.gitProvider.fetchFileContent) {
+    return undefined;
+  }
+
+  for (const sourcePath of REPO_LOCAL_CONFIG_ALLOWED_PATHS) {
+    const content = await input.gitProvider.fetchFileContent({
+      ...input.repository,
+      maxBytes: MAX_REPO_LOCAL_CONFIG_BYTES,
+      path: sourcePath,
+      ref: input.baseSha,
+    });
+    if (!content) {
+      continue;
+    }
+
+    const parsed = parseRepoLocalConfig({
+      content: content.content,
+      format: sourcePath.endsWith(".json") ? "json" : "yaml",
+      sourceCommitSha: input.baseSha,
+      sourcePath,
+    });
+
+    if (parsed.ok) {
+      return parsed.config;
+    }
+  }
+
+  return undefined;
 }
 
 /** Loads a GitHub repository reference for review orchestration. */

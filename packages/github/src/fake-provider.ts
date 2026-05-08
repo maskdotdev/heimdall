@@ -11,10 +11,12 @@ import type {
   CreateOrUpdateCheckRunInput,
   ExistingBotComment,
   ExistingReviewThreadState,
+  FetchFileContentInput,
   GitHubInstallationRef,
   GitHubPullRequestRef,
   GitHubRepositoryRef,
   GitProvider,
+  GitProviderFileContent,
   ProviderCheckRun,
   PublishedReview,
   PublishedSummaryComment,
@@ -25,12 +27,30 @@ import type {
   SyncInstallationResult,
 } from "./types";
 
+/** Seeded fake repository file content. */
+export type FakeGitProviderFileContent = {
+  /** Repository owner login. */
+  readonly owner: string;
+  /** Repository name. */
+  readonly repo: string;
+  /** Provider ref or commit SHA. */
+  readonly ref: string;
+  /** Repository-relative file path. */
+  readonly path: string;
+  /** UTF-8 file content. */
+  readonly content: string;
+  /** Optional provider blob SHA. */
+  readonly sha?: string;
+};
+
 /** Options used to seed a deterministic in-memory Git provider. */
 export type FakeGitProviderOptions = {
   /** Repositories visible to installation sync calls. */
   readonly repositories?: readonly Repository[];
   /** Pull request snapshots keyed by owner/repo/number. */
   readonly pullRequestSnapshots?: readonly PullRequestSnapshot[];
+  /** Repository file contents keyed by owner/repo/ref/path. */
+  readonly fileContents?: readonly FakeGitProviderFileContent[];
   /** Existing bot issue comments keyed by owner/repo/number. */
   readonly existingBotComments?: readonly ExistingBotComment[];
   /** Existing bot inline review comments keyed by owner/repo/number. */
@@ -57,6 +77,7 @@ export class FakeGitProvider implements GitProvider {
 
   private readonly repositories: readonly Repository[];
   private readonly pullRequestSnapshots: Map<string, PullRequestSnapshot>;
+  private readonly fileContents: Map<string, FakeGitProviderFileContent>;
   private readonly botComments: ExistingBotComment[];
   private readonly reviewComments: ExistingBotComment[];
   private readonly reviewThreadStates: readonly ExistingReviewThreadState[];
@@ -68,6 +89,10 @@ export class FakeGitProvider implements GitProvider {
     this.pullRequestSnapshots = new Map();
     for (const snapshot of options.pullRequestSnapshots ?? []) {
       this.pullRequestSnapshots.set(snapshotKey(snapshot), snapshot);
+    }
+    this.fileContents = new Map();
+    for (const fileContent of options.fileContents ?? []) {
+      this.fileContents.set(fileContentKey(fileContent), fileContent);
     }
     this.botComments = [...(options.existingBotComments ?? [])];
     this.reviewComments = [...(options.existingReviewComments ?? [])];
@@ -156,6 +181,29 @@ export class FakeGitProvider implements GitProvider {
       ref: input.ref,
       sha: snapshot?.headRef === input.ref ? (snapshot.headSha ?? "") : (snapshot?.baseSha ?? ""),
       metadata: {},
+    };
+  }
+
+  /** Fetches seeded repository file content for a specific ref. */
+  public async fetchFileContent(
+    input: FetchFileContentInput,
+  ): Promise<GitProviderFileContent | undefined> {
+    const fileContent = this.fileContents.get(fileContentKey(input));
+    if (!fileContent) {
+      return undefined;
+    }
+
+    const sizeBytes = Buffer.byteLength(fileContent.content, "utf8");
+    if (input.maxBytes !== undefined && sizeBytes > input.maxBytes) {
+      throw new Error(`Fake file ${input.path} exceeds configured maxBytes.`);
+    }
+
+    return {
+      content: fileContent.content,
+      path: fileContent.path,
+      ref: fileContent.ref,
+      ...(fileContent.sha ? { sha: fileContent.sha } : {}),
+      sizeBytes,
     };
   }
 
@@ -295,6 +343,13 @@ const pullRequestKey = (input: GitHubPullRequestRef): string =>
 
 const snapshotKey = (snapshot: PullRequestSnapshot): string =>
   `${snapshot.providerRepoId}#${snapshot.pullRequestNumber}`;
+
+const fileContentKey = (input: {
+  readonly owner: string;
+  readonly repo: string;
+  readonly ref: string;
+  readonly path: string;
+}): string => `${input.owner}/${input.repo}:${input.ref}:${input.path}`;
 
 const syntheticRawDiff = (files: readonly ChangedFile[]): string =>
   files.map(syntheticRawDiffFile).join("\n");
