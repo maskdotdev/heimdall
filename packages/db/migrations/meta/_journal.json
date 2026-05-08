@@ -204,6 +204,13 @@
       "when": 1778264539975,
       "tag": "0028_chubby_rockslide",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1778266580887,
+      "tag": "0029_breezy_sugar_man",
+      "breakpoints": true
     }
   ]
 }

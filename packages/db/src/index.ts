@@ -2,6 +2,7 @@ export * from "./client";
 export * from "./repositories/background-job-repository";
 export * from "./repositories/billing-repository";
 export * from "./repositories/code-intelligence-repository";
+export * from "./repositories/compliance-evidence-repository";
 export * from "./repositories/data-deletion-repository";
 export * from "./repositories/embedding-repository";
 export * from "./repositories/evaluation-repository";

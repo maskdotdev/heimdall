@@ -17,6 +17,7 @@ import {
   codeIndexVersions,
   codeRoutes,
   codeTestMappings,
+  complianceEvidence,
   creditGrants,
   debugExports,
   embeddingJobItems,
@@ -125,6 +126,10 @@ const queueHealthSnapshotsMigrationPath = resolve(
   testDirectory,
   "../migrations/0027_naive_namor.sql",
 );
+const complianceEvidenceMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0029_breezy_sugar_man.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -144,6 +149,8 @@ describe("database schema foundation", () => {
     expect(backgroundJobs.backgroundJobId.name).toBe("background_job_id");
     expect(queueHealthSnapshots.queueHealthSnapshotId.name).toBe("queue_health_snapshot_id");
     expect(queueHealthSnapshots.oldestWaitingAgeMs.name).toBe("oldest_waiting_age_ms");
+    expect(complianceEvidence.complianceEvidenceId.name).toBe("compliance_evidence_id");
+    expect(complianceEvidence.controlId.name).toBe("control_id");
     expect(pullRequests.pullRequestId.name).toBe("pull_request_id");
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
     expect(indexImportBatches.indexImportBatchId.name).toBe("index_import_batch_id");
@@ -233,6 +240,7 @@ describe("database schema foundation", () => {
     const suppressionMatchesMigration = await readFile(suppressionMatchesMigrationPath, "utf8");
     const orgSettingsMigration = await readFile(orgSettingsMigrationPath, "utf8");
     const queueHealthSnapshotsMigration = await readFile(queueHealthSnapshotsMigrationPath, "utf8");
+    const complianceEvidenceMigration = await readFile(complianceEvidenceMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -282,6 +290,10 @@ describe("database schema foundation", () => {
     expect(queueHealthSnapshotsMigration).toContain('CREATE TABLE "queue_health_snapshots"');
     expect(queueHealthSnapshotsMigration).toContain(
       'CREATE INDEX "queue_health_snapshots_queue_sampled_idx"',
+    );
+    expect(complianceEvidenceMigration).toContain('CREATE TABLE "compliance_evidence"');
+    expect(complianceEvidenceMigration).toContain(
+      'CREATE INDEX "compliance_evidence_org_control_idx"',
     );
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_runs"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_artifacts"');
@@ -488,11 +500,13 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('suppression_matches')::text) AS suppression_matches_table,
         (SELECT to_regclass('review_run_metrics')::text) AS review_run_metrics_table,
         (SELECT to_regclass('users')::text) AS users_table,
-        (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
+        (SELECT to_regclass('oauth_states')::text) AS oauth_states_table,
+        (SELECT to_regclass('compliance_evidence')::text) AS compliance_evidence_table
     `;
 
     expect(result).toEqual({
       admin_actions_table: "admin_actions",
+      compliance_evidence_table: "compliance_evidence",
       webhook_events: 1,
       index_versions: 1,
       index_import_batches_table: "index_import_batches",
