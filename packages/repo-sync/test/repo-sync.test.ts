@@ -16,6 +16,12 @@ import {
   assertFullCommitSha,
   assertInsideRoot,
   assertSafeRepositoryWorkspaceCleanupPath,
+  buildBareCloneArgs,
+  buildCommitExistsArgs,
+  buildFetchRefArgs,
+  buildWorktreeAddArgs,
+  buildWorktreePruneArgs,
+  buildWorktreeRemoveArgs,
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   createGitRunner,
@@ -166,6 +172,75 @@ describe("repo sync workspace", () => {
     );
     expect(() => getRepoSyncMirrorPath(config, "../repo")).toThrow("safe cache path segment");
     expect(() => getRepoSyncWorktreePath(config, "lease/123")).toThrow("safe cache path segment");
+  });
+
+  it("builds Git argv arrays for mirror and worktree operations", () => {
+    const cacheRoot = join(tmpdir(), "heimdall-repo-sync-command-test");
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+
+    expect(
+      buildBareCloneArgs({
+        cloneUrl: "https://x-access-token:secret@github.com/acme/api.git?token=1",
+        mirrorPath: tempMirrorPath,
+      }),
+    ).toEqual([
+      "clone",
+      "--bare",
+      "--filter=blob:none",
+      "--no-tags",
+      "https://github.com/acme/api.git",
+      tempMirrorPath,
+    ]);
+    expect(
+      buildBareCloneArgs({
+        cloneUrl: "https://github.com/acme/api.git",
+        enablePartialClone: false,
+        fetchTags: true,
+        mirrorPath: tempMirrorPath,
+      }),
+    ).toEqual(["clone", "--bare", "--tags", "https://github.com/acme/api.git", tempMirrorPath]);
+    expect(buildFetchRefArgs({ mirrorPath, ref: "refs/pull/1/head" })).toEqual([
+      "-C",
+      mirrorPath,
+      "fetch",
+      "--no-tags",
+      "origin",
+      "refs/pull/1/head",
+    ]);
+    expect(buildCommitExistsArgs({ commitSha, mirrorPath })).toEqual([
+      "-C",
+      mirrorPath,
+      "cat-file",
+      "-e",
+      `${commitSha}^{commit}`,
+    ]);
+    expect(buildWorktreeAddArgs({ commitSha, mirrorPath, workspacePath: worktreePath })).toEqual([
+      "-C",
+      mirrorPath,
+      "worktree",
+      "add",
+      "--detach",
+      worktreePath,
+      commitSha,
+    ]);
+    expect(buildWorktreeRemoveArgs({ mirrorPath, workspacePath: worktreePath })).toEqual([
+      "-C",
+      mirrorPath,
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ]);
+    expect(buildWorktreePruneArgs({ mirrorPath })).toEqual(["-C", mirrorPath, "worktree", "prune"]);
+    expect(() => buildFetchRefArgs({ mirrorPath, ref: "--upload-pack=bad" })).toThrow(
+      "must not start with a dash",
+    );
+    expect(() =>
+      buildWorktreeAddArgs({ commitSha: "main", mirrorPath, workspacePath: worktreePath }),
+    ).toThrow("40-character commit SHA");
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {

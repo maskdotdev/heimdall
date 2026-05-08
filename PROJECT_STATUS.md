@@ -810,6 +810,10 @@ tracked milestone.
   cache/runtime config defaults, REPO_SYNC_* environment parsing, normalized allowed-host lists,
   cache-root validation, and safe path builders for mirror, temp mirror, worktree, and lock paths
   under the standard mirrors/worktrees/tmp/locks layout.
+- Latest repo-sync command-construction milestone: `@repo/repo-sync` now exports tested Git argv
+  builders for bare partial clones, ref fetches, commit-existence checks, detached worktree add,
+  forced worktree removal, and worktree metadata pruning, with argument validation for empty,
+  null-byte, and dash-prefixed unsafe values.
 - Latest repo rules/configuration milestone: Phase #22 now compiles an explicit memory policy into
   immutable review policy snapshots. `@repo/rules` exposes default memory context/suppression
   limits, trusted feedback roles, approval requirements, and `evaluateMemoryPolicy` decisions for

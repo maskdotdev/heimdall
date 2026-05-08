@@ -125,6 +125,62 @@ export type CreateGitRunnerOptions = {
   readonly maxBufferBytes?: number;
 };
 
+/** Input for constructing a bare clone command. */
+export type BuildBareCloneArgsInput = {
+  /** Sanitized clone URL used as the remote. */
+  readonly cloneUrl: string;
+  /** Destination bare mirror path. */
+  readonly mirrorPath: string;
+  /** Enables `--filter=blob:none` partial clone mode. */
+  readonly enablePartialClone?: boolean;
+  /** Fetches tags during clone when true. */
+  readonly fetchTags?: boolean;
+};
+
+/** Input for constructing a fetch command. */
+export type BuildFetchRefArgsInput = {
+  /** Bare mirror path. */
+  readonly mirrorPath: string;
+  /** Remote name to fetch from. */
+  readonly remote?: string;
+  /** Ref or refspec to fetch. */
+  readonly ref: string;
+  /** Fetches tags when true. */
+  readonly fetchTags?: boolean;
+};
+
+/** Input for constructing a commit-existence command. */
+export type BuildCommitExistsArgsInput = {
+  /** Commit SHA that must exist in the mirror. */
+  readonly commitSha: string;
+  /** Bare mirror path. */
+  readonly mirrorPath: string;
+};
+
+/** Input for constructing a worktree add command. */
+export type BuildWorktreeAddArgsInput = {
+  /** Commit SHA to check out detached. */
+  readonly commitSha: string;
+  /** Bare mirror path. */
+  readonly mirrorPath: string;
+  /** Workspace path for the new worktree. */
+  readonly workspacePath: string;
+};
+
+/** Input for constructing a worktree path command. */
+export type BuildWorktreePathArgsInput = {
+  /** Bare mirror path. */
+  readonly mirrorPath: string;
+  /** Workspace path for the worktree. */
+  readonly workspacePath: string;
+};
+
+/** Input for constructing a mirror-only worktree command. */
+export type BuildMirrorWorktreeArgsInput = {
+  /** Bare mirror path. */
+  readonly mirrorPath: string;
+};
+
 /** Product-safe captured Git command output attached to failures. */
 export type CapturedGitOutput = {
   /** Redacted captured text, truncated when needed. */
@@ -549,6 +605,77 @@ export function assertFullCommitSha(input: string): void {
   }
 }
 
+/** Builds argv for a bare clone into a repository mirror path. */
+export function buildBareCloneArgs(input: BuildBareCloneArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("cloneUrl", sanitizeGitUrl(input.cloneUrl));
+  assertSafeGitCommandArgument("mirrorPath", input.mirrorPath);
+
+  return [
+    "clone",
+    "--bare",
+    ...((input.enablePartialClone ?? true) ? ["--filter=blob:none"] : []),
+    input.fetchTags ? "--tags" : "--no-tags",
+    sanitizeGitUrl(input.cloneUrl),
+    input.mirrorPath,
+  ];
+}
+
+/** Builds argv for fetching one ref or refspec into a mirror. */
+export function buildFetchRefArgs(input: BuildFetchRefArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("mirrorPath", input.mirrorPath);
+  assertSafeGitCommandArgument("remote", input.remote ?? "origin");
+  assertSafeGitCommandArgument("ref", input.ref);
+
+  return [
+    "-C",
+    input.mirrorPath,
+    "fetch",
+    input.fetchTags ? "--tags" : "--no-tags",
+    input.remote ?? "origin",
+    input.ref,
+  ];
+}
+
+/** Builds argv for checking whether a commit exists in a mirror. */
+export function buildCommitExistsArgs(input: BuildCommitExistsArgsInput): readonly string[] {
+  assertFullCommitSha(input.commitSha);
+  assertSafeGitCommandArgument("mirrorPath", input.mirrorPath);
+
+  return ["-C", input.mirrorPath, "cat-file", "-e", `${input.commitSha}^{commit}`];
+}
+
+/** Builds argv for creating a detached worktree from a mirror. */
+export function buildWorktreeAddArgs(input: BuildWorktreeAddArgsInput): readonly string[] {
+  assertFullCommitSha(input.commitSha);
+  assertSafeGitCommandArgument("mirrorPath", input.mirrorPath);
+  assertSafeGitCommandArgument("workspacePath", input.workspacePath);
+
+  return [
+    "-C",
+    input.mirrorPath,
+    "worktree",
+    "add",
+    "--detach",
+    input.workspacePath,
+    input.commitSha,
+  ];
+}
+
+/** Builds argv for removing a worktree from a mirror. */
+export function buildWorktreeRemoveArgs(input: BuildWorktreePathArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("mirrorPath", input.mirrorPath);
+  assertSafeGitCommandArgument("workspacePath", input.workspacePath);
+
+  return ["-C", input.mirrorPath, "worktree", "remove", "--force", input.workspacePath];
+}
+
+/** Builds argv for pruning stale worktree metadata from a mirror. */
+export function buildWorktreePruneArgs(input: BuildMirrorWorktreeArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("mirrorPath", input.mirrorPath);
+
+  return ["-C", input.mirrorPath, "worktree", "prune"];
+}
+
 /** Creates a Git command runner with timeout and redacted failure handling. */
 export function createGitRunner(options: CreateGitRunnerOptions = {}): GitCommandRunner {
   const gitBinaryPath = options.gitBinaryPath ?? "git";
@@ -750,6 +877,16 @@ function safeCachePathSegment(label: string, value: string): string {
   }
 
   return value;
+}
+
+/** Validates one Git argv value before command construction. */
+function assertSafeGitCommandArgument(label: string, value: string): void {
+  if (value.length === 0 || value.includes("\0")) {
+    throw new Error(`${label} must be a non-empty Git command argument.`);
+  }
+  if (value.startsWith("-")) {
+    throw new Error(`${label} must not start with a dash.`);
+  }
 }
 
 /** Returns an optional string config property when an environment value is present. */
