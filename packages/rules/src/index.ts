@@ -216,9 +216,10 @@ export type PolicyDecisionTrace = Static<typeof PolicyDecisionTraceSchema>;
 export const EffectiveTriggerPolicySchema = Type.Object(
   {
     enabledActions: Type.Array(Type.String({ minLength: 1 })),
-    includeBaseBranches: Type.Array(Type.String({ minLength: 1, maxLength: 240 })),
+    includeBaseBranches: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }))),
     ignoredAuthors: Type.Array(Type.String()),
     ignoredLabels: Type.Array(Type.String()),
+    requireAnyLabels: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
     requireLabel: Type.Optional(Type.String({ minLength: 1 })),
     skipDraftPullRequests: Type.Boolean(),
   },
@@ -1442,7 +1443,7 @@ function buildReviewPolicySnapshotCore(
     rules: activeRules,
     sandbox,
     safetyFloor,
-    trigger: compileTriggerPolicy(settings, orgSettings, repoLocalConfig, warnings),
+    trigger: compileTriggerPolicy(settings, orgSettings, repoLocalConfig),
   });
   const policyHash = sha256(canonicalJson(effectivePolicy));
   const snapshot = parseReviewPolicySnapshot({
@@ -1671,7 +1672,8 @@ function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision 
   const matchedIgnoredLabel = ignoredLabels.find((label) => labels.has(label));
   const author = input.authorLogin ? normalizeComparable(input.authorLogin) : undefined;
   const baseRef = input.baseRef?.trim();
-  const includeBaseBranches = input.policy.trigger.includeBaseBranches;
+  const includeBaseBranches = input.policy.trigger.includeBaseBranches ?? [];
+  const requiredLabels = requiredTriggerLabels(input.policy.trigger);
   const reviewPolicy = input.policy.reviewPolicy;
   let decision = true;
   let reasonCode = "allowed";
@@ -1691,10 +1693,7 @@ function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision 
   ) {
     decision = false;
     reasonCode = "base_branch_not_included";
-  } else if (
-    input.policy.trigger.requireLabel &&
-    !labels.has(normalizeComparable(input.policy.trigger.requireLabel))
-  ) {
+  } else if (requiredLabels.length > 0 && !requiredLabels.some((label) => labels.has(label))) {
     decision = false;
     reasonCode = "missing_required_label";
   } else if (matchedIgnoredLabel) {
@@ -1720,9 +1719,23 @@ function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision 
         baseRef: baseRef ?? "",
         labels: [...labels],
         matchedIgnoredLabel,
+        requiredLabels,
       },
     }),
   };
+}
+
+/** Returns normalized labels that can satisfy the trigger's required-label gate. */
+function requiredTriggerLabels(trigger: EffectiveTriggerPolicy): string[] {
+  const requireAnyLabels = trigger.requireAnyLabels ?? [];
+  const labels =
+    requireAnyLabels.length > 0
+      ? requireAnyLabels
+      : trigger.requireLabel
+        ? [trigger.requireLabel]
+        : [];
+
+  return uniqueStrings(labels.map(normalizeComparable));
 }
 
 /** Evaluates whether a candidate finding may be published under policy. */
@@ -2876,25 +2889,17 @@ function compileTriggerPolicy(
   settings: RepositorySettings,
   orgSettings: OrgSettings | undefined,
   repoLocalConfig: RepoLocalConfig | undefined,
-  warnings: PolicyWarning[],
 ): EffectiveTriggerPolicy {
   const requireAnyLabel = repoLocalConfig?.triggers?.requireAnyLabel;
-  const repoLocalRequiredLabel = requireAnyLabel?.[0];
-  const requiredLabel =
-    repoLocalRequiredLabel ??
-    settings.requireLabel ??
-    orgSettings?.defaultTriggerPolicy.requireLabel;
-  if (requireAnyLabel && requireAnyLabel.length > 1) {
-    warnings.push({
-      code: "repo_local_require_any_label_limited",
-      message:
-        "Only the first repo-local required label can be compiled by the MVP trigger policy.",
-      details: {
-        ignoredLabels: requireAnyLabel.slice(1),
-        selectedLabel: repoLocalRequiredLabel,
-      },
-    });
-  }
+  const configuredRequiredLabel =
+    settings.requireLabel ?? orgSettings?.defaultTriggerPolicy.requireLabel;
+  const requireAnyLabels = uniqueStrings([
+    ...(requireAnyLabel && requireAnyLabel.length > 0
+      ? requireAnyLabel
+      : configuredRequiredLabel
+        ? [configuredRequiredLabel]
+        : []),
+  ]);
   return {
     enabledActions: [
       ...(repoLocalConfig?.triggers?.enabledActions ??
@@ -2911,7 +2916,8 @@ function compileTriggerPolicy(
       ...settings.ignoredLabels,
       ...(repoLocalConfig?.triggers?.skipIfAnyLabel ?? []),
     ]),
-    ...(requiredLabel ? { requireLabel: requiredLabel } : {}),
+    requireAnyLabels,
+    ...(requireAnyLabels[0] ? { requireLabel: requireAnyLabels[0] } : {}),
     skipDraftPullRequests:
       settings.skipDraftPullRequests ||
       (orgSettings?.defaultTriggerPolicy.skipDraftPullRequests ?? false) ||

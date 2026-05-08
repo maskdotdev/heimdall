@@ -489,6 +489,7 @@ describe("buildReviewPolicySnapshot", () => {
         enabledActions: ["opened"],
         includeBaseBranches: ["main", "release/**"],
         ignoredLabels: ["no-ai-review"],
+        requireAnyLabels: ["ai-ready", "review-me"],
         requireLabel: "ai-ready",
       },
     });
@@ -497,7 +498,6 @@ describe("buildReviewPolicySnapshot", () => {
     expect(result.warnings.map((warning) => warning.code)).toEqual([
       "repo_local_categories_clamped_by_org_settings",
       "comment_budget_clamped_by_repo_local_config",
-      "repo_local_require_any_label_limited",
     ]);
   });
 
@@ -818,6 +818,24 @@ describe("shouldReviewPr", () => {
     });
     expect(skipped).toMatchObject({
       reasonCode: "base_branch_not_included",
+      shouldReview: false,
+    });
+  });
+
+  it("allows pull requests with any compiled required label", () => {
+    const policy = createPolicyFixture({
+      trigger: { requireAnyLabels: ["ready-for-review", "review-me"] },
+    });
+    const firstLabel = shouldReviewPr(
+      createPrInputFixture({ labels: ["ready-for-review"], policy }),
+    );
+    const secondLabel = shouldReviewPr(createPrInputFixture({ labels: ["review-me"], policy }));
+    const missingLabel = shouldReviewPr(createPrInputFixture({ labels: ["needs-tests"], policy }));
+
+    expect(firstLabel).toMatchObject({ reasonCode: "allowed", shouldReview: true });
+    expect(secondLabel).toMatchObject({ reasonCode: "allowed", shouldReview: true });
+    expect(missingLabel).toMatchObject({
+      reasonCode: "missing_required_label",
       shouldReview: false,
     });
   });

@@ -2170,11 +2170,13 @@ type ControlPlaneEffectivePolicy = {
     /** Enabled pull request actions. */
     readonly enabledActions: readonly string[];
     /** Included base branch patterns. Empty means all base branches. */
-    readonly includeBaseBranches: readonly string[];
+    readonly includeBaseBranches?: readonly string[];
     /** Ignored pull request authors. */
     readonly ignoredAuthors: readonly string[];
     /** Ignored pull request labels. */
     readonly ignoredLabels: readonly string[];
+    /** Pull request labels where any one can satisfy the review gate. */
+    readonly requireAnyLabels?: readonly string[];
     /** Required pull request label. */
     readonly requireLabel?: string;
     /** Whether draft pull requests are skipped. */
@@ -9644,10 +9646,15 @@ function renderPolicyPreviewDetails(preview: ControlPlanePolicyPreview): string 
     ["Inline comments", policy.publishing.publishInlineComments ? "on" : "off"],
     ["Summary comment", policy.publishing.publishSummaryComment ? "on" : "off"],
     ["Trigger actions", policy.trigger.enabledActions.join(", ")],
-    ["Base branches", policy.trigger.includeBaseBranches.join(", ") || "all"],
+    ["Base branches", policy.trigger.includeBaseBranches?.join(", ") || "all"],
     ["Ignored labels", policy.trigger.ignoredLabels.join(", ") || "none"],
     ["Ignored authors", policy.trigger.ignoredAuthors.join(", ") || "none"],
-    ["Required label", policy.trigger.requireLabel ?? "none"],
+    [
+      "Required labels",
+      policy.trigger.requireAnyLabels && policy.trigger.requireAnyLabels.length > 0
+        ? policy.trigger.requireAnyLabels.join(", ")
+        : (policy.trigger.requireLabel ?? "none"),
+    ],
     ["Draft PRs", policy.trigger.skipDraftPullRequests ? "skipped" : "reviewed"],
     ["Instructions", String(policy.instructions.length)],
     ...sandboxPolicyPreviewRows(policy.sandbox),
