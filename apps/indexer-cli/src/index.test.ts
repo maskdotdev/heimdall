@@ -1,7 +1,16 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type StructuredTelemetryLogger,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
+import type { IndexerCliObservability } from "./index";
 import { parseIndexerCliArgs, runIndexerCli } from "./index";
 
 const tempRoots: string[] = [];
@@ -155,6 +164,68 @@ describe("runIndexerCli", () => {
     expect(artifact.manifest.recordCount).toBe(artifact.records.length);
     expect(artifact.records).toContainEqual(
       expect.objectContaining({ path: "src/example.ts", type: "file" }),
+    );
+  });
+
+  it("records product-safe indexer telemetry without changing machine-readable output", async () => {
+    const root = await createTempWorkspace();
+    const outputPath = join(root, "artifact.json");
+    const output = memoryIo();
+    const telemetry = createRecordingObservability();
+
+    const exitCode = await runIndexerCli(
+      [
+        "index",
+        "--repo-id",
+        "repo_test",
+        "--commit-sha",
+        "abcdef1",
+        "--workspace",
+        root,
+        "--output",
+        outputPath,
+      ],
+      output.io,
+      { observability: telemetry.observability },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output.stderr()).toBe("");
+    expect(JSON.parse(output.stdout())).toEqual(
+      expect.objectContaining({
+        format: "json",
+        outputPath,
+        recordCount: expect.any(Number),
+      }),
+    );
+    expect(telemetry.metrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: { driver: "heimdall-typescript-indexer", status: "succeeded" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverRunsTotal,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { driver: "heimdall-typescript-indexer", status: "succeeded" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverDurationMs,
+          unit: "ms",
+        }),
+      ]),
+    );
+    expect(telemetry.spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: OBSERVABILITY_SPAN_NAMES.indexerDriverRun,
+          status: "ok",
+        }),
+      ]),
+    );
+    expect(JSON.stringify({ metrics: telemetry.metrics, spans: telemetry.spans })).not.toContain(
+      root,
+    );
+    expect(JSON.stringify({ metrics: telemetry.metrics, spans: telemetry.spans })).not.toContain(
+      "src/example.ts",
     );
   });
 
@@ -344,5 +415,114 @@ function memoryIo(): {
     },
     stderr: () => chunks.stderr,
     stdout: () => chunks.stdout,
+  };
+}
+
+/** Recorded metric point used by CLI telemetry tests. */
+type RecordedMetric = {
+  /** Metric instrument kind. */
+  readonly kind: "counter" | "histogram";
+  /** Metric labels captured by the test recorder. */
+  readonly labels?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Metric name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Metric value. */
+  readonly value: number;
+};
+
+/** Recorded span payload used by CLI telemetry tests. */
+type RecordedSpan = {
+  /** Span attributes captured when the span ended. */
+  readonly endAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Span attributes captured when the span started. */
+  readonly startAttributes?:
+    | Readonly<Record<string, TelemetryAttributeValue | undefined>>
+    | undefined;
+  /** Span status. */
+  readonly status?: "error" | "ok" | "unset" | undefined;
+};
+
+/** Recording observability handles used by CLI tests. */
+type RecordingObservability = {
+  /** Captured metric points. */
+  readonly metrics: RecordedMetric[];
+  /** Runtime passed into the CLI. */
+  readonly observability: IndexerCliObservability;
+  /** Captured span records. */
+  readonly spans: RecordedSpan[];
+};
+
+/** Creates a no-output observability runtime that records metrics and spans in memory. */
+function createRecordingObservability(): RecordingObservability {
+  const metrics: RecordedMetric[] = [];
+  const spans: RecordedSpan[] = [];
+
+  return {
+    metrics,
+    observability: {
+      logger: createNoopLogger(),
+      metrics: createRecordingMetrics(metrics),
+      shutdown: async () => undefined,
+      traces: createRecordingTraces(spans),
+    },
+    spans,
+  };
+}
+
+/** Creates a no-op structured logger for telemetry tests. */
+function createNoopLogger(): StructuredTelemetryLogger {
+  return {
+    debug: () => undefined,
+    error: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+  };
+}
+
+/** Creates a metric recorder that stores metric points in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: () => undefined,
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => ({
+      end: (endOptions = {}) => {
+        records.push({
+          endAttributes: endOptions.attributes,
+          name,
+          startAttributes: options?.attributes,
+          status: endOptions.status,
+        });
+        return undefined;
+      },
+    }),
   };
 }

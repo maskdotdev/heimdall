@@ -217,9 +217,15 @@ importers:
       '@repo/index-schema':
         specifier: workspace:*
         version: link:../../packages/index-schema
+      '@repo/indexer-driver':
+        specifier: workspace:*
+        version: link:../../packages/indexer-driver
       '@repo/indexer-ts':
         specifier: workspace:*
         version: link:../../packages/indexer-ts
+      '@repo/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
     devDependencies:
       '@types/bun':
         specifier: 'catalog:'
