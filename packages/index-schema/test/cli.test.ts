@@ -16,6 +16,38 @@ import { writeSplitIndexArtifactDirectory } from "../src/node";
 /** Temporary directories created by CLI tests. */
 const tempRoots: string[] = [];
 
+/** Expected validation failure for one generated invalid fixture. */
+type InvalidGeneratedFixtureExpectation = {
+  /** Built-in generated fixture name. */
+  readonly fixtureName: string;
+  /** Validation error substring expected after generation. */
+  readonly expectedError: string;
+};
+
+/** Generated invalid fixtures and the validation errors they should surface. */
+const invalidGeneratedFixtureExpectations = [
+  {
+    expectedError: "sha256",
+    fixtureName: "invalid-bad-checksum",
+  },
+  {
+    expectedError: "must not contain current-directory path segments",
+    fixtureName: "invalid-bad-path",
+  },
+  {
+    expectedError: "references missing record",
+    fixtureName: "invalid-missing-reference",
+  },
+  {
+    expectedError: "appears after edge records",
+    fixtureName: "invalid-out-of-order-records",
+  },
+  {
+    expectedError: "Expected union value",
+    fixtureName: "invalid-unknown-record-type",
+  },
+] as const satisfies readonly InvalidGeneratedFixtureExpectation[];
+
 afterEach(async () => {
   await Promise.all(tempRoots.map((root) => rm(root, { force: true, recursive: true })));
   tempRoots.length = 0;
@@ -157,6 +189,83 @@ describe("runIndexSchemaCli", () => {
         artifactId: "art_fixture_valid_typescript",
         recordCount: 4,
         valid: true,
+      }),
+    );
+  });
+
+  it("generates a valid Python split artifact fixture", async () => {
+    const root = await createTempRoot();
+    const outputPath = join(root, "generated-python");
+    const output = memoryIo();
+
+    const exitCode = await runIndexSchemaCli(
+      ["generate-fixture", "valid-python-artifact", "--output", outputPath],
+      output.io,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output.stderr()).toBe("");
+    expect(JSON.parse(output.stdout())).toEqual({
+      artifactId: "art_fixture_valid_python",
+      fixtureName: "valid-python-artifact",
+      outputPath,
+      recordCount: 3,
+      valid: true,
+    });
+
+    const countOutput = memoryIo();
+    const countExitCode = await runIndexSchemaCli(["count-records", outputPath], countOutput.io);
+
+    expect(countExitCode).toBe(0);
+    expect(JSON.parse(countOutput.stdout())).toEqual(
+      expect.objectContaining({
+        artifactId: "art_fixture_valid_python",
+        chunkCount: 1,
+        fileCount: 1,
+        recordCount: 3,
+        symbolCount: 1,
+      }),
+    );
+  });
+
+  it.each(
+    invalidGeneratedFixtureExpectations,
+  )("generates invalid fixture $fixtureName with useful validation errors", async ({
+    expectedError,
+    fixtureName,
+  }) => {
+    const root = await createTempRoot();
+    const outputPath = join(root, fixtureName);
+    const output = memoryIo();
+
+    const exitCode = await runIndexSchemaCli(
+      ["generate-fixture", fixtureName, "--output", outputPath],
+      output.io,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(output.stderr()).toBe("");
+    expect(JSON.parse(output.stdout())).toEqual(
+      expect.objectContaining({
+        errors: expect.arrayContaining([expect.stringContaining(expectedError)]),
+        fixtureName,
+        outputPath,
+        valid: false,
+      }),
+    );
+
+    const validationOutput = memoryIo();
+    const validationExitCode = await runIndexSchemaCli(
+      ["validate", outputPath],
+      validationOutput.io,
+    );
+
+    expect(validationExitCode).toBe(6);
+    expect(validationOutput.stderr()).toBe("");
+    expect(JSON.parse(validationOutput.stdout())).toEqual(
+      expect.objectContaining({
+        errors: expect.arrayContaining([expect.stringContaining(expectedError)]),
+        valid: false,
       }),
     );
   });

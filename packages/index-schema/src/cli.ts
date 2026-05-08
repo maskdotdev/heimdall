@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { resolve } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type ChunkRecord,
@@ -8,13 +9,20 @@ import {
   type EdgeRecord,
   type FileRecord,
   INDEX_ARTIFACT_SCHEMA_VERSION,
+  INDEX_MANIFEST_FILE_NAME,
   INDEX_RECORD_SCHEMA_VERSION,
   type IndexArtifact,
+  type IndexManifest,
+  parseIndexManifestJson,
   type SymbolRecord,
   stringifyIndexManifestJson,
   validateIndexArtifact,
 } from "./index";
-import { readIndexArtifactPath, writeSplitIndexArtifactDirectory } from "./node";
+import {
+  createIndexArtifactWriter,
+  readIndexArtifactPath,
+  writeSplitIndexArtifactDirectory,
+} from "./node";
 
 /** Minimal writer used by the index-schema CLI runner and tests. */
 export type IndexSchemaCliWriter = {
@@ -45,7 +53,15 @@ type ArtifactDiffCommand = {
 };
 
 /** Names of built-in fixtures that the CLI can generate. */
-type GeneratedFixtureName = "minimal-valid-artifact" | "valid-typescript-artifact";
+type GeneratedFixtureName =
+  | "invalid-bad-checksum"
+  | "invalid-bad-path"
+  | "invalid-missing-reference"
+  | "invalid-out-of-order-records"
+  | "invalid-unknown-record-type"
+  | "minimal-valid-artifact"
+  | "valid-python-artifact"
+  | "valid-typescript-artifact";
 
 /** Parsed generate-fixture command input. */
 type GenerateFixtureCommand = {
@@ -107,12 +123,20 @@ type GenerateFixtureSummary = {
   readonly outputPath: string;
   /** Total record count declared by the generated manifest. */
   readonly recordCount: number;
+  /** Validation errors for intentionally invalid fixtures. */
+  readonly errors?: readonly string[];
   /** Whether the generated fixture passed schema-owned validation after writing. */
   readonly valid: boolean;
 };
 
 const GENERATED_FIXTURE_NAMES = [
+  "invalid-bad-checksum",
+  "invalid-bad-path",
+  "invalid-missing-reference",
+  "invalid-out-of-order-records",
+  "invalid-unknown-record-type",
   "minimal-valid-artifact",
+  "valid-python-artifact",
   "valid-typescript-artifact",
 ] as const satisfies readonly GeneratedFixtureName[];
 
@@ -178,7 +202,19 @@ async function runValidateCommand(args: readonly string[], io: IndexSchemaCliIo)
     return parsed.help ? 0 : 1;
   }
 
-  const artifact = await readIndexArtifactPath(resolve(parsed.command.artifactPath));
+  const artifactResult = await readArtifactForValidation(resolve(parsed.command.artifactPath));
+  if (!artifactResult.ok) {
+    io.stdout.write(
+      `${JSON.stringify({
+        errorCount: artifactResult.errors.length,
+        errors: artifactResult.errors,
+        valid: false,
+      })}\n`,
+    );
+    return 6;
+  }
+
+  const artifact = artifactResult.artifact;
   const errors = validateIndexArtifact(artifact);
   const summary = validationSummary(artifact, errors);
 
@@ -270,23 +306,18 @@ async function runGenerateFixtureCommand(
     return parsed.help ? 0 : 1;
   }
 
-  const outputPath = resolve(parsed.command.outputPath);
-  await writeSplitIndexArtifactDirectory(
-    outputPath,
-    generatedFixtureArtifact(parsed.command.fixtureName),
-  );
-  const artifact = await readIndexArtifactPath(outputPath);
-  const validationErrors = validateIndexArtifact(artifact);
+  const generated = await writeGeneratedFixture(parsed.command);
   const summary = {
-    artifactId: artifact.manifest.artifactId,
+    artifactId: generated.artifact.manifest.artifactId,
     fixtureName: parsed.command.fixtureName,
-    outputPath,
-    recordCount: artifact.manifest.recordCount,
-    valid: validationErrors.length === 0,
+    outputPath: generated.outputPath,
+    recordCount: generated.artifact.manifest.recordCount,
+    ...(generated.validationErrors.length > 0 ? { errors: generated.validationErrors } : {}),
+    valid: generated.validationErrors.length === 0,
   } satisfies GenerateFixtureSummary;
 
   io.stdout.write(`${JSON.stringify(summary)}\n`);
-  return validationErrors.length === 0 ? 0 : 6;
+  return 0;
 }
 
 /** Converts an artifact and validation errors into CLI output. */
@@ -329,30 +360,236 @@ function recordCountSummary(artifact: IndexArtifact): ArtifactRecordCountSummary
   };
 }
 
-/** Builds one built-in fixture artifact. */
-function generatedFixtureArtifact(fixtureName: GeneratedFixtureName): IndexArtifact {
-  if (fixtureName === "minimal-valid-artifact") {
-    return fixtureArtifact({
-      artifactId: "art_fixture_minimal_valid",
-      languages: [],
-      records: [],
-    });
+/** Reads an artifact for validation while keeping read-time failures as validation issues. */
+async function readArtifactForValidation(
+  artifactPath: string,
+): Promise<
+  | { readonly ok: true; readonly artifact: IndexArtifact }
+  | { readonly ok: false; readonly errors: readonly string[] }
+> {
+  try {
+    return { artifact: await readIndexArtifactPath(artifactPath), ok: true };
+  } catch (error) {
+    return { errors: [errorMessage(error)], ok: false };
+  }
+}
+
+/** Writes a built-in fixture artifact and returns validation evidence for the written files. */
+async function writeGeneratedFixture(input: GenerateFixtureCommand): Promise<{
+  /** Artifact used as the source for fixture generation. */
+  readonly artifact: IndexArtifact;
+  /** Resolved output artifact directory. */
+  readonly outputPath: string;
+  /** Schema-owned validation errors observed after writing. */
+  readonly validationErrors: readonly string[];
+}> {
+  const outputPath = resolve(input.outputPath);
+  const artifact = generatedFixtureArtifact(input.fixtureName);
+
+  if (input.fixtureName === "invalid-out-of-order-records") {
+    await writeSplitIndexArtifactDirectoryWithoutOrdering(outputPath, artifact);
+  } else {
+    await writeSplitIndexArtifactDirectory(outputPath, artifact);
+  }
+  if (input.fixtureName === "invalid-bad-checksum") {
+    await corruptRecordFileChecksum(outputPath);
   }
 
-  return validTypeScriptFixtureArtifact();
+  return {
+    artifact,
+    outputPath,
+    validationErrors: await validateGeneratedFixturePath(outputPath),
+  };
+}
+
+/** Validates a generated fixture path while preserving read-time integrity errors as issues. */
+async function validateGeneratedFixturePath(outputPath: string): Promise<readonly string[]> {
+  try {
+    return validateIndexArtifact(await readIndexArtifactPath(outputPath));
+  } catch (error) {
+    return [errorMessage(error)];
+  }
+}
+
+/** Writes a split artifact without enforcing record ordering for invalid fixture generation. */
+async function writeSplitIndexArtifactDirectoryWithoutOrdering(
+  outputPath: string,
+  artifact: IndexArtifact,
+): Promise<void> {
+  const writer = createIndexArtifactWriter({ artifactDir: outputPath, enforceOrdering: false });
+  for (const record of artifact.records) {
+    await writer.writeRecord(record);
+  }
+
+  await writer.close({
+    languages: artifact.manifest.languages,
+    manifestBase: manifestBaseFromManifest(artifact.manifest),
+  });
+}
+
+/** Corrupts the manifest checksum for the canonical record file. */
+async function corruptRecordFileChecksum(outputPath: string): Promise<void> {
+  const manifestPath = join(outputPath, INDEX_MANIFEST_FILE_NAME);
+  const manifest = parseIndexManifestJson(await readFile(manifestPath, "utf8"));
+  const recordFiles = manifest.recordFiles ?? [];
+  const [recordFile] = recordFiles;
+  if (!recordFile) {
+    throw new Error("Cannot corrupt checksum for a fixture without recordFiles metadata.");
+  }
+
+  await writeFile(
+    manifestPath,
+    stringifyIndexManifestJson({
+      ...manifest,
+      recordFiles: [{ ...recordFile, sha256: `sha256:${"0".repeat(64)}` }, ...recordFiles.slice(1)],
+    }),
+    "utf8",
+  );
+}
+
+/** Removes record-derived manifest fields so a custom writer can regenerate them. */
+function manifestBaseFromManifest(
+  manifest: IndexManifest,
+): Omit<
+  IndexManifest,
+  | "chunkCount"
+  | "edgeCount"
+  | "fileCount"
+  | "languages"
+  | "recordCount"
+  | "recordFiles"
+  | "symbolCount"
+> {
+  const {
+    chunkCount: _chunkCount,
+    edgeCount: _edgeCount,
+    fileCount: _fileCount,
+    languages: _languages,
+    recordCount: _recordCount,
+    recordFiles: _recordFiles,
+    symbolCount: _symbolCount,
+    ...manifestBase
+  } = manifest;
+
+  return manifestBase;
+}
+
+/** Builds one built-in fixture artifact. */
+function generatedFixtureArtifact(fixtureName: GeneratedFixtureName): IndexArtifact {
+  switch (fixtureName) {
+    case "invalid-bad-checksum":
+      return validTypeScriptFixtureArtifact("art_fixture_invalid_bad_checksum");
+    case "invalid-bad-path":
+      return invalidBadPathFixtureArtifact();
+    case "invalid-missing-reference":
+      return invalidMissingReferenceFixtureArtifact();
+    case "invalid-out-of-order-records":
+      return invalidOutOfOrderFixtureArtifact();
+    case "invalid-unknown-record-type":
+      return invalidUnknownRecordTypeFixtureArtifact();
+    case "minimal-valid-artifact":
+      return fixtureArtifact({
+        artifactId: "art_fixture_minimal_valid",
+        languages: [],
+        parserVersions: {},
+        records: [],
+      });
+    case "valid-python-artifact":
+      return validPythonFixtureArtifact();
+    case "valid-typescript-artifact":
+      return validTypeScriptFixtureArtifact("art_fixture_valid_typescript");
+  }
 }
 
 /** Builds the built-in valid TypeScript fixture artifact. */
-function validTypeScriptFixtureArtifact(): IndexArtifact {
+function validTypeScriptFixtureArtifact(artifactId: string): IndexArtifact {
   const file = generatedFileRecord();
   const symbol = generatedSymbolRecord(file);
   const chunk = generatedChunkRecord(file, symbol);
   const edge = generatedExternalEdgeRecord(file);
 
   return fixtureArtifact({
-    artifactId: "art_fixture_valid_typescript",
+    artifactId,
     languages: ["typescript"],
+    parserVersions: { typescript: "5.0.0" },
     records: [file, symbol, chunk, edge],
+  });
+}
+
+/** Builds the built-in valid Python fixture artifact. */
+function validPythonFixtureArtifact(): IndexArtifact {
+  const file = generatedPythonFileRecord();
+  const symbol = generatedPythonSymbolRecord(file);
+  const chunk = generatedPythonChunkRecord(file, symbol);
+
+  return fixtureArtifact({
+    artifactId: "art_fixture_valid_python",
+    languages: ["python"],
+    parserVersions: { python: "3.11" },
+    records: [file, symbol, chunk],
+  });
+}
+
+/** Builds the invalid bad-path fixture artifact. */
+function invalidBadPathFixtureArtifact(): IndexArtifact {
+  return fixtureArtifact({
+    artifactId: "art_fixture_invalid_bad_path",
+    languages: ["typescript"],
+    parserVersions: { typescript: "5.0.0" },
+    records: [
+      {
+        ...generatedFileRecord(),
+        fileId: "file_fixture_invalid_bad_path",
+        path: "src/./example.ts",
+      },
+    ],
+  });
+}
+
+/** Builds the invalid missing-reference fixture artifact. */
+function invalidMissingReferenceFixtureArtifact(): IndexArtifact {
+  return fixtureArtifact({
+    artifactId: "art_fixture_invalid_missing_reference",
+    languages: ["typescript"],
+    parserVersions: { typescript: "5.0.0" },
+    records: [
+      {
+        ...generatedSymbolRecord(generatedFileRecord()),
+        fileId: "file_fixture_missing_reference_target",
+        symbolId: "sym_fixture_invalid_missing_reference",
+      },
+    ],
+  });
+}
+
+/** Builds the invalid out-of-order fixture artifact. */
+function invalidOutOfOrderFixtureArtifact(): IndexArtifact {
+  const file = generatedFileRecord();
+  const edge = generatedExternalEdgeRecord(file);
+
+  return fixtureArtifact({
+    artifactId: "art_fixture_invalid_out_of_order",
+    languages: ["typescript"],
+    parserVersions: { typescript: "5.0.0" },
+    records: [edge, file],
+  });
+}
+
+/** Builds the invalid unknown-record-type fixture artifact. */
+function invalidUnknownRecordTypeFixtureArtifact(): IndexArtifact {
+  const record = {
+    commitSha: "abcdef1234567890",
+    recordId: "unknown_fixture_record",
+    repoId: "repo_fixture_generated",
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    type: "unknown_record",
+  } satisfies Readonly<Record<string, unknown>>;
+
+  return fixtureArtifact({
+    artifactId: "art_fixture_invalid_unknown_record_type",
+    languages: [],
+    parserVersions: {},
+    records: [record as unknown as IndexArtifact["records"][number]],
   });
 }
 
@@ -362,6 +599,8 @@ function fixtureArtifact(input: {
   readonly artifactId: string;
   /** Languages to declare in the manifest. */
   readonly languages: IndexArtifact["manifest"]["languages"];
+  /** Parser versions to declare in the manifest. */
+  readonly parserVersions: IndexArtifact["manifest"]["parserVersions"];
   /** Records to include in the fixture. */
   readonly records: readonly IndexArtifact["records"][number][];
 }): IndexArtifact {
@@ -377,7 +616,7 @@ function fixtureArtifact(input: {
       indexerName: "fixture-indexer",
       indexerVersion: "0.0.0",
       languages: [...input.languages],
-      parserVersions: { typescript: "5.0.0" },
+      parserVersions: input.parserVersions,
       recordCount: input.records.length,
       recordSchemaVersion: INDEX_RECORD_SCHEMA_VERSION,
       repoId: "repo_fixture_generated",
@@ -408,6 +647,26 @@ function generatedFileRecord(): FileRecord {
   };
 }
 
+/** Creates the file record for the built-in Python fixture. */
+function generatedPythonFileRecord(): FileRecord {
+  return {
+    commitSha: "abcdef1234567890",
+    contentHash: `sha256:${"d".repeat(64)}`,
+    fileId: "file_fixture_valid_python",
+    isBinary: false,
+    isGenerated: false,
+    isTest: false,
+    isVendored: false,
+    language: "python",
+    lineCount: 3,
+    path: "app/main.py",
+    repoId: "repo_fixture_generated",
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    sizeBytes: 64,
+    type: "file",
+  };
+}
+
 /** Creates the symbol record for the built-in TypeScript fixture. */
 function generatedSymbolRecord(file: FileRecord): SymbolRecord {
   return {
@@ -428,6 +687,26 @@ function generatedSymbolRecord(file: FileRecord): SymbolRecord {
   };
 }
 
+/** Creates the symbol record for the built-in Python fixture. */
+function generatedPythonSymbolRecord(file: FileRecord): SymbolRecord {
+  return {
+    commitSha: file.commitSha,
+    contentHash: `sha256:${"e".repeat(64)}`,
+    fileId: file.fileId,
+    kind: "function",
+    language: file.language,
+    name: "greet",
+    path: file.path,
+    qualifiedName: "greet",
+    range: { endLine: 2, startLine: 1 },
+    repoId: file.repoId,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    signature: "def greet(name: str) -> str",
+    symbolId: "sym_fixture_valid_python_greet",
+    type: "symbol",
+  };
+}
+
 /** Creates the chunk record for the built-in TypeScript fixture. */
 function generatedChunkRecord(file: FileRecord, symbol: SymbolRecord): ChunkRecord {
   return {
@@ -444,6 +723,26 @@ function generatedChunkRecord(file: FileRecord, symbol: SymbolRecord): ChunkReco
     symbolId: symbol.symbolId,
     text: 'export function greet(name: string): string {\n  return "hello " + name;\n}',
     tokenEstimate: 16,
+    type: "chunk",
+  };
+}
+
+/** Creates the chunk record for the built-in Python fixture. */
+function generatedPythonChunkRecord(file: FileRecord, symbol: SymbolRecord): ChunkRecord {
+  return {
+    chunkId: "chunk_fixture_valid_python_greet",
+    commitSha: file.commitSha,
+    contentHash: `sha256:${"f".repeat(64)}`,
+    fileId: file.fileId,
+    kind: "symbol",
+    language: file.language,
+    path: file.path,
+    range: symbol.range,
+    repoId: file.repoId,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    symbolId: symbol.symbolId,
+    text: 'def greet(name: str) -> str:\n    return "hello " + name',
+    tokenEstimate: 12,
     type: "chunk",
   };
 }

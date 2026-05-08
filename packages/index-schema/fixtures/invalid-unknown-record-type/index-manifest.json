@@ -1,0 +1,30 @@
+{
+  "artifactId": "art_fixture_invalid_unknown_record_type",
+  "chunkerVersion": "fixture-chunker.v1",
+  "commitSha": "abcdef1234567890",
+  "generatedAt": "2026-05-07T12:00:00.000Z",
+  "indexerName": "fixture-indexer",
+  "indexerVersion": "0.0.0",
+  "parserVersions": {},
+  "recordSchemaVersion": "index_record.v1",
+  "repoId": "repo_fixture_generated",
+  "schemaVersion": "index_artifact.v1",
+  "chunkCount": 0,
+  "edgeCount": 0,
+  "fileCount": 0,
+  "languages": [],
+  "recordCount": 1,
+  "recordFiles": [
+    {
+      "byteLength": 161,
+      "recordCount": 1,
+      "sha256": "sha256:d7e74fd2cc74aa664f225d1e95d25e0040251679a40518fc4af7d90bbeedf5af",
+      "compression": "none",
+      "encoding": "utf-8",
+      "mediaType": "application/jsonl",
+      "path": "records.jsonl",
+      "recordKind": "mixed"
+    }
+  ],
+  "symbolCount": 0
+}
