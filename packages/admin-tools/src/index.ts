@@ -18,21 +18,15 @@ import {
   type BackgroundJobRecord,
   BackgroundJobRepository,
   type CandidateFindingRecord,
-  codeChunkEmbeddings,
-  codeChunks,
-  codeDependencies,
-  codeEdges,
-  codeIndexDiagnostics,
-  codeRoutes,
-  codeTestMappings,
+  CodeIntelligenceRepository,
   debugExports,
-  embeddingJobItems,
-  embeddingJobs,
+  type EmbeddingJobItemRecord,
+  type EmbeddingJobRecord,
+  EmbeddingRepository,
   type HeimdallDatabase,
+  type IndexImportBatchRecord,
   type IndexVersionRecord,
   IndexVersionRepository,
-  indexedFiles,
-  indexImportBatches,
   type LlmCallRecord,
   LlmCallRepository,
   type MemoryCandidateRecord,
@@ -63,7 +57,6 @@ import {
   SandboxRepository,
   type SandboxRunRecord,
   SecurityAuditRepository,
-  symbols,
   usageEvents,
   type ValidatedFindingRecord,
   type WebhookEventRecord,
@@ -88,7 +81,7 @@ import { parseJobEnvelope, QUEUE_NAMES, type QueueName } from "@repo/queue";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { validateAndRankCandidateFindings } from "@repo/review-engine";
 import { type EffectiveReviewPolicy, parseReviewPolicySnapshot } from "@repo/rules";
-import { and, asc, desc as drizzleDesc, eq, sql } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 
 export * from "./compliance-evidence";
 
@@ -1983,41 +1976,22 @@ export async function getIndexVersionInspection(
   dependencies: AdminDebugServiceDependencies,
 ): Promise<AdminIndexVersionInspection> {
   const row = await getIndexVersionRow(indexVersionId, dependencies.db);
-  const [
-    actualFileCount,
-    actualSymbolCount,
-    actualEdgeCount,
-    actualChunkCount,
-    actualDiagnosticCount,
-    actualDependencyCount,
-    actualRouteCount,
-    actualTestMappingCount,
-    actualEmbeddingCount,
-    importBatchRows,
-    embeddingJobRows,
-  ] = await Promise.all([
-    countIndexedFileRows(dependencies.db, indexVersionId),
-    countSymbolRows(dependencies.db, indexVersionId),
-    countCodeEdgeRows(dependencies.db, indexVersionId),
-    countCodeChunkRows(dependencies.db, indexVersionId),
-    countCodeIndexDiagnosticRows(dependencies.db, indexVersionId),
-    countCodeDependencyRows(dependencies.db, indexVersionId),
-    countCodeRouteRows(dependencies.db, indexVersionId),
-    countCodeTestMappingRows(dependencies.db, indexVersionId),
-    countCodeChunkEmbeddingRows(dependencies.db, indexVersionId),
+  const codeIntelligenceRepository = new CodeIntelligenceRepository(dependencies.db);
+  const [actualCounts, importBatchRows, embeddingJobRows] = await Promise.all([
+    codeIntelligenceRepository.countIndexVersionRecords(indexVersionId),
     listIndexImportBatchRows(dependencies.db, indexVersionId),
     listEmbeddingJobRowsForIndexVersion(dependencies.db, indexVersionId),
   ]);
   const counts = {
-    chunks: { actual: actualChunkCount, expected: row.chunkCount },
-    dependencies: { actual: actualDependencyCount, expected: row.dependencyCount },
-    diagnostics: { actual: actualDiagnosticCount, expected: row.diagnosticCount },
-    edges: { actual: actualEdgeCount, expected: row.edgeCount },
-    embeddings: { actual: actualEmbeddingCount, expected: row.embeddedChunkCount },
-    files: { actual: actualFileCount, expected: row.fileCount },
-    routes: { actual: actualRouteCount, expected: row.routeCount },
-    symbols: { actual: actualSymbolCount, expected: row.symbolCount },
-    testMappings: { actual: actualTestMappingCount, expected: row.testMappingCount },
+    chunks: { actual: actualCounts.chunks, expected: row.chunkCount },
+    dependencies: { actual: actualCounts.dependencies, expected: row.dependencyCount },
+    diagnostics: { actual: actualCounts.diagnostics, expected: row.diagnosticCount },
+    edges: { actual: actualCounts.edges, expected: row.edgeCount },
+    embeddings: { actual: actualCounts.embeddings, expected: row.embeddedChunkCount },
+    files: { actual: actualCounts.files, expected: row.fileCount },
+    routes: { actual: actualCounts.routes, expected: row.routeCount },
+    symbols: { actual: actualCounts.symbols, expected: row.symbolCount },
+    testMappings: { actual: actualCounts.testMappings, expected: row.testMappingCount },
   } satisfies AdminIndexVersionCountSummaries;
 
   return {
@@ -3587,9 +3561,9 @@ type PublishedFindingRow = PublishedFindingRecord;
 type MemoryFactRow = MemoryFactRecord;
 type MemoryCandidateRow = MemoryCandidateRecord;
 type IndexVersionRow = IndexVersionRecord;
-type IndexImportBatchRow = typeof indexImportBatches.$inferSelect;
-type EmbeddingJobRow = typeof embeddingJobs.$inferSelect;
-type EmbeddingJobItemRow = typeof embeddingJobItems.$inferSelect;
+type IndexImportBatchRow = IndexImportBatchRecord;
+type EmbeddingJobRow = EmbeddingJobRecord;
+type EmbeddingJobItemRow = EmbeddingJobItemRecord;
 type HeimdallTransaction = Parameters<Parameters<HeimdallDatabase["transaction"]>[0]>[0];
 type HeimdallDbExecutor = HeimdallDatabase | HeimdallTransaction;
 
@@ -3676,118 +3650,12 @@ async function getIndexVersionRow(
   return row;
 }
 
-/** Counts imported file rows for one index version. */
-async function countIndexedFileRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(indexedFiles)
-    .where(eq(indexedFiles.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported symbol rows for one index version. */
-async function countSymbolRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(symbols)
-    .where(eq(symbols.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported code edge rows for one index version. */
-async function countCodeEdgeRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeEdges)
-    .where(eq(codeEdges.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported code chunk rows for one index version. */
-async function countCodeChunkRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeChunks)
-    .where(eq(codeChunks.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported index diagnostic rows for one index version. */
-async function countCodeIndexDiagnosticRows(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeIndexDiagnostics)
-    .where(eq(codeIndexDiagnostics.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported dependency rows for one index version. */
-async function countCodeDependencyRows(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeDependencies)
-    .where(eq(codeDependencies.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported route rows for one index version. */
-async function countCodeRouteRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeRoutes)
-    .where(eq(codeRoutes.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts imported test mapping rows for one index version. */
-async function countCodeTestMappingRows(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeTestMappings)
-    .where(eq(codeTestMappings.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
-/** Counts stored code chunk embedding rows for one index version. */
-async function countCodeChunkEmbeddingRows(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-): Promise<number> {
-  const [row] = await db
-    .select({ value: sql<number>`count(*)::int` })
-    .from(codeChunkEmbeddings)
-    .where(eq(codeChunkEmbeddings.indexVersionId, indexVersionId));
-
-  return Number(row?.value ?? 0);
-}
-
 /** Lists import batches attached to one index version, newest first. */
 async function listIndexImportBatchRows(
   db: HeimdallDatabase,
   indexVersionId: string,
 ): Promise<readonly IndexImportBatchRow[]> {
-  return db
-    .select()
-    .from(indexImportBatches)
-    .where(eq(indexImportBatches.indexVersionId, indexVersionId))
-    .orderBy(drizzleDesc(indexImportBatches.updatedAt));
+  return new IndexVersionRepository(db).listIndexImportBatchesForIndexVersion(indexVersionId);
 }
 
 /** Lists embedding jobs attached to one index version, newest first. */
@@ -3795,11 +3663,7 @@ async function listEmbeddingJobRowsForIndexVersion(
   db: HeimdallDatabase,
   indexVersionId: string,
 ): Promise<readonly EmbeddingJobRow[]> {
-  return db
-    .select()
-    .from(embeddingJobs)
-    .where(eq(embeddingJobs.indexVersionId, indexVersionId))
-    .orderBy(drizzleDesc(embeddingJobs.createdAt));
+  return new EmbeddingRepository(db).listEmbeddingJobsForIndexVersion(indexVersionId);
 }
 
 /** Gets one embedding job summary for background-job debug details. */
@@ -3807,11 +3671,7 @@ async function getEmbeddingJobDebugSummary(
   db: HeimdallDatabase,
   embeddingJobId: string,
 ): Promise<AdminEmbeddingJobDebugSummary | undefined> {
-  const [row] = await db
-    .select()
-    .from(embeddingJobs)
-    .where(eq(embeddingJobs.embeddingJobId, embeddingJobId))
-    .limit(1);
+  const row = await new EmbeddingRepository(db).getEmbeddingJobRecord(embeddingJobId);
 
   return row ? toEmbeddingJobDebugSummary(row) : undefined;
 }
@@ -3821,11 +3681,7 @@ async function listEmbeddingJobItemDebugSummaries(
   db: HeimdallDatabase,
   embeddingJobId: string,
 ): Promise<readonly AdminEmbeddingJobItemDebugSummary[]> {
-  const rows = await db
-    .select()
-    .from(embeddingJobItems)
-    .where(eq(embeddingJobItems.embeddingJobId, embeddingJobId))
-    .limit(50);
+  const rows = await new EmbeddingRepository(db).listEmbeddingJobItemsForJob(embeddingJobId);
 
   return rows.map(toEmbeddingJobItemDebugSummary);
 }

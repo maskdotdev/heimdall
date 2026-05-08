@@ -178,11 +178,12 @@ tracked milestone.
 - Latest DB index-version milestone: `IndexVersionRepository` now supports ready index lookup by
   repo/commit/index key, latest-ready lookup by repo/commit, idempotent create/update, and
   importing, ready, and failed state transitions, plus DB-only inspection records with extended
-  imported-entity counts and artifact-import idempotency lookups. The Postgres-backed integration
-  test verifies the current migration chain plus terminal counts, inspection-count mapping,
-  importer-specific lifecycle transitions, and structured failure mapping. Review orchestration,
-  index imports, and admin tooling now use this repository boundary for ready-index polling,
-  index-import lifecycle reads/writes, and index-version inspection reads.
+  imported-entity counts, artifact-import idempotency lookups, and import-batch inspection reads.
+  The Postgres-backed integration test verifies the current migration chain plus terminal counts,
+  inspection-count mapping, importer-specific lifecycle transitions, import-batch reads, and
+  structured failure mapping. Review orchestration, index imports, and admin tooling now use this
+  repository boundary for ready-index polling, index-import lifecycle reads/writes, import-batch
+  debug reads, and index-version inspection reads.
 - Latest DB memory milestone: `MemoryFactRepository` now owns active repository and organization
   memory fact reads for review validation, repository-scoped inspection reads, single-row lookups,
   conflict-safe fact creation, fact updates, and fact disabling, including status, expiration,
@@ -217,18 +218,22 @@ tracked milestone.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,
-  dependency, route, related-test, and full-text chunk lookups. Retrieval now uses this repository
-  boundary for indexed context queries. The Postgres-backed integration test verifies latest-ready
-  symbol selection, innermost line matching, source ordering, chunk metadata mapping, edge kind
-  filtering, graph chunk direction, dependency and route mapping, related-test mappings, and
-  full-text search.
+  dependency, route, related-test, full-text chunk lookups, and actual row counts for admin
+  index-version inspection. Retrieval now uses this repository boundary for indexed context
+  queries, and admin tooling uses it for index-version count reconciliation instead of importing raw
+  index record tables. The Postgres-backed integration test verifies latest-ready symbol selection,
+  innermost line matching, source ordering, chunk metadata mapping, edge kind filtering, graph
+  chunk direction, dependency and route mapping, related-test mappings, full-text search, and
+  inspection counts.
 - Latest DB embedding milestone: `EmbeddingRepository` now exposes embeddable chunk reads, reusable
   vector cache reads, idempotent embedding storage with chunk and index progress updates, and
-  pgvector similarity search. Retrieval semantic search and `@repo/embedding` batch input/cache
-  reads plus batch embedding writes now call this repository boundary, including embedding writes
-  that run inside the worker's existing job-progress transaction. The Postgres-backed integration
-  test verifies metadata mapping, conflict-safe vector writes, progress updates,
-  cache/content-hash reuse, and nearest-neighbor ordering.
+  pgvector similarity search. It also owns embedding job and sampled job-item debug reads so admin
+  tooling no longer imports raw embedding job tables for index-version and background-job
+  inspection. Retrieval semantic search and `@repo/embedding` batch input/cache reads plus batch
+  embedding writes now call this repository boundary, including embedding writes that run inside the
+  worker's existing job-progress transaction. The Postgres-backed integration test verifies
+  metadata mapping, conflict-safe vector writes, progress updates, cache/content-hash reuse,
+  nearest-neighbor ordering, and embedding debug reads.
 - Latest DB LLM-call milestone: `LlmCallRepository` now owns idempotent LLM call row writes and
   prompt/response artifact link inserts. Review orchestration records successful review-model calls
   through this repository boundary instead of importing raw `llm_calls` or `llm_call_artifacts`
