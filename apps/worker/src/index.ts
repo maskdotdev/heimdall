@@ -137,7 +137,12 @@ import {
   dispatchPendingJobs,
   QUEUE_NAMES,
 } from "@repo/queue";
-import { cleanupRepositoryWorkspace, syncRepositoryWorkspace } from "@repo/repo-sync";
+import {
+  type AcquireRepositoryWorkspaceDependencies,
+  acquireRepositoryWorkspace,
+  createRepoSyncConfig,
+  type RepoSyncConfig,
+} from "@repo/repo-sync";
 import { type ReviewIndexDependencyMode, runPullRequestReview } from "@repo/review-orchestrator";
 import {
   createDockerContainerSandboxRunner,
@@ -189,6 +194,33 @@ type GitHubInstallationRuntimeRef = GitHubInstallationRef & {
   readonly orgId: string;
 };
 
+/** Input used by the worker to acquire an index workspace. */
+export type WorkerRepositoryWorkspaceAcquireInput = {
+  /** Repository provider reference loaded from the database. */
+  readonly repository: GitHubRepositoryRef;
+  /** Heimdall repository ID. */
+  readonly repoId: string;
+  /** Exact commit SHA to make available on disk. */
+  readonly commitSha: string;
+  /** Git provider used to resolve short-lived clone credentials. */
+  readonly gitProvider: GitProvider;
+  /** Repo-sync cache/runtime configuration. */
+  readonly repoSyncConfig: RepoSyncConfig;
+};
+
+/** Leased workspace shape consumed by the worker index job. */
+export type WorkerRepositoryWorkspaceLease = {
+  /** Checked-out workspace path passed to the indexer. */
+  readonly workspacePath: string;
+  /** Releases the workspace lease. */
+  readonly release: () => Promise<void>;
+};
+
+/** Worker index-job workspace acquisition boundary. */
+export type WorkerRepositoryWorkspaceAcquirer = (
+  input: WorkerRepositoryWorkspaceAcquireInput,
+) => Promise<WorkerRepositoryWorkspaceLease>;
+
 /** Options used to create worker job handlers. */
 export type CreateWorkerHandlersOptions = {
   /** Database used to resolve durable job payload IDs. */
@@ -221,6 +253,10 @@ export type CreateWorkerHandlersOptions = {
   readonly publishThrottle?: PublishThrottle;
   /** Optional parent directory for repo-sync workspaces. */
   readonly workspaceRoot?: string;
+  /** Optional repo-sync configuration used by cached workspace acquisition. */
+  readonly repoSyncConfig?: RepoSyncConfig;
+  /** Optional test hook for index-job workspace acquisition. */
+  readonly workspaceAcquirer?: WorkerRepositoryWorkspaceAcquirer;
   /** Durable directory used to store imported index artifacts before workspace cleanup. */
   readonly indexArtifactRoot?: string;
   /** Optional indexer driver selected by runtime configuration or tests. */
@@ -532,6 +568,13 @@ function defaultSleep(ms: number): Promise<void> {
 
 /** Creates real handlers for durable job types consumed by this worker app. */
 export function createWorkerHandlers(options: CreateWorkerHandlersOptions): DurableJobHandlerMap {
+  const repoSyncConfig =
+    options.repoSyncConfig ??
+    createRepoSyncConfig({
+      ...(options.workspaceRoot ? { cacheRoot: options.workspaceRoot } : {}),
+    });
+  const workspaceAcquirer = options.workspaceAcquirer ?? acquireWorkerRepositoryWorkspace;
+
   return {
     [JOB_TYPES.SyncInstallation]: async (envelope) => {
       const payload = asSyncInstallationPayload(envelope.payload);
@@ -548,21 +591,13 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       const payload = asIndexRepoCommitPayload(envelope.payload);
       const repository = await loadGitHubRepositoryRef(options.db, payload);
 
-      const workspace = await syncRepositoryWorkspace(
-        {
-          ...repository,
-          commitSha: payload.commitSha,
-          keepWorkspace: true,
-          repoId: payload.repoId,
-          ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
-        },
-        {
-          gitProvider: options.gitProvider,
-          ...(options.metrics ? { metrics: options.metrics } : {}),
-          ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
-          ...(options.traces ? { traces: options.traces } : {}),
-        },
-      );
+      const workspace = await workspaceAcquirer({
+        commitSha: payload.commitSha,
+        gitProvider: options.gitProvider,
+        repoId: payload.repoId,
+        repoSyncConfig,
+        repository,
+      });
       try {
         const driver = withIndexerTelemetry(
           withIndexerTimeout(options.indexerDriver ?? createTypeScriptIndexerDriver(), {
@@ -617,9 +652,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           timestamp: new Date().toISOString(),
         });
       } finally {
-        await cleanupRepositoryWorkspace(workspace.workspacePath, {
-          ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
-        });
+        await workspace.release();
       }
     },
     [JOB_TYPES.EmbeddingBatch]: async (envelope) => {
@@ -782,6 +815,34 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
       );
     },
+  };
+}
+
+/** Acquires a cached repository workspace for a worker index job. */
+export async function acquireWorkerRepositoryWorkspace(
+  input: WorkerRepositoryWorkspaceAcquireInput,
+  dependencies: AcquireRepositoryWorkspaceDependencies = {},
+): Promise<WorkerRepositoryWorkspaceLease> {
+  const cloneAuth = await input.gitProvider.getCloneAuth(input.repository);
+  const lease = await acquireRepositoryWorkspace(
+    {
+      cloneUrl: cloneAuth.cloneUrl,
+      commitSha: input.commitSha,
+      config: input.repoSyncConfig,
+      credential: {
+        kind: "https-basic-token",
+        token: cloneAuth.password,
+        username: cloneAuth.username,
+      },
+      purpose: "index",
+      repoId: input.repoId,
+    },
+    dependencies,
+  );
+
+  return {
+    release: lease.release,
+    workspacePath: lease.path,
   };
 }
 

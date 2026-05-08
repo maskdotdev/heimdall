@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY } from "@repo/artifacts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
@@ -7,6 +10,7 @@ import {
   validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
+import type { GitHubRepositoryRef } from "@repo/github";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
 import {
   OBSERVABILITY_METRIC_NAMES,
@@ -14,8 +18,16 @@ import {
   type TelemetryMetricRecorder,
 } from "@repo/observability";
 import type { PublishOperationType, PublishThrottleSlotInput } from "@repo/publisher";
+import {
+  createRepoSyncConfig,
+  getRepoSyncMirrorPath,
+  getRepoSyncTempMirrorPath,
+  getRepoSyncWorktreePath,
+  RepoSyncGitCommandError,
+} from "@repo/repo-sync";
 import { describe, expect, it, vi } from "vitest";
 import {
+  acquireWorkerRepositoryWorkspace,
   cleanupExpiredReviewArtifacts,
   createRedisPublishThrottle,
   createWorkerEmbeddingProviderFromEnvironment,
@@ -124,6 +136,114 @@ describe("loadGitHubInstallationRef", () => {
         "inst_gitlab",
       ),
     ).rejects.toThrow(/GitHub installation inst_gitlab was not found/u);
+  });
+});
+
+describe("acquireWorkerRepositoryWorkspace", () => {
+  it("resolves clone credentials and acquires a cached repo-sync workspace", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-worker-repo-sync-test-"));
+    const commitSha = "0123456789abcdef0123456789abcdef01234567";
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const mutableCommands: string[][] = [];
+    const fetchEnvironments: Readonly<Record<string, string | undefined>>[] = [];
+    const cloneAuthInputs: unknown[] = [];
+    let commitExists = false;
+
+    try {
+      const lease = await acquireWorkerRepositoryWorkspace(
+        {
+          commitSha,
+          gitProvider: {
+            getCloneAuth: async (input: GitHubRepositoryRef) => {
+              cloneAuthInputs.push(input);
+              return {
+                cloneUrl: "https://x-access-token:embedded-secret@github.com/acme/api.git?token=1",
+                expiresAt: "2026-05-08T00:00:00.000Z",
+                password: "token-123",
+                username: "x-access-token",
+              };
+            },
+          } as never,
+          repoId: "repo_123",
+          repoSyncConfig: config,
+          repository: {
+            installationId: "inst_123",
+            owner: "acme",
+            provider: "github",
+            providerInstallationId: "999",
+            providerRepoId: "1000",
+            repo: "api",
+          },
+        },
+        {
+          gitRunner: async (args, options) => {
+            mutableCommands.push([...args]);
+            if (args[0] === "clone") {
+              await mkdir(args[args.length - 1] ?? "", { recursive: true });
+              return "";
+            }
+            if (args[2] === "cat-file") {
+              if (commitExists) {
+                return "";
+              }
+              throw createWorkerMissingCommitGitError();
+            }
+            if (args[2] === "fetch") {
+              fetchEnvironments.push(options.env ?? {});
+              commitExists = true;
+              return "";
+            }
+            return "";
+          },
+          leaseIdFactory: () => "lease_123",
+          tempIdFactory: () => "tmp_456",
+        },
+      );
+
+      expect(lease.workspacePath).toBe(worktreePath);
+      await lease.release();
+
+      expect(cloneAuthInputs).toEqual([
+        {
+          installationId: "inst_123",
+          owner: "acme",
+          provider: "github",
+          providerInstallationId: "999",
+          providerRepoId: "1000",
+          repo: "api",
+        },
+      ]);
+      expect(mutableCommands).toEqual([
+        [
+          "clone",
+          "--bare",
+          "--filter=blob:none",
+          "--no-tags",
+          "https://github.com/acme/api.git",
+          tempMirrorPath,
+        ],
+        ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+        ["-C", mirrorPath, "fetch", "--no-tags", "origin", commitSha],
+        ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+        ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+        ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+        ["-C", mirrorPath, "worktree", "prune"],
+      ]);
+      expect(fetchEnvironments).toEqual([
+        expect.objectContaining({
+          GIT_PASSWORD: "token-123",
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_USERNAME: "x-access-token",
+        }),
+      ]);
+      expect(JSON.stringify(mutableCommands)).not.toContain("token-123");
+      expect(JSON.stringify(mutableCommands)).not.toContain("embedded-secret");
+    } finally {
+      await rm(cacheRoot, { force: true, recursive: true });
+    }
   });
 });
 
@@ -1811,6 +1931,18 @@ function createWorkerRecordingMetrics(records: WorkerRecordedMetric[]): Telemetr
       });
     },
   };
+}
+
+/** Creates a repo-sync command failure for missing commit checks. */
+function createWorkerMissingCommitGitError(): RepoSyncGitCommandError {
+  return new RepoSyncGitCommandError({
+    code: "GIT_COMMAND_FAILED",
+    command: "git cat-file -e",
+    message: "Git command failed: git cat-file -e",
+    stderr: { originalBytes: 0, text: "", truncated: false },
+    stdout: { originalBytes: 0, text: "", truncated: false },
+    timeoutMs: 120_000,
+  });
 }
 
 /** Provider installation row shape used by the worker installation lookup stub. */
