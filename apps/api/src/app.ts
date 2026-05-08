@@ -106,9 +106,8 @@ import {
   MemoryFactRepository,
   type memoryCandidates,
   type memoryFacts,
-  oauthStates,
-  orgMemberships,
   orgs,
+  ProductAuthRepository,
   ProviderInstallationRepository,
   providerInstallations,
   pullRequestSnapshots,
@@ -127,9 +126,6 @@ import {
   securityEvents,
   subscriptions,
   usageEvents,
-  userProviderAccounts,
-  userSessions,
-  users,
   WebhookRepository,
 } from "@repo/db";
 import {
@@ -219,21 +215,7 @@ import {
   type WebhookIngestionResult,
   WebhookPayloadError,
 } from "@repo/webhook-ingestion";
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gt,
-  gte,
-  ilike,
-  inArray,
-  isNull,
-  lt,
-  or,
-  type SQL,
-  sql,
-} from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lt, or, type SQL, sql } from "drizzle-orm";
 import { Elysia } from "elysia";
 
 /** Authentication settings for admin control-plane routes. */
@@ -7539,7 +7521,7 @@ async function startProductGitHubOAuth(
   const callbackUrl = productOAuthCallbackUrl(auth, request.requestUrl);
   const now = new Date();
 
-  await db.insert(oauthStates).values({
+  await new ProductAuthRepository(db).createProductOAuthState({
     expiresAt: new Date(now.getTime() + auth.stateTtlMinutes * 60 * 1000),
     metadata: {
       provider: "github",
@@ -7597,19 +7579,12 @@ async function completeProductGitHubOAuth(
 
 /** Consumes an OAuth state record exactly once and returns its redirect path. */
 async function consumeProductOAuthState(db: HeimdallDatabase, state: string): Promise<string> {
-  const [row] = await db
-    .update(oauthStates)
-    .set({ consumedAt: new Date() })
-    .where(
-      and(
-        eq(oauthStates.stateHash, hashProductOAuthState(state)),
-        isNull(oauthStates.consumedAt),
-        gt(oauthStates.expiresAt, new Date()),
-      ),
-    )
-    .returning({
-      redirectTo: oauthStates.redirectTo,
-    });
+  const now = new Date();
+  const row = await new ProductAuthRepository(db).consumeProductOAuthState({
+    consumedAt: now,
+    expiresAfter: now,
+    stateHash: hashProductOAuthState(state),
+  });
 
   if (!row) {
     throw new ProductOAuthError(
@@ -7759,88 +7734,25 @@ async function upsertProductOAuthUser(
   profile: ProductGitHubOAuthProfile,
   requestId: string,
 ): Promise<string> {
-  const existingAccount = await getProductProviderAccount(db, "github", profile.providerUserId);
-  const userId =
-    existingAccount?.userId ?? stablePrefixedId("usr", ["github", profile.providerUserId]);
-  const now = new Date();
-
-  await db
-    .insert(users)
-    .values({
-      ...(profile.avatarUrl ? { avatarUrl: profile.avatarUrl } : {}),
-      ...(profile.displayName ? { displayName: profile.displayName } : {}),
-      metadata: {
-        lastLoginProvider: "github",
-        providerLogin: profile.providerLogin,
-        requestId,
-      },
-      ...(profile.primaryEmail ? { primaryEmail: profile.primaryEmail } : {}),
-      userId,
-    })
-    .onConflictDoUpdate({
-      target: users.userId,
-      set: {
-        avatarUrl: profile.avatarUrl ?? null,
-        displayName: profile.displayName ?? null,
-        metadata: {
-          lastLoginProvider: "github",
-          providerLogin: profile.providerLogin,
-          requestId,
-        },
-        primaryEmail: profile.primaryEmail ?? null,
-        updatedAt: now,
-      },
-    });
-
-  await db
-    .insert(userProviderAccounts)
-    .values({
-      ...(profile.primaryEmail ? { email: profile.primaryEmail } : {}),
-      metadata: {
-        requestId,
-      },
-      provider: "github",
+  return new ProductAuthRepository(db).upsertProductOAuthUser({
+    avatarUrl: profile.avatarUrl,
+    displayName: profile.displayName,
+    fallbackUserId: stablePrefixedId("usr", ["github", profile.providerUserId]),
+    primaryEmail: profile.primaryEmail,
+    provider: "github",
+    providerLogin: profile.providerLogin,
+    providerMetadata: {
+      requestId,
+    },
+    providerUserId: profile.providerUserId,
+    updatedAt: new Date(),
+    userMetadata: {
+      lastLoginProvider: "github",
       providerLogin: profile.providerLogin,
-      providerUserId: profile.providerUserId,
-      userId,
-      userProviderAccountId: stablePrefixedId("upacct", ["github", profile.providerUserId]),
-    })
-    .onConflictDoUpdate({
-      target: [userProviderAccounts.provider, userProviderAccounts.providerUserId],
-      set: {
-        email: profile.primaryEmail ?? null,
-        metadata: {
-          requestId,
-        },
-        providerLogin: profile.providerLogin,
-        updatedAt: now,
-        userId,
-      },
-    });
-
-  return userId;
-}
-
-/** Gets an existing product provider account by provider identity. */
-async function getProductProviderAccount(
-  db: HeimdallDatabase,
-  provider: string,
-  providerUserId: string,
-): Promise<{ readonly userId: string } | undefined> {
-  const [row] = await db
-    .select({
-      userId: userProviderAccounts.userId,
-    })
-    .from(userProviderAccounts)
-    .where(
-      and(
-        eq(userProviderAccounts.provider, provider),
-        eq(userProviderAccounts.providerUserId, providerUserId),
-      ),
-    )
-    .limit(1);
-
-  return row;
+      requestId,
+    },
+    userProviderAccountId: stablePrefixedId("upacct", ["github", profile.providerUserId]),
+  });
 }
 
 /** Requires usable GitHub OAuth configuration. */
@@ -7908,7 +7820,7 @@ async function createProductSession(
   const now = new Date();
   const expiresAt = new Date(now.getTime() + productSessionCookieMaxAgeSeconds(auth) * 1000);
 
-  await db.insert(userSessions).values({
+  await new ProductAuthRepository(db).createProductSession({
     expiresAt,
     ...(request.metadata ? { metadata: request.metadata } : {}),
     sessionHash,
@@ -7956,26 +7868,10 @@ async function readProductSessionByHash(
   sessionHash: string,
   now: Date,
 ): Promise<ProductSessionContext | undefined> {
-  const [row] = await db
-    .select({
-      avatarUrl: users.avatarUrl,
-      displayName: users.displayName,
-      expiresAt: userSessions.expiresAt,
-      primaryEmail: users.primaryEmail,
-      selectedOrgId: userSessions.selectedOrgId,
-      sessionId: userSessions.sessionId,
-      userId: users.userId,
-    })
-    .from(userSessions)
-    .innerJoin(users, eq(users.userId, userSessions.userId))
-    .where(
-      and(
-        eq(userSessions.sessionHash, sessionHash),
-        isNull(userSessions.revokedAt),
-        gt(userSessions.expiresAt, now),
-      ),
-    )
-    .limit(1);
+  const row = await new ProductAuthRepository(db).getActiveProductSessionByHash({
+    now,
+    sessionHash,
+  });
 
   if (!row) {
     return undefined;
@@ -8011,14 +7907,7 @@ async function listProductSessionMemberships(
   db: HeimdallDatabase,
   userId: string,
 ): Promise<readonly ProductMembership[]> {
-  const rows = await db
-    .select({
-      orgId: orgMemberships.orgId,
-      role: orgMemberships.role,
-    })
-    .from(orgMemberships)
-    .where(eq(orgMemberships.userId, userId))
-    .orderBy(asc(orgMemberships.orgId));
+  const rows = await new ProductAuthRepository(db).listProductMemberships(userId);
 
   return rows.flatMap((row) =>
     isProductRole(row.role) ? [{ orgId: row.orgId, role: row.role }] : [],
@@ -8038,14 +7927,10 @@ async function listProductSessionInstallations(
 
 /** Revokes one DB-backed product session. */
 async function revokeProductSession(db: HeimdallDatabase, sessionId: string): Promise<void> {
-  const now = new Date();
-  await db
-    .update(userSessions)
-    .set({
-      revokedAt: now,
-      updatedAt: now,
-    })
-    .where(eq(userSessions.sessionId, sessionId));
+  await new ProductAuthRepository(db).revokeProductSession({
+    revokedAt: new Date(),
+    sessionId,
+  });
 }
 
 /** Returns a Set-Cookie header that clears the product session cookie. */
@@ -10728,12 +10613,7 @@ async function markMemoryCandidateRejected(
 
 /** Returns a valid user ID for FK-backed decision fields when the actor is stored locally. */
 async function existingUserId(db: HeimdallDatabase, userId: string): Promise<string | null> {
-  const [row] = await db
-    .select({ userId: users.userId })
-    .from(users)
-    .where(eq(users.userId, userId))
-    .limit(1);
-  return row?.userId ?? null;
+  return (await new ProductAuthRepository(db).getExistingProductUserId(userId)) ?? null;
 }
 
 /** Maps a feedback candidate kind to a scoped API memory fact kind. */
