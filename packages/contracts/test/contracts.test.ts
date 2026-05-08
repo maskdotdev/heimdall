@@ -14,6 +14,8 @@ import {
   CreateRepoRuleRequestSchema,
   ListRepoRulesResponseSchema,
   UpdateRepoRuleRequestSchema,
+  ValidateRepoLocalConfigFileRequestSchema,
+  ValidateRepoLocalConfigFileResponseSchema,
 } from "#contracts/api/rules";
 import { JOB_TYPES } from "#contracts/enums/jobs";
 import {
@@ -511,6 +513,32 @@ describe("contract validation", () => {
       safeParseWithSchema("UpdateRepoRuleRequest", UpdateRepoRuleRequestSchema, {
         enabled: false,
       }).ok,
+    ).toBe(true);
+
+    expect(
+      safeParseWithSchema(
+        "ValidateRepoLocalConfigFileRequest",
+        ValidateRepoLocalConfigFileRequestSchema,
+        {
+          content: "version: 1\nreview:\n  mode: summary_only\n",
+          format: "yaml",
+          sourcePath: ".github/ai-reviewer.yml",
+        },
+      ).ok,
+    ).toBe(true);
+
+    expect(
+      safeParseWithSchema(
+        "ValidateRepoLocalConfigFileResponse",
+        ValidateRepoLocalConfigFileResponseSchema,
+        {
+          data: {
+            valid: false,
+            errors: [{ code: "unknown_key", message: "Unknown config key.", path: "$.unknown" }],
+            warnings: [],
+          },
+        },
+      ).ok,
     ).toBe(true);
   });
 

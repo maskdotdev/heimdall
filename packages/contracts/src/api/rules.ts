@@ -1,6 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { FindingCategorySchema, FindingSeveritySchema } from "../enums/finding";
 import { RepoRuleEffectSchema, RepoRuleMatcherSchema, RepoRuleSchema } from "../memory/repo-rule";
+import { RepoPathSchema } from "../primitives/paths";
 import { EvidenceSchema, FindingLocationSchema } from "../review/finding";
 import { ApiSuccessResponseSchema } from "./common";
 import { UpdateRepositoryControlPlaneSettingsRequestSchema } from "./repositories";
@@ -71,3 +72,62 @@ export const TestRepositoryPolicyRequestSchema = Type.Object(
   { additionalProperties: false },
 );
 export type TestRepositoryPolicyRequest = Static<typeof TestRepositoryPolicyRequestSchema>;
+
+/** Supported config file content formats for validation previews. */
+export const RepoLocalConfigValidationFormatSchema = Type.Union([
+  Type.Literal("yaml"),
+  Type.Literal("json"),
+]);
+/** Supported config file content formats for validation previews. */
+export type RepoLocalConfigValidationFormat = Static<typeof RepoLocalConfigValidationFormatSchema>;
+
+/** Request body for validating one repo-local reviewer config file draft. */
+export const ValidateRepoLocalConfigFileRequestSchema = Type.Object(
+  {
+    content: Type.String(),
+    format: RepoLocalConfigValidationFormatSchema,
+    sourcePath: Type.Optional(RepoPathSchema),
+  },
+  { additionalProperties: false },
+);
+/** Request body for validating one repo-local reviewer config file draft. */
+export type ValidateRepoLocalConfigFileRequest = Static<
+  typeof ValidateRepoLocalConfigFileRequestSchema
+>;
+
+/** Validation error returned for a rejected repo-local reviewer config draft. */
+export const RepoLocalConfigValidationErrorSchema = Type.Object(
+  {
+    code: Type.String({ minLength: 1 }),
+    message: Type.String({ minLength: 1 }),
+    path: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Non-fatal warning returned for a repo-local reviewer config draft. */
+export const RepoLocalConfigValidationWarningSchema = Type.Object(
+  {
+    code: Type.String({ minLength: 1 }),
+    message: Type.String({ minLength: 1 }),
+    details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
+
+/** Response body for validating one repo-local reviewer config file draft. */
+export const ValidateRepoLocalConfigFileResponseSchema = ApiSuccessResponseSchema(
+  Type.Object(
+    {
+      valid: Type.Boolean(),
+      parsed: Type.Optional(Type.Unknown()),
+      errors: Type.Array(RepoLocalConfigValidationErrorSchema),
+      warnings: Type.Array(RepoLocalConfigValidationWarningSchema),
+    },
+    { additionalProperties: false },
+  ),
+);
+/** Response body for validating one repo-local reviewer config file draft. */
+export type ValidateRepoLocalConfigFileResponse = Static<
+  typeof ValidateRepoLocalConfigFileResponseSchema
+>;

@@ -73,6 +73,8 @@ import {
   UpdateRepositoryControlPlaneSettingsRequestSchema,
   type UsageEventType,
   UserIdSchema,
+  type ValidateRepoLocalConfigFileRequest,
+  ValidateRepoLocalConfigFileRequestSchema,
 } from "@repo/contracts";
 import {
   artifactAccessEvents,
@@ -153,6 +155,9 @@ import {
   type PathClassification,
   type PolicyDecisionTrace,
   type PolicyWarning,
+  parseRepoLocalConfig,
+  type RepoLocalConfig,
+  type RepoLocalConfigValidationError,
 } from "@repo/rules";
 import {
   type AdminActor,
@@ -1046,6 +1051,18 @@ type AdminRepositoryPolicyTest = {
   readonly pathClassification: PathClassification;
   /** Finding policy decision for the sample finding. */
   readonly findingDecision: FindingPolicyDecision;
+};
+
+/** Repo-local reviewer config validation response for settings UX. */
+type AdminRepoLocalConfigValidation = {
+  /** Whether the supplied config can be parsed and used. */
+  readonly valid: boolean;
+  /** Parsed normalized config when validation succeeds. */
+  readonly parsed?: RepoLocalConfig | undefined;
+  /** Validation errors that prevent use. */
+  readonly errors: readonly RepoLocalConfigValidationError[];
+  /** Non-fatal validation or policy warnings. */
+  readonly warnings: readonly PolicyWarning[];
 };
 
 /** Repository discovery row returned by admin overview and repository list routes. */
@@ -2868,6 +2885,11 @@ export type AdminControlPlaneService = {
     repoId: string,
     request: TestRepositoryPolicyRequest,
   ) => Promise<AdminRepositoryPolicyTest>;
+  /** Validates one repo-local reviewer config draft for a repository. */
+  readonly validateRepositoryConfigFile: (
+    repoId: string,
+    request: ValidateRepoLocalConfigFileRequest,
+  ) => Promise<AdminRepoLocalConfigValidation>;
   /** Gets organization-level policy defaults and guardrails. */
   readonly getOrgSettings: (orgId: string) => Promise<AdminOrgControlPlaneSettings>;
   /** Updates organization-level policy defaults and guardrails. */
@@ -4465,6 +4487,57 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           parsed.value,
         );
         return { data: test };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
+    .post("/api/v1/repositories/:repoId/config-file/validate", async ({ params, request, set }) => {
+      const guardResult = await guardApiV1Session(
+        request,
+        set,
+        adminAuth,
+        productSessionAuth,
+        getProductSessionService,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const parsed = safeParseWithSchema(
+        "ValidateRepoLocalConfigFileRequest",
+        ValidateRepoLocalConfigFileRequestSchema,
+        await request.json().catch(() => undefined),
+      );
+      if (!parsed.ok) {
+        set.status = 400;
+        return {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+          },
+        };
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().getRepositorySettings(params.repoId);
+        const authorizationResponse = guardApiV1ScopedAccess(
+          guardResult,
+          settings.repository.orgId,
+          settings.repository.repoId,
+          "rule:read",
+          set,
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const validation = await getAdminControlPlaneService().validateRepositoryConfigFile(
+          params.repoId,
+          parsed.value,
+        );
+        return { data: validation };
       } catch (error) {
         return handleAdminControlPlaneError(error, set);
       }
@@ -6788,6 +6861,54 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         return handleAdminControlPlaneError(error, set);
       }
     })
+    .post("/admin/repos/:repoId/config-file/validate", async ({ params, request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const parsed = safeParseWithSchema(
+        "ValidateRepoLocalConfigFileRequest",
+        ValidateRepoLocalConfigFileRequestSchema,
+        await request.json().catch(() => undefined),
+      );
+      if (!parsed.ok) {
+        set.status = 400;
+        return {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+          },
+        };
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().getRepositorySettings(params.repoId);
+        const authorizationResponse = guardScopedAccess(
+          guardResult.actor,
+          settings.repository.orgId,
+          settings.repository.repoId,
+          set,
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const validation = await getAdminControlPlaneService().validateRepositoryConfigFile(
+          params.repoId,
+          parsed.value,
+        );
+        return { data: validation };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
     .get("/admin/repos/:repoId/settings", async ({ params, request, set }) => {
       const guardResult = guardAdminSession(
         request,
@@ -7424,6 +7545,8 @@ function createAdminControlPlaneService(dependencies: {
       previewRepositoryPolicy(dependencies.db, repoId, patch),
     testRepositoryPolicy: (repoId, request) =>
       testRepositoryPolicy(dependencies.db, repoId, request),
+    validateRepositoryConfigFile: (repoId, request) =>
+      validateRepositoryConfigFile(dependencies.db, repoId, request),
     recordFindingOutcome: (findingId, request) =>
       recordFindingOutcome(dependencies.db, findingId, request),
     rejectMemoryCandidate: (memoryCandidateId, request) =>
@@ -11866,6 +11989,53 @@ async function testRepositoryPolicy(
     pathClassification,
     preview: policyPreviewFromResult(result),
   };
+}
+
+/** Validates one repo-local reviewer config draft for a repository. */
+async function validateRepositoryConfigFile(
+  db: HeimdallDatabase,
+  repoId: string,
+  request: ValidateRepoLocalConfigFileRequest,
+): Promise<AdminRepoLocalConfigValidation> {
+  const repositoryRepository = new RepositoryRepository(db);
+  const settings = await getRepositorySettings(db, repoId);
+  const orgSettings =
+    (await repositoryRepository.getOrgSettings(settings.repository.orgId)) ??
+    createDefaultOrgSettings(settings.repository.orgId, settings.repository.updatedAt);
+  const parsed = parseRepoLocalConfig({
+    content: request.content,
+    format: request.format,
+    sourceCommitSha: "0000000",
+    sourcePath: request.sourcePath ?? defaultRepoLocalConfigValidationSourcePath(),
+  });
+  const warnings: PolicyWarning[] = [...parsed.warnings];
+  if (parsed.ok && !orgSettings.allowRepoLocalConfig) {
+    warnings.push({
+      code: "repo_local_config_disabled_by_org_settings",
+      message: "Repo-local config is valid but organization settings currently disable it.",
+      details: {
+        orgSettingsVersion: orgSettings.version,
+      },
+    });
+  }
+
+  return parsed.ok
+    ? {
+        errors: [],
+        parsed: parsed.config,
+        valid: true,
+        warnings,
+      }
+    : {
+        errors: parsed.errors,
+        valid: false,
+        warnings,
+      };
+}
+
+/** Returns the validation source path used when the caller did not provide one. */
+function defaultRepoLocalConfigValidationSourcePath(): string {
+  return ".github/ai-reviewer.yml";
 }
 
 /** Updates organization policy defaults and appends a before/after audit record atomically. */

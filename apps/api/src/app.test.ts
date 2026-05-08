@@ -951,6 +951,22 @@ describe("api app", () => {
             },
           };
         },
+        validateRepositoryConfigFile: async (_repoId, request) => {
+          calls.push(`validate:${request.format}:${request.sourcePath ?? "default"}`);
+          return {
+            errors: [],
+            parsed: {
+              schemaVersion: "repo_local_config.v1",
+              configVersion: 1,
+              sourceCommitSha: "0000000",
+              sourceHash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              sourcePath: request.sourcePath ?? ".github/ai-reviewer.yml",
+              review: { mode: "summary_only" },
+            },
+            valid: true,
+            warnings: [],
+          };
+        },
         updateRepositoryRule: async (_repoId, ruleId, request) => {
           calls.push(`update:${ruleId}:${request.enabled}`);
           return repoRuleSummaryFixture({
@@ -1017,6 +1033,17 @@ describe("api app", () => {
         method: "POST",
       }),
     );
+    const validateResponse = await app.handle(
+      new Request("http://localhost/api/v1/repositories/repo_1/config-file/validate", {
+        body: JSON.stringify({
+          content: "version: 1\nreview:\n  mode: summary_only\n",
+          format: "yaml",
+          sourcePath: ".github/ai-reviewer.yml",
+        }),
+        headers: productHeaders,
+        method: "POST",
+      }),
+    );
     const updateResponse = await app.handle(
       new Request("http://localhost/api/v1/repositories/repo_1/rules/rule_1", {
         body: JSON.stringify({ enabled: false }),
@@ -1035,6 +1062,7 @@ describe("api app", () => {
     expect(previewResponse.status).toBe(200);
     expect(createResponse.status).toBe(201);
     expect(testResponse.status).toBe(200);
+    expect(validateResponse.status).toBe(200);
     expect(updateResponse.status).toBe(200);
     expect(deleteResponse.status).toBe(200);
     expect(observedPatch).toEqual({
@@ -1045,6 +1073,7 @@ describe("api app", () => {
     expect(calls).toEqual([
       "create:context:Public API guidance",
       "test:src/generated/client.ts",
+      "validate:yaml:.github/ai-reviewer.yml",
       "update:rule_1:false",
       "delete:rule_1",
     ]);
@@ -1062,6 +1091,12 @@ describe("api app", () => {
         findingDecision: { reasonCode: "suppressed_by_repo_rule", shouldPublish: false },
         pathClassification: { generated: true, path: "src/generated/client.ts" },
         preview: { policyHash: "sha256:product-test" },
+      },
+    });
+    await expect(validateResponse.json()).resolves.toMatchObject({
+      data: {
+        parsed: { review: { mode: "summary_only" }, sourcePath: ".github/ai-reviewer.yml" },
+        valid: true,
       },
     });
   });
@@ -5593,6 +5628,7 @@ describe("api app", () => {
   it("previews repository policy with a draft settings patch", async () => {
     let observedPatch: UpdateRepositoryControlPlaneSettingsRequest | undefined;
     let observedTestPath: string | undefined;
+    let observedConfigFormat: string | undefined;
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({
@@ -5656,6 +5692,14 @@ describe("api app", () => {
             },
           };
         },
+        validateRepositoryConfigFile: async (_repoId, request) => {
+          observedConfigFormat = request.format;
+          return {
+            errors: [{ code: "unknown_key", message: "Unknown config key.", path: "$.unknown" }],
+            valid: false,
+            warnings: [],
+          };
+        },
       }),
       githubWebhookHandler: noopWebhookHandler(),
     });
@@ -5704,11 +5748,25 @@ describe("api app", () => {
         },
       }),
     );
+    const validationResponse = await app.handle(
+      new Request("http://localhost/admin/repos/repo_1/config-file/validate", {
+        method: "POST",
+        body: JSON.stringify({ content: "version: 1\nunknown: true\n", format: "yaml" }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+      }),
+    );
 
     expect(response.status).toBe(200);
     expect(testResponse.status).toBe(200);
+    expect(validationResponse.status).toBe(200);
     expect(observedPatch).toEqual({ maxCommentsPerReview: 50, reviewPolicy: "summary_only" });
     expect(observedTestPath).toBe("src/math.ts");
+    expect(observedConfigFormat).toBe("yaml");
     await expect(response.json()).resolves.toMatchObject({
       data: {
         effectivePolicy: { reviewPolicy: "summary_only" },
@@ -5721,6 +5779,12 @@ describe("api app", () => {
         findingDecision: { reasonCode: "below_severity_threshold", shouldPublish: false },
         pathClassification: { included: true, path: "src/math.ts" },
         preview: { policyHash: "sha256:policy-test" },
+      },
+    });
+    await expect(validationResponse.json()).resolves.toMatchObject({
+      data: {
+        errors: [{ code: "unknown_key", path: "$.unknown" }],
+        valid: false,
       },
     });
   });
@@ -6302,6 +6366,18 @@ function createMockControlPlaneService(
         },
       };
     },
+    validateRepositoryConfigFile: async (_repoId, request) => ({
+      errors: [],
+      parsed: {
+        schemaVersion: "repo_local_config.v1",
+        configVersion: 1,
+        sourceCommitSha: "0000000",
+        sourceHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        sourcePath: request.sourcePath ?? ".github/ai-reviewer.yml",
+      },
+      valid: true,
+      warnings: [],
+    }),
     listAuditLogs: async () => [],
     recordFindingOutcome: async () => findingOutcomeRecordFixture(),
     rejectMemoryCandidate: async () => memoryCandidateRejectionFixture(),
