@@ -13,7 +13,7 @@ import {
   validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
-import type { GitHubRepositoryRef } from "@repo/github";
+import { GitHubPermissionError, type GitHubRepositoryRef } from "@repo/github";
 import type { IndexArtifact } from "@repo/index-schema";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
 import {
@@ -55,6 +55,7 @@ import {
   loadGitHubInstallationRef,
   persistIndexArtifactForImport,
   type RedisPublishThrottleClient,
+  recordDataDeletionProviderCleanupSecurityEvent,
   recordWorkerQueueMetrics,
   resolveWorkerEmbeddingApiKey,
   resolveWorkerGitHubPrivateKey,
@@ -1198,6 +1199,62 @@ describe("createWorkerHandlers", () => {
         type: "data_deletion_failed",
       },
     ]);
+  });
+
+  it("records provider cleanup security events for data deletion GitHub failures", () => {
+    const securityEventSink = createMemorySecurityEventSink();
+
+    recordDataDeletionProviderCleanupSecurityEvent({
+      dataDeletionRequestId: "ddr_worker_provider_cleanup",
+      error: new GitHubPermissionError("Resource not accessible by integration.", {
+        rateLimit: {
+          remaining: 42,
+          resource: "core",
+        },
+        requestId: "github_request_provider_cleanup",
+        status: 403,
+      }),
+      orgId: "org_worker_provider_cleanup",
+      reason: "customer_request",
+      securityEventSink,
+      target: {
+        kind: "review_comment",
+        provider: "github",
+        providerResourceId: "provider_comment_secret_remote_id",
+        repoId: "repo_worker_provider_cleanup",
+        reviewRunId: "rrn_worker_provider_cleanup",
+        sourceRowId: "finding_worker_provider_cleanup",
+        sourceTable: "published_findings",
+      },
+    });
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: expect.objectContaining({
+          dataDeletionRequestId: "ddr_worker_provider_cleanup",
+          githubRequestId: "github_request_provider_cleanup",
+          githubStatus: 403,
+          providerArtifactKind: "review_comment",
+          providerArtifactRowId: "finding_worker_provider_cleanup",
+          providerArtifactTable: "published_findings",
+          rateLimitBucket: "core",
+          rateLimitRemaining: 42,
+          reason: "customer_request",
+          reviewRunId: "rrn_worker_provider_cleanup",
+        }),
+        orgId: "org_worker_provider_cleanup",
+        repoId: "repo_worker_provider_cleanup",
+        resourceId: "ddr_worker_provider_cleanup",
+        resourceType: "data_deletion_request",
+        severity: "high",
+        source: "github",
+        status: "new",
+        type: "github_data_deletion_permission_denied",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain(
+      "provider_comment_secret_remote_id",
+    );
   });
 
   it("dispatches embedding repair jobs through the configured repairer", async () => {
