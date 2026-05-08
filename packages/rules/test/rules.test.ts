@@ -245,6 +245,131 @@ describe("buildReviewPolicySnapshot", () => {
       "user_rules_disabled_by_org_settings",
     ]);
   });
+
+  it("merges allowed repo-local config into policy snapshots with source metadata", () => {
+    const parsed = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "review:",
+        "  mode: summary_only",
+        "  max_comments_per_pr: 4",
+        "  severity_threshold: high",
+        "  minimum_confidence: 0.8",
+        "triggers:",
+        "  enabled_actions:",
+        "    - opened",
+        "  require_any_label:",
+        "    - ai-ready",
+        "    - review-me",
+        "  skip_if_any_label:",
+        "    - no-ai-review",
+        "paths:",
+        "  ignored:",
+        "    - apps/generated/**",
+        "  tests:",
+        "    - tests/**/*.ts",
+        "categories:",
+        "  enabled:",
+        "    - security",
+        "    - style",
+        "publishing:",
+        "  summary: true",
+        "  inline_comments: false",
+        "  check_run: false",
+        "  max_comments_per_pr: 3",
+        "memory:",
+        "  max_memory_facts_in_context: 2",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1234567890",
+      sourcePath: ".github/ai-reviewer.yml",
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      throw new Error(JSON.stringify(parsed.errors));
+    }
+
+    const orgSettings: OrgSettings = {
+      ...createDefaultOrgSettings(ids.orgId, now),
+      allowRepoLocalConfig: true,
+    };
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      orgSettings,
+      repoLocalConfig: parsed.config,
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+
+    expect(result.snapshot.decisionInputs).toMatchObject({
+      repoLocalConfigSourceCommitSha: "abcdef1234567890",
+      repoLocalConfigSourceHash: parsed.config.sourceHash,
+      repoLocalConfigSourcePath: ".github/ai-reviewer.yml",
+      repoLocalConfigVersion: 1,
+      source: "repository_settings_with_repo_local_config",
+    });
+    expect(result.snapshot.effectivePolicy).toMatchObject({
+      reviewPolicy: "summary_only",
+      findings: {
+        enabledCategories: ["security"],
+        maxCommentsPerReview: 3,
+        minimumConfidence: 0.8,
+        severityThreshold: "high",
+      },
+      memory: {
+        maxMemoryFactsInContext: 2,
+      },
+      publishing: {
+        maxCommentsPerReview: 3,
+        publishCheckRun: false,
+        publishInlineComments: false,
+        publishSummaryComment: true,
+      },
+      trigger: {
+        enabledActions: ["opened"],
+        ignoredLabels: ["no-ai-review"],
+        requireLabel: "ai-ready",
+      },
+    });
+    expect(result.snapshot.effectivePolicy.paths.ignoredPaths).toContain("apps/generated/**");
+    expect(result.snapshot.effectivePolicy.paths.testPaths).toContain("tests/**/*.ts");
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "repo_local_categories_clamped_by_org_settings",
+      "comment_budget_clamped_by_repo_local_config",
+      "repo_local_require_any_label_limited",
+    ]);
+  });
+
+  it("ignores repo-local config when organization settings do not allow it", () => {
+    const parsed = parseRepoLocalConfig({
+      content: "version: 1\nreview:\n  mode: summary_only\n",
+      format: "yaml",
+      sourceCommitSha: "abcdef1234567890",
+      sourcePath: ".ai-reviewer.yml",
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) {
+      throw new Error(JSON.stringify(parsed.errors));
+    }
+
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      orgSettings: createDefaultOrgSettings(ids.orgId, now),
+      repoLocalConfig: parsed.config,
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+
+    expect(result.snapshot.decisionInputs).toMatchObject({
+      allowRepoLocalConfig: false,
+      source: "repository_settings",
+    });
+    expect(result.snapshot.decisionInputs).not.toHaveProperty("repoLocalConfigSourceHash");
+    expect(result.snapshot.effectivePolicy.reviewPolicy).toBe("inline_comments_and_summary");
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "repo_local_config_disabled_by_org_settings",
+    ]);
+  });
 });
 
 describe("parseRepoLocalConfig", () => {

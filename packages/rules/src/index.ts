@@ -387,9 +387,16 @@ export const ReviewPolicySnapshotSchema = Type.Object(
         allowRepoLocalConfig: Type.Optional(Type.Boolean()),
         orgSettingsUpdatedAt: Type.Optional(IsoDateTimeSchema),
         orgSettingsVersion: Type.Optional(Type.Integer({ minimum: 1 })),
+        repoLocalConfigSourceCommitSha: Type.Optional(GitCommitShaSchema),
+        repoLocalConfigSourceHash: Type.Optional(Sha256Schema),
+        repoLocalConfigSourcePath: Type.Optional(RepoPathSchema),
+        repoLocalConfigVersion: Type.Optional(Type.Integer({ minimum: 1 })),
         repositoryEnabled: Type.Boolean(),
         repositorySettingsUpdatedAt: IsoDateTimeSchema,
-        source: Type.Literal("repository_settings"),
+        source: Type.Union([
+          Type.Literal("repository_settings"),
+          Type.Literal("repository_settings_with_repo_local_config"),
+        ]),
       },
       { additionalProperties: false },
     ),
@@ -858,6 +865,8 @@ export type BuildReviewPolicySnapshotInput = RulesTelemetryOptions & {
   readonly orgSettings?: OrgSettings;
   /** Repository settings row. Defaults are used when the row is missing. */
   readonly settings?: RepositorySettings;
+  /** Trusted repo-local configuration parsed from the selected config source. */
+  readonly repoLocalConfig?: RepoLocalConfig;
   /** Active organization and repository rules. */
   readonly activeRules?: readonly RepoRule[];
   /** Optional sandbox policy overrides from higher-level settings or deployment defaults. */
@@ -1123,6 +1132,7 @@ export function buildReviewPolicySnapshot(
   const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesCompilePolicy, {
     "rules.active_rule_input_count": input.activeRules?.length ?? 0,
     "rules.org_settings_provided": Boolean(input.orgSettings),
+    "rules.repo_local_config_provided": Boolean(input.repoLocalConfig),
     "rules.repository_enabled": input.repository.enabled,
     "rules.review_run_attached": Boolean(input.reviewRunId),
     "rules.settings_provided": Boolean(input.settings),
@@ -1175,21 +1185,77 @@ function buildReviewPolicySnapshotCore(
       (left, right) => left.priority - right.priority || left.ruleId.localeCompare(right.ruleId),
     );
   const activeRules = orgSettings?.allowUserDefinedRules === false ? [] : configuredRules;
+  const repoLocalConfig =
+    orgSettings?.allowRepoLocalConfig === true ? input.repoLocalConfig : undefined;
   const safetyFloor = DEFAULT_SAFETY_FLOOR;
   const orgFindingPolicy = orgSettings?.defaultFindingPolicy;
   const orgPublishingPolicy = orgSettings?.defaultPublishingPolicy;
+  const requestedReviewPolicy = repoLocalConfig?.review?.mode ?? settings.reviewPolicy;
+  const requestedSeverityThreshold =
+    repoLocalConfig?.review?.severityThreshold ?? settings.severityThreshold;
+  const requestedMaxComments = Math.max(
+    0,
+    repoLocalConfig?.review?.maxCommentsPerReview ?? settings.maxCommentsPerReview,
+  );
+  const requestedPublishingMaxComments =
+    repoLocalConfig?.publishing?.maxCommentsPerReview ?? requestedMaxComments;
   const orgSeverityThreshold = orgFindingPolicy?.severityThreshold;
   const severityAfterOrg = orgSeverityThreshold
-    ? stricterSeverity(settings.severityThreshold, orgSeverityThreshold)
-    : settings.severityThreshold;
+    ? stricterSeverity(requestedSeverityThreshold, orgSeverityThreshold)
+    : requestedSeverityThreshold;
   const severityThreshold = stricterSeverity(severityAfterOrg, safetyFloor.minimumPublishSeverity);
-  const repositoryMaxComments = Math.max(0, settings.maxCommentsPerReview);
+  const commentsAfterConfig = Math.min(requestedMaxComments, requestedPublishingMaxComments);
   const commentsAfterOrg = Math.min(
-    repositoryMaxComments,
-    orgFindingPolicy?.maxCommentsPerReview ?? repositoryMaxComments,
-    orgPublishingPolicy?.maxCommentsPerReview ?? repositoryMaxComments,
+    commentsAfterConfig,
+    orgFindingPolicy?.maxCommentsPerReview ?? commentsAfterConfig,
+    orgPublishingPolicy?.maxCommentsPerReview ?? commentsAfterConfig,
   );
   const maxCommentsPerReview = Math.min(commentsAfterOrg, safetyFloor.maxAllowedCommentsPerReview);
+  const requestedMinimumConfidence = repoLocalConfig?.review?.minimumConfidence;
+  const minimumConfidenceAfterConfig =
+    requestedMinimumConfidence ?? safetyFloor.minimumAllowedConfidence;
+  const minimumConfidenceAfterOrg = Math.max(
+    minimumConfidenceAfterConfig,
+    orgFindingPolicy?.minimumConfidence ?? safetyFloor.minimumAllowedConfidence,
+  );
+  const minimumConfidence = Math.max(
+    safetyFloor.minimumAllowedConfidence,
+    minimumConfidenceAfterOrg,
+  );
+  const orgEnabledCategories = [
+    ...(orgFindingPolicy?.enabledCategories ?? DEFAULT_ENABLED_FINDING_CATEGORIES),
+  ];
+  const requestedEnabledCategories = repoLocalConfig?.categories?.enabled
+    ? [...repoLocalConfig.categories.enabled]
+    : orgEnabledCategories;
+  const categoriesAllowedByOrg = requestedEnabledCategories.filter((category) =>
+    orgEnabledCategories.includes(category),
+  );
+  const disabledCategories = new Set(repoLocalConfig?.categories?.disabled ?? []);
+  const enabledCategories = uniqueStrings(
+    categoriesAllowedByOrg.filter((category) => !disabledCategories.has(category)),
+  );
+
+  if (input.repoLocalConfig && !repoLocalConfig) {
+    warnings.push({
+      code: "repo_local_config_disabled_by_org_settings",
+      message: "Repo-local config was ignored because organization settings did not enable it.",
+      details: {
+        sourceHash: input.repoLocalConfig.sourceHash,
+        sourcePath: input.repoLocalConfig.sourcePath,
+      },
+    });
+  }
+
+  if (repoLocalConfig?.rules && repoLocalConfig.rules.length > 0) {
+    warnings.push({
+      code: "repo_local_rules_not_compiled",
+      message: "Repo-local rule action blocks are parsed but not compiled into active rules yet.",
+      details: {
+        ruleCount: repoLocalConfig.rules.length,
+      },
+    });
+  }
 
   if (orgSettings?.allowUserDefinedRules === false && configuredRules.length > 0) {
     warnings.push({
@@ -1201,12 +1267,12 @@ function buildReviewPolicySnapshotCore(
     });
   }
 
-  if (severityAfterOrg !== settings.severityThreshold) {
+  if (severityAfterOrg !== requestedSeverityThreshold) {
     warnings.push({
       code: "severity_clamped_by_org_settings",
       message: "Repository severity threshold was clamped by organization settings.",
       details: {
-        requested: settings.severityThreshold,
+        requested: requestedSeverityThreshold,
         effective: severityAfterOrg,
       },
     });
@@ -1223,12 +1289,45 @@ function buildReviewPolicySnapshotCore(
     });
   }
 
-  if (commentsAfterOrg !== repositoryMaxComments) {
+  if (requestedMinimumConfidence !== undefined && minimumConfidence > requestedMinimumConfidence) {
+    warnings.push({
+      code: "confidence_clamped_by_org_or_safety_floor",
+      message: "Repo-local minimum confidence was clamped by org settings or the safety floor.",
+      details: {
+        requested: requestedMinimumConfidence,
+        effective: minimumConfidence,
+      },
+    });
+  }
+
+  if (requestedEnabledCategories.length !== categoriesAllowedByOrg.length) {
+    warnings.push({
+      code: "repo_local_categories_clamped_by_org_settings",
+      message: "Repo-local enabled categories were clamped by organization settings.",
+      details: {
+        requested: requestedEnabledCategories,
+        effective: categoriesAllowedByOrg,
+      },
+    });
+  }
+
+  if (commentsAfterConfig !== requestedMaxComments) {
+    warnings.push({
+      code: "comment_budget_clamped_by_repo_local_config",
+      message: "Repository comment budget was clamped by repo-local publishing settings.",
+      details: {
+        requested: requestedMaxComments,
+        effective: commentsAfterConfig,
+      },
+    });
+  }
+
+  if (commentsAfterOrg !== commentsAfterConfig) {
     warnings.push({
       code: "comment_budget_clamped_by_org_settings",
       message: "Repository comment budget was clamped by organization settings.",
       details: {
-        requested: repositoryMaxComments,
+        requested: commentsAfterConfig,
         effective: commentsAfterOrg,
       },
     });
@@ -1252,19 +1351,14 @@ function buildReviewPolicySnapshotCore(
   const effectivePolicy = parseEffectiveReviewPolicy({
     schemaVersion: "effective_review_policy.v1",
     compilerVersion: RULES_ENGINE_VERSION,
-    enabled: input.repository.enabled && settings.reviewPolicy !== "disabled",
+    enabled: input.repository.enabled && requestedReviewPolicy !== "disabled",
     findings: {
       allowStyleFindings:
         (orgFindingPolicy?.allowStyleFindings ?? false) ||
         activeRules.some((rule) => rule.effect === "style_preference"),
-      enabledCategories: [
-        ...(orgFindingPolicy?.enabledCategories ?? DEFAULT_ENABLED_FINDING_CATEGORIES),
-      ],
+      enabledCategories,
       maxCommentsPerReview,
-      minimumConfidence: Math.max(
-        safetyFloor.minimumAllowedConfidence,
-        orgFindingPolicy?.minimumConfidence ?? safetyFloor.minimumAllowedConfidence,
-      ),
+      minimumConfidence,
       severityThreshold,
       suppressGeneratedFileFindings:
         settings.skipGeneratedFiles ||
@@ -1274,48 +1368,50 @@ function buildReviewPolicySnapshotCore(
     instructions: activeRules
       .filter((rule) => rule.effect === "context" || rule.effect === "style_preference")
       .map((rule) => rule.instruction),
-    memory: compileMemoryPolicy(orgSettings),
+    memory: compileMemoryPolicy(orgSettings, repoLocalConfig?.memory),
     paths: {
-      configPaths: [...DEFAULT_CONFIG_PATHS],
-      documentationPaths: [...DEFAULT_DOCUMENTATION_PATHS],
-      generatedPaths: [...DEFAULT_GENERATED_PATHS],
-      ignoredPaths: uniqueStrings([...DEFAULT_IGNORED_PATHS, ...settings.ignoredPaths]),
-      includedPaths: [],
+      configPaths: uniqueStrings([
+        ...DEFAULT_CONFIG_PATHS,
+        ...(repoLocalConfig?.paths?.config ?? []),
+      ]),
+      documentationPaths: uniqueStrings([
+        ...DEFAULT_DOCUMENTATION_PATHS,
+        ...(repoLocalConfig?.paths?.documentation ?? []),
+      ]),
+      generatedPaths: uniqueStrings([
+        ...DEFAULT_GENERATED_PATHS,
+        ...(repoLocalConfig?.paths?.generated ?? []),
+      ]),
+      ignoredPaths: uniqueStrings([
+        ...DEFAULT_IGNORED_PATHS,
+        ...settings.ignoredPaths,
+        ...(repoLocalConfig?.paths?.ignored ?? []),
+      ]),
+      includedPaths: uniqueStrings([...(repoLocalConfig?.paths?.included ?? [])]),
       maxFileBytes: 512_000,
       maxFileLines: 10_000,
       pathMatchingMode: "heimdall_glob_v1",
       skipGeneratedFiles: settings.skipGeneratedFiles,
-      testPaths: [...DEFAULT_TEST_PATHS],
-      vendoredPaths: ["**/vendor/**", "**/third_party/**"],
+      testPaths: uniqueStrings([...DEFAULT_TEST_PATHS, ...(repoLocalConfig?.paths?.tests ?? [])]),
+      vendoredPaths: uniqueStrings([
+        "**/vendor/**",
+        "**/third_party/**",
+        ...(repoLocalConfig?.paths?.vendored ?? []),
+      ]),
     },
     publishing: compilePublishingPolicy(
-      publishingPolicyFromReviewPolicy(settings.reviewPolicy, maxCommentsPerReview),
+      compileRepoLocalPublishingPolicy(
+        publishingPolicyFromReviewPolicy(requestedReviewPolicy, maxCommentsPerReview),
+        repoLocalConfig?.publishing,
+      ),
       orgSettings,
     ),
     repoId: input.repository.repoId,
-    reviewPolicy: settings.reviewPolicy,
+    reviewPolicy: requestedReviewPolicy,
     rules: activeRules,
     sandbox,
     safetyFloor,
-    trigger: {
-      enabledActions: [
-        ...(orgSettings?.defaultTriggerPolicy.enabledActions ?? DEFAULT_ENABLED_PR_ACTIONS),
-      ],
-      ignoredAuthors: uniqueStrings([
-        ...(orgSettings?.defaultTriggerPolicy.ignoredAuthors ?? []),
-        ...settings.ignoredAuthors,
-      ]),
-      ignoredLabels: uniqueStrings([
-        ...(orgSettings?.defaultTriggerPolicy.ignoredLabels ?? []),
-        ...settings.ignoredLabels,
-      ]),
-      ...((settings.requireLabel ?? orgSettings?.defaultTriggerPolicy.requireLabel)
-        ? { requireLabel: settings.requireLabel ?? orgSettings?.defaultTriggerPolicy.requireLabel }
-        : {}),
-      skipDraftPullRequests:
-        settings.skipDraftPullRequests ||
-        (orgSettings?.defaultTriggerPolicy.skipDraftPullRequests ?? false),
-    },
+    trigger: compileTriggerPolicy(settings, orgSettings, repoLocalConfig, warnings),
   });
   const policyHash = sha256(canonicalJson(effectivePolicy));
   const snapshot = parseReviewPolicySnapshot({
@@ -1333,9 +1429,19 @@ function buildReviewPolicySnapshotCore(
             orgSettingsVersion: orgSettings.version,
           }
         : {}),
+      ...(repoLocalConfig
+        ? {
+            repoLocalConfigSourceCommitSha: repoLocalConfig.sourceCommitSha,
+            repoLocalConfigSourceHash: repoLocalConfig.sourceHash,
+            repoLocalConfigSourcePath: repoLocalConfig.sourcePath,
+            repoLocalConfigVersion: repoLocalConfig.configVersion,
+          }
+        : {}),
       repositoryEnabled: input.repository.enabled,
       repositorySettingsUpdatedAt: settings.updatedAt,
-      source: "repository_settings",
+      source: repoLocalConfig
+        ? "repository_settings_with_repo_local_config"
+        : "repository_settings",
     },
     effectivePolicy,
     orgId: input.repository.orgId,
@@ -1362,6 +1468,7 @@ function buildReviewPolicySnapshotCore(
       evaluatedRuleCount: activeRules.length,
       details: {
         policyHash,
+        repoLocalConfigApplied: Boolean(repoLocalConfig),
         sandboxRunner: sandbox.defaultRunner,
         warningCodes: warnings.map((warning) => warning.code),
       },
@@ -2672,6 +2779,26 @@ function publishingPolicyFromReviewPolicy(
   }
 }
 
+/** Applies repo-local publishing overrides before organization guardrails are enforced. */
+function compileRepoLocalPublishingPolicy(
+  base: EffectivePublishingPolicy,
+  publishing: RepoLocalPublishingConfig | undefined,
+): EffectivePublishingPolicy {
+  if (!publishing) {
+    return base;
+  }
+
+  return {
+    maxCommentsPerReview: Math.min(
+      base.maxCommentsPerReview,
+      publishing.maxCommentsPerReview ?? base.maxCommentsPerReview,
+    ),
+    publishCheckRun: publishing.publishCheckRun ?? base.publishCheckRun,
+    publishInlineComments: publishing.publishInlineComments ?? base.publishInlineComments,
+    publishSummaryComment: publishing.publishSummaryComment ?? base.publishSummaryComment,
+  };
+}
+
 /** Applies organization publishing guardrails to a derived publication policy. */
 function compilePublishingPolicy(
   base: EffectivePublishingPolicy,
@@ -2694,11 +2821,72 @@ function compilePublishingPolicy(
   };
 }
 
+/** Compiles trigger settings from org, repository, and repo-local config inputs. */
+function compileTriggerPolicy(
+  settings: RepositorySettings,
+  orgSettings: OrgSettings | undefined,
+  repoLocalConfig: RepoLocalConfig | undefined,
+  warnings: PolicyWarning[],
+): EffectiveTriggerPolicy {
+  const requireAnyLabel = repoLocalConfig?.triggers?.requireAnyLabel;
+  const repoLocalRequiredLabel = requireAnyLabel?.[0];
+  const requiredLabel =
+    repoLocalRequiredLabel ??
+    settings.requireLabel ??
+    orgSettings?.defaultTriggerPolicy.requireLabel;
+  if (requireAnyLabel && requireAnyLabel.length > 1) {
+    warnings.push({
+      code: "repo_local_require_any_label_limited",
+      message:
+        "Only the first repo-local required label can be compiled by the MVP trigger policy.",
+      details: {
+        ignoredLabels: requireAnyLabel.slice(1),
+        selectedLabel: repoLocalRequiredLabel,
+      },
+    });
+  }
+  if (repoLocalConfig?.triggers?.includeBaseBranches?.length) {
+    warnings.push({
+      code: "repo_local_base_branch_filters_not_compiled",
+      message: "Repo-local base branch filters are parsed but not compiled yet.",
+      details: {
+        includeBaseBranches: repoLocalConfig.triggers.includeBaseBranches,
+      },
+    });
+  }
+
+  return {
+    enabledActions: [
+      ...(repoLocalConfig?.triggers?.enabledActions ??
+        orgSettings?.defaultTriggerPolicy.enabledActions ??
+        DEFAULT_ENABLED_PR_ACTIONS),
+    ],
+    ignoredAuthors: uniqueStrings([
+      ...(orgSettings?.defaultTriggerPolicy.ignoredAuthors ?? []),
+      ...settings.ignoredAuthors,
+    ]),
+    ignoredLabels: uniqueStrings([
+      ...(orgSettings?.defaultTriggerPolicy.ignoredLabels ?? []),
+      ...settings.ignoredLabels,
+      ...(repoLocalConfig?.triggers?.skipIfAnyLabel ?? []),
+    ]),
+    ...(requiredLabel ? { requireLabel: requiredLabel } : {}),
+    skipDraftPullRequests:
+      settings.skipDraftPullRequests ||
+      (orgSettings?.defaultTriggerPolicy.skipDraftPullRequests ?? false) ||
+      (repoLocalConfig?.triggers?.skipDraftPullRequests ?? false),
+  };
+}
+
 /** Compiles organization memory defaults and suppression guardrails. */
-function compileMemoryPolicy(orgSettings: OrgSettings | undefined): EffectiveMemoryPolicy {
+function compileMemoryPolicy(
+  orgSettings: OrgSettings | undefined,
+  repoLocalMemory: RepoLocalMemoryConfig | undefined,
+): EffectiveMemoryPolicy {
   const base = {
     ...DEFAULT_MEMORY_POLICY,
     ...(orgSettings?.defaultMemoryPolicy ?? {}),
+    ...(repoLocalMemory ?? {}),
   };
 
   if (orgSettings?.allowMemorySuppression === false) {
