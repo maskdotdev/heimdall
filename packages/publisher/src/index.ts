@@ -7,12 +7,7 @@ import type {
 } from "@repo/contracts";
 import {
   type HeimdallDatabase,
-  publishedCheckRuns,
-  publishedFindings,
-  publishedReviews,
-  publishedSummaryComments,
-  publishOperations,
-  publishRuns,
+  PublisherRepository,
   RepositoryRepository,
   ReviewRepository,
 } from "@repo/db";
@@ -38,7 +33,6 @@ import {
   type SecurityEventSeverity,
   type SecurityEventSink,
 } from "@repo/security";
-import { eq } from "drizzle-orm";
 
 /** Legacy publisher behavior for review runs created before policy snapshots existed. */
 const LEGACY_PUBLISHING_POLICY = {
@@ -507,6 +501,7 @@ async function publishReviewRunInternal(
 ): Promise<PublishReviewResult> {
   const now = dependencies.now ?? (() => new Date());
   const reviewRepository = new ReviewRepository(dependencies.db);
+  const publisherRepository = new PublisherRepository(dependencies.db);
   const reviewRun = await reviewRepository.getReviewRun(payload.reviewRunId);
   if (!reviewRun) {
     throw new Error(`Review run ${payload.reviewRunId} was not found.`);
@@ -527,39 +522,20 @@ async function publishReviewRunInternal(
   const publishRunId = stableId("pub", [payload.reviewRunId, "live-output"]);
   const idempotencyKey = `review.publish.v1:${payload.reviewRunId}`;
   const startedAt = now();
-  await dependencies.db
-    .insert(publishRuns)
-    .values({
-      publishRunId,
-      reviewRunId: payload.reviewRunId,
-      repoId: reviewRun.repoId,
-      idempotencyKey,
-      status: "running",
-      startedAt,
-      metadata: {
-        pullRequestNumber: payload.pullRequestNumber,
-        ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
-        ...(payload.publishPlanArtifactId
-          ? { publishPlanArtifactId: payload.publishPlanArtifactId }
-          : {}),
-      },
-    })
-    .onConflictDoUpdate({
-      target: publishRuns.idempotencyKey,
-      set: {
-        status: "running",
-        startedAt,
-        completedAt: null,
-        error: null,
-        metadata: {
-          pullRequestNumber: payload.pullRequestNumber,
-          ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
-          ...(payload.publishPlanArtifactId
-            ? { publishPlanArtifactId: payload.publishPlanArtifactId }
-            : {}),
-        },
-      },
-    });
+  await publisherRepository.upsertRunningPublishRun({
+    idempotencyKey,
+    metadata: {
+      pullRequestNumber: payload.pullRequestNumber,
+      ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
+      ...(payload.publishPlanArtifactId
+        ? { publishPlanArtifactId: payload.publishPlanArtifactId }
+        : {}),
+    },
+    publishRunId,
+    repoId: reviewRun.repoId,
+    reviewRunId: payload.reviewRunId,
+    startedAt,
+  });
 
   try {
     const currentPullRequest = await dependencies.gitProvider.fetchPullRequestSnapshot({
@@ -568,23 +544,21 @@ async function publishReviewRunInternal(
     });
     if (currentPullRequest.headSha !== reviewRun.headSha) {
       const completedAt = now();
-      await dependencies.db
-        .update(publishRuns)
-        .set({
-          status: "skipped",
-          completedAt,
-          error: null,
-          metadata: {
-            reason: "stale_head",
-            expectedHeadSha: reviewRun.headSha,
-            actualHeadSha: currentPullRequest.headSha,
-            ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
-            ...(payload.publishPlanArtifactId
-              ? { publishPlanArtifactId: payload.publishPlanArtifactId }
-              : {}),
-          },
-        })
-        .where(eq(publishRuns.idempotencyKey, idempotencyKey));
+      await publisherRepository.updatePublishRunStatus({
+        completedAt,
+        error: null,
+        idempotencyKey,
+        metadata: {
+          reason: "stale_head",
+          expectedHeadSha: reviewRun.headSha,
+          actualHeadSha: currentPullRequest.headSha,
+          ...(payload.publishPlanId ? { publishPlanId: payload.publishPlanId } : {}),
+          ...(payload.publishPlanArtifactId
+            ? { publishPlanArtifactId: payload.publishPlanArtifactId }
+            : {}),
+        },
+        status: "skipped",
+      });
       await insertPublishOperation(dependencies.db, publishRunId, "stale_head.check", {
         status: "completed",
         responseHash: hashJson({
@@ -693,26 +667,24 @@ async function publishReviewRunInternal(
     const summaryComment = configuredSummary ?? fallbackSummary;
 
     const completedAt = now();
-    await dependencies.db
-      .update(publishRuns)
-      .set({
-        status: "completed",
-        completedAt,
-        error: null,
-        metadata: withoutUndefinedValues({
-          providerCheckRunId: checkRun?.providerCheckRunId,
-          providerReviewId: review?.providerReviewId,
-          providerSummaryCommentId: summaryComment?.providerCommentId,
-          inlineCommentCount: review?.commentIds.length ?? 0,
-          plannedOperations: publishPlan.plannedOperations,
-          publishPlanId: payload.publishPlanId,
-          publishPlanArtifactId: payload.publishPlanArtifactId,
-          publishThrottle: publishPlan.throttle,
-          publishingPolicy: publishPlan.policy,
-          summaryFallback: fallbackSummary !== undefined,
-        }),
-      })
-      .where(eq(publishRuns.idempotencyKey, idempotencyKey));
+    await publisherRepository.updatePublishRunStatus({
+      completedAt,
+      error: null,
+      idempotencyKey,
+      metadata: withoutUndefinedValues({
+        providerCheckRunId: checkRun?.providerCheckRunId,
+        providerReviewId: review?.providerReviewId,
+        providerSummaryCommentId: summaryComment?.providerCommentId,
+        inlineCommentCount: review?.commentIds.length ?? 0,
+        plannedOperations: publishPlan.plannedOperations,
+        publishPlanId: payload.publishPlanId,
+        publishPlanArtifactId: payload.publishPlanArtifactId,
+        publishThrottle: publishPlan.throttle,
+        publishingPolicy: publishPlan.policy,
+        summaryFallback: fallbackSummary !== undefined,
+      }),
+      status: "completed",
+    });
 
     return {
       publishRunId,
@@ -724,14 +696,12 @@ async function publishReviewRunInternal(
       staleHead: false,
     };
   } catch (error) {
-    await dependencies.db
-      .update(publishRuns)
-      .set({
-        status: "failed",
-        completedAt: now(),
-        error: serializePublisherError(error, "publisher.failed"),
-      })
-      .where(eq(publishRuns.idempotencyKey, idempotencyKey));
+    await publisherRepository.updatePublishRunStatus({
+      completedAt: now(),
+      error: serializePublisherError(error, "publisher.failed"),
+      idempotencyKey,
+      status: "failed",
+    });
     recordPublisherGitHubSecurityEvent({
       error,
       operation: "publish_review",
@@ -947,29 +917,16 @@ async function publishCheckRun(input: {
   });
   const checkRun = await input.gitProvider.createOrUpdateCheckRun(checkRunInput);
 
-  await input.db
-    .insert(publishedCheckRuns)
-    .values({
-      publishedCheckRunId: stableId("pcr", [input.publishRunId, checkRun.providerCheckRunId]),
-      publishRunId: input.publishRunId,
-      reviewRunId: input.reviewRunId,
-      provider: "github",
-      providerCheckRunId: checkRun.providerCheckRunId,
-      status: "published",
-      conclusion: checkRunInput.conclusion,
-      metadata: { htmlUrl: checkRun.htmlUrl, annotationCount: checkRunInput.annotations.length },
-    })
-    .onConflictDoUpdate({
-      target: publishedCheckRuns.publishedCheckRunId,
-      set: {
-        status: "published",
-        conclusion: checkRunInput.conclusion,
-        metadata: {
-          htmlUrl: checkRun.htmlUrl,
-          annotationCount: checkRunInput.annotations.length,
-        },
-      },
-    });
+  await new PublisherRepository(input.db).upsertPublishedCheckRun({
+    conclusion: checkRunInput.conclusion,
+    metadata: { htmlUrl: checkRun.htmlUrl, annotationCount: checkRunInput.annotations.length },
+    provider: "github",
+    providerCheckRunId: checkRun.providerCheckRunId,
+    publishedCheckRunId: stableId("pcr", [input.publishRunId, checkRun.providerCheckRunId]),
+    publishRunId: input.publishRunId,
+    reviewRunId: input.reviewRunId,
+    status: "published",
+  });
   await insertPublishOperation(input.db, input.publishRunId, "check_run.upsert", {
     status: "completed",
     responseHash: hashJson(checkRun),
@@ -1019,21 +976,15 @@ async function publishInlineComments(input: PublishInlineCommentsInput): Promise
   try {
     const review = await input.gitProvider.publishReview(reviewInput);
     const commentIdsByFindingId = mapCommentIdsByFindingId(review, input.findings);
-    await input.db
-      .insert(publishedReviews)
-      .values({
-        publishedReviewId: stableId("prev", [input.publishRunId, review.providerReviewId]),
-        publishRunId: input.publishRunId,
-        reviewRunId: input.reviewRunId,
-        provider: "github",
-        providerReviewId: review.providerReviewId,
-        status: "published",
-        metadata: { commentIds: review.commentIds },
-      })
-      .onConflictDoUpdate({
-        target: publishedReviews.publishedReviewId,
-        set: { status: "published", metadata: { commentIds: review.commentIds } },
-      });
+    await new PublisherRepository(input.db).upsertPublishedReview({
+      metadata: { commentIds: review.commentIds },
+      provider: "github",
+      providerReviewId: review.providerReviewId,
+      publishedReviewId: stableId("prev", [input.publishRunId, review.providerReviewId]),
+      publishRunId: input.publishRunId,
+      reviewRunId: input.reviewRunId,
+      status: "published",
+    });
     await Promise.all(
       input.findings.map((finding) =>
         upsertPublishedFinding(input.db, {
@@ -1119,26 +1070,16 @@ async function publishSummaryComment(input: {
     requestHash: hashJson(summaryInput),
   });
   const comment = await input.gitProvider.publishSummaryComment(summaryInput);
-  await input.db
-    .insert(publishedSummaryComments)
-    .values({
-      publishedSummaryCommentId: stableId("psc", [input.publishRunId, comment.providerCommentId]),
-      publishRunId: input.publishRunId,
-      reviewRunId: input.reviewRunId,
-      provider: "github",
-      providerCommentId: comment.providerCommentId,
-      bodyHash: hashJson(body),
-      status: "published",
-      metadata: { htmlUrl: comment.htmlUrl, purpose: input.purpose },
-    })
-    .onConflictDoUpdate({
-      target: publishedSummaryComments.publishedSummaryCommentId,
-      set: {
-        bodyHash: hashJson(body),
-        status: "published",
-        metadata: { htmlUrl: comment.htmlUrl, purpose: input.purpose },
-      },
-    });
+  await new PublisherRepository(input.db).upsertPublishedSummaryComment({
+    bodyHash: hashJson(body),
+    metadata: { htmlUrl: comment.htmlUrl, purpose: input.purpose },
+    provider: "github",
+    providerCommentId: comment.providerCommentId,
+    publishedSummaryCommentId: stableId("psc", [input.publishRunId, comment.providerCommentId]),
+    publishRunId: input.publishRunId,
+    reviewRunId: input.reviewRunId,
+    status: "published",
+  });
   if (input.findingsToMark.length > 0) {
     await Promise.all(
       input.findingsToMark.map((finding) =>
@@ -1171,33 +1112,21 @@ async function upsertPublishedFinding(
     readonly status: PublishedFindingStatus;
   },
 ): Promise<void> {
-  await db
-    .insert(publishedFindings)
-    .values({
-      findingId: stableId("pf", [input.publishRunId, input.finding.findingId]),
-      validatedFindingId: input.finding.findingId,
-      reviewRunId: input.finding.reviewRunId,
-      provider: "github",
-      providerCommentId: input.providerCommentId,
-      providerReviewId: input.providerReviewId,
-      location: input.finding.location,
-      title: input.finding.title,
-      body: input.finding.body,
-      publishedAt: input.publishedAt,
-      status: input.status,
-      fingerprint: input.finding.fingerprint,
-      metadata: { rank: input.finding.rank },
-    })
-    .onConflictDoUpdate({
-      target: publishedFindings.findingId,
-      set: {
-        providerCommentId: input.providerCommentId,
-        providerReviewId: input.providerReviewId,
-        publishedAt: input.publishedAt,
-        status: input.status,
-        metadata: { rank: input.finding.rank },
-      },
-    });
+  await new PublisherRepository(db).upsertPublishedFinding({
+    body: input.finding.body,
+    findingId: stableId("pf", [input.publishRunId, input.finding.findingId]),
+    fingerprint: input.finding.fingerprint,
+    location: input.finding.location,
+    metadata: { rank: input.finding.rank },
+    provider: "github",
+    providerCommentId: input.providerCommentId,
+    providerReviewId: input.providerReviewId,
+    publishedAt: input.publishedAt,
+    reviewRunId: input.finding.reviewRunId,
+    status: input.status,
+    title: input.finding.title,
+    validatedFindingId: input.finding.findingId,
+  });
 }
 
 async function loadGitHubRepositoryRef(
@@ -1404,14 +1333,14 @@ async function insertPublishOperation(
     readonly error?: Record<string, unknown>;
   },
 ): Promise<void> {
-  await db.insert(publishOperations).values({
+  await new PublisherRepository(db).recordPublishOperation({
+    error: input.error,
     publishOperationId: `pop_${randomUUID().replaceAll("-", "")}`,
     publishRunId,
     operationType,
     status: input.status,
     requestHash: input.requestHash,
     responseHash: input.responseHash,
-    error: input.error,
   });
 }
 
