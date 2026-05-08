@@ -17,6 +17,7 @@ import {
   type ReviewPullRequestInput,
   reviewMemoryFactFromRow,
   reviewRunStatusForStage,
+  reviewStalenessDisposition,
   startReviewTelemetryStageSpan,
 } from "../src";
 
@@ -125,6 +126,28 @@ describe("checkReviewRunCurrent", () => {
         currentCheckInput,
       ),
     ).resolves.toBe("unknown");
+  });
+});
+
+describe("reviewStalenessDisposition", () => {
+  it("maps superseded and closed states to terminal review dispositions", () => {
+    expect(reviewStalenessDisposition("superseded", "before_review")).toEqual({
+      outcome: "superseded",
+      reason: "pull_request_head_changed",
+      status: "superseded",
+      summary: "Review superseded before review because the pull request head changed.",
+    });
+    expect(reviewStalenessDisposition("closed", "after_index")).toEqual({
+      outcome: "skipped",
+      reason: "pull_request_not_open",
+      status: "skipped",
+      summary: "Review skipped after index wait because the pull request is no longer open.",
+    });
+  });
+
+  it("does not stop current or unknown states", () => {
+    expect(reviewStalenessDisposition("current", "after_snapshot")).toBeUndefined();
+    expect(reviewStalenessDisposition("unknown", "before_publish")).toBeUndefined();
   });
 });
 

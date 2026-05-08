@@ -226,6 +226,37 @@ export type ReviewRunCurrentCheckInput = GitHubPullRequestRef & {
 /** Current-head state for a review run just before publish handoff. */
 export type ReviewRunCurrentStatus = "current" | "superseded" | "closed" | "unknown";
 
+/** Staleness checkpoints where orchestration verifies the PR still targets the expected head. */
+export type ReviewStalenessCheckpoint =
+  | "after_snapshot"
+  | "after_index"
+  | "before_review"
+  | "before_publish";
+
+/** Terminal disposition for a non-current review run. */
+export type ReviewStalenessDisposition = {
+  /** Product-safe top-level telemetry outcome. */
+  readonly outcome: Extract<ReviewTelemetryOutcome, "skipped" | "superseded">;
+  /** Stable product-safe reason stored in review metadata. */
+  readonly reason: string;
+  /** Review-run summary for dashboard and API consumers. */
+  readonly summary: string;
+  /** Terminal review-run status. */
+  readonly status: Extract<ReviewRun["status"], "skipped" | "superseded">;
+};
+
+/** Result returned when a staleness checkpoint stops a review run. */
+type ReviewStalenessStopResult = {
+  /** Whether the checkpoint released a quota reservation. */
+  readonly quotaReservationReleased: boolean;
+  /** Terminal orchestration result to return to the worker. */
+  readonly result: ReviewOrchestrationResult;
+  /** Updated terminal review run. */
+  readonly reviewRun: ReviewRun;
+  /** Product-safe top-level telemetry outcome. */
+  readonly telemetryOutcome: Extract<ReviewTelemetryOutcome, "skipped" | "superseded">;
+};
+
 /** Product-safe retrieval trace artifact persisted next to a context bundle. */
 export type RetrievalTraceArtifactPayload = {
   /** Token budget and packing summary for the final bundle. */
@@ -572,6 +603,29 @@ export async function runPullRequestReview(
         }),
       },
     );
+    currentStage = "staleness";
+    const afterSnapshotStaleness = await stopReviewRunIfStale({
+      checkpoint: "after_snapshot",
+      dependencies,
+      now,
+      pullRequestRef,
+      quotaReservation,
+      quotaService,
+      reviewRepository,
+      reviewRun,
+      snapshot,
+    });
+    if (afterSnapshotStaleness) {
+      quotaReservationFinalized = afterSnapshotStaleness.quotaReservationReleased;
+      reviewRun = afterSnapshotStaleness.reviewRun;
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage: "staleness",
+        outcome: afterSnapshotStaleness.telemetryOutcome,
+        result: afterSnapshotStaleness.result,
+      });
+
+      return afterSnapshotStaleness.result;
+    }
 
     const syncWorkspace =
       dependencies.syncWorkspace ??
@@ -788,6 +842,30 @@ export async function runPullRequestReview(
         ...(indexVersionId ? { indexVersionId } : {}),
       },
     });
+    currentStage = "staleness";
+    const afterIndexStaleness = await stopReviewRunIfStale({
+      artifactRefs: artifacts,
+      checkpoint: "after_index",
+      dependencies,
+      now,
+      pullRequestRef,
+      quotaReservation,
+      quotaService,
+      reviewRepository,
+      reviewRun,
+      snapshot,
+    });
+    if (afterIndexStaleness) {
+      quotaReservationFinalized = afterIndexStaleness.quotaReservationReleased;
+      reviewRun = afterIndexStaleness.reviewRun;
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage: "staleness",
+        outcome: afterIndexStaleness.telemetryOutcome,
+        result: afterIndexStaleness.result,
+      });
+
+      return afterIndexStaleness.result;
+    }
     const retrievalIndex = indexVersionId
       ? createDatabaseRetrievalIndex({
           db: dependencies.db,
@@ -868,6 +946,30 @@ export async function runPullRequestReview(
         ...(retrievalWarningCount > 0 ? { warningCount: retrievalWarningCount } : {}),
       },
     });
+    currentStage = "staleness";
+    const beforeReviewStaleness = await stopReviewRunIfStale({
+      artifactRefs: [...artifacts, contextArtifact, retrievalTraceArtifact],
+      checkpoint: "before_review",
+      dependencies,
+      now,
+      pullRequestRef,
+      quotaReservation,
+      quotaService,
+      reviewRepository,
+      reviewRun,
+      snapshot,
+    });
+    if (beforeReviewStaleness) {
+      quotaReservationFinalized = beforeReviewStaleness.quotaReservationReleased;
+      reviewRun = beforeReviewStaleness.reviewRun;
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage: "staleness",
+        outcome: beforeReviewStaleness.telemetryOutcome,
+        result: beforeReviewStaleness.result,
+      });
+
+      return beforeReviewStaleness.result;
+    }
 
     reviewRun = await transitionReviewRunStage(
       reviewRepository,
@@ -1163,78 +1265,39 @@ export async function runPullRequestReview(
         validationStats: validationResult.stats,
       },
     });
-    const currentStatus = await runReviewTelemetryStage(
+    currentStage = "staleness";
+    const beforePublishStaleness = await stopReviewRunIfStale({
+      artifactRefs: completedReviewArtifactRefs,
+      checkpoint: "before_publish",
+      counts: {
+        candidateFindings: candidateFindings.length,
+        publishedFindings: 0,
+        rejectedFindings: rejectedFindingCount,
+        validatedFindings: publishedFindingCount,
+      },
       dependencies,
-      "staleness",
-      () =>
-        checkReviewRunCurrent(dependencies.gitProvider, {
-          ...pullRequestRef,
-          expectedHeadSha: snapshot.headSha,
-        }),
-      {
-        endAttributes: (status) => ({
-          "review.staleness_status": status,
-        }),
-      },
-    );
-    await reviewRepository.insertStageEvent({
-      reviewRunId,
-      stage: "staleness",
-      status: currentStatus,
       metadata: {
-        expectedHeadSha: snapshot.headSha,
-        pullRequestNumber: snapshot.pullRequestNumber,
+        publishPlanArtifactId: publishPlanArtifact.artifactId,
+        publishPlanId,
       },
+      now,
+      pullRequestRef,
+      quotaReservation,
+      quotaService,
+      reviewRepository,
+      reviewRun,
+      snapshot,
     });
-    if (currentStatus === "superseded" || currentStatus === "closed") {
-      const completedAt = now().toISOString();
-      await quotaService.releaseReservation({
-        now: completedAt,
-        quotaReservationId: quotaReservation.reservation.quotaReservationId,
-      });
-      quotaReservationFinalized = true;
-      reviewRun = await reviewRepository.upsertReviewRun({
-        ...reviewRun,
-        status: currentStatus === "superseded" ? "superseded" : "skipped",
-        completedAt,
-        updatedAt: completedAt,
-        summary:
-          currentStatus === "superseded"
-            ? "Review superseded before publish because the pull request head changed."
-            : "Review skipped before publish because the pull request is no longer open.",
-        artifactRefs: completedReviewArtifactRefs,
-        counts: {
-          candidateFindings: candidateFindings.length,
-          validatedFindings: publishedFindingCount,
-          publishedFindings: 0,
-          rejectedFindings: rejectedFindingCount,
-        },
-        metadata: {
-          ...reviewRun.metadata,
-          currentStage: "staleness",
-          publishPlanId,
-          publishPlanArtifactId: publishPlanArtifact.artifactId,
-          staleness: {
-            expectedHeadSha: snapshot.headSha,
-            status: currentStatus,
-          },
-        },
-      });
-      await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
-
-      const result = {
-        reviewRunId: reviewRun.reviewRunId,
-        snapshotId: snapshot.snapshotId,
-        candidateFindingCount: candidateFindings.length,
-        validatedFindingCount: publishedFindingCount,
-      };
+    if (beforePublishStaleness) {
+      quotaReservationFinalized = beforePublishStaleness.quotaReservationReleased;
+      reviewRun = beforePublishStaleness.reviewRun;
       endPullRequestReviewTelemetrySpan(reviewSpan, {
         currentStage: "staleness",
-        outcome: currentStatus === "superseded" ? "superseded" : "skipped",
-        result,
+        outcome: beforePublishStaleness.telemetryOutcome,
+        result: beforePublishStaleness.result,
       });
 
-      return result;
+      return beforePublishStaleness.result;
     }
 
     if (!publishPlanHasExternalWrites) {
@@ -1933,6 +1996,154 @@ export async function checkReviewRunCurrent(
   } catch {
     return "unknown";
   }
+}
+
+/** Returns the terminal disposition for a non-current review run at one checkpoint. */
+export function reviewStalenessDisposition(
+  status: ReviewRunCurrentStatus,
+  checkpoint: ReviewStalenessCheckpoint,
+): ReviewStalenessDisposition | undefined {
+  const checkpointLabel = reviewStalenessCheckpointLabel(checkpoint);
+  if (status === "superseded") {
+    return {
+      outcome: "superseded",
+      reason: "pull_request_head_changed",
+      status: "superseded",
+      summary: `Review superseded ${checkpointLabel} because the pull request head changed.`,
+    };
+  }
+  if (status === "closed") {
+    return {
+      outcome: "skipped",
+      reason: "pull_request_not_open",
+      status: "skipped",
+      summary: `Review skipped ${checkpointLabel} because the pull request is no longer open.`,
+    };
+  }
+
+  return undefined;
+}
+
+/** Checks current PR state at a checkpoint and terminally stops stale review runs. */
+async function stopReviewRunIfStale(input: {
+  /** Artifacts persisted before this checkpoint. */
+  readonly artifactRefs?: readonly ReviewArtifactRef[] | undefined;
+  /** Checkpoint name to record in telemetry and stage metadata. */
+  readonly checkpoint: ReviewStalenessCheckpoint;
+  /** Terminal counts to store if the checkpoint stops the review. */
+  readonly counts?: ReviewRun["counts"] | undefined;
+  /** Review orchestration dependencies used for provider checks and telemetry. */
+  readonly dependencies: Pick<
+    ReviewOrchestratorDependencies,
+    "gitProvider" | "traceContext" | "traces"
+  >;
+  /** Additional product-safe metadata to merge into the terminal review run. */
+  readonly metadata?: Record<string, unknown> | undefined;
+  /** Clock used for deterministic tests. */
+  readonly now: () => Date;
+  /** Provider pull request reference to check. */
+  readonly pullRequestRef: GitHubPullRequestRef;
+  /** Reserved quota to release if this checkpoint stops the run. */
+  readonly quotaReservation?: ReserveQuotaResult | undefined;
+  /** Quota service that owns release operations. */
+  readonly quotaService: QuotaService;
+  /** Repository helper for review run updates. */
+  readonly reviewRepository: ReviewRepository;
+  /** Mutable review run state before the checkpoint. */
+  readonly reviewRun: ReviewRun;
+  /** Snapshot that owns the expected PR head. */
+  readonly snapshot: PullRequestSnapshot;
+}): Promise<ReviewStalenessStopResult | undefined> {
+  const currentStatus = await runReviewTelemetryStage(
+    input.dependencies,
+    "staleness",
+    () =>
+      checkReviewRunCurrent(input.dependencies.gitProvider, {
+        ...input.pullRequestRef,
+        expectedHeadSha: input.snapshot.headSha,
+      }),
+    {
+      attributes: {
+        "review.staleness_checkpoint": input.checkpoint,
+      },
+      endAttributes: (status) => ({
+        "review.staleness_checkpoint": input.checkpoint,
+        "review.staleness_status": status,
+      }),
+    },
+  );
+  await input.reviewRepository.insertStageEvent({
+    reviewRunId: input.reviewRun.reviewRunId,
+    stage: "staleness",
+    status: currentStatus,
+    metadata: {
+      checkpoint: input.checkpoint,
+      expectedHeadSha: input.snapshot.headSha,
+      pullRequestNumber: input.snapshot.pullRequestNumber,
+    },
+  });
+  const disposition = reviewStalenessDisposition(currentStatus, input.checkpoint);
+  if (!disposition) {
+    return undefined;
+  }
+
+  const completedAt = input.now().toISOString();
+  let quotaReservationReleased = false;
+  if (input.quotaReservation?.reservation) {
+    await input.quotaService.releaseReservation({
+      now: completedAt,
+      quotaReservationId: input.quotaReservation.reservation.quotaReservationId,
+    });
+    quotaReservationReleased = true;
+  }
+
+  const reviewRun = await input.reviewRepository.upsertReviewRun({
+    ...input.reviewRun,
+    artifactRefs: [...(input.artifactRefs ?? [])],
+    completedAt,
+    counts: input.counts ?? {
+      candidateFindings: 0,
+      publishedFindings: 0,
+      rejectedFindings: 0,
+      validatedFindings: 0,
+    },
+    metadata: {
+      ...input.reviewRun.metadata,
+      ...(input.metadata ?? {}),
+      currentStage: "staleness",
+      staleness: {
+        checkpoint: input.checkpoint,
+        expectedHeadSha: input.snapshot.headSha,
+        reason: disposition.reason,
+        status: currentStatus,
+      },
+    },
+    status: disposition.status,
+    summary: disposition.summary,
+    updatedAt: completedAt,
+  });
+  await input.reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
+
+  return {
+    quotaReservationReleased,
+    result: {
+      candidateFindingCount: reviewRun.counts.candidateFindings,
+      reviewRunId: reviewRun.reviewRunId,
+      snapshotId: input.snapshot.snapshotId,
+      validatedFindingCount: reviewRun.counts.validatedFindings,
+    },
+    reviewRun,
+    telemetryOutcome: disposition.outcome,
+  };
+}
+
+/** Returns a readable checkpoint phrase for review-run summaries. */
+function reviewStalenessCheckpointLabel(checkpoint: ReviewStalenessCheckpoint): string {
+  if (checkpoint === "after_snapshot") return "after snapshot";
+  if (checkpoint === "after_index") return "after index wait";
+  if (checkpoint === "before_review") return "before review";
+
+  return "before publish";
 }
 
 /** Loads a GitHub repository reference for review orchestration. */
