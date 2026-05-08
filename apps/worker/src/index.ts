@@ -1077,6 +1077,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         gitProvider: options.gitProvider,
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(options.publishThrottle ? { publishThrottle: options.publishThrottle } : {}),
+        ...(options.securityEventSink ? { securityEventSink: options.securityEventSink } : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
       });

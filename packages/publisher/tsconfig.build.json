@@ -16,6 +16,7 @@
     { "path": "../db/tsconfig.build.json" },
     { "path": "../github/tsconfig.build.json" },
     { "path": "../observability/tsconfig.build.json" },
-    { "path": "../rules/tsconfig.build.json" }
+    { "path": "../rules/tsconfig.build.json" },
+    { "path": "../security/tsconfig.build.json" }
   ]
 }

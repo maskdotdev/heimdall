@@ -33,6 +33,11 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import type { EffectivePublishingPolicy } from "@repo/rules";
+import {
+  recordSecurityEvent,
+  type SecurityEventSeverity,
+  type SecurityEventSink,
+} from "@repo/security";
 import { eq } from "drizzle-orm";
 
 /** Legacy publisher behavior for review runs created before policy snapshots existed. */
@@ -127,6 +132,8 @@ export type ReviewPublisherDependencies = {
   readonly publishThrottle?: PublishThrottle;
   /** Optional publish throttle limit overrides used while planning. */
   readonly publishThrottleLimits?: Partial<PublishThrottleLimits>;
+  /** Optional sink for provider-control security events emitted during publishing. */
+  readonly securityEventSink?: SecurityEventSink;
   /** Optional trace context propagated from the durable publish job. */
   readonly traceContext?: TelemetryTraceContextInput | undefined;
   /** Optional span recorder for product-safe publisher spans. */
@@ -629,7 +636,11 @@ async function publishReviewRunInternal(
             ? { publishThrottle: dependencies.publishThrottle }
             : {}),
           publishRunId,
+          repoId: reviewRun.repoId,
           reviewRunId: payload.reviewRunId,
+          ...(dependencies.securityEventSink
+            ? { securityEventSink: dependencies.securityEventSink }
+            : {}),
           pullRequestNumber: payload.pullRequestNumber,
           headSha: reviewRun.headSha,
           findings: publishPlan.inlineFindings,
@@ -721,6 +732,14 @@ async function publishReviewRunInternal(
         error: serializePublisherError(error, "publisher.failed"),
       })
       .where(eq(publishRuns.idempotencyKey, idempotencyKey));
+    recordPublisherGitHubSecurityEvent({
+      error,
+      operation: "publish_review",
+      payload,
+      publishRunId,
+      repoId: reviewRun.repoId,
+      securityEventSink: dependencies.securityEventSink,
+    });
     throw error;
   }
 }
@@ -731,7 +750,9 @@ type PublishInlineCommentsInput = {
   readonly repository: GitHubRepositoryRef;
   readonly publishThrottle?: PublishThrottle;
   readonly publishRunId: string;
+  readonly repoId: string;
   readonly reviewRunId: string;
+  readonly securityEventSink?: SecurityEventSink | undefined;
   readonly pullRequestNumber: number;
   readonly headSha: string;
   readonly findings: readonly ValidatedFinding[];
@@ -1041,6 +1062,17 @@ async function publishInlineComments(input: PublishInlineCommentsInput): Promise
       status: "failed",
       responseHash: hashJson({ message: error instanceof Error ? error.message : String(error) }),
       error: serializePublisherError(error, "publisher.inline_comments_failed"),
+    });
+    recordPublisherGitHubSecurityEvent({
+      error,
+      operation: "review.inline_comments",
+      payload: {
+        pullRequestNumber: input.pullRequestNumber,
+        repoId: input.repoId,
+        reviewRunId: input.reviewRunId,
+      },
+      publishRunId: input.publishRunId,
+      securityEventSink: input.securityEventSink,
     });
 
     return {
@@ -1381,6 +1413,85 @@ async function insertPublishOperation(
     responseHash: input.responseHash,
     error: input.error,
   });
+}
+
+/** Input used to record one provider-adjacent publisher security event. */
+type RecordPublisherGitHubSecurityEventInput = {
+  /** Error returned by the GitHub provider. */
+  readonly error: unknown;
+  /** Provider publish operation that failed. */
+  readonly operation: PublishOperationType | "publish_review";
+  /** Publish job payload that identifies the review and PR. */
+  readonly payload: Pick<PublishReviewJobPayload, "pullRequestNumber" | "repoId" | "reviewRunId">;
+  /** Durable publish run ID associated with the failed operation. */
+  readonly publishRunId: string;
+  /** Repository ID when it is available from the review run. */
+  readonly repoId?: string | undefined;
+  /** Optional sink configured by the worker runtime. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+};
+
+/** Records provider-side publishing control failures as product-safe security events. */
+function recordPublisherGitHubSecurityEvent(input: RecordPublisherGitHubSecurityEventInput): void {
+  if (!input.securityEventSink || !(input.error instanceof GitHubProviderError)) {
+    return;
+  }
+
+  const eventType = publisherGitHubSecurityEventType(input.error.code);
+  if (!eventType) {
+    return;
+  }
+
+  recordSecurityEvent(input.securityEventSink, {
+    metadata: withoutUndefinedValues({
+      githubRequestId: input.error.requestId,
+      githubStatus: input.error.status,
+      publishOperation: input.operation,
+      publishRunId: input.publishRunId,
+      pullRequestNumber: input.payload.pullRequestNumber,
+      rateLimitRemaining: input.error.rateLimit?.remaining,
+      rateLimitResource: input.error.rateLimit?.resource,
+      retryAfterSeconds: input.error.retryAfterSeconds,
+      reviewRunId: input.payload.reviewRunId,
+    }),
+    repoId: input.repoId ?? input.payload.repoId,
+    resourceId: input.payload.reviewRunId,
+    resourceType: "review_run",
+    severity: publisherGitHubSecurityEventSeverity(input.error.code),
+    source: "github",
+    type: eventType,
+  });
+}
+
+/** Maps GitHub publish failures to security-event types worth triaging. */
+function publisherGitHubSecurityEventType(code: GitHubErrorCode): string | undefined {
+  switch (code) {
+    case "github_installation_suspended":
+      return "github_publish_installation_suspended";
+    case "github_permission":
+      return "github_publish_permission_denied";
+    case "github_rate_limit":
+      return "github_publish_rate_limited";
+    case "github_secondary_rate_limit":
+      return "github_publish_secondary_rate_limited";
+    case "github_token":
+      return "github_publish_token_failed";
+    default:
+      return undefined;
+  }
+}
+
+/** Returns the security-event severity for one provider publish failure. */
+function publisherGitHubSecurityEventSeverity(code: GitHubErrorCode): SecurityEventSeverity {
+  if (
+    code === "github_installation_suspended" ||
+    code === "github_permission" ||
+    code === "github_token"
+  ) {
+    return "high";
+  }
+
+  return "medium";
 }
 
 /** Converts thrown publisher/provider errors into durable structured failure metadata. */

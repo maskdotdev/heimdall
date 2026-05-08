@@ -855,6 +855,9 @@ importers:
       '@repo/rules':
         specifier: workspace:*
         version: link:../rules
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../security
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.2(@opentelemetry/api@1.9.1)(bun-types@1.3.13)(postgres@3.4.9)

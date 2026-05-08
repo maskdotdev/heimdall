@@ -1447,6 +1447,9 @@ const criticalSecurityEventTypes = new Set([
 /** Security event types that require urgent triage but are not always incidents. */
 const highSecurityEventTypes = new Set([
   "artifact_download_spike",
+  "github_publish_installation_suspended",
+  "github_publish_permission_denied",
+  "github_publish_token_failed",
   "invalid_webhook_signature_spike",
   "prompt_redaction_secret_detected",
   "sandbox_resource_abuse",
