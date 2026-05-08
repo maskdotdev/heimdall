@@ -4,6 +4,8 @@ import type { HeimdallDatabase } from "../client";
 import { codeIndexVersions } from "../schema";
 import { toCodeIndexVersion } from "./row-mappers";
 
+type CodeIndexVersionRow = typeof codeIndexVersions.$inferSelect;
+
 /** Natural lookup key for an index version. */
 export type IndexVersionLookupInput = {
   /** Repository ID that owns the index version. */
@@ -27,6 +29,54 @@ export type IndexVersionCounts = Pick<
   CodeIndexVersion,
   "chunkCount" | "edgeCount" | "embeddedChunkCount" | "fileCount" | "symbolCount"
 >;
+
+/** Durable index-version record read through the database repository boundary. */
+export type IndexVersionRecord = {
+  /** Stable index version ID. */
+  readonly indexVersionId: string;
+  /** Repository that owns the index version. */
+  readonly repoId: string;
+  /** Commit SHA indexed by this version. */
+  readonly commitSha: string;
+  /** Stable indexer/chunker key. */
+  readonly indexKey: string;
+  /** Import lifecycle status. */
+  readonly status: string;
+  /** Artifact URI for the imported index payload. */
+  readonly artifactUri: string;
+  /** Optional artifact content hash. */
+  readonly artifactHash: string | null;
+  /** Indexer implementation name. */
+  readonly indexerName: string;
+  /** Indexer implementation version. */
+  readonly indexerVersion: string;
+  /** Chunker implementation version. */
+  readonly chunkerVersion: string;
+  /** Expected indexed file count. */
+  readonly fileCount: number;
+  /** Expected indexed symbol count. */
+  readonly symbolCount: number;
+  /** Expected code edge count. */
+  readonly edgeCount: number;
+  /** Expected code chunk count. */
+  readonly chunkCount: number;
+  /** Expected diagnostic count. */
+  readonly diagnosticCount: number;
+  /** Expected dependency count. */
+  readonly dependencyCount: number;
+  /** Expected route count. */
+  readonly routeCount: number;
+  /** Expected related-test mapping count. */
+  readonly testMappingCount: number;
+  /** Expected embedded chunk count. */
+  readonly embeddedChunkCount: number;
+  /** Completion timestamp for terminal states. */
+  readonly completedAt: Date | null;
+  /** Structured import failure payload when present. */
+  readonly error: unknown;
+  /** Creation timestamp. */
+  readonly createdAt: Date;
+};
 
 /** Input used to mark an index version ready. */
 export type MarkIndexReadyInput = {
@@ -161,6 +211,19 @@ export class IndexVersionRepository {
     return row ? toCodeIndexVersion(row) : undefined;
   }
 
+  /** Gets an index version record by ID, including DB-only inspection counts. */
+  public async getIndexVersionRecord(
+    indexVersionId: string,
+  ): Promise<IndexVersionRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(codeIndexVersions)
+      .where(eq(codeIndexVersions.indexVersionId, indexVersionId))
+      .limit(1);
+
+    return row ? toIndexVersionRecord(row) : undefined;
+  }
+
   /** Marks an index version as importing. */
   public async markIndexImporting(indexVersionId: string): Promise<CodeIndexVersion> {
     const [row] = await this.db
@@ -210,6 +273,34 @@ export class IndexVersionRepository {
 
     return toCodeIndexVersion(requireReturnedRow(row));
   }
+}
+
+/** Converts a durable index version row to the repository record shape. */
+function toIndexVersionRecord(row: CodeIndexVersionRow): IndexVersionRecord {
+  return {
+    artifactHash: row.artifactHash,
+    artifactUri: row.artifactUri,
+    chunkCount: row.chunkCount,
+    chunkerVersion: row.chunkerVersion,
+    commitSha: row.commitSha,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    dependencyCount: row.dependencyCount,
+    diagnosticCount: row.diagnosticCount,
+    edgeCount: row.edgeCount,
+    embeddedChunkCount: row.embeddedChunkCount,
+    error: row.error,
+    fileCount: row.fileCount,
+    indexKey: row.indexKey,
+    indexerName: row.indexerName,
+    indexerVersion: row.indexerVersion,
+    indexVersionId: row.indexVersionId,
+    repoId: row.repoId,
+    routeCount: row.routeCount,
+    status: row.status,
+    symbolCount: row.symbolCount,
+    testMappingCount: row.testMappingCount,
+  };
 }
 
 /** Builds a structured failure payload for an index version. */

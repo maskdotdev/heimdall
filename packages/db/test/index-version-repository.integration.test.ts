@@ -75,6 +75,15 @@ describe.runIf(integrationDatabaseUrl)("IndexVersionRepository integration", () 
       repoId: "repo_index_version_test",
     });
     expect(latestReady?.indexVersionId).toBe("idx_repository_ready_new");
+    await expect(
+      indexVersionRepository.getIndexVersionRecord("idx_repository_ready_new"),
+    ).resolves.toMatchObject({
+      diagnosticCount: 0,
+      indexKey: "tree-sitter:2:chunks-v1",
+      indexVersionId: "idx_repository_ready_new",
+      routeCount: 0,
+      testMappingCount: 0,
+    });
 
     const importing = await indexVersionRepository.markIndexImporting("idx_repository_transition");
     expect(importing.status).toBe("importing");

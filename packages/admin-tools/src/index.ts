@@ -23,13 +23,14 @@ import {
   codeDependencies,
   codeEdges,
   codeIndexDiagnostics,
-  codeIndexVersions,
   codeRoutes,
   codeTestMappings,
   debugExports,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
+  type IndexVersionRecord,
+  IndexVersionRepository,
   indexedFiles,
   indexImportBatches,
   llmCalls,
@@ -3424,7 +3425,7 @@ type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
 type MemoryFactRow = typeof memoryFacts.$inferSelect;
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
-type IndexVersionRow = typeof codeIndexVersions.$inferSelect;
+type IndexVersionRow = IndexVersionRecord;
 type IndexImportBatchRow = typeof indexImportBatches.$inferSelect;
 type EmbeddingJobRow = typeof embeddingJobs.$inferSelect;
 type EmbeddingJobItemRow = typeof embeddingJobItems.$inferSelect;
@@ -3509,11 +3510,7 @@ async function getIndexVersionRow(
   indexVersionId: string,
   db: HeimdallDatabase,
 ): Promise<IndexVersionRow> {
-  const [row] = await db
-    .select()
-    .from(codeIndexVersions)
-    .where(eq(codeIndexVersions.indexVersionId, indexVersionId))
-    .limit(1);
+  const row = await new IndexVersionRepository(db).getIndexVersionRecord(indexVersionId);
 
   if (!row) {
     throw new AdminDebugNotFoundError("index_version", indexVersionId);
@@ -4771,20 +4768,12 @@ async function findReadyIndexVersionId(
   repoId: string,
   commitSha: string,
 ): Promise<string | undefined> {
-  const [row] = await db
-    .select({ indexVersionId: codeIndexVersions.indexVersionId })
-    .from(codeIndexVersions)
-    .where(
-      and(
-        eq(codeIndexVersions.repoId, repoId),
-        eq(codeIndexVersions.commitSha, commitSha),
-        eq(codeIndexVersions.status, "ready"),
-      ),
-    )
-    .orderBy(desc(codeIndexVersions.completedAt))
-    .limit(1);
+  const indexVersion = await new IndexVersionRepository(db).getLatestReadyIndexForCommit({
+    commitSha,
+    repoId,
+  });
 
-  return row?.indexVersionId;
+  return indexVersion?.indexVersionId;
 }
 
 /** Summarizes a context bundle for operator-facing retrieval replay output. */

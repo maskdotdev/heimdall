@@ -101,9 +101,11 @@ tracked milestone.
   mutable state updates, provider lookup, and repo/number idempotency.
 - Latest DB index-version milestone: `IndexVersionRepository` now supports ready index lookup by
   repo/commit/index key, latest-ready lookup by repo/commit, idempotent create/update, and
-  importing, ready, and failed state transitions. The Postgres-backed integration test verifies the
-  current migration chain plus terminal counts and structured failure mapping. Review orchestration
-  now uses this repository boundary for ready-index polling.
+  importing, ready, and failed state transitions, plus DB-only inspection records with extended
+  imported-entity counts. The Postgres-backed integration test verifies the current migration chain
+  plus terminal counts, inspection-count mapping, and structured failure mapping. Review
+  orchestration and admin tooling now use this repository boundary for ready-index polling and
+  index-version inspection reads.
 - Latest DB memory-fact milestone: `MemoryFactRepository` now owns active repository and
   organization memory fact reads for review validation, including status, expiration, scope, order,
   and limit handling. Review orchestration now uses this repository boundary instead of importing
