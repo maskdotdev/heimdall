@@ -224,14 +224,20 @@ describe("buildIndexVersionCountMismatches", () => {
     expect(
       buildIndexVersionCountMismatches({
         chunks: { actual: 8, expected: 7 },
+        dependencies: { actual: 1, expected: 2 },
+        diagnostics: { actual: 0, expected: 0 },
         edges: { actual: 0, expected: 0 },
         embeddings: { actual: 2, expected: 4 },
         files: { actual: 3, expected: 3 },
+        routes: { actual: 1, expected: 1 },
         symbols: { actual: 5, expected: 5 },
+        testMappings: { actual: 3, expected: 1 },
       }),
     ).toEqual([
       { actual: 8, delta: 1, expected: 7, metric: "chunks" },
+      { actual: 1, delta: -1, expected: 2, metric: "dependencies" },
       { actual: 2, delta: -2, expected: 4, metric: "embeddings" },
+      { actual: 3, delta: 2, expected: 1, metric: "testMappings" },
     ]);
   });
 });

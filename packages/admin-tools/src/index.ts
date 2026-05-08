@@ -18,8 +18,12 @@ import {
   candidateFindings,
   codeChunkEmbeddings,
   codeChunks,
+  codeDependencies,
   codeEdges,
+  codeIndexDiagnostics,
   codeIndexVersions,
+  codeRoutes,
+  codeTestMappings,
   debugExports,
   embeddingJobItems,
   embeddingJobs,
@@ -268,7 +272,16 @@ export type AdminEmbeddingJobItemDebugSummary = {
 };
 
 /** Count metric shown by the admin index-version inspector. */
-export type AdminIndexVersionCountMetric = "chunks" | "edges" | "embeddings" | "files" | "symbols";
+export type AdminIndexVersionCountMetric =
+  | "chunks"
+  | "dependencies"
+  | "diagnostics"
+  | "edges"
+  | "embeddings"
+  | "files"
+  | "routes"
+  | "symbols"
+  | "testMappings";
 
 /** Expected and actual row counts for one imported index metric. */
 export type AdminIndexVersionCountSummary = {
@@ -300,6 +313,14 @@ export type AdminIndexVersionCountSummaries = {
   readonly edges: AdminIndexVersionCountSummary;
   /** Imported chunk count summary. */
   readonly chunks: AdminIndexVersionCountSummary;
+  /** Imported diagnostic count summary. */
+  readonly diagnostics: AdminIndexVersionCountSummary;
+  /** Imported dependency count summary. */
+  readonly dependencies: AdminIndexVersionCountSummary;
+  /** Imported route count summary. */
+  readonly routes: AdminIndexVersionCountSummary;
+  /** Imported test mapping count summary. */
+  readonly testMappings: AdminIndexVersionCountSummary;
   /** Stored chunk embedding count summary. */
   readonly embeddings: AdminIndexVersionCountSummary;
 };
@@ -334,6 +355,14 @@ export type AdminIndexImportBatchDebugSummary = {
   readonly edgeCount: number;
   /** Chunk records planned or imported by the batch. */
   readonly chunkCount: number;
+  /** Diagnostic records planned or imported by the batch. */
+  readonly diagnosticCount: number;
+  /** Dependency records planned or imported by the batch. */
+  readonly dependencyCount: number;
+  /** Route records planned or imported by the batch. */
+  readonly routeCount: number;
+  /** Test mapping records planned or imported by the batch. */
+  readonly testMappingCount: number;
   /** Embedding jobs created by the batch. */
   readonly embeddingJobCount: number;
   /** Product-safe serialized import error when present. */
@@ -1834,6 +1863,10 @@ export async function getIndexVersionInspection(
     actualSymbolCount,
     actualEdgeCount,
     actualChunkCount,
+    actualDiagnosticCount,
+    actualDependencyCount,
+    actualRouteCount,
+    actualTestMappingCount,
     actualEmbeddingCount,
     importBatchRows,
     embeddingJobRows,
@@ -1842,16 +1875,24 @@ export async function getIndexVersionInspection(
     countSymbolRows(dependencies.db, indexVersionId),
     countCodeEdgeRows(dependencies.db, indexVersionId),
     countCodeChunkRows(dependencies.db, indexVersionId),
+    countCodeIndexDiagnosticRows(dependencies.db, indexVersionId),
+    countCodeDependencyRows(dependencies.db, indexVersionId),
+    countCodeRouteRows(dependencies.db, indexVersionId),
+    countCodeTestMappingRows(dependencies.db, indexVersionId),
     countCodeChunkEmbeddingRows(dependencies.db, indexVersionId),
     listIndexImportBatchRows(dependencies.db, indexVersionId),
     listEmbeddingJobRowsForIndexVersion(dependencies.db, indexVersionId),
   ]);
   const counts = {
     chunks: { actual: actualChunkCount, expected: row.chunkCount },
+    dependencies: { actual: actualDependencyCount, expected: row.dependencyCount },
+    diagnostics: { actual: actualDiagnosticCount, expected: row.diagnosticCount },
     edges: { actual: actualEdgeCount, expected: row.edgeCount },
     embeddings: { actual: actualEmbeddingCount, expected: row.embeddedChunkCount },
     files: { actual: actualFileCount, expected: row.fileCount },
+    routes: { actual: actualRouteCount, expected: row.routeCount },
     symbols: { actual: actualSymbolCount, expected: row.symbolCount },
+    testMappings: { actual: actualTestMappingCount, expected: row.testMappingCount },
   } satisfies AdminIndexVersionCountSummaries;
 
   return {
@@ -3469,6 +3510,55 @@ async function countCodeChunkRows(db: HeimdallDatabase, indexVersionId: string):
   return Number(row?.value ?? 0);
 }
 
+/** Counts imported index diagnostic rows for one index version. */
+async function countCodeIndexDiagnosticRows(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeIndexDiagnostics)
+    .where(eq(codeIndexDiagnostics.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts imported dependency rows for one index version. */
+async function countCodeDependencyRows(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeDependencies)
+    .where(eq(codeDependencies.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts imported route rows for one index version. */
+async function countCodeRouteRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeRoutes)
+    .where(eq(codeRoutes.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts imported test mapping rows for one index version. */
+async function countCodeTestMappingRows(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeTestMappings)
+    .where(eq(codeTestMappings.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
 /** Counts stored code chunk embedding rows for one index version. */
 async function countCodeChunkEmbeddingRows(
   db: HeimdallDatabase,
@@ -3977,6 +4067,10 @@ function toIndexImportBatchDebugSummary(
     symbolCount: row.symbolCount,
     edgeCount: row.edgeCount,
     chunkCount: row.chunkCount,
+    diagnosticCount: row.diagnosticCount,
+    dependencyCount: row.dependencyCount,
+    routeCount: row.routeCount,
+    testMappingCount: row.testMappingCount,
     embeddingJobCount: row.embeddingJobCount,
     ...(row.error !== null ? { error: row.error } : {}),
     metadataKeys: sortedRecordKeys(metadata),

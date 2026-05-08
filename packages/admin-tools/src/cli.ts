@@ -1426,6 +1426,10 @@ function formatIndexImportResult(result: ImportIndexArtifactResult): string {
     `Symbols: ${result.symbolCount}`,
     `Edges: ${result.edgeCount}`,
     `Chunks: ${result.chunkCount}`,
+    `Diagnostics: ${result.diagnosticCount}`,
+    `Dependencies: ${result.dependencyCount}`,
+    `Routes: ${result.routeCount}`,
+    `Test mappings: ${result.testMappingCount}`,
     `Embedding jobs: ${result.embeddingJobCount}`,
   ].join("\n");
 }
@@ -1448,6 +1452,10 @@ function formatIndexCountSummaries(inspection: AdminIndexVersionInspection): str
     `symbols=${formatIndexCount(inspection.counts.symbols)}`,
     `edges=${formatIndexCount(inspection.counts.edges)}`,
     `chunks=${formatIndexCount(inspection.counts.chunks)}`,
+    `diagnostics=${formatIndexCount(inspection.counts.diagnostics)}`,
+    `dependencies=${formatIndexCount(inspection.counts.dependencies)}`,
+    `routes=${formatIndexCount(inspection.counts.routes)}`,
+    `testMappings=${formatIndexCount(inspection.counts.testMappings)}`,
     `embeddings=${formatIndexCount(inspection.counts.embeddings)}`,
   ].join(", ");
 }
