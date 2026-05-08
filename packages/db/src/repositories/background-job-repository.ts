@@ -6,12 +6,15 @@ import {
   type JobStatus,
   parseWithSchema,
 } from "@repo/contracts";
-import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, like, lte, or, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { backgroundJobs } from "../schema";
 
 /** Database surface required by background job repository methods. */
-type BackgroundJobRepositoryDatabase = Pick<HeimdallDatabase, "insert" | "select" | "update">;
+type BackgroundJobRepositoryDatabase = Pick<
+  HeimdallDatabase,
+  "delete" | "insert" | "select" | "update"
+>;
 
 /** Product-safe durable job error payload stored on background job rows. */
 export type BackgroundJobError = {
@@ -227,6 +230,19 @@ export class BackgroundJobRepository {
       .limit(1);
 
     return row ? toBackgroundJobRecord(row) : undefined;
+  }
+
+  /** Deletes durable embedding batch and repair jobs associated with an embedding job row. */
+  public async deleteEmbeddingBackgroundJobsForEmbeddingJob(embeddingJobId: string): Promise<void> {
+    await this.db
+      .delete(backgroundJobs)
+      .where(
+        or(
+          like(backgroundJobs.jobKey, `embedding:${embeddingJobId}:%`),
+          eq(backgroundJobs.jobKey, `embedding:repair:${embeddingJobId}`),
+          like(backgroundJobs.jobKey, `embedding:repair:${embeddingJobId}:batch:%`),
+        ),
+      );
   }
 
   /** Returns pending jobs eligible for dispatch. */

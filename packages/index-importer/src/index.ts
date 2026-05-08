@@ -8,7 +8,7 @@ import {
   JOB_TYPES,
 } from "@repo/contracts";
 import {
-  backgroundJobs,
+  BackgroundJobRepository,
   codeChunkEmbeddings,
   codeChunks,
   codeDependencies,
@@ -46,7 +46,7 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
-import { and, asc, eq, inArray, like, lt, not, or } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, not } from "drizzle-orm";
 
 export const packageName = "@repo/index-importer" as const;
 
@@ -1126,16 +1126,10 @@ async function cleanupFailedIndexVersionRows(
     input.embeddingJobIds ?? (await loadEmbeddingJobIdsForIndexVersion(db, input.indexVersionId));
 
   await db.transaction(async (tx) => {
+    const backgroundJobRepository = new BackgroundJobRepository(tx);
+
     for (const embeddingJobId of embeddingJobIds) {
-      await tx
-        .delete(backgroundJobs)
-        .where(
-          or(
-            like(backgroundJobs.jobKey, `embedding:${embeddingJobId}:%`),
-            eq(backgroundJobs.jobKey, `embedding:repair:${embeddingJobId}`),
-            like(backgroundJobs.jobKey, `embedding:repair:${embeddingJobId}:batch:%`),
-          ),
-        );
+      await backgroundJobRepository.deleteEmbeddingBackgroundJobsForEmbeddingJob(embeddingJobId);
     }
     if (embeddingJobIds.length > 0) {
       await tx
@@ -1714,6 +1708,8 @@ async function enqueueEmbeddingBatches(input: {
     await options.db.insert(embeddingJobItems).values(batch).onConflictDoNothing();
   }
 
+  const backgroundJobRepository = new BackgroundJobRepository(options.db);
+
   for (let index = 0; index < input.plan.chunks.length; index += batchSize) {
     const chunkIds = input.plan.chunks
       .slice(index, index + batchSize)
@@ -1728,28 +1724,21 @@ async function enqueueEmbeddingBatches(input: {
     };
     const now = new Date().toISOString();
     const jobKey = `embedding:${embeddingJobId}:${index / batchSize}`;
-    await options.db
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: createStableId("job", [jobKey]),
-        queueName: QUEUE_NAMES.embedding,
-        jobKey,
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: createStableId("job", [jobKey]),
+      envelope: {
+        attempt: 0,
+        createdAt: now,
+        idempotencyKey: jobKey,
+        jobId: createStableId("job", [jobKey, "envelope"]),
         jobType: JOB_TYPES.EmbeddingBatch,
-        status: "pending",
-        repoId: input.repoId,
-        payload: {
-          jobId: createStableId("job", [jobKey, "envelope"]),
-          jobType: JOB_TYPES.EmbeddingBatch,
-          schemaVersion: "job_envelope.v1",
-          idempotencyKey: jobKey,
-          createdAt: now,
-          attempt: 0,
-          maxAttempts: 3,
-          payload,
-        },
         maxAttempts: 3,
-      })
-      .onConflictDoNothing();
+        payload,
+        schemaVersion: "job_envelope.v1",
+      },
+      queueName: QUEUE_NAMES.embedding,
+      repoId: input.repoId,
+    });
     count += 1;
   }
 
@@ -1801,34 +1790,27 @@ async function enqueueEmbeddingRepairJob(input: {
   };
   const jobKey = `embedding:repair:${input.embeddingJobId}`;
 
-  await input.db
-    .insert(backgroundJobs)
-    .values({
-      backgroundJobId: createStableId("job", [jobKey]),
-      jobKey,
+  await new BackgroundJobRepository(input.db).insertBackgroundJob({
+    backgroundJobId: createStableId("job", [jobKey]),
+    envelope: {
+      attempt: 0,
+      createdAt: new Date().toISOString(),
+      idempotencyKey: jobKey,
+      jobId: createStableId("job", [jobKey, "envelope"]),
       jobType: JOB_TYPES.EmbeddingRepair,
       maxAttempts: 3,
-      metadata: {
-        source: "embedding_planner_repair_backstop",
-      },
-      orgId: input.orgId,
-      payload: {
-        attempt: 0,
-        createdAt: new Date().toISOString(),
-        idempotencyKey: jobKey,
-        jobId: createStableId("job", [jobKey, "envelope"]),
-        jobType: JOB_TYPES.EmbeddingRepair,
-        maxAttempts: 3,
-        payload,
-        scheduledFor: scheduledAt.toISOString(),
-        schemaVersion: "job_envelope.v1",
-      },
-      queueName: QUEUE_NAMES.embedding,
-      repoId: input.repoId,
-      scheduledAt,
-      status: "pending",
-    })
-    .onConflictDoNothing();
+      payload,
+      scheduledFor: scheduledAt.toISOString(),
+      schemaVersion: "job_envelope.v1",
+    },
+    metadata: {
+      source: "embedding_planner_repair_backstop",
+    },
+    orgId: input.orgId,
+    queueName: QUEUE_NAMES.embedding,
+    repoId: input.repoId,
+    scheduledAt,
+  });
 }
 
 /** Loads a repository owner org for embedding planner rows. */

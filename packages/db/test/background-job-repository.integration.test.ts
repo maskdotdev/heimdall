@@ -1,7 +1,13 @@
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { JOB_TYPES, type JobEnvelope, type SyncInstallationJobPayload } from "@repo/contracts";
+import {
+  type EmbeddingBatchJobPayload,
+  type EmbeddingRepairJobPayload,
+  JOB_TYPES,
+  type JobEnvelope,
+  type SyncInstallationJobPayload,
+} from "@repo/contracts";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -209,6 +215,53 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
       }),
     ).resolves.toMatchObject({ status: "running" });
   });
+
+  it("deletes embedding background jobs for one embedding job key family", async () => {
+    const embeddingJobId = "embjob_background_cleanup";
+    const unrelatedEmbeddingJobId = "embjob_background_cleanup_other";
+    const matchingBatchJobKey = `embedding:${embeddingJobId}:0`;
+    const matchingRepairJobKeys = [
+      `embedding:repair:${embeddingJobId}`,
+      `embedding:repair:${embeddingJobId}:batch:0`,
+    ];
+    const matchingJobKeys = [matchingBatchJobKey, ...matchingRepairJobKeys];
+    const unrelatedJobKey = `embedding:${unrelatedEmbeddingJobId}:0`;
+
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: `job_${matchingBatchJobKey.replace(/[^A-Za-z0-9_-]/g, "_")}`,
+      envelope: embeddingBatchEnvelope(matchingBatchJobKey, embeddingJobId),
+      queueName: "embedding",
+    });
+    for (const jobKey of matchingRepairJobKeys) {
+      await backgroundJobRepository.insertBackgroundJob({
+        backgroundJobId: `job_${jobKey.replace(/[^A-Za-z0-9_-]/g, "_")}`,
+        envelope: embeddingRepairEnvelope(jobKey, embeddingJobId),
+        queueName: "embedding",
+      });
+    }
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: "job_embedding_unrelated",
+      envelope: embeddingBatchEnvelope(unrelatedJobKey, unrelatedEmbeddingJobId),
+      queueName: "embedding",
+    });
+
+    await backgroundJobRepository.deleteEmbeddingBackgroundJobsForEmbeddingJob(embeddingJobId);
+
+    for (const jobKey of matchingJobKeys) {
+      await expect(
+        backgroundJobRepository.getBackgroundJobByQueueAndKey({
+          jobKey,
+          queueName: "embedding",
+        }),
+      ).resolves.toBeUndefined();
+    }
+    await expect(
+      backgroundJobRepository.getBackgroundJobByQueueAndKey({
+        jobKey: unrelatedJobKey,
+        queueName: "embedding",
+      }),
+    ).resolves.toMatchObject({ backgroundJobId: "job_embedding_unrelated" });
+  });
 });
 
 /** Builds a sync-installation durable job envelope for repository tests. */
@@ -226,6 +279,59 @@ function syncInstallationEnvelope(idempotencyKey: string): JobEnvelope<SyncInsta
       installationId: "inst_background_job_repository_test",
       provider: "github",
       reason: "manual",
+    },
+    schemaVersion: "job_envelope.v1",
+  };
+}
+
+/** Builds an embedding batch durable job envelope for repository tests. */
+function embeddingBatchEnvelope(
+  idempotencyKey: string,
+  embeddingJobId: string,
+): JobEnvelope<EmbeddingBatchJobPayload> {
+  const stableSuffix = idempotencyKey.replace(/[^A-Za-z0-9_-]/g, "_");
+
+  return {
+    attempt: 0,
+    createdAt: "2026-05-08T00:00:00.000Z",
+    idempotencyKey,
+    jobId: `job_${stableSuffix}`,
+    jobType: JOB_TYPES.EmbeddingBatch,
+    maxAttempts: 3,
+    payload: {
+      chunkIds: ["chunk_background_job_repository_test"],
+      embeddingJobId,
+      embeddingModel: "text-embedding-3-small",
+      embeddingProfileVersion: "code_embedding_profile.v1",
+      indexVersionId: "idx_background_job_repository_test",
+      repoId: "repo_background_job_repository_test",
+    },
+    schemaVersion: "job_envelope.v1",
+  };
+}
+
+/** Builds an embedding repair durable job envelope for repository tests. */
+function embeddingRepairEnvelope(
+  idempotencyKey: string,
+  embeddingJobId: string,
+): JobEnvelope<EmbeddingRepairJobPayload> {
+  const stableSuffix = idempotencyKey.replace(/[^A-Za-z0-9_-]/g, "_");
+
+  return {
+    attempt: 0,
+    createdAt: "2026-05-08T00:00:00.000Z",
+    idempotencyKey,
+    jobId: `job_${stableSuffix}`,
+    jobType: JOB_TYPES.EmbeddingRepair,
+    maxAttempts: 3,
+    payload: {
+      dimensions: 1536,
+      embeddingJobId,
+      embeddingProfileVersion: "code_embedding_profile.v1",
+      indexVersionId: "idx_background_job_repository_test",
+      model: "text-embedding-3-small",
+      provider: "openai",
+      repoId: "repo_background_job_repository_test",
     },
     schemaVersion: "job_envelope.v1",
   };

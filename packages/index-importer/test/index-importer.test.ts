@@ -1251,7 +1251,9 @@ function createRecordingImportDatabaseStub(
         insertedRows.push(values);
 
         return {
-          onConflictDoNothing: async () => undefined,
+          onConflictDoNothing: () => ({
+            returning: async () => [createBackgroundJobInsertedRow(values)],
+          }),
           onConflictDoUpdate: async (_input: unknown) => undefined,
         };
       },
@@ -1272,7 +1274,9 @@ function createRecordingImportDatabaseStub(
         insertedRows.push(values);
 
         return {
-          onConflictDoNothing: async () => undefined,
+          onConflictDoNothing: () => ({
+            returning: async () => [createBackgroundJobInsertedRow(values)],
+          }),
           onConflictDoUpdate: async (_input: unknown) => undefined,
         };
       },
@@ -1373,7 +1377,9 @@ function createEmbeddingPlanningImportDatabaseStub(
     }),
     insert: (_table: unknown) => ({
       values: (_values: unknown) => ({
-        onConflictDoNothing: async () => undefined,
+        onConflictDoNothing: () => ({
+          returning: async () => [createBackgroundJobInsertedRow(_values)],
+        }),
         onConflictDoUpdate: async (_input: unknown) => undefined,
       }),
     }),
@@ -1393,7 +1399,7 @@ function createEmbeddingPlanningImportDatabaseStub(
         insertedRows.push(values);
 
         return {
-          onConflictDoNothing: async () => {
+          onConflictDoNothing: () => {
             if (
               isUnknownRecord(values) &&
               options.failOnJobType !== undefined &&
@@ -1401,6 +1407,10 @@ function createEmbeddingPlanningImportDatabaseStub(
             ) {
               throw new Error("embedding planner write failed");
             }
+
+            return {
+              returning: async () => [createBackgroundJobInsertedRow(values)],
+            };
           },
           onConflictDoUpdate: async (_input: unknown) => undefined,
         };
@@ -1428,6 +1438,29 @@ function createEmbeddingPlanningImportDatabaseStub(
   };
 
   return db as unknown as HeimdallDatabase;
+}
+
+/** Adds database-default fields expected by the background job repository mapper. */
+function createBackgroundJobInsertedRow(values: unknown): unknown {
+  if (typeof values !== "object" || values === null || Array.isArray(values)) {
+    return values;
+  }
+
+  const row = values as Record<string, unknown>;
+  const timestamp = new Date("2026-05-08T00:00:00.000Z");
+
+  return {
+    ...row,
+    attempts: row.attempts ?? 0,
+    completedAt: row.completedAt ?? null,
+    createdAt: row.createdAt ?? timestamp,
+    error: row.error ?? null,
+    orgId: row.orgId ?? null,
+    reviewRunId: row.reviewRunId ?? null,
+    scheduledAt: row.scheduledAt ?? null,
+    startedAt: row.startedAt ?? null,
+    updatedAt: row.updatedAt ?? timestamp,
+  };
 }
 
 /** Creates the DB surface needed by stale import reconciliation tests. */
