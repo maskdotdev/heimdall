@@ -301,6 +301,35 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
       metadata: { note: "accepted" },
       outcome: "accepted",
     });
+    await reviewRepository.insertFindingOutcomeIfAbsent({
+      candidateFindingId: null,
+      findingOutcomeId: "out_review_repository_inserted",
+      metadata: { source: "provider" },
+      occurredAt: new Date("2026-05-08T00:06:30.000Z"),
+      orgId: "org_review_repository_test",
+      outcome: "resolved",
+      publishedFindingId: null,
+      repoId: "repo_review_repository_test",
+      source: "provider_webhook",
+    });
+    await reviewRepository.insertFindingOutcomeIfAbsent({
+      candidateFindingId: null,
+      findingOutcomeId: "out_review_repository_inserted",
+      metadata: { source: "ignored" },
+      occurredAt: new Date("2026-05-08T00:07:00.000Z"),
+      orgId: "org_review_repository_test",
+      outcome: "commented",
+      publishedFindingId: null,
+      repoId: "repo_review_repository_test",
+      source: "provider_webhook",
+    });
+    await expect(
+      reviewRepository.getFindingOutcome("out_review_repository_inserted"),
+    ).resolves.toMatchObject({
+      findingOutcomeId: "out_review_repository_inserted",
+      metadata: { source: "provider" },
+      outcome: "resolved",
+    });
     const findingOutcomes = await reviewRepository.listFindingOutcomesForFindings({
       candidateFindingIds: ["fnd_review_repository_candidate"],
       publishedFindingIds: ["pub_review_repository_validated"],

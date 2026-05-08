@@ -43,7 +43,6 @@ import {
   createDatabaseClient,
   FeedbackRepository,
   type FindingOutcomeRecord,
-  findingOutcomes,
   type HeimdallDatabase,
   MemoryCandidateRepository,
   ProviderInstallationRepository,
@@ -2510,27 +2509,24 @@ async function recordOutcomeFromProviderFeedback(
   await persistFeedbackEventAndSignals(db, feedbackEvent, feedbackCommandFromPayload(payload));
 
   if (outcome) {
-    await db
-      .insert(findingOutcomes)
-      .values({
-        candidateFindingId: published.candidateFindingId,
-        findingOutcomeId: stableWorkerId("out", [
-          "provider_feedback",
-          payload.externalEventId ??
-            payload.externalReactionId ??
-            payload.externalParentCommentId ??
-            payload.externalCommentId ??
-            payload.externalThreadId,
-        ]),
-        metadata: providerFeedbackOutcomeMetadata(payload),
-        occurredAt: new Date(receivedAt),
-        orgId: published.orgId,
-        outcome,
-        publishedFindingId: published.publishedFindingId,
-        repoId: published.repoId,
-        source: "provider_webhook",
-      })
-      .onConflictDoNothing();
+    await new ReviewRepository(db).insertFindingOutcomeIfAbsent({
+      candidateFindingId: published.candidateFindingId,
+      findingOutcomeId: stableWorkerId("out", [
+        "provider_feedback",
+        payload.externalEventId ??
+          payload.externalReactionId ??
+          payload.externalParentCommentId ??
+          payload.externalCommentId ??
+          payload.externalThreadId,
+      ]),
+      metadata: providerFeedbackOutcomeMetadata(payload),
+      occurredAt: new Date(receivedAt),
+      orgId: published.orgId,
+      outcome,
+      publishedFindingId: published.publishedFindingId,
+      repoId: published.repoId,
+      source: "provider_webhook",
+    });
   }
 
   await createMemoryCandidatesFromProviderCommand(db, payload, published, receivedAt, telemetry);

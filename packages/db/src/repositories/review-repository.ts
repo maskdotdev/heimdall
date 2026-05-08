@@ -503,18 +503,7 @@ export class ReviewRepository {
   ): Promise<FindingOutcomeRecord> {
     const [inserted] = await this.db
       .insert(findingOutcomes)
-      .values({
-        candidateFindingId: input.candidateFindingId ?? undefined,
-        createdAt: input.createdAt ?? new Date(),
-        findingOutcomeId: input.findingOutcomeId,
-        metadata: input.metadata,
-        occurredAt: input.occurredAt,
-        orgId: input.orgId,
-        outcome: input.outcome,
-        publishedFindingId: input.publishedFindingId ?? undefined,
-        repoId: input.repoId,
-        source: input.source,
-      })
+      .values(findingOutcomeInsertValues(input))
       .onConflictDoNothing()
       .returning(findingOutcomeRecordSelect());
 
@@ -528,6 +517,14 @@ export class ReviewRepository {
     }
 
     return existing;
+  }
+
+  /** Inserts one finding outcome and preserves existing idempotent rows. */
+  public async insertFindingOutcomeIfAbsent(input: CreateFindingOutcomeInput): Promise<void> {
+    await this.db
+      .insert(findingOutcomes)
+      .values(findingOutcomeInsertValues(input))
+      .onConflictDoNothing();
   }
 
   /** Gets one finding outcome by ID. */
@@ -927,6 +924,24 @@ function findingOutcomeRecordSelect() {
     publishedFindingId: findingOutcomes.publishedFindingId,
     repoId: findingOutcomes.repoId,
     source: findingOutcomes.source,
+  };
+}
+
+/** Converts finding outcome input into the Drizzle insert shape. */
+function findingOutcomeInsertValues(
+  input: CreateFindingOutcomeInput,
+): typeof findingOutcomes.$inferInsert {
+  return {
+    candidateFindingId: input.candidateFindingId ?? undefined,
+    createdAt: input.createdAt ?? new Date(),
+    findingOutcomeId: input.findingOutcomeId,
+    metadata: input.metadata,
+    occurredAt: input.occurredAt,
+    orgId: input.orgId,
+    outcome: input.outcome,
+    publishedFindingId: input.publishedFindingId ?? undefined,
+    repoId: input.repoId,
+    source: input.source,
   };
 }
 
