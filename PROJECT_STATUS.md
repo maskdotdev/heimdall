@@ -1329,9 +1329,10 @@ tracked milestone.
 - Latest review/provider security-event milestone: review orchestration now accepts the worker
   security-event sink and records product-safe GitHub-sourced security events for provider
   permission, installation-suspended, token, rate-limit, unavailable, and validation failures that
-  block PR review snapshots or later current-state/provider checks. Worker review jobs pass through
-  the durable Postgres-backed sink, and focused review-orchestrator tests verify permission-denial
-  event shape, safe rate-limit metadata, and not-found suppression for stale PR state.
+  block PR review snapshots, repo-local policy config loading, or later current-state/provider
+  checks. Worker review jobs pass through the durable Postgres-backed sink, and focused
+  review-orchestrator tests verify permission-denial event shape, safe rate-limit metadata, and
+  not-found suppression for stale PR state.
 - Latest publisher security-event milestone: `@repo/publisher` now accepts the worker
   security-event sink and records product-safe GitHub-sourced security events for provider
   permission, installation-suspended, token, and rate-limit failures during review publishing.
