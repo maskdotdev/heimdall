@@ -13,6 +13,7 @@
     "dev:admin-gateway": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; pnpm --filter @app/admin-gateway dev",
     "dev:api": "turbo dev --filter=@app/api",
     "dev:admin-idp": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/dev-admin-idp.ts",
+    "dev:validate-artifact": "pnpm --filter @app/indexer-cli dev -- validate",
     "dev:marketing": "turbo dev --filter=@app/marketing",
     "dev:web": "turbo dev --filter=@app/web",
     "dev:worker": "turbo dev --filter=@app/worker",
