@@ -65,7 +65,11 @@ import {
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
-import { importIndexArtifact, importIndexArtifactFromUri } from "@repo/index-importer";
+import {
+  createIndexImportLimitsFromEnvironment,
+  importIndexArtifact,
+  importIndexArtifactFromUri,
+} from "@repo/index-importer";
 import {
   assertIndexerSupportsCurrentArtifactSchema,
   type CodeIndexerDriver,
@@ -553,11 +557,13 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           throw new Error(`${result.error.code}: ${result.error.message}`);
         }
 
+        const importLimits = createIndexImportLimitsFromEnvironment(process.env);
         if (result.artifactUri) {
           await importIndexArtifact(result.artifact, {
             artifactUri: result.artifactUri,
             db: options.db,
             enqueueEmbeddings: true,
+            importLimits,
             ...(options.metrics ? { metrics: options.metrics } : {}),
             ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
             ...(options.traces ? { traces: options.traces } : {}),
@@ -571,6 +577,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             artifactUri,
             db: options.db,
             enqueueEmbeddings: true,
+            importLimits,
             ...(options.metrics ? { metrics: options.metrics } : {}),
             ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
             ...(options.traces ? { traces: options.traces } : {}),

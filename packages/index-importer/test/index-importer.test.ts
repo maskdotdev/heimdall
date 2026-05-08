@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createFileSystemIndexArtifactResolver,
   createIndexArtifactResolverFromEnvironment,
+  createIndexImportLimitsFromEnvironment,
   createS3CompatibleIndexArtifactResolver,
   importIndexArtifact,
   readIndexArtifactFromUri,
@@ -222,6 +223,28 @@ describe("createFileSystemIndexArtifactResolver", () => {
 });
 
 describe("importIndexArtifact telemetry", () => {
+  it("creates import limits from INDEX_IMPORT_MAX environment values", () => {
+    expect(
+      createIndexImportLimitsFromEnvironment({
+        INDEX_IMPORT_MAX_CHUNK_TEXT_BYTES: "64",
+        INDEX_IMPORT_MAX_CHUNKS: "6",
+        INDEX_IMPORT_MAX_EDGES: "7",
+        INDEX_IMPORT_MAX_FILES: "3",
+        INDEX_IMPORT_MAX_RECORD_BYTES: "128",
+        INDEX_IMPORT_MAX_RECORDS: "2",
+        INDEX_IMPORT_MAX_SYMBOLS: "5",
+      }),
+    ).toMatchObject({
+      maxChunkTextBytes: 64,
+      maxChunks: 6,
+      maxEdges: 7,
+      maxFiles: 3,
+      maxRecordBytes: 128,
+      maxRecords: 2,
+      maxSymbols: 5,
+    });
+  });
+
   it("records product-safe successful import metrics and spans", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
@@ -468,6 +491,52 @@ describe("importIndexArtifact telemetry", () => {
         }),
       ]),
     );
+  });
+
+  it("rejects artifacts that exceed configured import record limits", async () => {
+    const updatedRows: unknown[] = [];
+
+    await expect(
+      importIndexArtifact(artifactWithFiles(2), {
+        artifactUri: "file:///tmp/index-artifact.json",
+        db: createRecordingImportDatabaseStub([], updatedRows),
+        importLimits: { maxFiles: 1, maxRecords: 1 },
+      }),
+    ).rejects.toThrow("validation limits exceeded");
+
+    expect(updatedRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          error: expect.objectContaining({
+            class: "validation_error",
+            message: expect.stringContaining("fileCount 2 exceeds configured maximum 1"),
+          }),
+          phase: "failed",
+          status: "failed",
+        }),
+      ]),
+    );
+  });
+
+  it("rejects chunk text that exceeds configured byte limits without echoing source text", async () => {
+    const artifact = artifactWithChunks(1);
+    const chunkText = "export const value1 = 1;";
+
+    let caughtError: unknown;
+    try {
+      await importIndexArtifact(artifact, {
+        artifactUri: "file:///tmp/index-artifact.json",
+        db: createImportDatabaseStub(),
+        importLimits: { maxChunkTextBytes: 8 },
+      });
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toBeInstanceOf(Error);
+    const message = caughtError instanceof Error ? caughtError.message : "";
+    expect(message).toContain("chunkTextBytes[1]");
+    expect(message).not.toContain(chunkText);
   });
 
   it("records validation failure telemetry without importing records", async () => {

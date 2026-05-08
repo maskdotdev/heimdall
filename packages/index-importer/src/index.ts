@@ -55,6 +55,17 @@ const DEFAULT_IMPORT_RECORD_BATCH_SIZE = 1_000;
 /** Maximum record batch size accepted from caller-provided import options. */
 const MAX_IMPORT_RECORD_BATCH_SIZE = 5_000;
 
+/** Default safety limits for one index artifact import. */
+export const DEFAULT_INDEX_IMPORT_LIMITS = {
+  maxChunkTextBytes: 256_000,
+  maxChunks: 500_000,
+  maxEdges: 1_000_000,
+  maxFiles: 100_000,
+  maxRecordBytes: 2_000_000,
+  maxRecords: 1_000_000,
+  maxSymbols: 500_000,
+} satisfies IndexImportLimits;
+
 /** Resolver that loads an index artifact from a durable URI or local path. */
 export type IndexArtifactResolver = {
   /** Reads and parses an index artifact from the provided URI. */
@@ -92,6 +103,27 @@ export type S3CompatibleIndexArtifactResolverOptions = {
 /** Environment values used to choose the runtime index artifact resolver. */
 export type IndexArtifactResolverEnvironment = Readonly<Record<string, string | undefined>>;
 
+/** Configurable safety limits for one index artifact import. */
+export type IndexImportLimits = {
+  /** Maximum UTF-8 bytes allowed for one chunk text payload. */
+  readonly maxChunkTextBytes: number;
+  /** Maximum chunk records allowed in one artifact. */
+  readonly maxChunks: number;
+  /** Maximum edge records allowed in one artifact. */
+  readonly maxEdges: number;
+  /** Maximum file records allowed in one artifact. */
+  readonly maxFiles: number;
+  /** Maximum UTF-8 JSON bytes allowed for one artifact record. */
+  readonly maxRecordBytes: number;
+  /** Maximum total records allowed in one artifact. */
+  readonly maxRecords: number;
+  /** Maximum symbol records allowed in one artifact. */
+  readonly maxSymbols: number;
+};
+
+/** Environment values used to configure index import limits. */
+export type IndexImportLimitsEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Options for importing a validated artifact. */
 export type ImportIndexArtifactOptions = {
   /** Database used for idempotent persistence. */
@@ -110,6 +142,8 @@ export type ImportIndexArtifactOptions = {
   readonly embeddingDimensions?: number;
   /** Maximum chunk IDs per embedding job. */
   readonly embeddingBatchSize?: number;
+  /** Optional safety limits for artifact record and chunk sizes. */
+  readonly importLimits?: Partial<IndexImportLimits>;
   /** Maximum normalized records written per database insert statement. */
   readonly importRecordBatchSize?: number;
   /** Optional metric recorder for aggregate index-import telemetry. */
@@ -166,6 +200,8 @@ type IndexImportPlan = {
   readonly files: readonly Extract<IndexArtifact["records"][number], { type: "file" }>[];
   /** Durable import batch ID that owns progress state. */
   readonly importBatchId: string;
+  /** Fully resolved safety limits for artifact record and chunk sizes. */
+  readonly importLimits: IndexImportLimits;
   /** Bounded insert batch size for normalized record writes. */
   readonly importRecordBatchSize: number;
   /** Deterministic index key for this importer/chunker profile. */
@@ -260,6 +296,22 @@ export function createIndexArtifactResolverFromEnvironment(
   return createFileSystemIndexArtifactResolver();
 }
 
+/** Creates fully resolved index import safety limits from environment variables. */
+export function createIndexImportLimitsFromEnvironment(
+  env: IndexImportLimitsEnvironment,
+): IndexImportLimits {
+  const limits: Partial<IndexImportLimits> = {};
+  assignOptionalLimit(limits, "maxChunkTextBytes", env.INDEX_IMPORT_MAX_CHUNK_TEXT_BYTES);
+  assignOptionalLimit(limits, "maxChunks", env.INDEX_IMPORT_MAX_CHUNKS);
+  assignOptionalLimit(limits, "maxEdges", env.INDEX_IMPORT_MAX_EDGES);
+  assignOptionalLimit(limits, "maxFiles", env.INDEX_IMPORT_MAX_FILES);
+  assignOptionalLimit(limits, "maxRecordBytes", env.INDEX_IMPORT_MAX_RECORD_BYTES);
+  assignOptionalLimit(limits, "maxRecords", env.INDEX_IMPORT_MAX_RECORDS);
+  assignOptionalLimit(limits, "maxSymbols", env.INDEX_IMPORT_MAX_SYMBOLS);
+
+  return resolveIndexImportLimits(limits);
+}
+
 /** Reads a filesystem-backed index artifact from a file URL or local path. */
 export async function readIndexArtifactFromUri(
   artifactUri: string,
@@ -298,6 +350,13 @@ export async function importIndexArtifact(
     validationFailureCount = validationErrors.length;
     if (validationErrors.length > 0) {
       throw new Error(`Invalid index artifact: validation failed: ${validationErrors.join("; ")}`);
+    }
+    const limitErrors = validateIndexImportLimits(artifact, importPlan);
+    validationFailureCount = limitErrors.length;
+    if (limitErrors.length > 0) {
+      throw new Error(
+        `Invalid index artifact: validation limits exceeded: ${limitErrors.join("; ")}`,
+      );
     }
 
     await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
@@ -507,6 +566,7 @@ function createIndexImportPlan(
   const chunks = artifact.records.filter(
     (record): record is ChunkRecord => record.type === "chunk",
   );
+  const importLimits = resolveIndexImportLimits(options.importLimits);
   const indexVersionId = stableId("idx", [
     artifact.manifest.repoId,
     artifact.manifest.commitSha,
@@ -526,11 +586,56 @@ function createIndexImportPlan(
       indexKey,
       artifactHash,
     ]),
+    importLimits,
     importRecordBatchSize: boundedImportRecordBatchSize(options.importRecordBatchSize),
     indexKey,
     indexVersionId,
     symbolRecords,
   };
+}
+
+/** Validates configured import safety limits against manifest and record payload sizes. */
+function validateIndexImportLimits(artifact: IndexArtifact, plan: IndexImportPlan): string[] {
+  const limits = plan.importLimits;
+  const errors: string[] = [];
+
+  collectLimitError(errors, "recordCount", artifact.manifest.recordCount, limits.maxRecords);
+  collectLimitError(errors, "fileCount", artifact.manifest.fileCount, limits.maxFiles);
+  collectLimitError(errors, "symbolCount", artifact.manifest.symbolCount, limits.maxSymbols);
+  collectLimitError(errors, "edgeCount", artifact.manifest.edgeCount, limits.maxEdges);
+  collectLimitError(errors, "chunkCount", artifact.manifest.chunkCount, limits.maxChunks);
+  collectLimitError(errors, "actualRecordCount", artifact.records.length, limits.maxRecords);
+  collectLimitError(errors, "actualFileCount", plan.files.length, limits.maxFiles);
+  collectLimitError(errors, "actualSymbolCount", plan.symbolRecords.length, limits.maxSymbols);
+  collectLimitError(errors, "actualEdgeCount", plan.edgeRecords.length, limits.maxEdges);
+  collectLimitError(errors, "actualChunkCount", plan.chunks.length, limits.maxChunks);
+
+  artifact.records.forEach((record, index) => {
+    collectLimitError(
+      errors,
+      `recordBytes[${index + 1}:${record.type}]`,
+      byteLength(JSON.stringify(record)),
+      limits.maxRecordBytes,
+    );
+  });
+
+  plan.chunks.forEach((chunk, index) => {
+    collectLimitError(
+      errors,
+      `chunkTextBytes[${index + 1}]`,
+      byteLength(chunk.text),
+      limits.maxChunkTextBytes,
+    );
+  });
+
+  return errors;
+}
+
+/** Appends a product-safe validation error when a count exceeds its configured maximum. */
+function collectLimitError(errors: string[], name: string, actual: number, maximum: number): void {
+  if (actual > maximum) {
+    errors.push(`${name} ${actual} exceeds configured maximum ${maximum}`);
+  }
 }
 
 /** Creates or refreshes the visible import batch phase for a running artifact import. */
@@ -569,6 +674,7 @@ async function markIndexImportBatchRunning(
       metadata: {
         artifactId: artifact.manifest.artifactId,
         chunkerVersion: artifact.manifest.chunkerVersion,
+        importLimits: plan.importLimits,
         importRecordBatchSize: plan.importRecordBatchSize,
         indexerName: artifact.manifest.indexerName,
         indexerVersion: artifact.manifest.indexerVersion,
@@ -594,6 +700,7 @@ async function markIndexImportBatchRunning(
         metadata: {
           artifactId: artifact.manifest.artifactId,
           chunkerVersion: artifact.manifest.chunkerVersion,
+          importLimits: plan.importLimits,
           importRecordBatchSize: plan.importRecordBatchSize,
           indexerName: artifact.manifest.indexerName,
           indexerVersion: artifact.manifest.indexerVersion,
@@ -687,6 +794,63 @@ function artifactHashForImport(artifact: IndexArtifact): `sha256:${string}` {
   }
 
   return hashArtifact(artifact);
+}
+
+/** Resolves caller-provided import limits against conservative defaults. */
+function resolveIndexImportLimits(
+  limits: Partial<IndexImportLimits> | undefined,
+): IndexImportLimits {
+  return {
+    maxChunkTextBytes: boundedPositiveInteger(
+      limits?.maxChunkTextBytes,
+      DEFAULT_INDEX_IMPORT_LIMITS.maxChunkTextBytes,
+    ),
+    maxChunks: boundedPositiveInteger(limits?.maxChunks, DEFAULT_INDEX_IMPORT_LIMITS.maxChunks),
+    maxEdges: boundedPositiveInteger(limits?.maxEdges, DEFAULT_INDEX_IMPORT_LIMITS.maxEdges),
+    maxFiles: boundedPositiveInteger(limits?.maxFiles, DEFAULT_INDEX_IMPORT_LIMITS.maxFiles),
+    maxRecordBytes: boundedPositiveInteger(
+      limits?.maxRecordBytes,
+      DEFAULT_INDEX_IMPORT_LIMITS.maxRecordBytes,
+    ),
+    maxRecords: boundedPositiveInteger(limits?.maxRecords, DEFAULT_INDEX_IMPORT_LIMITS.maxRecords),
+    maxSymbols: boundedPositiveInteger(limits?.maxSymbols, DEFAULT_INDEX_IMPORT_LIMITS.maxSymbols),
+  };
+}
+
+/** Bounds one positive integer configuration value to a safe importer limit. */
+function boundedPositiveInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+
+  return Math.max(1, value);
+}
+
+/** Assigns a parsed environment limit only when the value is present and valid. */
+function assignOptionalLimit<K extends keyof IndexImportLimits>(
+  limits: Partial<IndexImportLimits>,
+  key: K,
+  value: string | undefined,
+): void {
+  const parsed = parseOptionalPositiveInteger(value);
+  if (parsed !== undefined) {
+    limits[key] = parsed;
+  }
+}
+
+/** Parses an optional positive integer from an environment variable. */
+function parseOptionalPositiveInteger(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim().length === 0) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Returns the UTF-8 byte length of a string. */
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
 /** Returns whether an import phase can safely reference an existing index version row. */
