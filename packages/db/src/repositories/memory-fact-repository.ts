@@ -42,6 +42,14 @@ export type ListActiveReviewMemoryFactsInput = {
   readonly limit: number;
 };
 
+/** Input used to list repository and organization memory facts for an inspected repository. */
+export type ListRepositoryMemoryFactsInput = {
+  /** Organization that owns the repository. */
+  readonly orgId: string;
+  /** Repository being inspected. */
+  readonly repoId: string;
+};
+
 /** Query helper for durable memory facts. */
 export class MemoryFactRepository {
   /** Creates a memory fact query helper. */
@@ -68,6 +76,24 @@ export class MemoryFactRepository {
       )
       .orderBy(desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId))
       .limit(input.limit);
+
+    return rows.map(toMemoryFactRecord);
+  }
+
+  /** Lists repository and organization memory facts that can apply to one repository. */
+  public async listRepositoryMemoryFacts(
+    input: ListRepositoryMemoryFactsInput,
+  ): Promise<readonly MemoryFactRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(
+        or(
+          eq(memoryFacts.repoId, input.repoId),
+          and(eq(memoryFacts.orgId, input.orgId), isNull(memoryFacts.repoId)),
+        ),
+      )
+      .orderBy(asc(memoryFacts.status), desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId));
 
     return rows.map(toMemoryFactRecord);
   }

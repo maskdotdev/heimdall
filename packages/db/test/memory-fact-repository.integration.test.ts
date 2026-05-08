@@ -78,6 +78,20 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
       }),
     ).rejects.toThrow(/limit must be an integer/u);
   });
+
+  it("lists repository and organization memory facts for inspection", async () => {
+    const facts = await memoryFactRepository.listRepositoryMemoryFacts({
+      orgId: "org_memory_fact_test",
+      repoId: "repo_memory_fact_test",
+    });
+
+    expect(facts.map((fact) => fact.memoryFactId)).toEqual([
+      "mem_memory_fact_expired",
+      "mem_memory_fact_repo_recent",
+      "mem_memory_fact_org",
+      "mem_memory_fact_disabled",
+    ]);
+  });
 });
 
 /** Applies all generated SQL migrations in lexical order to a test schema. */

@@ -34,8 +34,9 @@ import {
   indexedFiles,
   indexImportBatches,
   llmCalls,
+  type MemoryFactRecord,
+  MemoryFactRepository,
   memoryCandidates,
-  memoryFacts,
   PullRequestRepository,
   publishedCheckRuns,
   publishedFindings,
@@ -3423,7 +3424,7 @@ type PublishedCheckRunRow = typeof publishedCheckRuns.$inferSelect;
 type PublishedReviewRow = typeof publishedReviews.$inferSelect;
 type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
-type MemoryFactRow = typeof memoryFacts.$inferSelect;
+type MemoryFactRow = MemoryFactRecord;
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
 type IndexVersionRow = IndexVersionRecord;
 type IndexImportBatchRow = typeof indexImportBatches.$inferSelect;
@@ -3694,16 +3695,7 @@ async function listMemoryFactsForRepository(
     readonly repoId: string;
   },
 ): Promise<readonly MemoryFactRow[]> {
-  return db
-    .select()
-    .from(memoryFacts)
-    .where(
-      or(
-        eq(memoryFacts.repoId, input.repoId),
-        and(eq(memoryFacts.orgId, input.orgId), isNull(memoryFacts.repoId)),
-      ),
-    )
-    .orderBy(asc(memoryFacts.status), desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId));
+  return new MemoryFactRepository(db).listRepositoryMemoryFacts(input);
 }
 
 /** Lists memory candidates that can apply to a repository. */

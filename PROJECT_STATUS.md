@@ -109,7 +109,8 @@ tracked milestone.
 - Latest DB memory-fact milestone: `MemoryFactRepository` now owns active repository and
   organization memory fact reads for review validation, including status, expiration, scope, order,
   and limit handling. Review orchestration now uses this repository boundary instead of importing
-  the raw `memory_facts` table for validation suppression inputs.
+  the raw `memory_facts` table for validation suppression inputs. Admin tooling now also uses this
+  repository boundary for repository-scoped memory fact inspection reads.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,
