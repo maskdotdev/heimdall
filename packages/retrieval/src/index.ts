@@ -228,6 +228,14 @@ type IndexedRetrievalResult = {
   readonly warnings: readonly RetrievalWarning[];
 };
 
+/** Selected and dropped items produced by token-budget packing. */
+type PackedContextItems = {
+  /** Lower-priority context items excluded by the token budget. */
+  readonly droppedItems: readonly ContextItem[];
+  /** Context items selected for the final bundle. */
+  readonly items: readonly ContextItem[];
+};
+
 /** Items and trace produced by relevant memory retrieval. */
 type MemoryRetrievalResult = {
   /** Context items produced from relevant memory facts. */
@@ -299,7 +307,9 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
       input.indexAvailable === false || !input.index
         ? [...ruleResult.items, ...memoryResult.items, ...withFallbackRule(diffItems)]
         : [...ruleResult.items, ...memoryResult.items, ...indexedResult.items, ...diffItems];
-    const items = packItems(candidateItems, maxTokens);
+    const packedItems = packItems(candidateItems, maxTokens);
+    const items = packedItems.items;
+    const warnings = retrievalWarnings(indexedResult.warnings, packedItems);
 
     const bundle = parseWithSchema("ContextBundle", ContextBundleSchema, {
       schemaVersion: "context_bundle.v1",
@@ -327,6 +337,9 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
         retrievalMode: input.index ? "indexed_context" : "diff_fallback",
         indexAvailable: Boolean(input.index),
         ...(input.index ? { indexVersionId: input.index.indexVersionId } : {}),
+        ...(packedItems.droppedItems.length > 0
+          ? { packing: packingSummary(candidateItems, packedItems) }
+          : {}),
         ...(memoryResult.trace.length > 0
           ? {
               memory: {
@@ -343,7 +356,7 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
               },
             }
           : {}),
-        ...(indexedResult.warnings.length > 0 ? { warnings: indexedResult.warnings } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
       },
     });
     finishRetrievalTelemetry(input.metrics, telemetry, {
@@ -1711,19 +1724,72 @@ function normalizeFullTextQuery(query: string): string {
   return [...new Set(terms)].slice(0, 32).join(" ");
 }
 
-function packItems(items: readonly ContextItem[], maxTokens: number): readonly ContextItem[] {
+function packItems(items: readonly ContextItem[], maxTokens: number): PackedContextItems {
   const packed: ContextItem[] = [];
+  const dropped: ContextItem[] = [];
   let usedTokens = 0;
 
   for (const item of [...items].sort((left, right) => right.priority - left.priority)) {
     if (usedTokens + item.tokenEstimate > maxTokens) {
+      dropped.push(item);
       continue;
     }
     packed.push(item);
     usedTokens += item.tokenEstimate;
   }
 
-  return packed;
+  return { droppedItems: dropped, items: packed };
+}
+
+/** Combines retriever warnings with token-budget packing warnings. */
+function retrievalWarnings(
+  indexedWarnings: readonly RetrievalWarning[],
+  packedItems: PackedContextItems,
+): readonly RetrievalWarning[] {
+  if (packedItems.droppedItems.length === 0) {
+    return indexedWarnings;
+  }
+
+  return [
+    ...indexedWarnings,
+    {
+      retriever: "context-packer",
+      code: "token_budget_exceeded",
+      message: "Context token budget excluded one or more lower-priority retrieval items.",
+    },
+  ];
+}
+
+/** Builds a product-safe summary of selected and dropped context item counts. */
+function packingSummary(
+  candidateItems: readonly ContextItem[],
+  packedItems: PackedContextItems,
+): Record<string, unknown> {
+  return {
+    candidateItemCount: candidateItems.length,
+    selectedItemCount: packedItems.items.length,
+    droppedItemCount: packedItems.droppedItems.length,
+    droppedTokenEstimate: packedItems.droppedItems.reduce(
+      (total, item) => total + item.tokenEstimate,
+      0,
+    ),
+    droppedSources: countContextItemsBySafeKey(packedItems.droppedItems, (item) => item.source),
+    droppedKinds: countContextItemsBySafeKey(packedItems.droppedItems, (item) => item.kind),
+  };
+}
+
+/** Counts context items by bounded non-content labels. */
+function countContextItemsBySafeKey(
+  items: readonly ContextItem[],
+  key: (item: ContextItem) => string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const normalizedKey = normalizeRetrievalLabel(key(item), "unknown");
+    counts[normalizedKey] = (counts[normalizedKey] ?? 0) + 1;
+  }
+
+  return counts;
 }
 
 function prefixForLine(kind: "context" | "addition" | "deletion"): string {

@@ -503,6 +503,88 @@ describe("retrieveContext", () => {
     );
   });
 
+  it("records token-budget packing warnings when lower-priority context is dropped", async () => {
+    const index: RetrievalIndex = {
+      indexVersionId: "idx_123",
+      getSameFileChunks: async () => [
+        {
+          chunkId: "chunk_same",
+          symbolId: "sym_same",
+          path: "src/math.ts",
+          startLine: 1,
+          endLine: 3,
+          language: "typescript",
+          contentHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          text: "export function run() {}",
+          tokenEstimate: 6,
+        },
+      ],
+      getSymbolsForFiles: async () => [
+        {
+          symbolId: "sym_same",
+          fileId: "file_same",
+          path: "src/math.ts",
+          name: "run",
+          qualifiedName: "run",
+          kind: "function",
+          language: "typescript",
+          startLine: 1,
+          endLine: 3,
+        },
+      ],
+      getRelatedChunks: async () => [],
+      getRelatedTestChunks: async () => [],
+      searchFullTextChunks: async () => [],
+      searchSimilarChunks: async () => [
+        {
+          chunkId: "chunk_low_priority",
+          path: "src/low-priority.ts",
+          startLine: 1,
+          endLine: 12,
+          language: "typescript",
+          contentHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          text: "export function lowPriorityContext() { return true; }",
+          tokenEstimate: 30,
+          score: 0.2,
+          searchSource: "vector_search",
+        },
+      ],
+    };
+
+    const bundle = await retrieveContext({
+      reviewRunId: "rrn_01HREVIEW",
+      snapshot: validPullRequestSnapshotFixture,
+      index,
+      maxTokens: 50,
+      timestamp: "2026-05-05T00:00:00.000Z",
+    });
+
+    expect(bundle.items.map((item) => item.kind)).toEqual(
+      expect.arrayContaining(["changed_symbol", "same_file_context", "diff"]),
+    );
+    expect(bundle.items).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "similar_pattern",
+          snippet: expect.objectContaining({ chunkId: "chunk_low_priority" }),
+        }),
+      ]),
+    );
+    expect(bundle.metadata).toMatchObject({
+      packing: {
+        droppedItemCount: 1,
+        droppedKinds: { similar_pattern: 1 },
+        droppedSources: { vector_search: 1 },
+      },
+      warnings: [
+        expect.objectContaining({
+          code: "token_budget_exceeded",
+          retriever: "context-packer",
+        }),
+      ],
+    });
+  });
+
   it("keeps required context when optional indexed retrievers fail", async () => {
     const index: RetrievalIndex = {
       indexVersionId: "idx_123",
