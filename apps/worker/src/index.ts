@@ -188,7 +188,7 @@ import {
   withSandboxTelemetry,
 } from "@repo/sandbox";
 import {
-  createLocalEnvSecretsManager,
+  createSecretsManagerFromEnvironment,
   parseSecretRef,
   recordSecurityEvent,
   type SecretsManager,
@@ -2251,7 +2251,7 @@ function dataDeletionPredicateDescription(payload: DataDeletionPlanJobPayload): 
 /** Resolves the GitHub App private key through the security secret boundary. */
 export async function resolveWorkerGitHubPrivateKey(
   env: WorkerSecretEnvironment,
-  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+  secretsManager: SecretsManager = createSecretsManagerFromEnvironment({ env }),
 ): Promise<string | undefined> {
   const secretRefValue =
     optionalEnvString(env.GITHUB_APP_PRIVATE_KEY_SECRET_REF) ??
@@ -2280,7 +2280,7 @@ export async function resolveWorkerGitHubPrivateKey(
 /** Resolves the worker LLM provider API key through the security secret boundary. */
 export async function resolveWorkerLlmApiKey(
   env: WorkerLlmGatewayEnvironment,
-  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+  secretsManager: SecretsManager = createSecretsManagerFromEnvironment({ env }),
 ): Promise<string | undefined> {
   const secretRefValue = firstEnvValue(env, [
     "HEIMDALL_LLM_PROVIDER_API_KEY_SECRET_REF",
@@ -2313,7 +2313,7 @@ export async function resolveWorkerLlmApiKey(
 /** Resolves the worker embedding provider API key through the security secret boundary. */
 export async function resolveWorkerEmbeddingApiKey(
   env: WorkerEmbeddingProviderEnvironment,
-  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+  secretsManager: SecretsManager = createSecretsManagerFromEnvironment({ env }),
 ): Promise<string | undefined> {
   const secretRefValue = firstEnvValue(env, [
     "HEIMDALL_EMBEDDING_API_KEY_SECRET_REF",
@@ -2380,7 +2380,7 @@ export async function createWorkerLlmGatewayFromEnvironment(
 
   const apiKey = await resolveWorkerLlmApiKey(
     env,
-    options.secretsManager ?? createLocalEnvSecretsManager({ env }),
+    options.secretsManager ?? createSecretsManagerFromEnvironment({ env }),
   );
   if (!apiKey) {
     throw new Error(
@@ -2503,7 +2503,7 @@ export async function createWorkerEmbeddingProviderFromEnvironment(
     "text-embedding-3-small";
   const apiKey = await resolveWorkerEmbeddingApiKey(
     env,
-    options.secretsManager ?? createLocalEnvSecretsManager({ env }),
+    options.secretsManager ?? createSecretsManagerFromEnvironment({ env }),
   );
   if (!apiKey) {
     throw new Error(
