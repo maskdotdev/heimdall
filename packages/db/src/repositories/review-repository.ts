@@ -5,7 +5,7 @@ import type {
   ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, ne, or } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
@@ -242,7 +242,7 @@ export class ReviewRepository {
       .onConflictDoNothing()
       .returning();
 
-    return row ? toCandidateFinding(row) : finding;
+    return row ? toCandidateFinding(row) : this.getConflictingCandidateFinding(finding);
   }
 
   /** Lists candidate findings for one review run. */
@@ -263,7 +263,7 @@ export class ReviewRepository {
       .onConflictDoNothing()
       .returning();
 
-    return row ? toValidatedFinding(row) : finding;
+    return row ? toValidatedFinding(row) : this.getValidatedFinding(finding.findingId);
   }
 
   /** Lists validated findings for one review run. */
@@ -509,5 +509,37 @@ export class ReviewRepository {
       target: reviewRunMetrics.reviewRunId,
       set: values,
     });
+  }
+
+  /** Gets the stored candidate row that caused an idempotent insert conflict. */
+  private async getConflictingCandidateFinding(
+    finding: CandidateFinding,
+  ): Promise<CandidateFinding> {
+    const [row] = await this.db
+      .select()
+      .from(candidateFindings)
+      .where(
+        or(
+          eq(candidateFindings.findingId, finding.findingId),
+          and(
+            eq(candidateFindings.reviewRunId, finding.reviewRunId),
+            eq(candidateFindings.fingerprint, finding.fingerprint),
+          ),
+        ),
+      )
+      .limit(1);
+
+    return toCandidateFinding(requireReturnedRow(row));
+  }
+
+  /** Gets a validated finding by ID after an idempotent insert conflict. */
+  private async getValidatedFinding(findingId: string): Promise<ValidatedFinding> {
+    const [row] = await this.db
+      .select()
+      .from(validatedFindings)
+      .where(eq(validatedFindings.findingId, findingId))
+      .limit(1);
+
+    return toValidatedFinding(requireReturnedRow(row));
   }
 }
