@@ -57,9 +57,13 @@ import {
 import { buildRawDiffArtifact, buildSnapshotDerivedArtifacts } from "@repo/pr-snapshot";
 import { createPublishPlan, hasPlannedPublishOperations, type PublishPlan } from "@repo/publisher";
 import {
+  type AcquireRepositoryWorkspaceDependencies,
+  acquireRepositoryWorkspace,
   cleanupRepositoryWorkspace,
+  createRepoSyncConfig,
+  type RepoSyncConfig,
+  type RepositoryWorktreePurpose,
   type SyncRepositoryWorkspaceResult,
-  syncRepositoryWorkspace,
 } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { createReviewEngine, validateCandidateFindings } from "@repo/review-engine";
@@ -179,7 +183,11 @@ export type ReviewOrchestratorDependencies = {
   readonly gitProvider: GitProvider;
   /** Optional parent directory for repo-sync workspaces. */
   readonly workspaceRoot?: string;
-  /** Optional workspace sync function for tests. */
+  /** Optional repo-sync configuration used by cached workspace acquisition. */
+  readonly repoSyncConfig?: RepoSyncConfig;
+  /** Optional cached workspace acquisition hook for tests. */
+  readonly workspaceAcquirer?: ReviewRepositoryWorkspaceAcquirer;
+  /** Optional workspace sync function for legacy tests. */
   readonly syncWorkspace?: SyncWorkspace;
   /** Optional model gateway for LLM-backed review passes. */
   readonly llmGateway?: LLMGateway;
@@ -403,14 +411,61 @@ export type RetrievalTraceArtifactItem = {
   readonly tokenEstimate: number;
 };
 
+/** Workspace acquired for review orchestration. */
+export type ReviewRepositoryWorkspace = SyncRepositoryWorkspaceResult & {
+  /** Releases the workspace lease idempotently when the workspace was retained for tools. */
+  readonly release?: () => Promise<void>;
+};
+
+/** Input used by review orchestration to acquire a workspace. */
+export type ReviewRepositoryWorkspaceAcquireInput = {
+  /** Repository provider reference loaded from the database. */
+  readonly repository: GitHubRepositoryRef;
+  /** Heimdall repository ID. */
+  readonly repoId: string;
+  /** Exact commit SHA to make available on disk. */
+  readonly commitSha: string;
+  /** Optional refs to fetch before falling back to direct commit fetch. */
+  readonly fetchRefHints?: readonly string[];
+  /** Purpose attached to the cached worktree lease. */
+  readonly purpose: RepositoryWorktreePurpose;
+  /** Git provider used to resolve short-lived clone credentials. */
+  readonly gitProvider: Pick<GitProvider, "getCloneAuth">;
+  /** Repo-sync cache/runtime configuration. */
+  readonly repoSyncConfig: RepoSyncConfig;
+};
+
+/** Workspace lease shape consumed by review orchestration. */
+export type ReviewRepositoryWorkspaceLease = {
+  /** Checked-out workspace path passed to downstream tools. */
+  readonly workspacePath: string;
+  /** Commit SHA checked out in the workspace. */
+  readonly checkedOutSha: string;
+  /** Releases the cached worktree lease idempotently. */
+  readonly release: () => Promise<void>;
+};
+
+/** Review workspace acquisition boundary. */
+export type ReviewRepositoryWorkspaceAcquirer = (
+  input: ReviewRepositoryWorkspaceAcquireInput,
+) => Promise<ReviewRepositoryWorkspaceLease>;
+
+/** Workspace sync input used by review orchestration. */
+export type ReviewWorkspaceSyncInput = GitHubRepositoryRef & {
+  /** Heimdall repository ID. */
+  readonly repoId: string;
+  /** Exact commit SHA to make available on disk. */
+  readonly commitSha: string;
+  /** Keeps the workspace on disk after sync when true. */
+  readonly keepWorkspace?: boolean;
+  /** Optional parent directory for repo-sync workspaces. */
+  readonly workspaceRoot?: string;
+  /** Optional refs to fetch before falling back to direct commit fetch. */
+  readonly fetchRefHints?: readonly string[];
+};
+
 /** Workspace sync function used by review orchestration. */
-export type SyncWorkspace = (
-  input: GitHubRepositoryRef & {
-    readonly commitSha: string;
-    readonly keepWorkspace?: boolean;
-    readonly workspaceRoot?: string;
-  },
-) => Promise<SyncRepositoryWorkspaceResult>;
+export type SyncWorkspace = (input: ReviewWorkspaceSyncInput) => Promise<ReviewRepositoryWorkspace>;
 
 /** Input for creating a review-owned static-analysis request. */
 export type CreateStaticAnalysisRequestForReviewInput = {
@@ -423,7 +478,7 @@ export type CreateStaticAnalysisRequestForReviewInput = {
   /** Pull request snapshot being reviewed. */
   readonly snapshot: PullRequestSnapshot;
   /** Synced workspace available to static-analysis tools. */
-  readonly workspace: SyncRepositoryWorkspaceResult;
+  readonly workspace: ReviewRepositoryWorkspace;
   /** Request creation timestamp. */
   readonly timestamp: string;
   /** Optional static-analysis mode. */
@@ -601,6 +656,18 @@ export async function runPullRequestReview(
   }
   const repository = await loadGitHubRepositoryRef(dependencies.db, input);
   const pullRequestRef = { ...repository, pullRequestNumber: input.pullRequestNumber };
+  const repoSyncConfig =
+    dependencies.repoSyncConfig ??
+    createRepoSyncConfig({
+      ...(dependencies.workspaceRoot ? { cacheRoot: dependencies.workspaceRoot } : {}),
+    });
+  const syncWorkspace =
+    dependencies.syncWorkspace ??
+    createReviewWorkspaceSync({
+      gitProvider: dependencies.gitProvider,
+      repoSyncConfig,
+      workspaceAcquirer: dependencies.workspaceAcquirer ?? acquireReviewRepositoryWorkspace,
+    });
 
   const snapshotFetch = await fetchPullRequestSnapshotForReview(
     dependencies.gitProvider,
@@ -696,6 +763,7 @@ export async function runPullRequestReview(
   let quotaReservation: ReserveQuotaResult | undefined;
   let quotaReservationFinalized = false;
   let currentStage = "snapshot";
+  const acquiredDefaultWorkspaces: ReviewRepositoryWorkspace[] = [];
   const reviewSpan = startPullRequestReviewTelemetrySpan(input, dependencies);
   const reviewStageLogContext = createReviewStageLogContext({
     input,
@@ -896,10 +964,6 @@ export async function runPullRequestReview(
       return afterSnapshotStaleness.result;
     }
 
-    const syncWorkspace: SyncWorkspace =
-      dependencies.syncWorkspace ??
-      ((workspaceInput: GitHubRepositoryRef & { readonly commitSha: string }) =>
-        syncRepositoryWorkspace(workspaceInput, { gitProvider: dependencies.gitProvider }));
     const shouldRunStaticAnalysisBaseline = shouldRunBaseHeadStaticAnalysis({
       mode: dependencies.staticAnalysisMode,
       runner: dependencies.staticAnalysisRunner,
@@ -914,7 +978,9 @@ export async function runPullRequestReview(
             {
               ...repository,
               commitSha: snapshot.headSha,
+              fetchRefHints: reviewHeadFetchRefHints(snapshot),
               keepWorkspace: Boolean(dependencies.staticAnalysisRunner),
+              repoId: snapshot.repoId,
             },
             dependencies.workspaceRoot,
           ),
@@ -926,6 +992,9 @@ export async function runPullRequestReview(
         }),
       },
     );
+    if (!dependencies.syncWorkspace && workspace.release) {
+      acquiredDefaultWorkspaces.push(workspace);
+    }
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "workspace",
@@ -946,7 +1015,9 @@ export async function runPullRequestReview(
                 {
                   ...repository,
                   commitSha: snapshot.baseSha,
+                  fetchRefHints: reviewBaseFetchRefHints(snapshot),
                   keepWorkspace: true,
+                  repoId: snapshot.repoId,
                 },
                 dependencies.workspaceRoot,
               ),
@@ -963,6 +1034,9 @@ export async function runPullRequestReview(
         )
       : undefined;
     if (staticAnalysisBaselineWorkspace) {
+      if (!dependencies.syncWorkspace && staticAnalysisBaselineWorkspace.release) {
+        acquiredDefaultWorkspaces.push(staticAnalysisBaselineWorkspace);
+      }
       await reviewRepository.insertStageEvent({
         reviewRunId,
         stage: "workspace",
@@ -2028,6 +2102,7 @@ export async function runPullRequestReview(
 
     return result;
   } catch (error) {
+    await releaseDefaultReviewWorkspacesAfterFailure(acquiredDefaultWorkspaces);
     if (error instanceof ReviewIndexDependencyPendingError) {
       endPullRequestReviewTelemetrySpan(reviewSpan, {
         currentStage,
@@ -2079,6 +2154,102 @@ export async function runPullRequestReview(
     });
     throw error;
   }
+}
+
+/** Acquires a cached repository workspace for review orchestration. */
+export async function acquireReviewRepositoryWorkspace(
+  input: ReviewRepositoryWorkspaceAcquireInput,
+  dependencies: AcquireRepositoryWorkspaceDependencies = {},
+): Promise<ReviewRepositoryWorkspaceLease> {
+  const cloneAuth = await input.gitProvider.getCloneAuth(input.repository);
+  const lease = await acquireRepositoryWorkspace(
+    {
+      cloneUrl: cloneAuth.cloneUrl,
+      commitSha: input.commitSha,
+      config: input.repoSyncConfig,
+      credential: {
+        kind: "https-basic-token",
+        token: cloneAuth.password,
+        username: cloneAuth.username,
+      },
+      ...(input.fetchRefHints ? { fetchRefHints: input.fetchRefHints } : {}),
+      purpose: input.purpose,
+      repoId: input.repoId,
+    },
+    dependencies,
+  );
+
+  return {
+    checkedOutSha: lease.commitSha,
+    release: lease.release,
+    workspacePath: lease.path,
+  };
+}
+
+/** Input used to create the default cached review workspace sync function. */
+type CreateReviewWorkspaceSyncInput = {
+  /** Git provider used to resolve short-lived clone credentials. */
+  readonly gitProvider: Pick<GitProvider, "getCloneAuth">;
+  /** Repo-sync cache/runtime configuration. */
+  readonly repoSyncConfig: RepoSyncConfig;
+  /** Workspace acquisition boundary. */
+  readonly workspaceAcquirer: ReviewRepositoryWorkspaceAcquirer;
+};
+
+/** Creates a cached workspace sync function for review orchestration. */
+function createReviewWorkspaceSync(input: CreateReviewWorkspaceSyncInput): SyncWorkspace {
+  return async (workspaceInput) => {
+    const lease = await input.workspaceAcquirer({
+      commitSha: workspaceInput.commitSha,
+      ...(workspaceInput.fetchRefHints ? { fetchRefHints: workspaceInput.fetchRefHints } : {}),
+      gitProvider: input.gitProvider,
+      purpose: workspaceInput.keepWorkspace ? "static_analysis" : "review",
+      repoId: workspaceInput.repoId,
+      repoSyncConfig: input.repoSyncConfig,
+      repository: workspaceInput,
+    });
+    const workspace = {
+      checkedOutSha: lease.checkedOutSha,
+      cleanedUp: false,
+      release: lease.release,
+      workspacePath: lease.workspacePath,
+    } satisfies ReviewRepositoryWorkspace;
+
+    if (workspaceInput.keepWorkspace) {
+      return workspace;
+    }
+
+    await lease.release();
+    return {
+      ...workspace,
+      cleanedUp: true,
+    };
+  };
+}
+
+/** Releases default cached review workspaces without masking the original review failure. */
+async function releaseDefaultReviewWorkspacesAfterFailure(
+  workspaces: readonly ReviewRepositoryWorkspace[],
+): Promise<void> {
+  await Promise.allSettled(workspaces.map((workspace) => workspace.release?.()));
+}
+
+/** Returns fetch hints for the pull request head commit. */
+function reviewHeadFetchRefHints(snapshot: PullRequestSnapshot): readonly string[] {
+  return uniqueStrings([
+    `refs/pull/${snapshot.pullRequestNumber}/head`,
+    gitHeadRefHint(snapshot.headRef),
+  ]);
+}
+
+/** Returns fetch hints for the pull request base commit. */
+function reviewBaseFetchRefHints(snapshot: PullRequestSnapshot): readonly string[] {
+  return [gitHeadRefHint(snapshot.baseRef)];
+}
+
+/** Converts a branch-like ref name into a full Git ref hint. */
+function gitHeadRefHint(refName: string): string {
+  return refName.startsWith("refs/") ? refName : `refs/heads/${refName}`;
 }
 
 /** Input used to end the top-level pull request review telemetry span. */
@@ -3144,7 +3315,7 @@ export function createStaticAnalysisBaseSnapshotForReview(
 /** Runs optional static analysis and records non-fatal stage events. */
 async function runStaticAnalysisForReview(input: {
   /** Optional base workspace used for base/head diagnostic comparison. */
-  readonly baselineWorkspace?: SyncRepositoryWorkspaceResult | undefined;
+  readonly baselineWorkspace?: ReviewRepositoryWorkspace | undefined;
   /** Optional static-analysis budgets. */
   readonly budgets?: StaticAnalysisBudgets | undefined;
   /** Whether to remove the optional base workspace after static-analysis execution. */
@@ -3174,7 +3345,7 @@ async function runStaticAnalysisForReview(input: {
   /** Optional span recorder used for static-analysis component telemetry. */
   readonly traces?: TelemetrySpanRecorder | undefined;
   /** Synced workspace for the review run. */
-  readonly workspace: SyncRepositoryWorkspaceResult;
+  readonly workspace: ReviewRepositoryWorkspace;
 }): Promise<ReviewStaticAnalysisResult> {
   let workspaceCleanedUp = input.workspace.cleanedUp;
   if (!input.runner) {
@@ -3252,7 +3423,7 @@ async function runStaticAnalysisForReview(input: {
 /** Runs the optional base-commit static-analysis pass for base/head comparison. */
 async function runStaticAnalysisBaselineForReview(input: {
   /** Optional base workspace used for base/head diagnostic comparison. */
-  readonly baselineWorkspace?: SyncRepositoryWorkspaceResult | undefined;
+  readonly baselineWorkspace?: ReviewRepositoryWorkspace | undefined;
   /** Optional static-analysis budgets. */
   readonly budgets?: StaticAnalysisBudgets | undefined;
   /** Whether to remove the optional base workspace after static-analysis execution. */
@@ -3389,10 +3560,14 @@ async function cleanupStaticAnalysisWorkspaceForReview(input: {
   /** Stage name used for the cleanup event. */
   readonly stage: string;
   /** Workspace to remove. */
-  readonly workspace: SyncRepositoryWorkspaceResult;
+  readonly workspace: ReviewRepositoryWorkspace;
 }): Promise<boolean> {
   try {
-    await cleanupRepositoryWorkspace(input.workspace.workspacePath);
+    if (input.workspace.release) {
+      await input.workspace.release();
+    } else {
+      await cleanupRepositoryWorkspace(input.workspace.workspacePath);
+    }
     await input.reviewRepository.insertStageEvent({
       reviewRunId: input.reviewRunId,
       stage: input.stage,

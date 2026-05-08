@@ -1,7 +1,10 @@
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { JOB_TYPES, type PullRequestSnapshot } from "@repo/contracts";
 import { validOrgSettingsFixture } from "@repo/contracts/fixtures/repository.fixture";
 import { validContextBundleFixture } from "@repo/contracts/fixtures/review.fixture";
-import { createFakeGitProvider } from "@repo/github";
+import { createFakeGitProvider, type GitHubRepositoryRef } from "@repo/github";
 import {
   createMemoryTelemetrySpanSink,
   createTelemetrySpanRecorder,
@@ -10,10 +13,18 @@ import {
   OBSERVABILITY_SPAN_NAMES,
   type TelemetryMetricRecorder,
 } from "@repo/observability";
+import {
+  createRepoSyncConfig,
+  getRepoSyncMirrorPath,
+  getRepoSyncTempMirrorPath,
+  getRepoSyncWorktreePath,
+  RepoSyncGitCommandError,
+} from "@repo/repo-sync";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
 import { createFakeToolRunner } from "@repo/tool-runner";
 import { describe, expect, it } from "vitest";
 import {
+  acquireReviewRepositoryWorkspace,
   assertSnapshotMatchesJob,
   buildRetrievalTraceArtifactPayload,
   checkReviewRunCurrent,
@@ -719,6 +730,117 @@ describe("createStaticAnalysisRequestForReview", () => {
   });
 });
 
+describe("acquireReviewRepositoryWorkspace", () => {
+  it("resolves clone credentials and acquires a cached repo-sync review workspace", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-review-repo-sync-test-"));
+    const commitSha = "2222222222222222222222222222222222222222";
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_test");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_test", "tmp_review");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_review");
+    const mutableCommands: string[][] = [];
+    const fetchEnvironments: Readonly<Record<string, string | undefined>>[] = [];
+    const cloneAuthInputs: unknown[] = [];
+    let commitExists = false;
+
+    try {
+      const lease = await acquireReviewRepositoryWorkspace(
+        {
+          commitSha,
+          fetchRefHints: ["refs/pull/7/head"],
+          gitProvider: {
+            getCloneAuth: async (input: GitHubRepositoryRef) => {
+              cloneAuthInputs.push(input);
+              return {
+                cloneUrl: "https://x-access-token:embedded-secret@github.com/acme/api.git?token=1",
+                expiresAt: "2026-05-08T00:00:00.000Z",
+                password: "token-123",
+                username: "x-access-token",
+              };
+            },
+          },
+          purpose: "review",
+          repoId: "repo_test",
+          repoSyncConfig: config,
+          repository: {
+            installationId: "inst_test",
+            owner: "acme",
+            provider: "github",
+            providerInstallationId: "999",
+            providerRepoId: "1000",
+            repo: "api",
+          },
+        },
+        {
+          gitRunner: async (args, options) => {
+            mutableCommands.push([...args]);
+            if (args[0] === "clone") {
+              await mkdir(args[args.length - 1] ?? "", { recursive: true });
+              return "";
+            }
+            if (args[2] === "cat-file") {
+              if (commitExists) {
+                return "";
+              }
+              throw createReviewMissingCommitGitError();
+            }
+            if (args[2] === "fetch") {
+              fetchEnvironments.push(options.env ?? {});
+              commitExists = true;
+              return "";
+            }
+            return "";
+          },
+          leaseIdFactory: () => "lease_review",
+          tempIdFactory: () => "tmp_review",
+        },
+      );
+
+      expect(lease.workspacePath).toBe(worktreePath);
+      expect(lease.checkedOutSha).toBe(commitSha);
+      await lease.release();
+
+      expect(cloneAuthInputs).toEqual([
+        {
+          installationId: "inst_test",
+          owner: "acme",
+          provider: "github",
+          providerInstallationId: "999",
+          providerRepoId: "1000",
+          repo: "api",
+        },
+      ]);
+      expect(mutableCommands).toEqual([
+        [
+          "clone",
+          "--bare",
+          "--filter=blob:none",
+          "--no-tags",
+          "https://github.com/acme/api.git",
+          tempMirrorPath,
+        ],
+        ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+        ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/7/head"],
+        ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+        ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+        ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+        ["-C", mirrorPath, "worktree", "prune"],
+      ]);
+      expect(fetchEnvironments).toEqual([
+        expect.objectContaining({
+          GIT_PASSWORD: "token-123",
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_USERNAME: "x-access-token",
+        }),
+      ]);
+      expect(JSON.stringify(mutableCommands)).not.toContain("token-123");
+      expect(JSON.stringify(mutableCommands)).not.toContain("embedded-secret");
+    } finally {
+      await rm(cacheRoot, { force: true, recursive: true });
+    }
+  });
+});
+
 describe("shouldRunBaseHeadStaticAnalysis", () => {
   it("requires base-head mode and a configured runner", () => {
     const runner = createFakeToolRunner();
@@ -779,6 +901,18 @@ describe("reviewMemoryFactFromRow", () => {
     });
   });
 });
+
+/** Creates a repo-sync command failure for missing commit checks. */
+function createReviewMissingCommitGitError(): RepoSyncGitCommandError {
+  return new RepoSyncGitCommandError({
+    code: "GIT_COMMAND_FAILED",
+    command: "git cat-file -e",
+    message: "Git command failed: git cat-file -e",
+    stderr: { originalBytes: 0, text: "", truncated: false },
+    stdout: { originalBytes: 0, text: "", truncated: false },
+    timeoutMs: 120_000,
+  });
+}
 
 /** Creates the minimal provider surface needed for current-head checks. */
 function providerReturningSnapshot(snapshot: PullRequestSnapshot): {

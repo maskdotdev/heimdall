@@ -739,6 +739,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           ...(options.reviewIndexDependencyMode
             ? { indexDependencyMode: options.reviewIndexDependencyMode }
             : {}),
+          repoSyncConfig,
           ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
           ...(options.logger ? { logger: options.logger } : {}),
           ...(options.metrics ? { metrics: options.metrics } : {}),
