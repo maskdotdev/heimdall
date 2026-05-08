@@ -1,6 +1,9 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   buildEvalHistoryWrite,
@@ -19,6 +22,27 @@ import {
   runEvaluation,
   writeEvalReportArtifacts,
 } from "../src/index";
+
+/** Executes a child process and resolves with captured output on success. */
+const execFileAsync = promisify(execFile);
+
+/** Absolute path to the evaluation package under test. */
+const evaluationPackageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Error shape returned by execFile when a child process exits unsuccessfully. */
+type ExecFailure = Error & {
+  /** Process exit code or signal reported by the child process. */
+  readonly code?: number | string;
+  /** Captured standard error output. */
+  readonly stderr?: string | Buffer;
+  /** Captured standard output. */
+  readonly stdout?: string | Buffer;
+};
+
+/** Returns whether an unknown error is an execFile child-process failure. */
+function isExecFailure(error: unknown): error is ExecFailure {
+  return typeof error === "object" && error !== null && "stdout" in error && "stderr" in error;
+}
 
 describe("evaluation harness", () => {
   it("loads the registered smoke suite and passes the MVP gate", async () => {
@@ -215,5 +239,87 @@ describe("evaluation harness", () => {
     );
     expect(markdown).toContain("Evaluation Comparison");
     expect(markdown).toContain("lost case_ts_missing_await_001:expected_missing_await");
+  });
+
+  it("fails the eval compare CLI when a candidate regresses from the baseline", async () => {
+    const suite = await loadRegisteredEvalSuite("smoke-full-pipeline-v1");
+    const baseline = runEvaluation({
+      suite,
+      timestamp: "2026-05-06T00:00:00.000Z",
+    });
+    const candidateSuite = {
+      ...suite,
+      cases: suite.cases.map((evalCase) =>
+        evalCase.caseId === "case_ts_missing_await_001"
+          ? { ...evalCase, actualFindings: [] }
+          : evalCase,
+      ),
+    };
+    const candidate = runEvaluation({
+      suite: candidateSuite,
+      timestamp: "2026-05-06T00:00:01.000Z",
+    });
+    const outputDir = await mkdtemp(join(tmpdir(), "heimdall-eval-compare-"));
+    const baselineReportFile = join(outputDir, "baseline.json");
+    const candidateReportFile = join(outputDir, "candidate.json");
+    const comparisonReportFile = join(outputDir, "comparison.md");
+
+    try {
+      await Promise.all([
+        writeFile(baselineReportFile, `${JSON.stringify(baseline, null, 2)}\n`, "utf8"),
+        writeFile(candidateReportFile, `${JSON.stringify(candidate, null, 2)}\n`, "utf8"),
+      ]);
+
+      let failure: ExecFailure | undefined;
+      try {
+        await execFileAsync(
+          "bun",
+          [
+            "run",
+            "src/cli.ts",
+            "compare",
+            "--baseline-report",
+            baselineReportFile,
+            "--candidate-report",
+            candidateReportFile,
+            "--output-file",
+            comparisonReportFile,
+          ],
+          { cwd: evaluationPackageDir, encoding: "utf8" },
+        );
+      } catch (error) {
+        if (!isExecFailure(error)) {
+          throw error;
+        }
+        failure = error;
+      }
+
+      expect(failure?.code).not.toBe(0);
+      expect(String(failure?.stdout ?? "")).toContain("Status: FAIL");
+      expect(String(failure?.stderr ?? "")).toContain("Evaluation baseline comparison failed");
+      expect(await readFile(comparisonReportFile, "utf8")).toContain(
+        "lost case_ts_missing_await_001:expected_missing_await",
+      );
+
+      const noFailResult = await execFileAsync(
+        "bun",
+        [
+          "run",
+          "src/cli.ts",
+          "compare",
+          "--baseline-report",
+          baselineReportFile,
+          "--candidate-report",
+          candidateReportFile,
+          "--no-fail-on-regression",
+        ],
+        { cwd: evaluationPackageDir, encoding: "utf8" },
+      );
+
+      expect(String(noFailResult.stdout)).toContain("Status: FAIL");
+      expect(String(noFailResult.stderr)).toBe("");
+    } finally {
+      await rm(outputDir, { force: true, recursive: true });
+    }
   });
 });

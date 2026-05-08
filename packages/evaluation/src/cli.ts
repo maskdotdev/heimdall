@@ -7,6 +7,7 @@ import type { EvalHumanLabelRow } from "@repo/db";
 import {
   assertEvalGate,
   buildEvalHistoryWrite,
+  compareEvalReports,
   createEvalHumanLabelFile,
   type EvalHumanLabelRecord,
   type EvalReportArtifacts,
@@ -19,6 +20,8 @@ import {
   parseEvalCaseImportSource,
   parseEvalHumanFindingLabel,
   parseEvalHumanLabelFile,
+  parseEvalReport,
+  renderEvalComparisonMarkdown,
   renderEvalReportMarkdown,
   runEvaluation,
   writeEvalReportArtifacts,
@@ -94,6 +97,18 @@ type EvalExportLabelsCliOptions = {
   readonly suiteFile?: string;
 };
 
+/** Parsed CLI options for comparing a candidate eval report with a baseline report. */
+type EvalCompareCliOptions = {
+  /** JSON report file for the active baseline run. */
+  readonly baselineReportFile: string;
+  /** JSON report file for the candidate run under evaluation. */
+  readonly candidateReportFile: string;
+  /** Optional Markdown output file for the comparison report. */
+  readonly outputFile?: string;
+  /** Whether to exit nonzero when the comparison detects a regression. */
+  readonly failOnRegression: boolean;
+};
+
 /** Entrypoint for the evaluation CLI. */
 async function main(args: readonly string[]): Promise<void> {
   const [command, ...rest] = args;
@@ -113,9 +128,13 @@ async function main(args: readonly string[]): Promise<void> {
     await exportLabelsCommand(rest);
     return;
   }
+  if (command === "compare") {
+    await compareReportsCommand(rest);
+    return;
+  }
 
   throw new Error(
-    `Unknown evaluation command "${command ?? ""}". Expected "run", "import-case", "import-labels", or "export-labels".`,
+    `Unknown evaluation command "${command ?? ""}". Expected "run", "import-case", "import-labels", "export-labels", or "compare".`,
   );
 }
 
@@ -150,6 +169,40 @@ async function runEvalCommand(args: readonly string[]): Promise<void> {
 
   if (options.failOnThreshold) {
     assertEvalGate(report);
+  }
+}
+
+/** Compares an eval report against a baseline and optionally writes comparison Markdown. */
+async function compareReportsCommand(args: readonly string[]): Promise<void> {
+  const options = parseCompareOptions(args);
+  const baselinePath = resolveWorkspacePath(options.baselineReportFile);
+  const candidatePath = resolveWorkspacePath(options.candidateReportFile);
+  const [baseline, candidate] = await Promise.all([
+    readEvalReportFile(baselinePath),
+    readEvalReportFile(candidatePath),
+  ]);
+
+  if (baseline.suiteId !== candidate.suiteId) {
+    throw new Error(
+      `Cannot compare eval reports from different suites: ${baseline.suiteId} and ${candidate.suiteId}.`,
+    );
+  }
+
+  const comparison = compareEvalReports(baseline, candidate);
+  const markdown = renderEvalComparisonMarkdown(comparison);
+  process.stdout.write(markdown);
+
+  if (options.outputFile) {
+    const outputPath = resolveWorkspacePath(options.outputFile);
+    await ensureParentDirectory(outputPath);
+    await writeFile(outputPath, markdown, "utf8");
+    process.stdout.write(`Comparison report: ${outputPath}\n`);
+  }
+
+  if (options.failOnRegression && comparison.status === "fail") {
+    throw new Error(
+      `Evaluation baseline comparison failed for ${candidate.suiteId}: ${comparison.regressedCaseIds.length} regressed cases, ${comparison.lostTruePositives.length} lost true positives, and ${comparison.newFalsePositives.length} new false positives.`,
+    );
   }
 }
 
@@ -264,6 +317,11 @@ async function persistEvalHistory(input: PersistEvalHistoryInput): Promise<strin
   } finally {
     await client.close();
   }
+}
+
+/** Reads and validates one eval report JSON file. */
+async function readEvalReportFile(filePath: string): Promise<ReturnType<typeof parseEvalReport>> {
+  return parseEvalReport(JSON.parse(await readFile(filePath, "utf8")) as unknown);
 }
 
 /** Resolves a CLI path relative to the workspace root when it is not absolute. */
@@ -385,6 +443,51 @@ function parseRunOptions(args: readonly string[]): EvalCliOptions {
     ...(branch ? { branch } : {}),
     setActiveBaseline,
     failOnThreshold,
+  };
+}
+
+/** Parses `eval compare` command options. */
+function parseCompareOptions(args: readonly string[]): EvalCompareCliOptions {
+  let baselineReportFile: string | undefined;
+  let candidateReportFile: string | undefined;
+  let outputFile: string | undefined;
+  let failOnRegression = true;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    switch (arg) {
+      case "--baseline-report":
+        baselineReportFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--candidate-report":
+        candidateReportFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--output-file":
+        outputFile = readOptionValue(args, index, arg);
+        index += 1;
+        break;
+      case "--no-fail-on-regression":
+        failOnRegression = false;
+        break;
+      default:
+        throw new Error(`Unknown evaluation compare option "${arg}".`);
+    }
+  }
+
+  if (!baselineReportFile) {
+    throw new Error("Missing required --baseline-report for eval compare.");
+  }
+  if (!candidateReportFile) {
+    throw new Error("Missing required --candidate-report for eval compare.");
+  }
+
+  return {
+    baselineReportFile,
+    candidateReportFile,
+    failOnRegression,
+    ...(outputFile ? { outputFile } : {}),
   };
 }
 
