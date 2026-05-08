@@ -260,6 +260,16 @@ export type AdminControlPlaneRateLimitOptions = {
   readonly maxEntries?: number;
 };
 
+/** In-process rate limit settings for product session routes. */
+export type ProductSessionRateLimitOptions = {
+  /** Maximum requests allowed per client key in each window. */
+  readonly maxRequests?: number;
+  /** Sliding window duration in seconds. */
+  readonly windowSeconds?: number;
+  /** Maximum tracked client keys retained by this API process. */
+  readonly maxEntries?: number;
+};
+
 /** Authentication settings for product user session routes. */
 export type ProductSessionAuthOptions = {
   /** Whether product session routes are enabled. */
@@ -274,6 +284,8 @@ export type ProductSessionAuthOptions = {
   readonly cookieSameSite?: "Strict" | "Lax" | "None";
   /** Session lifetime in days for newly created product sessions. */
   readonly sessionTtlDays?: number;
+  /** In-process product route rate limit settings. */
+  readonly rateLimit?: ProductSessionRateLimitOptions;
 };
 
 /** GitHub OAuth settings for product user login. */
@@ -348,6 +360,8 @@ type ResolvedProductSessionAuthOptions = {
   readonly cookieSameSite: "Strict" | "Lax" | "None";
   /** Session lifetime in days for newly created product sessions. */
   readonly sessionTtlDays: number;
+  /** In-process limiter for product session routes. */
+  readonly rateLimiter?: AdminRouteRateLimiter | undefined;
   /** Configuration error that prevents safe product session access. */
   readonly configurationError?: string | undefined;
 };
@@ -2569,10 +2583,16 @@ const DEFAULT_ENTITLEMENT_FEATURE_KEYS = [
 const DEFAULT_ADMIN_RATE_LIMIT_MAX_REQUESTS = 120;
 /** Default admin rate-limit window in seconds. */
 const DEFAULT_ADMIN_RATE_LIMIT_WINDOW_SECONDS = 60;
+/** Default product requests allowed per client in one fixed window. */
+const DEFAULT_PRODUCT_RATE_LIMIT_MAX_REQUESTS = 600;
+/** Default product rate-limit window in seconds. */
+const DEFAULT_PRODUCT_RATE_LIMIT_WINDOW_SECONDS = 60;
 /** Default lifetime for object-store artifact download URLs. */
 const DEFAULT_REVIEW_ARTIFACT_SIGNED_URL_EXPIRES_SECONDS = 300;
 /** Default maximum number of tracked admin rate-limit client keys. */
 const DEFAULT_ADMIN_RATE_LIMIT_MAX_ENTRIES = 10_000;
+/** Default maximum number of tracked product rate-limit client keys. */
+const DEFAULT_PRODUCT_RATE_LIMIT_MAX_ENTRIES = 25_000;
 /** Header that carries a request-scoped support-session reference. */
 const SUPPORT_SESSION_HEADER = "x-heimdall-support-session-id";
 /** Opaque support-session IDs accepted from trusted admin surfaces. */
@@ -3324,6 +3344,10 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       if (configResponse) {
         return configResponse;
       }
+      const rateLimitResponse = guardProductRateLimit(request, set, productSessionAuth);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
 
       try {
         const start = await getProductGitHubOAuthService().start({
@@ -3348,6 +3372,10 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       );
       if (configResponse) {
         return configResponse;
+      }
+      const rateLimitResponse = guardProductRateLimit(request, set, productSessionAuth);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
       }
 
       try {
@@ -13202,6 +13230,18 @@ function resolveProductSessionAuth(
     optionSessionTtlDays ??
     optionalPositiveInteger(process.env.HEIMDALL_PRODUCT_SESSION_TTL_DAYS) ??
     14;
+  const rateLimitMaxRequests =
+    options?.rateLimit?.maxRequests ??
+    optionalPositiveInteger(process.env.HEIMDALL_PRODUCT_RATE_LIMIT_MAX_REQUESTS) ??
+    DEFAULT_PRODUCT_RATE_LIMIT_MAX_REQUESTS;
+  const rateLimitWindowSeconds =
+    options?.rateLimit?.windowSeconds ??
+    optionalPositiveInteger(process.env.HEIMDALL_PRODUCT_RATE_LIMIT_WINDOW_SECONDS) ??
+    DEFAULT_PRODUCT_RATE_LIMIT_WINDOW_SECONDS;
+  const rateLimitMaxEntries =
+    options?.rateLimit?.maxEntries ??
+    optionalPositiveInteger(process.env.HEIMDALL_PRODUCT_RATE_LIMIT_MAX_ENTRIES) ??
+    DEFAULT_PRODUCT_RATE_LIMIT_MAX_ENTRIES;
   const configurationError = validateResolvedProductSessionAuth({
     cookieName,
     cookieSameSite,
@@ -13215,6 +13255,14 @@ function resolveProductSessionAuth(
     cookieName,
     cookieSameSite,
     enabled,
+    rateLimiter:
+      enabled && rateLimitMaxRequests > 0
+        ? createAdminRouteRateLimiter({
+            maxEntries: rateLimitMaxEntries,
+            maxRequests: rateLimitMaxRequests,
+            windowSeconds: rateLimitWindowSeconds,
+          })
+        : undefined,
     secureCookies,
     sessionPepper,
     sessionTtlDays,
@@ -13632,6 +13680,35 @@ function handleProductOAuthError(error: unknown, set: AdminStatusSet): AdminErro
   };
 }
 
+/** Guards product routes with the configured in-process fixed-window rate limiter. */
+function guardProductRateLimit(
+  request: Request,
+  set: AdminResponseSet,
+  auth: ResolvedProductSessionAuthOptions,
+): AdminErrorResponse | undefined {
+  if (request.method === "OPTIONS" || !auth.rateLimiter) {
+    return undefined;
+  }
+
+  const rateLimit = auth.rateLimiter.check(productRateLimitKey(request, auth));
+  if (rateLimit.allowed) {
+    return undefined;
+  }
+
+  set.status = 429;
+  set.headers = {
+    ...(set.headers ?? {}),
+    "retry-after": String(rateLimit.retryAfterSeconds),
+  };
+
+  return {
+    error: {
+      code: "product_auth.rate_limited",
+      message: "Product API request rate limit exceeded.",
+    },
+  };
+}
+
 /** Redirects the browser to the product dashboard with a sanitized OAuth error code. */
 function productOAuthErrorRedirect(
   error: unknown,
@@ -13970,6 +14047,10 @@ async function guardProductSession(
         },
       },
     };
+  }
+  const rateLimitResponse = guardProductRateLimit(request, set, auth);
+  if (rateLimitResponse) {
+    return { response: rateLimitResponse };
   }
 
   const session = await sessionService.readSession(request.headers.get("cookie"));
@@ -16223,6 +16304,17 @@ function traceContextFromRequest(request: Request, requestId: string): Telemetry
 /** Returns a stable client key for admin route rate limiting. */
 function adminRateLimitKey(request: Request): string {
   return clientIpAddressFromRequest(request) ?? "local";
+}
+
+/** Returns a privacy-preserving client key for product route rate limiting. */
+function productRateLimitKey(request: Request, auth: ResolvedProductSessionAuthOptions): string {
+  const token = parseProductCookieHeader(request.headers.get("cookie"))[auth.cookieName];
+  if (token) {
+    const tokenHash = createHash("sha256").update(token).digest("hex").slice(0, 32);
+    return `session:${tokenHash}`;
+  }
+
+  return `ip:${clientIpAddressFromRequest(request) ?? "local"}`;
 }
 
 /** Returns the first forwarded client IP address when present. */

@@ -769,6 +769,44 @@ describe("api app", () => {
     });
   });
 
+  it("rate-limits product session routes by opaque session cookie", async () => {
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      productSessionAuth: {
+        ...productAuth,
+        rateLimit: {
+          maxRequests: 1,
+          windowSeconds: 60,
+        },
+      },
+      productSessionService: createMockProductSessionService(),
+    });
+
+    const first = await app.handle(
+      new Request("http://localhost/api/v1/me", {
+        headers: { cookie: "car_session=opaque" },
+      }),
+    );
+    const second = await app.handle(
+      new Request("http://localhost/api/v1/me", {
+        headers: { cookie: "car_session=opaque" },
+      }),
+    );
+    const otherSession = await app.handle(
+      new Request("http://localhost/api/v1/me", {
+        headers: { cookie: "car_session=other" },
+      }),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(429);
+    expect(second.headers.get("retry-after")).toBe("60");
+    expect(otherSession.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({
+      error: { code: "product_auth.rate_limited" },
+    });
+  });
+
   it("serves scoped API v1 resources from product sessions", async () => {
     const listOrgQueries: Parameters<AdminControlPlaneService["listOrganizations"]>[0][] = [];
     const listRepositoryQueries: Parameters<AdminControlPlaneService["listRepositories"]>[0][] = [];
@@ -1914,6 +1952,54 @@ describe("api app", () => {
     expect(response.headers.get("location")).toBe(
       "https://github.com/login/oauth/authorize?state=state_1",
     );
+  });
+
+  it("rate-limits product GitHub OAuth starts by client address", async () => {
+    const starts: string[] = [];
+    const app = createApiApp({
+      githubWebhookHandler: noopWebhookHandler(),
+      productGitHubOAuthService: createMockProductGitHubOAuthService({
+        start: async (request) => {
+          starts.push(request.redirectTo ?? "");
+          return {
+            authorizationUrl: "https://github.com/login/oauth/authorize?state=state_1",
+          };
+        },
+      }),
+      productSessionAuth: {
+        ...productAuth,
+        rateLimit: {
+          maxRequests: 1,
+          windowSeconds: 60,
+        },
+      },
+      productSessionService: createMockProductSessionService(),
+    });
+
+    const first = await app.handle(
+      new Request("http://localhost/api/v1/auth/github/start?redirectTo=/reviews", {
+        headers: { "x-forwarded-for": "203.0.113.20" },
+      }),
+    );
+    const second = await app.handle(
+      new Request("http://localhost/api/v1/auth/github/start?redirectTo=/reviews", {
+        headers: { "x-forwarded-for": "203.0.113.20" },
+      }),
+    );
+    const otherClient = await app.handle(
+      new Request("http://localhost/api/v1/auth/github/start?redirectTo=/reviews", {
+        headers: { "x-forwarded-for": "203.0.113.21" },
+      }),
+    );
+
+    expect(first.status).toBe(302);
+    expect(second.status).toBe(429);
+    expect(second.headers.get("retry-after")).toBe("60");
+    expect(otherClient.status).toBe(302);
+    expect(starts).toEqual(["/reviews", "/reviews"]);
+    await expect(second.json()).resolves.toMatchObject({
+      error: { code: "product_auth.rate_limited" },
+    });
   });
 
   it("completes GitHub OAuth login and writes a product session cookie", async () => {
