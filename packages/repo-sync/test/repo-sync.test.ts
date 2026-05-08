@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -35,6 +35,8 @@ import {
   ensureRepositoryMirror,
   type GitCommandRunner,
   getRepoSyncCacheLayout,
+  getRepoSyncCacheStats,
+  getRepoSyncLeaseMetadataPath,
   getRepoSyncLockPath,
   getRepoSyncMirrorPath,
   getRepoSyncTempMirrorPath,
@@ -160,7 +162,9 @@ describe("repo sync workspace", () => {
 
     expect(getRepoSyncCacheLayout(config)).toEqual({
       cacheRoot,
+      leaseMetadataRoot: join(cacheRoot, "metadata", "worktree-leases"),
       locksRoot: join(cacheRoot, "locks"),
+      metadataRoot: join(cacheRoot, "metadata"),
       mirrorsRoot: join(cacheRoot, "mirrors"),
       tmpRoot: join(cacheRoot, "tmp"),
       worktreesRoot: join(cacheRoot, "worktrees"),
@@ -173,6 +177,9 @@ describe("repo sync workspace", () => {
     );
     expect(getRepoSyncWorktreePath(config, "lease_123")).toBe(
       join(cacheRoot, "worktrees", "lease_123"),
+    );
+    expect(getRepoSyncLeaseMetadataPath(config, "lease_123")).toBe(
+      join(cacheRoot, "metadata", "worktree-leases", "lease_123.json"),
     );
     expect(getRepoSyncLockPath(config, "fetch_repo_123")).toBe(
       join(cacheRoot, "locks", "fetch_repo_123.lock"),
@@ -621,6 +628,7 @@ describe("repo sync workspace", () => {
     const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 60 });
     const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
     const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const metadataPath = getRepoSyncLeaseMetadataPath(config, "lease_123");
     const mutableCommands: string[][] = [];
     const gitRunner: GitCommandRunner = async (args) => {
       mutableCommands.push([...args]);
@@ -666,11 +674,13 @@ describe("repo sync workspace", () => {
       workspaceSizeBytes: 256,
     });
     await expect(access(worktreePath)).resolves.toBeUndefined();
+    await expect(access(metadataPath)).resolves.toBeUndefined();
 
     await lease.release();
     await lease.release();
 
     await expect(access(worktreePath)).rejects.toThrow();
+    await expect(access(metadataPath)).rejects.toThrow();
     expect(mutableCommands).toEqual([
       ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
       ["-C", worktreePath, "rev-parse", "HEAD"],
@@ -982,6 +992,100 @@ describe("repo sync workspace", () => {
     });
     await expect(access(expiredWorktreePath)).resolves.toBeUndefined();
     expect(mutableCommands).toEqual([]);
+  });
+
+  it("reports cache stats and freed worktree bytes after expired cleanup", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-cache-stats-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 60 });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const expiredWorktreePath = getRepoSyncWorktreePath(config, "lease_expired");
+    const activeWorktreePath = getRepoSyncWorktreePath(config, "lease_active");
+    const expiredMetadataPath = getRepoSyncLeaseMetadataPath(config, "lease_expired");
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const gitRunner: GitCommandRunner = async (args) => {
+      if (args[2] === "worktree" && args[3] === "add") {
+        const workspacePath = args[5];
+        if (workspacePath === undefined) {
+          throw new Error("Missing fake worktree path.");
+        }
+        await mkdir(workspacePath, { recursive: true });
+        await writeFile(
+          join(workspacePath, "payload.txt"),
+          workspacePath.endsWith("lease_expired") ? "expired-worktree".repeat(64) : "active",
+          "utf8",
+        );
+      }
+      if (args[2] === "rev-parse") {
+        return `${commitSha}\n`;
+      }
+      return "";
+    };
+
+    await mkdir(mirrorPath, { recursive: true });
+    await writeFile(join(mirrorPath, "objects.dat"), "mirror", "utf8");
+    await createRepositoryWorktreeLease(
+      {
+        commitSha,
+        config,
+        leaseId: "lease_expired",
+        mirrorPath,
+        purpose: "review",
+        repoId: "repo_123",
+      },
+      {
+        gitRunner,
+        now: () => new Date("2025-12-31T23:58:00.000Z"),
+      },
+    );
+    await createRepositoryWorktreeLease(
+      {
+        commitSha,
+        config,
+        leaseId: "lease_active",
+        mirrorPath,
+        purpose: "index",
+        repoId: "repo_123",
+      },
+      {
+        gitRunner,
+        now: () => now,
+      },
+    );
+
+    const beforeCleanup = await getRepoSyncCacheStats({ config }, { now: () => now });
+
+    expect(beforeCleanup.worktrees.map((worktree) => worktree.leaseId).sort()).toEqual([
+      "lease_active",
+      "lease_expired",
+    ]);
+    expect(beforeCleanup.activeWorkspaces.map((worktree) => worktree.leaseId)).toEqual([
+      "lease_active",
+    ]);
+    expect(beforeCleanup.mirrors).toMatchObject([
+      {
+        activeWorktreeCount: 1,
+        path: mirrorPath,
+        repoId: "repo_123",
+      },
+    ]);
+    expect(beforeCleanup.totalBytes).toBeGreaterThan(0);
+    expect(beforeCleanup.worktreeBytes).toBeGreaterThan(0);
+
+    await cleanupExpiredRepositoryWorktrees(
+      { config },
+      {
+        gitRunner,
+        now: () => now,
+      },
+    );
+    const afterCleanup = await getRepoSyncCacheStats({ config }, { now: () => now });
+
+    expect(afterCleanup.worktrees.map((worktree) => worktree.leaseId)).toEqual(["lease_active"]);
+    expect(afterCleanup.worktreeBytes).toBeLessThan(beforeCleanup.worktreeBytes);
+    await expect(access(expiredWorktreePath)).rejects.toThrow();
+    await expect(access(expiredMetadataPath)).rejects.toThrow();
+    await expect(access(activeWorktreePath)).resolves.toBeUndefined();
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {

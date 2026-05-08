@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   rename,
   rm,
   writeFile,
@@ -101,6 +102,10 @@ export type CreateRepoSyncConfigInput = Partial<RepoSyncConfig>;
 export type RepoSyncCacheLayout = {
   /** Root directory that contains all repo-sync cache paths. */
   readonly cacheRoot: string;
+  /** Directory containing repo-sync metadata sidecars. */
+  readonly metadataRoot: string;
+  /** Directory containing worktree lease metadata sidecars. */
+  readonly leaseMetadataRoot: string;
   /** Directory containing bare repository mirrors. */
   readonly mirrorsRoot: string;
   /** Directory containing checked-out worktrees. */
@@ -284,6 +289,106 @@ export type RepositoryCommitAvailability = RepositoryMirrorRef & {
 
 /** Reason a repository worktree lease was acquired. */
 export type RepositoryWorktreePurpose = "debug" | "index" | "replay" | "review" | "static_analysis";
+
+/** Persisted sidecar metadata for a cached worktree lease. */
+export type RepositoryWorktreeLeaseMetadata = {
+  /** Metadata schema version. */
+  readonly schemaVersion: "repo_sync_worktree_lease.v1";
+  /** Stable product repository ID. */
+  readonly repoId: string;
+  /** Lease ID used as the worktree path segment. */
+  readonly leaseId: string;
+  /** Commit SHA checked out in detached mode. */
+  readonly commitSha: string;
+  /** Bare mirror path that owns the worktree. */
+  readonly mirrorPath: string;
+  /** Worktree path on disk. */
+  readonly workspacePath: string;
+  /** Purpose attached to the lease. */
+  readonly purpose: RepositoryWorktreePurpose;
+  /** ISO timestamp when the lease was created. */
+  readonly createdAt: string;
+  /** ISO timestamp when the lease should be considered expired. */
+  readonly expiresAt: string;
+  /** Total filesystem bytes measured before the lease was returned. */
+  readonly workspaceSizeBytes: number;
+};
+
+/** Cache statistics for one cached mirror directory. */
+export type RepoSyncMirrorCacheStats = {
+  /** Stable product repository ID inferred from the mirror path. */
+  readonly repoId: string;
+  /** Bare mirror path on disk. */
+  readonly path: string;
+  /** Filesystem bytes used by the mirror directory. */
+  readonly bytes: number;
+  /** Number of non-expired worktree leases that reference this mirror. */
+  readonly activeWorktreeCount: number;
+  /** ISO timestamp for the mirror directory mtime. */
+  readonly lastModifiedAt: string;
+};
+
+/** Cache statistics for one cached worktree directory. */
+export type RepoSyncWorktreeCacheStats = {
+  /** Lease ID used as the worktree path segment. */
+  readonly leaseId: string;
+  /** Worktree path on disk. */
+  readonly path: string;
+  /** Filesystem bytes used by the worktree directory. */
+  readonly bytes: number;
+  /** True when sidecar metadata exists and parsed successfully. */
+  readonly metadataPresent: boolean;
+  /** True when the worktree is expired for the stats cutoff. */
+  readonly expired: boolean;
+  /** Stable product repository ID from sidecar metadata, when available. */
+  readonly repoId?: string;
+  /** Commit SHA from sidecar metadata, when available. */
+  readonly commitSha?: string;
+  /** Purpose from sidecar metadata, when available. */
+  readonly purpose?: RepositoryWorktreePurpose;
+  /** ISO timestamp when the lease was created, when available. */
+  readonly createdAt?: string;
+  /** ISO timestamp when the lease should expire, when available. */
+  readonly expiresAt?: string;
+};
+
+/** Aggregate statistics for the local repo-sync cache. */
+export type RepoSyncCacheStats = {
+  /** Stable identifier for the worker cache node. */
+  readonly cacheNodeId: string;
+  /** Root directory that contains mirror, worktree, temp, lock, and metadata paths. */
+  readonly cacheRoot: string;
+  /** Total filesystem bytes under the cache root. */
+  readonly totalBytes: number;
+  /** Filesystem bytes used by cached mirrors. */
+  readonly mirrorBytes: number;
+  /** Filesystem bytes used by cached worktrees. */
+  readonly worktreeBytes: number;
+  /** Filesystem bytes used by repo-sync metadata. */
+  readonly metadataBytes: number;
+  /** Cached mirror directory statistics. */
+  readonly mirrors: readonly RepoSyncMirrorCacheStats[];
+  /** Cached worktree directory statistics. */
+  readonly worktrees: readonly RepoSyncWorktreeCacheStats[];
+  /** Non-expired cached worktrees. */
+  readonly activeWorkspaces: readonly RepoSyncWorktreeCacheStats[];
+};
+
+/** Input used to inspect local repo-sync cache statistics. */
+export type GetRepoSyncCacheStatsInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Cutoff used to decide whether worktree leases are expired. */
+  readonly expiredBefore?: Date;
+};
+
+/** Dependencies used to inspect local repo-sync cache statistics. */
+export type GetRepoSyncCacheStatsDependencies = {
+  /** Optional disk usage provider used to measure cache paths. */
+  readonly diskUsageProvider?: DiskUsageProvider;
+  /** Optional clock used to derive the default expiration cutoff. */
+  readonly now?: () => Date;
+};
 
 /** Input required to create a detached worktree lease from a mirror. */
 export type CreateRepositoryWorktreeLeaseInput = {
@@ -523,10 +628,13 @@ export function loadRepoSyncConfigFromEnvironment(env: RepoSyncEnvironment): Rep
 /** Returns the physical cache directory layout for a repo-sync cache root. */
 export function getRepoSyncCacheLayout(input: RepoSyncCachePathInput): RepoSyncCacheLayout {
   const cacheRoot = normalizeRepoSyncCacheRoot(cacheRootFromPathInput(input));
+  const metadataRoot = join(cacheRoot, "metadata");
 
   return {
     cacheRoot,
+    leaseMetadataRoot: join(metadataRoot, "worktree-leases"),
     locksRoot: join(cacheRoot, "locks"),
+    metadataRoot,
     mirrorsRoot: join(cacheRoot, "mirrors"),
     tmpRoot: join(cacheRoot, "tmp"),
     worktreesRoot: join(cacheRoot, "worktrees"),
@@ -558,6 +666,17 @@ export function getRepoSyncWorktreePath(input: RepoSyncCachePathInput, leaseId: 
   return join(
     getRepoSyncCacheLayout(input).worktreesRoot,
     safeCachePathSegment("leaseId", leaseId),
+  );
+}
+
+/** Returns the sidecar metadata path for one worktree lease ID. */
+export function getRepoSyncLeaseMetadataPath(
+  input: RepoSyncCachePathInput,
+  leaseId: string,
+): string {
+  return join(
+    getRepoSyncCacheLayout(input).leaseMetadataRoot,
+    `${safeCachePathSegment("leaseId", leaseId)}.json`,
   );
 }
 
@@ -787,6 +906,9 @@ export async function createRepositoryWorktreeLease(
   await mkdir(layout.worktreesRoot, { recursive: true });
 
   const git = dependencies.gitRunner ?? runGit;
+  const createdAtDate = dependencies.now?.() ?? new Date();
+  const ttlSeconds = input.ttlSeconds ?? input.config.defaultLeaseTtlSeconds;
+  const expiresAtDate = new Date(createdAtDate.getTime() + ttlSeconds * 1_000);
   let worktreeCreated = false;
   let workspaceSizeBytes = 0;
   try {
@@ -820,6 +942,18 @@ export async function createRepositoryWorktreeLease(
       maxWorkspaceBytes: input.config.maxWorkspaceBytes,
       workspacePath,
     });
+    await writeRepositoryWorktreeLeaseMetadata(input.config, {
+      commitSha: input.commitSha,
+      createdAt: createdAtDate.toISOString(),
+      expiresAt: expiresAtDate.toISOString(),
+      leaseId,
+      mirrorPath: input.mirrorPath,
+      purpose: input.purpose,
+      repoId: input.repoId,
+      schemaVersion: "repo_sync_worktree_lease.v1",
+      workspacePath,
+      workspaceSizeBytes,
+    });
   } catch (error) {
     if (worktreeCreated) {
       await cleanupFailedRepositoryWorktreeLease({
@@ -831,12 +965,10 @@ export async function createRepositoryWorktreeLease(
       });
     }
     await rm(workspacePath, { force: true, recursive: true });
+    await removeRepositoryWorktreeLeaseMetadata(input.config, leaseId);
     throw error;
   }
 
-  const createdAtDate = dependencies.now?.() ?? new Date();
-  const ttlSeconds = input.ttlSeconds ?? input.config.defaultLeaseTtlSeconds;
-  const expiresAtDate = new Date(createdAtDate.getTime() + ttlSeconds * 1_000);
   let released = false;
 
   return {
@@ -867,6 +999,7 @@ export async function createRepositoryWorktreeLease(
           await git(buildWorktreePruneArgs({ mirrorPath: input.mirrorPath }), {
             timeoutMs: input.config.defaultWorktreeTimeoutMs,
           });
+          await removeRepositoryWorktreeLeaseMetadata(input.config, leaseId);
         },
       );
       released = true;
@@ -900,6 +1033,55 @@ export async function acquireRepositoryWorkspace(
     cloneUrlHash: commit.cloneUrlHash,
     fetched: commit.fetched,
     mirrorCreated: commit.created,
+  };
+}
+
+/** Returns product-safe filesystem statistics for the local repo-sync cache. */
+export async function getRepoSyncCacheStats(
+  input: GetRepoSyncCacheStatsInput,
+  dependencies: GetRepoSyncCacheStatsDependencies = {},
+): Promise<RepoSyncCacheStats> {
+  const layout = getRepoSyncCacheLayout(input.config);
+  const diskUsageProvider = dependencies.diskUsageProvider ?? defaultDiskUsageProvider;
+  const referenceNow = dependencies.now?.() ?? new Date();
+  const leaseExpirationCutoff = input.expiredBefore ?? referenceNow;
+  const legacyModifiedCutoff =
+    input.expiredBefore ??
+    new Date(referenceNow.getTime() - input.config.defaultLeaseTtlSeconds * 1_000);
+  const worktrees = await readRepoSyncWorktreeCacheStats({
+    config: input.config,
+    diskUsageProvider,
+    leaseExpirationCutoff,
+    legacyModifiedCutoff,
+  });
+  const activeWorkspaces = worktrees.filter((worktree) => !worktree.expired);
+  const activeWorktreeCountsByRepoId = activeWorkspaces.reduce((counts, worktree) => {
+    if (worktree.repoId === undefined) {
+      return counts;
+    }
+    counts.set(worktree.repoId, (counts.get(worktree.repoId) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
+  const mirrors = await readRepoSyncMirrorCacheStats({
+    activeWorktreeCountsByRepoId,
+    config: input.config,
+    diskUsageProvider,
+  });
+  const [totalBytes, metadataBytes] = await Promise.all([
+    getExistingPathUsageBytes(diskUsageProvider, layout.cacheRoot),
+    getExistingPathUsageBytes(diskUsageProvider, layout.metadataRoot),
+  ]);
+
+  return {
+    activeWorkspaces,
+    cacheNodeId: input.config.cacheNodeId,
+    cacheRoot: layout.cacheRoot,
+    metadataBytes,
+    mirrorBytes: mirrors.reduce((total, mirror) => total + mirror.bytes, 0),
+    mirrors,
+    totalBytes,
+    worktreeBytes: worktrees.reduce((total, worktree) => total + worktree.bytes, 0),
+    worktrees,
   };
 }
 
@@ -974,6 +1156,277 @@ async function getFilesystemUsageBytes(path: string): Promise<number> {
   return stats.size + childUsageBytes.reduce((total, bytes) => total + bytes, 0);
 }
 
+/** Returns usage for an existing path, or zero when the path is absent. */
+async function getExistingPathUsageBytes(
+  diskUsageProvider: DiskUsageProvider,
+  path: string,
+): Promise<number> {
+  try {
+    return await diskUsageProvider.getUsageBytes(path);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return 0;
+    }
+    throw error;
+  }
+}
+
+/** Input used to build worktree cache statistics. */
+type ReadRepoSyncWorktreeCacheStatsInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Disk usage boundary used to measure worktree directories. */
+  readonly diskUsageProvider: DiskUsageProvider;
+  /** Cutoff used to classify metadata-backed lease expiration. */
+  readonly leaseExpirationCutoff: Date;
+  /** Cutoff used to classify legacy worktrees without metadata by mtime. */
+  readonly legacyModifiedCutoff: Date;
+};
+
+/** Reads filesystem statistics for cached repo-sync worktrees. */
+async function readRepoSyncWorktreeCacheStats(
+  input: ReadRepoSyncWorktreeCacheStatsInput,
+): Promise<RepoSyncWorktreeCacheStats[]> {
+  const layout = getRepoSyncCacheLayout(input.config);
+  const worktreeEntries = await readRepoSyncDirectoryEntries(layout.worktreesRoot);
+  const worktrees: RepoSyncWorktreeCacheStats[] = [];
+
+  for (const entry of worktreeEntries) {
+    if (!isRepoSyncLeaseWorktreeName(entry.name)) {
+      continue;
+    }
+
+    const worktreePath = getRepoSyncWorktreePath(input.config, entry.name);
+    assertInsideRoot(layout.worktreesRoot, worktreePath);
+    const stats = await lstat(worktreePath);
+    if (!stats.isDirectory()) {
+      continue;
+    }
+
+    const metadata = await readRepositoryWorktreeLeaseMetadata(input.config, entry.name);
+    const bytes = await getExistingPathUsageBytes(input.diskUsageProvider, worktreePath);
+    const expired = isRepositoryWorktreeExpired({
+      fallbackModifiedAt: stats.mtime,
+      leaseExpirationCutoff: input.leaseExpirationCutoff,
+      legacyModifiedCutoff: input.legacyModifiedCutoff,
+      metadata,
+    });
+
+    worktrees.push({
+      bytes,
+      expired,
+      leaseId: entry.name,
+      metadataPresent: metadata !== undefined,
+      path: worktreePath,
+      ...(metadata === undefined
+        ? {}
+        : {
+            commitSha: metadata.commitSha,
+            createdAt: metadata.createdAt,
+            expiresAt: metadata.expiresAt,
+            purpose: metadata.purpose,
+            repoId: metadata.repoId,
+          }),
+    });
+  }
+
+  return worktrees;
+}
+
+/** Input used to build mirror cache statistics. */
+type ReadRepoSyncMirrorCacheStatsInput = {
+  /** Active worktree counts keyed by product repository ID. */
+  readonly activeWorktreeCountsByRepoId: ReadonlyMap<string, number>;
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Disk usage boundary used to measure mirror directories. */
+  readonly diskUsageProvider: DiskUsageProvider;
+};
+
+/** Reads filesystem statistics for cached repo-sync mirrors. */
+async function readRepoSyncMirrorCacheStats(
+  input: ReadRepoSyncMirrorCacheStatsInput,
+): Promise<RepoSyncMirrorCacheStats[]> {
+  const layout = getRepoSyncCacheLayout(input.config);
+  const mirrorEntries = await readRepoSyncDirectoryEntries(layout.mirrorsRoot);
+  const mirrors: RepoSyncMirrorCacheStats[] = [];
+
+  for (const entry of mirrorEntries) {
+    const repoId = repoIdFromMirrorEntryName(entry.name);
+    if (!entry.isDirectory() || repoId === undefined) {
+      continue;
+    }
+
+    const mirrorPath = getRepoSyncMirrorPath(input.config, repoId);
+    assertInsideRoot(layout.mirrorsRoot, mirrorPath);
+    const stats = await lstat(mirrorPath);
+    mirrors.push({
+      activeWorktreeCount: input.activeWorktreeCountsByRepoId.get(repoId) ?? 0,
+      bytes: await getExistingPathUsageBytes(input.diskUsageProvider, mirrorPath),
+      lastModifiedAt: stats.mtime.toISOString(),
+      path: mirrorPath,
+      repoId,
+    });
+  }
+
+  return mirrors;
+}
+
+/** Returns the product repository ID represented by a mirror directory name. */
+function repoIdFromMirrorEntryName(name: string): string | undefined {
+  if (!name.endsWith(".git")) {
+    return undefined;
+  }
+  const repoId = name.slice(0, -".git".length);
+  if (!safeCachePathSegmentPattern.test(repoId)) {
+    return undefined;
+  }
+
+  return repoId;
+}
+
+/** Input used to classify a worktree as expired. */
+type IsRepositoryWorktreeExpiredInput = {
+  /** Worktree mtime used for legacy entries without metadata. */
+  readonly fallbackModifiedAt: Date;
+  /** Cutoff used to classify metadata-backed lease expiration. */
+  readonly leaseExpirationCutoff: Date;
+  /** Cutoff used to classify legacy worktrees without metadata by mtime. */
+  readonly legacyModifiedCutoff: Date;
+  /** Parsed lease metadata when available. */
+  readonly metadata: RepositoryWorktreeLeaseMetadata | undefined;
+};
+
+/** Returns true when a worktree is expired for a cleanup or stats cutoff. */
+function isRepositoryWorktreeExpired(input: IsRepositoryWorktreeExpiredInput): boolean {
+  if (input.metadata !== undefined) {
+    return Date.parse(input.metadata.expiresAt) <= input.leaseExpirationCutoff.getTime();
+  }
+
+  return input.fallbackModifiedAt.getTime() <= input.legacyModifiedCutoff.getTime();
+}
+
+/** Writes sidecar metadata for a worktree lease. */
+async function writeRepositoryWorktreeLeaseMetadata(
+  config: RepoSyncConfig,
+  metadata: RepositoryWorktreeLeaseMetadata,
+): Promise<void> {
+  const layout = getRepoSyncCacheLayout(config);
+  const metadataPath = getRepoSyncLeaseMetadataPath(config, metadata.leaseId);
+  assertInsideRoot(layout.leaseMetadataRoot, metadataPath);
+  await mkdir(layout.leaseMetadataRoot, { recursive: true });
+  await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+}
+
+/** Reads sidecar metadata for a worktree lease, returning undefined for absent or invalid data. */
+async function readRepositoryWorktreeLeaseMetadata(
+  config: RepoSyncConfig,
+  leaseId: string,
+): Promise<RepositoryWorktreeLeaseMetadata | undefined> {
+  const layout = getRepoSyncCacheLayout(config);
+  const metadataPath = getRepoSyncLeaseMetadataPath(config, leaseId);
+  assertInsideRoot(layout.leaseMetadataRoot, metadataPath);
+
+  try {
+    const metadataText = await readFile(metadataPath, "utf8");
+    const parsed: unknown = JSON.parse(metadataText);
+    return parseRepositoryWorktreeLeaseMetadata(parsed);
+  } catch (error) {
+    if (isMissingPathError(error) || error instanceof SyntaxError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/** Removes sidecar metadata for a worktree lease. */
+async function removeRepositoryWorktreeLeaseMetadata(
+  config: RepoSyncConfig,
+  leaseId: string,
+): Promise<void> {
+  const layout = getRepoSyncCacheLayout(config);
+  const metadataPath = getRepoSyncLeaseMetadataPath(config, leaseId);
+  assertInsideRoot(layout.leaseMetadataRoot, metadataPath);
+  await rm(metadataPath, { force: true });
+}
+
+/** Parses sidecar metadata from a JSON value. */
+function parseRepositoryWorktreeLeaseMetadata(
+  value: unknown,
+): RepositoryWorktreeLeaseMetadata | undefined {
+  if (!isObjectRecord(value)) {
+    return undefined;
+  }
+
+  const {
+    commitSha,
+    createdAt,
+    expiresAt,
+    leaseId,
+    mirrorPath,
+    purpose,
+    repoId,
+    schemaVersion,
+    workspacePath,
+    workspaceSizeBytes,
+  } = value;
+  if (
+    schemaVersion !== "repo_sync_worktree_lease.v1" ||
+    typeof repoId !== "string" ||
+    !safeCachePathSegmentPattern.test(repoId) ||
+    typeof leaseId !== "string" ||
+    !isRepoSyncLeaseWorktreeName(leaseId) ||
+    typeof commitSha !== "string" ||
+    !fullCommitShaPattern.test(commitSha) ||
+    typeof mirrorPath !== "string" ||
+    typeof workspacePath !== "string" ||
+    !isRepositoryWorktreePurpose(purpose) ||
+    typeof createdAt !== "string" ||
+    !isValidIsoDateString(createdAt) ||
+    typeof expiresAt !== "string" ||
+    !isValidIsoDateString(expiresAt) ||
+    typeof workspaceSizeBytes !== "number" ||
+    !Number.isSafeInteger(workspaceSizeBytes) ||
+    workspaceSizeBytes < 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    commitSha,
+    createdAt,
+    expiresAt,
+    leaseId,
+    mirrorPath,
+    purpose,
+    repoId,
+    schemaVersion,
+    workspacePath,
+    workspaceSizeBytes,
+  };
+}
+
+/** Returns true when an unknown value is a string-keyed record. */
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Returns true when a value is a known repository worktree purpose. */
+function isRepositoryWorktreePurpose(value: unknown): value is RepositoryWorktreePurpose {
+  return (
+    value === "debug" ||
+    value === "index" ||
+    value === "replay" ||
+    value === "review" ||
+    value === "static_analysis"
+  );
+}
+
+/** Returns true when a string is parseable as an ISO timestamp. */
+function isValidIsoDateString(value: string): boolean {
+  return !Number.isNaN(Date.parse(value));
+}
+
 /** Input used when removing a worktree that failed validation. */
 type CleanupFailedRepositoryWorktreeLeaseInput = {
   /** Runtime repo-sync configuration. */
@@ -1026,11 +1479,10 @@ export async function cleanupExpiredRepositoryWorktrees(
   const layout = getRepoSyncCacheLayout(input.config);
   const dryRun = input.dryRun === true;
   const limit = normalizeRepoSyncCleanupLimit(input.limit);
+  const now = dependencies.now?.() ?? new Date();
+  const leaseExpirationCutoff = input.expiredBefore ?? now;
   const cutoff =
-    input.expiredBefore ??
-    new Date(
-      (dependencies.now?.() ?? new Date()).getTime() - input.config.defaultLeaseTtlSeconds * 1_000,
-    );
+    input.expiredBefore ?? new Date(now.getTime() - input.config.defaultLeaseTtlSeconds * 1_000);
   const failures: RepoSyncCleanupFailure[] = [];
   let expiredWorktreeCount = 0;
   let removedWorktreeCount = 0;
@@ -1049,7 +1501,16 @@ export async function cleanupExpiredRepositoryWorktrees(
     try {
       assertInsideRoot(layout.worktreesRoot, worktreePath);
       const worktreeStats = await lstat(worktreePath);
-      if (!worktreeStats.isDirectory() || worktreeStats.mtime.getTime() > cutoff.getTime()) {
+      const metadata = await readRepositoryWorktreeLeaseMetadata(input.config, entry.name);
+      if (
+        !worktreeStats.isDirectory() ||
+        !isRepositoryWorktreeExpired({
+          fallbackModifiedAt: worktreeStats.mtime,
+          leaseExpirationCutoff,
+          legacyModifiedCutoff: cutoff,
+          metadata,
+        })
+      ) {
         skippedWorktreeCount += 1;
         continue;
       }
@@ -1062,6 +1523,7 @@ export async function cleanupExpiredRepositoryWorktrees(
 
       if (!dryRun) {
         await rm(worktreePath, { force: true, recursive: true });
+        await removeRepositoryWorktreeLeaseMetadata(input.config, entry.name);
       }
       removedWorktreeCount += 1;
     } catch (error) {
