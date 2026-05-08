@@ -26,6 +26,7 @@ import {
   createWorkerReviewIndexDependencyModeFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
+  enqueueWaitingReviewRunsForIndex,
   type RedisPublishThrottleClient,
   resolveWorkerEmbeddingApiKey,
   resolveWorkerGitHubPrivateKey,
@@ -569,6 +570,86 @@ describe("createWorkerHandlers", () => {
         }),
         queueName: "embedding",
         repoId: payload.repoId,
+        status: "pending",
+      }),
+    ]);
+  });
+
+  it("requeues reviews waiting for a completed index dependency", async () => {
+    const insertedRows: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedRows.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [
+              {
+                baseSha: "1111111",
+                dryRunMetadata: { dryRun: true },
+                headSha: "2222222",
+                pullRequestNumber: 7,
+                reviewRunId: "rrn_waiting",
+                trigger: "webhook",
+              },
+            ],
+          }),
+        }),
+      }),
+    };
+
+    await expect(
+      enqueueWaitingReviewRunsForIndex(
+        db as never,
+        {
+          commitSha: "2222222",
+          installationId: "inst_test",
+          priority: "high",
+          reason: "pr_review",
+          repoId: "repo_test",
+        },
+        {
+          timestamp: "2026-05-08T00:00:00.000Z",
+          traceContext: { requestId: "req_index" },
+        },
+      ),
+    ).resolves.toEqual({
+      enqueuedCount: 1,
+      inspectedCount: 1,
+    });
+
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        jobKey: "github:review-resume:repo_test:7:2222222:index",
+        jobType: JOB_TYPES.ReviewPullRequest,
+        metadata: {
+          completedIndexCommitSha: "2222222",
+          source: "index_dependency_ready",
+        },
+        payload: expect.objectContaining({
+          createdAt: "2026-05-08T00:00:00.000Z",
+          idempotencyKey: "github:review-resume:repo_test:7:2222222:index",
+          jobType: JOB_TYPES.ReviewPullRequest,
+          payload: {
+            baseSha: "1111111",
+            dryRun: true,
+            headSha: "2222222",
+            installationId: "inst_test",
+            pullRequestNumber: 7,
+            repoId: "repo_test",
+            trigger: "webhook",
+          },
+          traceContext: { requestId: "req_index" },
+        }),
+        queueName: "review",
+        repoId: "repo_test",
+        reviewRunId: "rrn_waiting",
         status: "pending",
       }),
     ]);

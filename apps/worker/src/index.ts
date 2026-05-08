@@ -22,12 +22,14 @@ import {
   type EmbeddingRepairJobPayload,
   type IndexRepoCommitJobPayload,
   JOB_TYPES,
+  type JobEnvelope,
   type JobPayload,
   type LLMFindingOutput,
   type PublishReviewJobPayload,
   parseWithSchema,
   type ReviewArtifactCleanupJobPayload,
   type ReviewPullRequestJobPayload,
+  type ReviewTrigger,
   type SandboxCleanupJobPayload,
   type SyncInstallationJobPayload,
   type UpdateMemoryJobPayload,
@@ -600,6 +602,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             ...(options.traces ? { traces: options.traces } : {}),
           });
         }
+        await enqueueWaitingReviewRunsForIndex(options.db, payload, {
+          ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+          timestamp: new Date().toISOString(),
+        });
       } finally {
         await rm(workspace.workspacePath, { force: true, recursive: true });
       }
@@ -754,6 +760,116 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       );
     },
   };
+}
+
+/** Result returned after requeueing reviews that were waiting for a completed index. */
+export type EnqueueWaitingReviewRunsForIndexResult = {
+  /** Number of waiting review runs found for the completed index commit. */
+  readonly inspectedCount: number;
+  /** Number of idempotent review resume jobs attempted. */
+  readonly enqueuedCount: number;
+};
+
+/** Requeues review jobs waiting for the index version that just finished importing. */
+export async function enqueueWaitingReviewRunsForIndex(
+  db: HeimdallDatabase,
+  payload: IndexRepoCommitJobPayload,
+  options: {
+    /** Timestamp used for deterministic job envelopes. */
+    readonly timestamp: string;
+    /** Optional trace context propagated from the completed index job. */
+    readonly traceContext?: JobEnvelope<IndexRepoCommitJobPayload>["traceContext"];
+  },
+): Promise<EnqueueWaitingReviewRunsForIndexResult> {
+  const waitingRuns = await db
+    .select({
+      baseSha: reviewRuns.baseSha,
+      dryRunMetadata: reviewRuns.metadata,
+      headSha: reviewRuns.headSha,
+      pullRequestNumber: reviewRuns.pullRequestNumber,
+      reviewRunId: reviewRuns.reviewRunId,
+      trigger: reviewRuns.trigger,
+    })
+    .from(reviewRuns)
+    .where(
+      and(
+        eq(reviewRuns.repoId, payload.repoId),
+        eq(reviewRuns.headSha, payload.commitSha),
+        eq(reviewRuns.status, "waiting_for_index"),
+      ),
+    )
+    .limit(100);
+
+  for (const run of waitingRuns) {
+    const jobKey = `github:review-resume:${payload.repoId}:${run.pullRequestNumber}:${payload.commitSha}:index`;
+    const reviewPayload: ReviewPullRequestJobPayload = {
+      baseSha: run.baseSha,
+      headSha: run.headSha,
+      installationId: payload.installationId,
+      pullRequestNumber: run.pullRequestNumber,
+      repoId: payload.repoId,
+      trigger: reviewTriggerFromValue(run.trigger),
+      ...(reviewRunDryRunFromMetadata(run.dryRunMetadata) ? { dryRun: true } : {}),
+    };
+    const envelope: JobEnvelope<ReviewPullRequestJobPayload> = {
+      attempt: 0,
+      createdAt: options.timestamp,
+      idempotencyKey: jobKey,
+      jobId: stableWorkerId("job", ["review_resume", jobKey, "envelope"]),
+      jobType: JOB_TYPES.ReviewPullRequest,
+      maxAttempts: 3,
+      payload: reviewPayload,
+      schemaVersion: "job_envelope.v1",
+      ...(options.traceContext ? { traceContext: options.traceContext } : {}),
+    };
+
+    await db
+      .insert(backgroundJobs)
+      .values({
+        backgroundJobId: stableWorkerId("job", ["review_resume", jobKey]),
+        jobKey,
+        jobType: JOB_TYPES.ReviewPullRequest,
+        maxAttempts: envelope.maxAttempts,
+        metadata: {
+          completedIndexCommitSha: payload.commitSha,
+          source: "index_dependency_ready",
+        },
+        payload: envelope,
+        queueName: QUEUE_NAMES.review,
+        repoId: payload.repoId,
+        reviewRunId: run.reviewRunId,
+        status: "pending",
+      })
+      .onConflictDoNothing();
+  }
+
+  return {
+    enqueuedCount: waitingRuns.length,
+    inspectedCount: waitingRuns.length,
+  };
+}
+
+/** Returns true when review-run metadata marks the run as dry-run. */
+function reviewRunDryRunFromMetadata(metadata: unknown): boolean {
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>).dryRun === true
+  );
+}
+
+/** Parses a durable review-run trigger into the review job trigger contract. */
+function reviewTriggerFromValue(value: string): ReviewTrigger {
+  switch (value) {
+    case "manual":
+    case "rerun":
+    case "scheduled":
+    case "webhook":
+      return value;
+    default:
+      throw new Error(`Unsupported waiting review trigger: ${value}`);
+  }
 }
 
 /** Enqueues missing chunks discovered by an embedding repair pass as bounded batch jobs. */
