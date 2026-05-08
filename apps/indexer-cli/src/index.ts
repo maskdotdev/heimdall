@@ -3,7 +3,16 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringifyIndexArtifactJson, validateIndexArtifact } from "@repo/index-schema";
 import { readIndexArtifactPath, writeSplitIndexArtifactDirectory } from "@repo/index-schema/node";
+import { withIndexerTelemetry } from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
+import {
+  createObservabilityRuntime,
+  type ObservabilityConsoleLogger,
+  type StructuredTelemetryLogger,
+  type TelemetryAttributeValue,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 
 /** Artifact output layouts supported by the CLI. */
 export type IndexerCliOutputFormat = "json" | "split";
@@ -38,6 +47,24 @@ export type IndexerCliIo = {
   readonly stdout: IndexerCliWriter;
   /** Standard error stream. */
   readonly stderr: IndexerCliWriter;
+};
+
+/** Product-safe observability handles used by the indexer CLI. */
+export type IndexerCliObservability = {
+  /** Structured logger used for command lifecycle events. */
+  readonly logger: StructuredTelemetryLogger;
+  /** Metric recorder passed into indexer driver telemetry. */
+  readonly metrics: TelemetryMetricRecorder;
+  /** Flushes telemetry providers before the process exits. */
+  readonly shutdown: () => Promise<void>;
+  /** Span recorder passed into indexer driver telemetry. */
+  readonly traces: TelemetrySpanRecorder;
+};
+
+/** Optional dependencies accepted by the indexer CLI runner. */
+export type IndexerCliOptions = {
+  /** Prebuilt observability runtime for tests or embedding callers. */
+  readonly observability?: IndexerCliObservability;
 };
 
 /** Parsed CLI command result. */
@@ -119,6 +146,54 @@ Options:
 export async function runIndexerCli(
   argv: readonly string[],
   io: IndexerCliIo = process,
+  options: IndexerCliOptions = {},
+): Promise<number> {
+  const ownsObservability = options.observability === undefined;
+  const observability = options.observability ?? createIndexerCliObservability(io);
+  const command = indexerCliCommandLabel(argv[0]);
+  const startedAtMs = Date.now();
+
+  observability.logger.info("indexer cli command started", {
+    attributes: { "cli.command": command },
+    target: "indexer_cli.command",
+  });
+
+  try {
+    const exitCode = await runIndexerCliCommand(argv, io, observability);
+    observability.logger.info("indexer cli command completed", {
+      attributes: {
+        "cli.command": command,
+        "cli.duration_ms": Date.now() - startedAtMs,
+        "cli.exit_code": exitCode,
+        "cli.status": exitCode === 0 ? "succeeded" : "failed",
+      },
+      target: "indexer_cli.command",
+    });
+
+    return exitCode;
+  } catch (error) {
+    observability.logger.error("indexer cli command failed", {
+      attributes: {
+        "cli.command": command,
+        "cli.duration_ms": Date.now() - startedAtMs,
+        "cli.status": "failed",
+      },
+      error,
+      target: "indexer_cli.command",
+    });
+    throw error;
+  } finally {
+    if (ownsObservability) {
+      await shutdownIndexerCliObservability(observability);
+    }
+  }
+}
+
+/** Runs the parsed indexer command once observability is initialized. */
+async function runIndexerCliCommand(
+  argv: readonly string[],
+  io: IndexerCliIo,
+  observability: IndexerCliObservability,
 ): Promise<number> {
   if (argv[0] === "capabilities") {
     return runCapabilitiesCommand(argv.slice(1), io);
@@ -141,7 +216,10 @@ export async function runIndexerCli(
     return 1;
   }
 
-  const driver = createTypeScriptIndexerDriver();
+  const driver = withIndexerTelemetry(createTypeScriptIndexerDriver(), {
+    metrics: observability.metrics,
+    traces: observability.traces,
+  });
   const result = await driver.indexRepository({
     commitSha: parsed.request.commitSha,
     repoId: parsed.request.repoId,
@@ -200,6 +278,78 @@ export async function runIndexerCli(
   io.stdout.write("\n");
 
   return 0;
+}
+
+/** Creates the CLI observability runtime with console telemetry routed to stderr. */
+function createIndexerCliObservability(io: IndexerCliIo): IndexerCliObservability {
+  const stderrConsole = createStderrConsoleLogger(io);
+  const runtime = createObservabilityRuntime({
+    consoleLogger: stderrConsole,
+    defaultServiceName: "heimdall-indexer-cli",
+  });
+
+  return {
+    logger: runtime.logger,
+    metrics: runtime.metrics,
+    shutdown: runtime.shutdown,
+    traces: runtime.traces,
+  };
+}
+
+/** Creates a console-compatible logger that never writes telemetry to stdout. */
+function createStderrConsoleLogger(io: IndexerCliIo): ObservabilityConsoleLogger {
+  const writeLine = (message?: unknown, ...optionalParams: readonly unknown[]) => {
+    io.stderr.write(`${formatConsoleArguments(message, optionalParams)}\n`);
+  };
+
+  return {
+    debug: writeLine,
+    error: writeLine,
+    info: writeLine,
+    warn: writeLine,
+  };
+}
+
+/** Formats console-style arguments without exposing object internals by default. */
+function formatConsoleArguments(message: unknown, optionalParams: readonly unknown[]): string {
+  const parts = [message, ...optionalParams].map((part) =>
+    typeof part === "string" ? part : JSON.stringify(part),
+  );
+
+  return parts.join(" ");
+}
+
+/** Returns a bounded command label for telemetry attributes. */
+function indexerCliCommandLabel(command: string | undefined): TelemetryAttributeValue {
+  if (
+    command === "capabilities" ||
+    command === "help" ||
+    command === "index" ||
+    command === "run" ||
+    command === "validate"
+  ) {
+    return command;
+  }
+
+  if (command === undefined || command === "--help" || command === "-h") {
+    return "help";
+  }
+
+  return "unknown";
+}
+
+/** Flushes CLI observability without making telemetry shutdown a user-visible failure. */
+async function shutdownIndexerCliObservability(
+  observability: IndexerCliObservability,
+): Promise<void> {
+  try {
+    await observability.shutdown();
+  } catch (error) {
+    observability.logger.warn("indexer cli telemetry shutdown failed", {
+      error,
+      target: "indexer_cli.telemetry",
+    });
+  }
 }
 
 /** Validates a JSON or split index artifact from disk. */

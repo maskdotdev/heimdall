@@ -18,6 +18,8 @@
   "dependencies": {
     "@repo/contracts": "workspace:*",
     "@repo/index-schema": "workspace:*",
+    "@repo/indexer-driver": "workspace:*",
+    "@repo/observability": "workspace:*",
     "@repo/indexer-ts": "workspace:*"
   },
   "devDependencies": {
