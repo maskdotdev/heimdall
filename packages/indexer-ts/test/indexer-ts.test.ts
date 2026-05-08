@@ -9,7 +9,7 @@ describe("getTypeScriptIndexerCapabilities", () => {
   it("does not advertise incremental indexing before previous-artifact reuse exists", () => {
     expect(getTypeScriptIndexerCapabilities()).toMatchObject({
       supportedLanguages: expect.arrayContaining(["python"]),
-      supportedRecordTypes: expect.arrayContaining(["dependency"]),
+      supportedRecordTypes: expect.arrayContaining(["dependency", "route", "test_mapping"]),
       supportsIncremental: false,
       supportsPreviousArtifact: false,
     });
@@ -71,7 +71,16 @@ describe("indexTypeScriptRepository", () => {
       commitSha: "1234567890abcdef",
       workspacePath,
     });
-    const orderByType: Record<string, number> = { chunk: 2, edge: 3, file: 0, symbol: 1 };
+    const orderByType: Record<string, number> = {
+      chunk: 2,
+      dependency: 3,
+      diagnostic: 7,
+      edge: 6,
+      file: 0,
+      route: 4,
+      symbol: 1,
+      test_mapping: 5,
+    };
     const orderIndexes = artifact.records.map((record) => orderByType[record.type] ?? 99);
 
     expect(orderIndexes).toEqual([...orderIndexes].sort((left, right) => left - right));
@@ -191,6 +200,7 @@ describe("indexTypeScriptRepository", () => {
         "def normalize_email(value: str) -> str:",
         "    return value.lower()",
         "",
+        '@app.get("/sessions/{token}")',
         "async def validate_session(token: str) -> bool:",
         "    return normalize_email(token).startswith('session_')",
         "",
@@ -242,6 +252,18 @@ describe("indexTypeScriptRepository", () => {
         ? [{ fromId: record.fromId, toId: record.toId }]
         : [],
     );
+    const routes = artifact.records.flatMap((record) =>
+      record.type === "route"
+        ? [
+            {
+              framework: record.framework,
+              handlerSymbolId: record.handlerSymbolId,
+              methods: record.methods,
+              routePattern: record.routePattern,
+            },
+          ]
+        : [],
+    );
 
     expect(fileRecords).toEqual([{ language: "python", path: "service.py" }]);
     expect(symbolRecords).toEqual([
@@ -289,8 +311,119 @@ describe("indexTypeScriptRepository", () => {
         toId: symbolIdsByName.get("normalize_email"),
       },
     ]);
+    expect(routes).toEqual([
+      {
+        framework: "python-web",
+        handlerSymbolId: symbolIdsByName.get("validate_session"),
+        methods: ["GET"],
+        routePattern: "/sessions/{token}",
+      },
+    ]);
     expect(artifact.manifest.languages).toEqual(["python"]);
     expect(artifact.manifest.parserVersions).toEqual({ python: "heuristic-python-v1" });
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("emits route records and simple test mappings from cheap heuristics", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await Promise.all([
+      mkdir(join(workspacePath, "app", "api", "users", "[id]"), { recursive: true }),
+      mkdir(join(workspacePath, "src"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(workspacePath, "src", "users.ts"),
+        [
+          "export function listUsers() {",
+          "  return [];",
+          "}",
+          "",
+          'router.get("/users", listUsers);',
+          "",
+        ].join("\n"),
+      ),
+      writeFile(
+        join(workspacePath, "src", "users.test.ts"),
+        [
+          "import { listUsers } from './users';",
+          "test('lists users', () => listUsers());",
+          "",
+        ].join("\n"),
+      ),
+      writeFile(
+        join(workspacePath, "app", "api", "users", "[id]", "route.ts"),
+        ["export function GET() {", "  return Response.json({ ok: true });", "}", ""].join("\n"),
+      ),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const fileIdsByPath = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "file" ? [[record.path, record.fileId] as const] : [],
+      ),
+    );
+    const symbolIdsByPathAndName = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "symbol"
+          ? [[`${record.path}:${record.name}`, record.symbolId] as const]
+          : [],
+      ),
+    );
+    const routes = artifact.records.flatMap((record) =>
+      record.type === "route"
+        ? [
+            {
+              framework: record.framework,
+              handlerSymbolId: record.handlerSymbolId,
+              methods: record.methods,
+              path: record.path,
+              routePattern: record.routePattern,
+            },
+          ]
+        : [],
+    );
+    const testMappings = artifact.records.flatMap((record) =>
+      record.type === "test_mapping"
+        ? [
+            {
+              targetFileId: record.targetFileId,
+              testFileId: record.testFileId,
+            },
+          ]
+        : [],
+    );
+    const testFiles = artifact.records.flatMap((record) =>
+      record.type === "file" && record.isTest ? [record.path] : [],
+    );
+
+    expect(routes).toEqual([
+      {
+        framework: "nextjs",
+        handlerSymbolId: symbolIdsByPathAndName.get("app/api/users/[id]/route.ts:GET"),
+        methods: ["GET"],
+        path: "app/api/users/[id]/route.ts",
+        routePattern: "/api/users/:id",
+      },
+      {
+        framework: "http-router",
+        handlerSymbolId: symbolIdsByPathAndName.get("src/users.ts:listUsers"),
+        methods: ["GET"],
+        path: "src/users.ts",
+        routePattern: "/users",
+      },
+    ]);
+    expect(testFiles).toEqual(["src/users.test.ts"]);
+    expect(testMappings).toEqual([
+      {
+        targetFileId: fileIdsByPath.get("src/users.ts"),
+        testFileId: fileIdsByPath.get("src/users.test.ts"),
+      },
+    ]);
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 

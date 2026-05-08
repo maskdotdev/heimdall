@@ -12,8 +12,10 @@ import {
   INDEX_ARTIFACT_SCHEMA_VERSION,
   INDEX_RECORD_SCHEMA_VERSION,
   type IndexRecord,
+  type RouteRecord,
   type SymbolKind,
   type SymbolRecord,
+  type TestMappingRecord,
 } from "@repo/index-schema";
 import type { CodeIndexerDriver, IndexArtifact, IndexerCapabilities } from "@repo/indexer-driver";
 import {
@@ -34,6 +36,8 @@ const BINARY_CONTENT_SAMPLE_BYTES = 8_192;
 const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
 const GENERATED_CONTENT_HEADER_BYTES = 8_192;
 const PACKAGE_JSON_FILE_NAME = "package.json";
+const httpRouteMethods = new Set(["delete", "get", "head", "options", "patch", "post", "put"]);
+const nextJsRouteMethods = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const generatedPathSegments = new Set(["generated", "__generated__"]);
 const vendoredPathSegments = new Set([
   "bower_components",
@@ -123,6 +127,32 @@ type PythonCallFact = {
   readonly lineNumber: number;
 };
 
+/** Python route decorator fact used to emit conservative route records. */
+type PythonRouteDecoratorFact = {
+  /** Raw decorator text without leading whitespace. */
+  readonly decorator: string;
+  /** 1-based line where the decorator appears. */
+  readonly decoratorLine: number;
+  /** HTTP method declared by the decorator. */
+  readonly method: string;
+  /** Route pattern declared by the decorator. */
+  readonly routePattern: string;
+  /** Receiver object used by the decorator, such as app or router. */
+  readonly receiver: string;
+  /** 1-based line where the decorated handler declaration starts. */
+  readonly handlerLine: number;
+};
+
+/** Test target candidate inferred from a test file path. */
+type TestTargetCandidate = {
+  /** Source path that may be covered by the test file. */
+  readonly path: string;
+  /** Confidence assigned when the candidate exists in the artifact. */
+  readonly confidence: number;
+  /** Name of the deterministic heuristic that produced this candidate. */
+  readonly heuristic: string;
+};
+
 /** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
 type TypeScriptIndexRecordGroups = {
   /** Chunk records discovered from indexed files. */
@@ -133,8 +163,12 @@ type TypeScriptIndexRecordGroups = {
   readonly edges: EdgeRecord[];
   /** File records discovered from workspace source files. */
   readonly files: FileRecord[];
+  /** Route records discovered from cheap framework heuristics. */
+  readonly routes: RouteRecord[];
   /** Symbol records discovered from parsed source files. */
   readonly symbols: SymbolRecord[];
+  /** Test mapping records discovered from path/name heuristics. */
+  readonly testMappings: TestMappingRecord[];
 };
 
 /** Creates a TypeScript and JavaScript artifact indexer. */
@@ -180,7 +214,15 @@ export function getTypeScriptIndexerCapabilities(): IndexerCapabilities {
     maxFileBytes: MAX_FILE_BYTES,
     supportedArtifactSchemaVersions: [INDEX_ARTIFACT_SCHEMA_VERSION],
     supportedLanguages: ["typescript", "javascript", "tsx", "jsx", "python"],
-    supportedRecordTypes: ["file", "symbol", "edge", "chunk", "dependency"],
+    supportedRecordTypes: [
+      "file",
+      "symbol",
+      "edge",
+      "chunk",
+      "dependency",
+      "route",
+      "test_mapping",
+    ],
     supportedRequestSchemaVersions: [INDEX_REQUEST_SCHEMA_VERSION],
     supportsCancellation: false,
     supportsIncremental: false,
@@ -204,7 +246,9 @@ export async function indexTypeScriptRepository(input: {
     dependencies: [],
     edges: [],
     files: [],
+    routes: [],
     symbols: [],
+    testMappings: [],
   };
   const languages = new Set<CodeLanguage>();
 
@@ -235,6 +279,7 @@ export async function indexTypeScriptRepository(input: {
       recordGroups.files.push(file);
       recordGroups.symbols.push(...symbols);
       recordGroups.chunks.push(...chunkRecordsForFile(file, content, symbols));
+      recordGroups.routes.push(...pythonRouteRecordsForFile(file, content, symbols));
       recordGroups.edges.push(
         ...pythonEdgeRecordsForFile(input.repoId, input.commitSha, file.fileId, content, symbols),
       );
@@ -254,12 +299,16 @@ export async function indexTypeScriptRepository(input: {
     recordGroups.files.push(file);
     recordGroups.symbols.push(...symbols);
     recordGroups.chunks.push(...chunkRecordsForFile(file, content, symbols));
+    recordGroups.routes.push(...routeRecordsForFile(file, sourceFile, symbols));
     recordGroups.edges.push(
       ...edgeRecordsForFile(input.repoId, input.commitSha, file.fileId, path, sourceFile, symbols),
     );
     languages.add(language);
   }
 
+  recordGroups.testMappings.push(
+    ...testMappingRecordsForFiles(input.repoId, input.commitSha, recordGroups.files),
+  );
   const records = orderedIndexRecords(recordGroups);
 
   return {
@@ -316,6 +365,8 @@ function orderedIndexRecords(groups: TypeScriptIndexRecordGroups): IndexRecord[]
     ...groups.symbols,
     ...groups.chunks,
     ...groups.dependencies,
+    ...groups.routes,
+    ...groups.testMappings,
     ...groups.edges,
   ];
 }
@@ -731,6 +782,465 @@ function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Emits route records for clear TypeScript and JavaScript framework patterns. */
+function routeRecordsForFile(
+  file: FileRecord,
+  sourceFile: ts.SourceFile,
+  symbols: readonly SymbolRecord[],
+): RouteRecord[] {
+  return uniqueRoutes([
+    ...routeCallRecordsForFile(file, sourceFile, symbols),
+    ...nextJsRouteRecordsForFile(file, symbols),
+  ]);
+}
+
+/** Emits route records for app/router HTTP method calls with literal paths. */
+function routeCallRecordsForFile(
+  file: FileRecord,
+  sourceFile: ts.SourceFile,
+  symbols: readonly SymbolRecord[],
+): RouteRecord[] {
+  const symbolsByName = new Map(symbols.map((symbol) => [symbol.name, symbol]));
+  const routes: RouteRecord[] = [];
+
+  const visit = (node: ts.Node) => {
+    if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+      ts.forEachChild(node, visit);
+      return;
+    }
+
+    const method = httpMethodFromName(node.expression.name.text);
+    const routePattern = firstStringArgument(node);
+    const receiverText = node.expression.expression.getText(sourceFile);
+    const framework = httpRouterFramework(receiverText);
+    if (!method || !routePattern || !framework) {
+      ts.forEachChild(node, visit);
+      return;
+    }
+
+    const range = lineRange(sourceFile, node);
+    const handler = routeHandlerSymbolForExpression(node.arguments[1], symbolsByName);
+    routes.push({
+      type: "route",
+      schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+      routeId: createStableId("route", [
+        file.repoId,
+        file.commitSha,
+        file.fileId,
+        "call",
+        method,
+        routePattern,
+        range.startLine,
+      ]),
+      repoId: file.repoId,
+      commitSha: file.commitSha,
+      path: file.path,
+      language: file.language,
+      routePattern,
+      methods: [method],
+      ...(handler ? { handlerSymbolId: handler.symbolId } : {}),
+      range,
+      framework,
+      confidence: 0.85,
+      metadata: { receiver: receiverText },
+    });
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return routes;
+}
+
+/** Emits Next.js app-router route records from exported HTTP method symbols. */
+function nextJsRouteRecordsForFile(
+  file: FileRecord,
+  symbols: readonly SymbolRecord[],
+): RouteRecord[] {
+  const routePattern = nextJsRoutePattern(file.path);
+  if (!routePattern) {
+    return [];
+  }
+
+  return symbols
+    .filter((symbol) => nextJsRouteMethods.has(symbol.name))
+    .map((symbol) => ({
+      type: "route" as const,
+      schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+      routeId: createStableId("route", [
+        file.repoId,
+        file.commitSha,
+        file.fileId,
+        "next",
+        symbol.name,
+      ]),
+      repoId: file.repoId,
+      commitSha: file.commitSha,
+      path: file.path,
+      language: file.language,
+      routePattern,
+      methods: [symbol.name],
+      handlerSymbolId: symbol.symbolId,
+      range: symbol.range,
+      framework: "nextjs",
+      confidence: 0.9,
+      metadata: { router: "app" },
+    }));
+}
+
+/** Emits FastAPI/Flask-like route records from Python decorators. */
+function pythonRouteRecordsForFile(
+  file: FileRecord,
+  content: string,
+  symbols: readonly SymbolRecord[],
+): RouteRecord[] {
+  const symbolsByStartLine = new Map(symbols.map((symbol) => [symbol.range.startLine, symbol]));
+
+  return uniqueRoutes(
+    pythonRouteDecoratorFacts(content).flatMap((fact) => {
+      const handler = symbolsByStartLine.get(fact.handlerLine);
+      if (!handler) {
+        return [];
+      }
+
+      return [
+        {
+          type: "route" as const,
+          schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+          routeId: createStableId("route", [
+            file.repoId,
+            file.commitSha,
+            file.fileId,
+            "python-decorator",
+            fact.method,
+            fact.routePattern,
+            fact.decoratorLine,
+          ]),
+          repoId: file.repoId,
+          commitSha: file.commitSha,
+          path: file.path,
+          language: file.language,
+          routePattern: fact.routePattern,
+          methods: [fact.method],
+          handlerSymbolId: handler.symbolId,
+          range: handler.range,
+          framework: "python-web",
+          confidence: 0.85,
+          metadata: {
+            decorator: fact.decorator,
+            decoratorLine: fact.decoratorLine,
+            receiver: fact.receiver,
+          },
+        },
+      ];
+    }),
+  );
+}
+
+/** Extracts Python route decorators and the handler line they decorate. */
+function pythonRouteDecoratorFacts(content: string): PythonRouteDecoratorFact[] {
+  const facts: PythonRouteDecoratorFact[] = [];
+  let pendingDecorators: PythonRouteDecoratorFact[] = [];
+
+  content.split("\n").forEach((line, index) => {
+    const lineNumber = index + 1;
+    const statement = stripPythonInlineComment(line).trim();
+    if (statement.length === 0 || statement.startsWith("#")) {
+      return;
+    }
+
+    const decoratorFact = pythonRouteDecoratorFactFromLine(statement, lineNumber);
+    if (decoratorFact) {
+      pendingDecorators = [...pendingDecorators, decoratorFact];
+      return;
+    }
+
+    if (/^(?:async\s+)?def\s+[A-Za-z_][A-Za-z0-9_]*\b/u.test(statement)) {
+      facts.push(
+        ...pendingDecorators.map((fact) => ({
+          ...fact,
+          handlerLine: lineNumber,
+        })),
+      );
+    }
+
+    pendingDecorators = [];
+  });
+
+  return facts;
+}
+
+/** Converts one Python decorator line into a route fact when it is clear. */
+function pythonRouteDecoratorFactFromLine(
+  statement: string,
+  lineNumber: number,
+): PythonRouteDecoratorFact | undefined {
+  const match = statement.match(
+    /^@([A-Za-z_][A-Za-z0-9_]*)\.(delete|get|head|options|patch|post|put)\(\s*(["'])(.*?)\3/u,
+  );
+  if (!match?.[1] || !match[2] || !match[4]?.startsWith("/")) {
+    return undefined;
+  }
+
+  return {
+    decorator: statement,
+    decoratorLine: lineNumber,
+    handlerLine: lineNumber,
+    method: match[2].toUpperCase(),
+    receiver: match[1],
+    routePattern: match[4],
+  };
+}
+
+/** Returns a route pattern from the first call argument when it is a literal path. */
+function firstStringArgument(node: ts.CallExpression): string | undefined {
+  const firstArgument = node.arguments[0];
+  if (
+    !firstArgument ||
+    (!ts.isStringLiteral(firstArgument) && !ts.isNoSubstitutionTemplateLiteral(firstArgument))
+  ) {
+    return undefined;
+  }
+
+  return firstArgument.text.startsWith("/") ? firstArgument.text : undefined;
+}
+
+/** Resolves a handler expression to an extracted same-file symbol when possible. */
+function routeHandlerSymbolForExpression(
+  expression: ts.Expression | undefined,
+  symbolsByName: ReadonlyMap<string, SymbolRecord>,
+): SymbolRecord | undefined {
+  if (!expression || !ts.isIdentifier(expression)) {
+    return undefined;
+  }
+
+  return symbolsByName.get(expression.text);
+}
+
+/** Converts a framework method property name into an uppercase HTTP method. */
+function httpMethodFromName(name: string): string | undefined {
+  return httpRouteMethods.has(name) ? name.toUpperCase() : undefined;
+}
+
+/** Classifies supported router receivers and filters out unrelated `.get()` calls. */
+function httpRouterFramework(receiverText: string): string | undefined {
+  if (receiverText.includes("Elysia")) {
+    return "elysia";
+  }
+
+  const receiver = receiverText.trim().toLowerCase();
+  if (receiver === "fastify") {
+    return "fastify";
+  }
+  if (receiver === "app" || receiver === "router" || receiver === "server") {
+    return "http-router";
+  }
+
+  return undefined;
+}
+
+/** Returns a Next.js app-router path pattern for route module paths. */
+function nextJsRoutePattern(path: string): string | undefined {
+  const match = path.match(/(?:^|\/)app(?:\/(.+))?\/route\.[cm]?[jt]sx?$/u);
+  if (!match) {
+    return undefined;
+  }
+
+  return routePatternFromSegments(match[1]?.split("/") ?? []);
+}
+
+/** Converts framework path segments into an HTTP route pattern. */
+function routePatternFromSegments(segments: readonly string[]): string {
+  const routeSegments = segments
+    .filter((segment) => segment.length > 0 && !segment.startsWith("(") && !segment.startsWith("@"))
+    .map((segment) => {
+      const optionalCatchAll = segment.match(/^\[\[\.\.\.([A-Za-z0-9_-]+)\]\]$/u);
+      if (optionalCatchAll?.[1]) {
+        return `*${optionalCatchAll[1]}`;
+      }
+
+      const catchAll = segment.match(/^\[\.\.\.([A-Za-z0-9_-]+)\]$/u);
+      if (catchAll?.[1]) {
+        return `*${catchAll[1]}`;
+      }
+
+      const dynamic = segment.match(/^\[([A-Za-z0-9_-]+)\]$/u);
+      return dynamic?.[1] ? `:${dynamic[1]}` : segment;
+    });
+
+  return routeSegments.length === 0 ? "/" : `/${routeSegments.join("/")}`;
+}
+
+/** Drops duplicate route IDs while preserving deterministic order. */
+function uniqueRoutes(routes: readonly RouteRecord[]): RouteRecord[] {
+  const seen = new Set<string>();
+
+  return routes.filter((route) => {
+    if (seen.has(route.routeId)) {
+      return false;
+    }
+
+    seen.add(route.routeId);
+    return true;
+  });
+}
+
+/** Emits simple test-to-source mappings when a unique target file exists. */
+function testMappingRecordsForFiles(
+  repoId: string,
+  commitSha: string,
+  files: readonly FileRecord[],
+): TestMappingRecord[] {
+  const filesByPath = new Map(files.map((file) => [file.path, file]));
+
+  return files.flatMap((testFile) => {
+    if (!testFile.isTest) {
+      return [];
+    }
+
+    const candidate = matchingTestTargetCandidate(testFile.path, filesByPath);
+    const targetFile = candidate ? filesByPath.get(candidate.path) : undefined;
+    if (!candidate || !targetFile || targetFile.isTest) {
+      return [];
+    }
+
+    return [
+      {
+        type: "test_mapping" as const,
+        schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+        testMappingId: createStableId("testmap", [
+          repoId,
+          commitSha,
+          testFile.fileId,
+          targetFile.fileId,
+        ]),
+        repoId,
+        commitSha,
+        testFileId: testFile.fileId,
+        targetFileId: targetFile.fileId,
+        confidence: candidate.confidence,
+        metadata: {
+          heuristic: candidate.heuristic,
+          targetPath: targetFile.path,
+          testPath: testFile.path,
+        },
+      },
+    ];
+  });
+}
+
+/** Finds the first candidate that points to an indexed file. */
+function matchingTestTargetCandidate(
+  testPath: string,
+  filesByPath: ReadonlyMap<string, FileRecord>,
+): TestTargetCandidate | undefined {
+  return testTargetCandidatesForPath(testPath).find((candidate) => filesByPath.has(candidate.path));
+}
+
+/** Produces deterministic source candidates for one test file path. */
+function testTargetCandidatesForPath(testPath: string): readonly TestTargetCandidate[] {
+  const fileName = pathFileName(testPath);
+  const directory = pathDirectory(testPath);
+  const testName = testBaseName(fileName);
+  const extension = sourceExtension(fileName);
+  if (!testName || !extension) {
+    return [];
+  }
+
+  const candidates: TestTargetCandidate[] = [];
+  const directDirectory = directory
+    .split("/")
+    .filter((segment) => segment !== "__tests__")
+    .join("/");
+  for (const path of sourcePathVariants(joinRepoPath(directDirectory, testName), extension)) {
+    candidates.push({ confidence: 0.9, heuristic: "same-directory-test-name", path });
+  }
+
+  const testDirectoryIndex = directory
+    .split("/")
+    .findIndex((segment) => segment === "test" || segment === "tests");
+  if (testDirectoryIndex >= 0) {
+    const suffix = directory
+      .split("/")
+      .slice(testDirectoryIndex + 1)
+      .join("/");
+    const suffixBasePath = joinRepoPath(suffix, testName);
+    for (const root of ["src", "app", ""]) {
+      for (const path of sourcePathVariants(joinRepoPath(root, suffixBasePath), extension)) {
+        candidates.push({ confidence: 0.75, heuristic: "mirrored-test-directory", path });
+      }
+    }
+  }
+
+  return uniqueTestTargetCandidates(candidates).filter((candidate) => candidate.path !== testPath);
+}
+
+/** Returns the production base name implied by a test file name. */
+function testBaseName(fileName: string): string | undefined {
+  const extension = sourceExtension(fileName);
+  if (!extension) {
+    return undefined;
+  }
+
+  const baseName = fileName.slice(0, -extension.length);
+  const normalized = baseName
+    .replace(/\.(test|spec)$/u, "")
+    .replace(/^test_/u, "")
+    .replace(/_test$/u, "");
+
+  return normalized.length > 0 && normalized !== baseName ? normalized : undefined;
+}
+
+/** Returns source path variants that may match a test target. */
+function sourcePathVariants(basePath: string, extension: string): readonly string[] {
+  if (extension === ".py") {
+    return [`${basePath}.py`];
+  }
+
+  const extensionGroup =
+    extension === ".tsx" || extension === ".ts" ? [".ts", ".tsx"] : [".js", ".jsx", ".mjs", ".cjs"];
+
+  return extensionGroup.map((candidateExtension) => `${basePath}${candidateExtension}`);
+}
+
+/** Returns a supported source extension for source and test files. */
+function sourceExtension(path: string): string | undefined {
+  const match = path.match(/(\.[cm]?js|\.jsx|\.tsx|\.ts|\.py)$/u);
+  return match?.[1];
+}
+
+/** Joins repository path parts without introducing absolute paths. */
+function joinRepoPath(...parts: readonly string[]): string {
+  return parts.filter((part) => part.length > 0).join("/");
+}
+
+/** Returns the final path segment of a POSIX repository path. */
+function pathFileName(path: string): string {
+  return path.split("/").at(-1) ?? path;
+}
+
+/** Returns the directory portion of a POSIX repository path. */
+function pathDirectory(path: string): string {
+  const segments = path.split("/");
+  return segments.length > 1 ? segments.slice(0, -1).join("/") : "";
+}
+
+/** Drops duplicate test target candidates by path while preserving priority order. */
+function uniqueTestTargetCandidates(
+  candidates: readonly TestTargetCandidate[],
+): TestTargetCandidate[] {
+  const seen = new Set<string>();
+
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.path)) {
+      return false;
+    }
+
+    seen.add(candidate.path);
+    return true;
+  });
+}
+
 function edgeRecordsForFile(
   repoId: string,
   commitSha: string,
@@ -1079,7 +1589,9 @@ function symbolKind(node: ts.Node, name: string): SymbolKind {
   if (ts.isMethodDeclaration(node)) return "method";
   if (ts.isPropertyDeclaration(node)) return "property";
   if (ts.isVariableDeclaration(node)) return /^[A-Z0-9_]+$/.test(name) ? "constant" : "variable";
-  if (ts.isFunctionDeclaration(node)) return /^[A-Z]/.test(name) ? "component" : "function";
+  if (ts.isFunctionDeclaration(node)) {
+    return nextJsRouteMethods.has(name) || !/^[A-Z]/.test(name) ? "function" : "component";
+  }
   return "unknown";
 }
 
@@ -1145,6 +1657,7 @@ function isGeneratedPath(path: string): boolean {
 function isTestPath(path: string): boolean {
   return (
     /(^|[/.])(test|spec)\.[cm]?[jt]sx?$/.test(path) ||
+    /(^|[/.])(test|spec)\.py$/.test(path) ||
     /(^|\/)(test_.+|.+_test)\.py$/.test(path) ||
     path.includes("__tests__/") ||
     path.includes("tests/")
