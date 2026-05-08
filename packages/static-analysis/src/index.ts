@@ -666,6 +666,47 @@ const PyrightJsonOutputSchema = Type.Object(
 /** Pyright JSON diagnostic. */
 type PyrightJsonDiagnostic = Static<typeof PyrightJsonDiagnosticSchema>;
 
+/** Semgrep JSON position. */
+const SemgrepJsonPositionSchema = Type.Object(
+  {
+    col: Type.Integer({ minimum: 0 }),
+    line: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: true },
+);
+
+/** Semgrep JSON result details. */
+const SemgrepJsonExtraSchema = Type.Object(
+  {
+    message: Type.String(),
+    severity: Type.Optional(Type.String()),
+  },
+  { additionalProperties: true },
+);
+
+/** Semgrep JSON result. */
+const SemgrepJsonResultSchema = Type.Object(
+  {
+    check_id: Type.String(),
+    end: SemgrepJsonPositionSchema,
+    extra: SemgrepJsonExtraSchema,
+    path: Type.String(),
+    start: SemgrepJsonPositionSchema,
+  },
+  { additionalProperties: true },
+);
+
+/** Semgrep JSON output. */
+const SemgrepJsonOutputSchema = Type.Object(
+  {
+    results: Type.Array(SemgrepJsonResultSchema),
+  },
+  { additionalProperties: true },
+);
+
+/** Semgrep JSON result. */
+type SemgrepJsonResult = Static<typeof SemgrepJsonResultSchema>;
+
 type TypeScriptTextDiagnostic = {
   /** TypeScript diagnostic code without the `TS` prefix. */
   readonly code: string;
@@ -813,6 +854,9 @@ export function parseToolOutputDiagnostics(
   }
   if (input.tool === "pyright") {
     return parsePyrightJsonDiagnostics(input);
+  }
+  if (input.tool === "semgrep") {
+    return parseSemgrepJsonDiagnostics(input);
   }
   if (input.tool === "typescript") {
     return parseTypeScriptTextDiagnostics(input);
@@ -1538,6 +1582,70 @@ function parsePyrightJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses Semgrep JSON output into normalized diagnostics. */
+function parseSemgrepJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = input.result.stdout.trim();
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedOutput = parseJson(rawOutput);
+  if (!parsedOutput.ok) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+          format: "semgrep_json",
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ],
+    };
+  }
+  if (!Value.Check(SemgrepJsonOutputSchema, parsedOutput.value)) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning(
+          "tool_output_schema_mismatch",
+          "Static analysis tool output did not match the expected schema.",
+          {
+            format: "semgrep_json",
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          },
+        ),
+      ],
+    };
+  }
+
+  const parsedDiagnostics = (
+    parsedOutput.value as { results: readonly SemgrepJsonResult[] }
+  ).results
+    .map((result) => semgrepResultToNormalizedDiagnostic({ input, result }))
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings =
+    parsedDiagnostics.length > diagnostics.length
+      ? [
+          warning(
+            "tool_output_diagnostic_budget_truncated",
+            "Static analysis tool output diagnostics were truncated.",
+            {
+              diagnosticCount: parsedDiagnostics.length,
+              maxDiagnostics: input.maxDiagnostics,
+              tool: input.tool,
+              toolRunId: input.toolRunId,
+            },
+          ),
+        ]
+      : [];
+
+  return { diagnostics, warnings };
+}
+
 /** Parses `tsc --pretty false` output into normalized diagnostics. */
 function parseTypeScriptTextDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
@@ -1807,6 +1915,44 @@ function pyrightDiagnosticToNormalizedDiagnostic(input: {
   });
 }
 
+/** Converts one Semgrep JSON result into the normalized report shape. */
+function semgrepResultToNormalizedDiagnostic(input: {
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+  /** Semgrep result emitted by JSON output. */
+  readonly result: SemgrepJsonResult;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.result.extra.message.trim();
+  const originalPath = input.result.path.trim();
+  if (originalPath.length === 0 || message.length === 0 || input.result.start.line < 1) {
+    return undefined;
+  }
+
+  const filePath = normalizeToolFilePath(originalPath, input.input.workspacePath);
+  const ruleId = input.result.check_id.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: "security",
+    location: {
+      endColumn: Math.max(1, input.result.end.col),
+      ...(input.result.end.line > 0 ? { endLine: input.result.end.line } : {}),
+      filePath,
+      ...(filePath === originalPath ? {} : { originalPath }),
+      startColumn: Math.max(1, input.result.start.col),
+      startLine: input.result.start.line,
+    },
+    message,
+    metadata: semgrepResultMetadata(input.result),
+    rawMessage: input.result.extra.message,
+    ...(ruleId ? { ruleId, ruleName: semgrepRuleName(ruleId) } : {}),
+    severity: semgrepSeverity(input.result.extra.severity),
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "semgrep",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
 /** Parses JSON without throwing into the report builder. */
 function parseJson(
   value: string,
@@ -1831,6 +1977,20 @@ function biomeSeverity(severity: string): ToolDiagnosticSeverity {
   if (normalizedSeverity === "fatal") return "critical";
   if (normalizedSeverity === "error") return "error";
   if (normalizedSeverity === "warning" || normalizedSeverity === "warn") return "warning";
+  return "info";
+}
+
+/** Maps Semgrep severity strings to normalized diagnostic severities. */
+function semgrepSeverity(severity: string | undefined): ToolDiagnosticSeverity {
+  const normalizedSeverity = severity?.toLowerCase() ?? "";
+  if (
+    normalizedSeverity === "critical" ||
+    normalizedSeverity === "error" ||
+    normalizedSeverity === "high"
+  ) {
+    return "error";
+  }
+  if (normalizedSeverity === "warning" || normalizedSeverity === "medium") return "warning";
   return "info";
 }
 
@@ -1979,10 +2139,26 @@ function pyrightDiagnosticMetadata(
   };
 }
 
+/** Returns product-safe metadata for a Semgrep result. */
+function semgrepResultMetadata(result: SemgrepJsonResult): Readonly<Record<string, unknown>> {
+  const checkId = result.check_id.trim();
+  const severity = result.extra.severity?.trim();
+  return {
+    ...(checkId ? { checkId } : {}),
+    ...(severity ? { severity } : {}),
+  };
+}
+
 /** Returns a compact Biome rule name from a diagnostic category. */
 function biomeRuleName(category: string): string {
   const parts = category.split("/").filter((part) => part.length > 0);
   return parts.at(-1) ?? category;
+}
+
+/** Returns a compact Semgrep rule name from a check ID. */
+function semgrepRuleName(checkId: string): string {
+  const parts = checkId.split(".").filter((part) => part.length > 0);
+  return parts.at(-1) ?? checkId;
 }
 
 /** Normalizes a tool-emitted file path to a repository-relative path when possible. */
@@ -2041,7 +2217,7 @@ function descriptor(
     defaultTimeoutMs: DEFAULT_STATIC_ANALYSIS_BUDGETS.maxToolRunMs,
     displayName,
     languages: [...languages],
-    mayAccessNetwork: false,
+    mayAccessNetwork: name === "semgrep",
     mayExecuteProjectCode: name !== "typescript",
     mutatesWorkspace: false,
     name,
@@ -2125,7 +2301,7 @@ function toolCommand(
     env: {},
     executable,
     filesystemPolicy: "read_only",
-    networkPolicy: "none",
+    networkPolicy: toolNetworkPolicy(tool),
   };
 }
 
@@ -2148,11 +2324,23 @@ function toolCommandArgs(tool: StaticToolName, paths: readonly string[]): readon
   if (tool === "pyright") {
     return ["--outputjson", ...paths];
   }
+  if (tool === "semgrep") {
+    return ["scan", "--json", "--metrics=off", "--config=auto", ...paths];
+  }
   if (tool === "typescript") {
     return ["--noEmit", "--pretty", "false"];
   }
 
   return ["--changed-files", ...paths];
+}
+
+/** Returns the network policy required by one static-analysis tool. */
+function toolNetworkPolicy(tool: StaticToolName): ToolCommandSpec["networkPolicy"] {
+  if (tool === "semgrep") {
+    return "metadata_only";
+  }
+
+  return "none";
 }
 
 /** Converts a runner result into a report run summary. */

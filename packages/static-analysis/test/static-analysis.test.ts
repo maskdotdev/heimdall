@@ -99,6 +99,7 @@ describe("static analysis", () => {
     const biomePlan = planStaticAnalysis({ ...request, requestedTools: ["biome"] });
     const pyrightPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["pyright"] });
     const ruffPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["ruff"] });
+    const semgrepPlan = planStaticAnalysis({ ...request, requestedTools: ["semgrep"] });
     const typeScriptPlan = planStaticAnalysis({ ...request, requestedTools: ["typescript"] });
 
     expect(biomePlan.toolRuns[0]?.command).toMatchObject({
@@ -115,6 +116,12 @@ describe("static analysis", () => {
       args: ["check", "--output-format", "json", "src/app.py"],
       displayCommand: "ruff check --output-format json src/app.py",
       executable: "ruff",
+    });
+    expect(semgrepPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["scan", "--json", "--metrics=off", "--config=auto", "src/math.ts"],
+      displayCommand: "semgrep scan --json --metrics=off --config=auto src/math.ts",
+      executable: "semgrep",
+      networkPolicy: "metadata_only",
     });
     expect(typeScriptPlan.toolRuns[0]?.command).toMatchObject({
       args: ["--noEmit", "--pretty", "false"],
@@ -412,6 +419,69 @@ describe("static analysis", () => {
       severity: "error",
       sourceTrust: "tool_output",
       tool: "biome",
+    });
+  });
+
+  it("parses Semgrep JSON output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: JSON.stringify({
+          errors: [],
+          results: [
+            {
+              check_id: "python.lang.security.audit.subprocess-shell-true",
+              end: { col: 23, line: 2, offset: 42 },
+              extra: {
+                message: "Avoid invoking subprocess with shell=True.",
+                severity: "ERROR",
+              },
+              path: "/workspace/repo/src/app.py",
+              start: { col: 7, line: 2, offset: 26 },
+            },
+          ],
+          version: "1.120.0",
+        }),
+        stdoutBytes: 320,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "semgrep",
+      toolRunId: "str_semgrep",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "security",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 23,
+        endLine: 2,
+        filePath: "src/app.py",
+        originalPath: "/workspace/repo/src/app.py",
+        startColumn: 7,
+        startLine: 2,
+      },
+      metadata: {
+        checkId: "python.lang.security.audit.subprocess-shell-true",
+        severity: "ERROR",
+      },
+      ruleId: "python.lang.security.audit.subprocess-shell-true",
+      ruleName: "subprocess-shell-true",
+      severity: "error",
+      sourceTrust: "tool_output",
+      tool: "semgrep",
     });
   });
 
