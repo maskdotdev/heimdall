@@ -203,6 +203,28 @@ type TypeScriptInstanceBinding = {
   readonly ownerSymbolId: string;
 };
 
+/** Local TS/JS variable initialized with `new ClassName()`. */
+type TypeScriptConstructorBindingFact = {
+  /** Constructor binding name used at the `new` expression. */
+  readonly className: string;
+  /** 1-based line where the binding starts. */
+  readonly lineNumber: number;
+  /** Local variable name used as a member-call receiver. */
+  readonly localName: string;
+  /** Enclosing callable symbol that owns this binding. */
+  readonly ownerSymbolId: string;
+};
+
+/** Property-access call fact from a TS/JS call expression. */
+type TypeScriptMemberCallFact = {
+  /** 1-based line where the member call starts. */
+  readonly lineNumber: number;
+  /** Called member name. */
+  readonly memberName: string;
+  /** Local receiver name used at the call site. */
+  readonly receiverName: string;
+};
+
 /** Resolved TS/JS same-file member call target. */
 type TypeScriptMemberCallTarget = {
   /** Metadata that explains the conservative member-call resolution. */
@@ -411,6 +433,13 @@ export async function indexTypeScriptRepository(input: {
       moduleAliases,
     ),
     ...importedCallEdgesForSources(
+      input.repoId,
+      input.commitSha,
+      typeScriptSources,
+      filesByPath,
+      moduleAliases,
+    ),
+    ...importedMemberCallEdgesForSources(
       input.repoId,
       input.commitSha,
       typeScriptSources,
@@ -1155,6 +1184,113 @@ function importedCallEdgesForSources(
   );
 }
 
+/** Emits symbol call edges for member calls through imported class instances. */
+function importedMemberCallEdgesForSources(
+  repoId: string,
+  commitSha: string,
+  sources: readonly TypeScriptSourceExtraction[],
+  filesByPath: ReadonlyMap<string, FileRecord>,
+  moduleAliases: readonly ModuleResolutionAlias[],
+): EdgeRecord[] {
+  const allSymbols = sources.flatMap((source) => source.symbols);
+  const symbolsByPathAndName = symbolsByFilePathAndName(allSymbols);
+  const symbolsByPathAndQualifiedName = symbolsByFilePathAndQualifiedName(allSymbols);
+
+  return uniqueEdges(
+    sources.flatMap((source) => {
+      const importsByLocalName = new Map(
+        typeScriptImportBindingFacts(source.sourceFile).map((fact) => [fact.localName, fact]),
+      );
+      const constructorBindings = typeScriptConstructorBindingFacts(
+        source.sourceFile,
+        source.symbols,
+      );
+
+      return typeScriptMemberCallFacts(source.sourceFile).flatMap((fact) => {
+        const caller = callableSymbolContainingLine(source.symbols, fact.lineNumber);
+        const constructorBinding = caller
+          ? uniqueVisibleConstructorBinding(
+              constructorBindings,
+              caller.symbolId,
+              fact.receiverName,
+              fact.lineNumber,
+            )
+          : undefined;
+        const importFact = constructorBinding
+          ? importsByLocalName.get(constructorBinding.className)
+          : undefined;
+        if (!caller || !constructorBinding || !importFact) {
+          return [];
+        }
+
+        const resolvedModule = resolveModuleFile(
+          source.file.path,
+          importFact.moduleSpecifier,
+          filesByPath,
+          moduleAliases,
+        );
+        if (!resolvedModule) {
+          return [];
+        }
+
+        const classSymbol = importedSymbolForBinding(
+          symbolsByPathAndName,
+          resolvedModule.file.path,
+          importFact,
+        );
+        const receiverClass = classSymbol?.qualifiedName ?? classSymbol?.name;
+        const callee =
+          receiverClass && classSymbol?.kind === "class"
+            ? symbolsByPathAndQualifiedName
+                .get(resolvedModule.file.path)
+                ?.get(`${receiverClass}.${fact.memberName}`)
+            : undefined;
+        if (!callee || caller.symbolId === callee.symbolId) {
+          return [];
+        }
+
+        return [
+          {
+            type: "edge" as const,
+            schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+            edgeId: createStableId("edge", [
+              repoId,
+              commitSha,
+              caller.symbolId,
+              "calls",
+              callee.symbolId,
+              "imported-member",
+              fact.lineNumber,
+            ]),
+            repoId,
+            commitSha,
+            fromId: caller.symbolId,
+            toId: callee.symbolId,
+            fromKind: "symbol" as const,
+            toKind: "symbol" as const,
+            kind: "calls" as const,
+            confidence: 0.8,
+            metadata: {
+              ...(resolvedModule.aliasPattern ? { aliasPattern: resolvedModule.aliasPattern } : {}),
+              callKind: "member_imported_instance",
+              importKind: importFact.importKind,
+              importedName: importFact.importedName,
+              importPath: importFact.moduleSpecifier,
+              lineNumber: fact.lineNumber,
+              localName: importFact.localName,
+              memberName: fact.memberName,
+              receiverClass,
+              receiverName: fact.receiverName,
+              resolution: resolvedModule.resolution,
+              resolvedPath: resolvedModule.file.path,
+            },
+          },
+        ];
+      });
+    }),
+  );
+}
+
 /** Resolves an imported binding to a concrete symbol in the target file. */
 function importedSymbolForBinding(
   symbolsByPathAndName: ReadonlyMap<string, ReadonlyMap<string, SymbolRecord>>,
@@ -1254,6 +1390,30 @@ function typeScriptDirectCallFacts(sourceFile: ts.SourceFile): TypeScriptCallFac
   return facts;
 }
 
+/** Extracts member call facts with simple local identifier receivers from TS/JS source. */
+function typeScriptMemberCallFacts(sourceFile: ts.SourceFile): TypeScriptMemberCallFact[] {
+  const facts: TypeScriptMemberCallFact[] = [];
+
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression)
+    ) {
+      facts.push({
+        lineNumber: lineRange(sourceFile, node).startLine,
+        memberName: node.expression.name.text,
+        receiverName: node.expression.expression.text,
+      });
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return facts;
+}
+
 /** Builds a nested lookup of extracted symbols by file path and local symbol name. */
 function symbolsByFilePathAndName(
   symbols: readonly SymbolRecord[],
@@ -1266,6 +1426,28 @@ function symbolsByFilePathAndName(
     }
     if (!symbolsByName.has(symbol.name)) {
       symbolsByName.set(symbol.name, symbol);
+    }
+  }
+
+  return symbolsByPath;
+}
+
+/** Builds a nested lookup of extracted symbols by file path and qualified name. */
+function symbolsByFilePathAndQualifiedName(
+  symbols: readonly SymbolRecord[],
+): ReadonlyMap<string, ReadonlyMap<string, SymbolRecord>> {
+  const symbolsByPath = new Map<string, Map<string, SymbolRecord>>();
+  for (const symbol of symbols) {
+    if (!symbol.qualifiedName) {
+      continue;
+    }
+
+    const symbolsByName = symbolsByPath.get(symbol.path) ?? new Map<string, SymbolRecord>();
+    if (!symbolsByPath.has(symbol.path)) {
+      symbolsByPath.set(symbol.path, symbolsByName);
+    }
+    if (!symbolsByName.has(symbol.qualifiedName)) {
+      symbolsByName.set(symbol.qualifiedName, symbol);
     }
   }
 
@@ -2092,17 +2274,38 @@ function typeScriptInstanceBindings(
   symbols: readonly SymbolRecord[],
 ): TypeScriptInstanceBinding[] {
   const classSymbolsByName = uniqueClassSymbolsByName(symbols);
-  const bindings: TypeScriptInstanceBinding[] = [];
+  return typeScriptConstructorBindingFacts(sourceFile, symbols).flatMap((fact) => {
+    const classSymbol = classSymbolsByName.get(fact.className);
+    if (!classSymbol?.qualifiedName) {
+      return [];
+    }
+
+    return [
+      {
+        classQualifiedName: classSymbol.qualifiedName,
+        lineNumber: fact.lineNumber,
+        localName: fact.localName,
+        ownerSymbolId: fact.ownerSymbolId,
+      },
+    ];
+  });
+}
+
+/** Finds local variables initialized with simple `new ClassName()` expressions. */
+function typeScriptConstructorBindingFacts(
+  sourceFile: ts.SourceFile,
+  symbols: readonly SymbolRecord[],
+): TypeScriptConstructorBindingFact[] {
+  const facts: TypeScriptConstructorBindingFact[] = [];
 
   const visit = (node: ts.Node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
       const className = newExpressionClassName(node.initializer);
-      const classSymbol = className ? classSymbolsByName.get(className) : undefined;
       const lineNumber = lineRange(sourceFile, node).startLine;
       const owner = callableSymbolContainingLine(symbols, lineNumber);
-      if (classSymbol?.qualifiedName && owner) {
-        bindings.push({
-          classQualifiedName: classSymbol.qualifiedName,
+      if (className && owner) {
+        facts.push({
+          className,
           lineNumber,
           localName: node.name.text,
           ownerSymbolId: owner.symbolId,
@@ -2114,7 +2317,7 @@ function typeScriptInstanceBindings(
   };
 
   visit(sourceFile);
-  return bindings;
+  return facts;
 }
 
 /** Builds a lookup for class names that resolve to exactly one same-file class symbol. */
@@ -2211,6 +2414,23 @@ function uniqueVisibleInstanceBinding(
   lineNumber: number,
 ): TypeScriptInstanceBinding | undefined {
   const matches = instanceBindings.filter(
+    (binding) =>
+      binding.ownerSymbolId === ownerSymbolId &&
+      binding.localName === receiverName &&
+      binding.lineNumber < lineNumber,
+  );
+
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** Finds a single visible constructor binding for a receiver in the caller scope. */
+function uniqueVisibleConstructorBinding(
+  constructorBindings: readonly TypeScriptConstructorBindingFact[],
+  ownerSymbolId: string,
+  receiverName: string,
+  lineNumber: number,
+): TypeScriptConstructorBindingFact | undefined {
+  const matches = constructorBindings.filter(
     (binding) =>
       binding.ownerSymbolId === ownerSymbolId &&
       binding.localName === receiverName &&
