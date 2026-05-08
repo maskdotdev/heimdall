@@ -1405,6 +1405,7 @@ export async function runPullRequestReview(
           durationMs: passResult.durationMs,
           candidateCount: passResult.candidates.length,
           candidateFindingIds: passResult.candidates.map((finding) => finding.findingId),
+          ...(passResult.output !== undefined ? { output: passResult.output } : {}),
           ...(passResult.error ? { error: passResult.error } : {}),
         })),
       },

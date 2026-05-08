@@ -116,7 +116,24 @@ export type ReviewPassContext = {
   readonly llmGateway?: LLMGateway;
   /** Optional static-analysis report used by static-tool synthesis passes. */
   readonly staticAnalysisReport?: StaticAnalysisReport;
+  /** Candidate findings available to post-generation passes such as the judge. */
+  readonly candidateFindings?: readonly CandidateFinding[];
+  /** Optional PR summary output available to downstream passes. */
+  readonly summary?: PRReviewSummary;
+  /** Optional behavior-change output available to downstream passes. */
+  readonly behaviorChange?: BehaviorChangeSummary;
 };
+
+/** Structured output emitted by one review pass. */
+export type ReviewPassRunOutput = {
+  /** Candidate findings emitted by the pass. */
+  readonly candidates: readonly CandidateFinding[];
+  /** Optional pass-specific structured output. */
+  readonly output?: unknown;
+};
+
+/** Return shape accepted from review pass implementations. */
+export type ReviewPassRunReturn = readonly CandidateFinding[] | ReviewPassRunOutput;
 
 /** Candidate finding pass boundary implemented by review-engine passes. */
 export interface ReviewPass {
@@ -125,7 +142,7 @@ export interface ReviewPass {
   /** Human-readable pass version. */
   readonly version: string;
   /** Runs the pass and returns structured candidate findings. */
-  run(context: ReviewPassContext): Promise<readonly CandidateFinding[]>;
+  run(context: ReviewPassContext): Promise<ReviewPassRunReturn>;
 }
 
 /** Review pass execution modes used to select specialized passes. */
@@ -212,10 +229,60 @@ export type ReviewEngineInput = ReviewEngineTelemetryOptions & {
 export type ReviewEngineResult = {
   /** Pass IDs selected for this review run. */
   readonly selectedPassIds: readonly ReviewPassId[];
+  /** Structured PR summary emitted by the summary pass. */
+  readonly summary?: PRReviewSummary;
+  /** Structured behavior-change summary emitted by the behavior pass. */
+  readonly behaviorChange?: BehaviorChangeSummary;
   /** Structured execution results for selected passes. */
   readonly passResults: readonly ReviewPassResult[];
   /** Candidate findings emitted by selected passes. */
   readonly findings: readonly CandidateFinding[];
+};
+
+/** Structured pull-request summary produced by the PR summary pass. */
+export type PRReviewSummary = {
+  /** Summary schema version. */
+  readonly schemaVersion: "pr_review_summary.v1";
+  /** Pull request title copied from trusted snapshot metadata. */
+  readonly title: string;
+  /** Concise overview of the changed files. */
+  readonly overview: string;
+  /** Number of changed files in the snapshot. */
+  readonly changedFileCount: number;
+  /** Number of changed source files. */
+  readonly sourceFileCount: number;
+  /** Number of changed test files. */
+  readonly testFileCount: number;
+  /** High-level risk areas inferred from paths and retrieved context. */
+  readonly riskAreas: readonly string[];
+};
+
+/** Structured behavior-change summary produced by the behavior pass. */
+export type BehaviorChangeSummary = {
+  /** Summary schema version. */
+  readonly schemaVersion: "behavior_change_summary.v1";
+  /** Concise behavior-oriented summary. */
+  readonly summary: string;
+  /** Changed paths considered by the behavior pass. */
+  readonly changedPaths: readonly string[];
+  /** Conservative risk level inferred from the change shape. */
+  readonly riskLevel: "high" | "low" | "medium";
+  /** Product-safe reasons for the risk level. */
+  readonly reasons: readonly string[];
+};
+
+/** Structured output produced by the MVP finding judge pass. */
+export type FindingJudgeOutput = {
+  /** Judge output schema version. */
+  readonly schemaVersion: "finding_judge_output.v1";
+  /** Current MVP judging strategy. */
+  readonly strategy: "delegated_to_validation";
+  /** Number of candidate findings inspected by the judge pass. */
+  readonly candidateCount: number;
+  /** Number of candidates kept by the judge pass. */
+  readonly keptCandidateCount: number;
+  /** Number of candidates dropped by the judge pass. */
+  readonly droppedCandidateCount: number;
 };
 
 /** High-level review engine facade used by orchestration code. */
@@ -391,8 +458,127 @@ function createNoCandidateReviewPass(name: string, version: string): ReviewPass 
   return {
     name,
     version,
-    run: async () => [],
+    run: async (context) => ({
+      candidates: [],
+      output: noCandidatePassOutput(name, context),
+    }),
   };
+}
+
+/** Returns structured output for MVP planning and judge passes. */
+function noCandidatePassOutput(
+  passName: string,
+  context: ReviewPassContext,
+): PRReviewSummary | BehaviorChangeSummary | FindingJudgeOutput | undefined {
+  if (passName === "pr_summary") {
+    return createPRReviewSummary(context);
+  }
+  if (passName === "behavior_change") {
+    return createBehaviorChangeSummary(context);
+  }
+  if (passName === "finding_judge") {
+    return createFindingJudgeOutput(context);
+  }
+
+  return undefined;
+}
+
+/** Creates a deterministic PR summary from snapshot and context metadata. */
+function createPRReviewSummary(context: ReviewPassContext): PRReviewSummary {
+  const sourceFileCount = context.snapshot.changedFiles.filter((file) =>
+    pullRequestHasSourceFile(file),
+  ).length;
+  const testFileCount = context.snapshot.changedFiles.filter((file) => file.isTest).length;
+  const riskAreas = reviewRiskAreas(context);
+
+  return {
+    schemaVersion: "pr_review_summary.v1",
+    title: context.snapshot.title,
+    overview: `Updates ${context.snapshot.changedFileCount} file${context.snapshot.changedFileCount === 1 ? "" : "s"} with ${context.snapshot.additions} added and ${context.snapshot.deletions} removed line${context.snapshot.deletions === 1 ? "" : "s"}.`,
+    changedFileCount: context.snapshot.changedFileCount,
+    sourceFileCount,
+    testFileCount,
+    riskAreas,
+  };
+}
+
+/** Creates a deterministic behavior summary from changed paths and risk signals. */
+function createBehaviorChangeSummary(context: ReviewPassContext): BehaviorChangeSummary {
+  const changedPaths = context.snapshot.changedFiles.map((file) => file.path).sort();
+  const reasons = behaviorRiskReasons(context);
+  const riskLevel =
+    reasons.includes("security-sensitive change") || context.snapshot.changedFileCount > 10
+      ? "high"
+      : reasons.length > 0
+        ? "medium"
+        : "low";
+
+  return {
+    schemaVersion: "behavior_change_summary.v1",
+    summary: `Changes affect ${changedPaths.slice(0, 5).join(", ")}${changedPaths.length > 5 ? " and additional files" : ""}.`,
+    changedPaths,
+    riskLevel,
+    reasons,
+  };
+}
+
+/** Creates the MVP judge output that delegates final decisions to validation. */
+function createFindingJudgeOutput(context: ReviewPassContext): FindingJudgeOutput {
+  const candidateCount = context.candidateFindings?.length ?? 0;
+
+  return {
+    schemaVersion: "finding_judge_output.v1",
+    strategy: "delegated_to_validation",
+    candidateCount,
+    keptCandidateCount: candidateCount,
+    droppedCandidateCount: 0,
+  };
+}
+
+/** Returns high-level risk area labels for a PR summary. */
+function reviewRiskAreas(context: ReviewPassContext): readonly string[] {
+  const areas = new Set<string>();
+  if (isDocumentationOnlyPullRequest(context.snapshot)) {
+    areas.add("documentation");
+  }
+  if (pullRequestHasSourceChanges(context.snapshot)) {
+    areas.add("source behavior");
+  }
+  if (context.snapshot.changedFiles.some((file) => file.isTest)) {
+    areas.add("tests");
+  }
+  if (hasSecuritySensitiveChanges(context.snapshot, context.contextBundle)) {
+    areas.add("security-sensitive paths");
+  }
+  if (context.staticAnalysisReport) {
+    areas.add("static-analysis diagnostics");
+  }
+
+  return [...areas].sort();
+}
+
+/** Returns product-safe behavior risk reasons inferred from the review context. */
+function behaviorRiskReasons(context: ReviewPassContext): readonly string[] {
+  const reasons: string[] = [];
+  if (hasSecuritySensitiveChanges(context.snapshot, context.contextBundle)) {
+    reasons.push("security-sensitive change");
+  }
+  if (context.snapshot.changedFiles.some((file) => file.isTest)) {
+    reasons.push("test behavior changed");
+  }
+  if (context.staticAnalysisReport && context.staticAnalysisReport.summary.diagnosticCount > 0) {
+    reasons.push("static-analysis diagnostics present");
+  }
+  if (context.snapshot.changedFileCount > 10) {
+    reasons.push("large pull request");
+  }
+
+  return reasons;
+}
+
+/** Returns whether a changed file is a reviewable source file. */
+function pullRequestHasSourceFile(file: ChangedFile): boolean {
+  return isReviewableFile(file) && !file.isGenerated && !file.isTest && !isDocumentationFile(file);
 }
 
 /** Creates the built-in MVP review pass registry. */
@@ -430,7 +616,16 @@ export function createReviewEngine(): ReviewEngine {
         ...(input.traces ? { traces: input.traces } : {}),
       });
 
-      return { findings: result.findings, passResults: result.passResults, selectedPassIds };
+      const summary = summaryFromPassResults(result.passResults);
+      const behaviorChange = behaviorChangeFromPassResults(result.passResults);
+
+      return {
+        ...(behaviorChange ? { behaviorChange } : {}),
+        findings: result.findings,
+        passResults: result.passResults,
+        selectedPassIds,
+        ...(summary ? { summary } : {}),
+      };
     },
   };
 }
@@ -464,6 +659,8 @@ export type ReviewPassResult = {
   readonly durationMs: number;
   /** Candidate findings emitted by the pass. Empty when the pass failed. */
   readonly candidates: readonly CandidateFinding[];
+  /** Optional pass-specific structured output. */
+  readonly output?: unknown;
   /** Product-safe failure details when the pass failed. */
   readonly error?: ReviewPassFailure;
 };
@@ -590,7 +787,8 @@ async function runReviewPassWithTelemetry(
   });
 
   try {
-    const findings = await pass.run(input.context);
+    const passOutput = normalizeReviewPassRunOutput(await pass.run(input.context));
+    const findings = passOutput.candidates;
     const durationMs = Math.max(0, Date.now() - startedAtMs);
     const finishedAt = new Date().toISOString();
     const labels = reviewPassTelemetryLabels(pass, "succeeded");
@@ -615,6 +813,7 @@ async function runReviewPassWithTelemetry(
       candidates: findings,
       durationMs,
       finishedAt,
+      ...(passOutput.output !== undefined ? { output: passOutput.output } : {}),
       passName: pass.name,
       passVersion: pass.version,
       startedAt,
@@ -657,6 +856,48 @@ async function runReviewPassWithTelemetry(
 
     throw error;
   }
+}
+
+/** Normalizes legacy candidate arrays and structured pass outputs into one shape. */
+function normalizeReviewPassRunOutput(output: ReviewPassRunReturn): ReviewPassRunOutput {
+  if (isReviewPassRunOutput(output)) {
+    return output;
+  }
+
+  return { candidates: output };
+}
+
+/** Extracts the first structured PR summary from pass results. */
+function summaryFromPassResults(
+  passResults: readonly ReviewPassResult[],
+): PRReviewSummary | undefined {
+  const output = passResults.find((passResult) => passResult.passName === "pr_summary")?.output;
+  return isPRReviewSummary(output) ? output : undefined;
+}
+
+/** Extracts the first structured behavior summary from pass results. */
+function behaviorChangeFromPassResults(
+  passResults: readonly ReviewPassResult[],
+): BehaviorChangeSummary | undefined {
+  const output = passResults.find(
+    (passResult) => passResult.passName === "behavior_change",
+  )?.output;
+  return isBehaviorChangeSummary(output) ? output : undefined;
+}
+
+/** Returns whether a pass returned structured output instead of a candidate array. */
+function isReviewPassRunOutput(output: ReviewPassRunReturn): output is ReviewPassRunOutput {
+  return !Array.isArray(output) && isRecord(output) && Array.isArray(output.candidates);
+}
+
+/** Returns whether a value is a structured PR review summary. */
+function isPRReviewSummary(value: unknown): value is PRReviewSummary {
+  return isRecord(value) && value.schemaVersion === "pr_review_summary.v1";
+}
+
+/** Returns whether a value is a structured behavior-change summary. */
+function isBehaviorChangeSummary(value: unknown): value is BehaviorChangeSummary {
+  return isRecord(value) && value.schemaVersion === "behavior_change_summary.v1";
 }
 
 /** Converts an unknown pass error into bounded product-safe failure details. */

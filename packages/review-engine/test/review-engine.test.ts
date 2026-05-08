@@ -131,6 +131,16 @@ describe("createReviewEngine", () => {
       "succeeded",
       "succeeded",
     ]);
+    expect(result.summary).toMatchObject({
+      schemaVersion: "pr_review_summary.v1",
+      changedFileCount: validPullRequestSnapshotFixture.changedFileCount,
+      sourceFileCount: 1,
+    });
+    expect(result.behaviorChange).toMatchObject({
+      schemaVersion: "behavior_change_summary.v1",
+      changedPaths: ["src/math.ts"],
+      riskLevel: "low",
+    });
   });
 
   it("isolates selected pass failures and returns structured pass results", async () => {
@@ -211,6 +221,24 @@ describe("MVP review pass golden fixtures", () => {
     });
 
     expect(result.findings).toEqual([]);
+    expect(result.passResults.find((passResult) => passResult.passName === "pr_summary")).toEqual(
+      expect.objectContaining({
+        output: expect.objectContaining({
+          schemaVersion: "pr_review_summary.v1",
+          riskAreas: ["source behavior"],
+        }),
+      }),
+    );
+    expect(
+      result.passResults.find((passResult) => passResult.passName === "behavior_change"),
+    ).toEqual(
+      expect.objectContaining({
+        output: expect.objectContaining({
+          schemaVersion: "behavior_change_summary.v1",
+          summary: "Changes affect src/math.ts.",
+        }),
+      }),
+    );
     expect(result.selectedPassIds).toEqual([
       "pr_summary",
       "behavior_change",
