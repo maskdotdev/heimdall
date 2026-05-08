@@ -1224,6 +1224,182 @@ describe("static analysis", () => {
     expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
   });
 
+  it("parses fixture-backed ESLint JSON output with mixed changed-line coverage", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("eslint/json-output.json"),
+      }),
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "eslint",
+      toolRunId: "str_eslint_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "no-undef",
+      "@typescript-eslint/no-unused-vars",
+    ]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.severity)).toEqual([
+      "error",
+      "warning",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed Biome JSON output with mixed changed-line coverage", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("biome/json-output.json"),
+      }),
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "biome",
+      toolRunId: "str_biome_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "lint/correctness/noUnusedVariables",
+      "lint/style/useConst",
+    ]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleName)).toEqual([
+      "noUnusedVariables",
+      "useConst",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed TypeScript text output and ignores summary lines", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("typescript/pretty-false.txt"),
+      }),
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "typescript",
+      toolRunId: "str_typescript_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual(["TS2322", "TS6133"]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.severity)).toEqual([
+      "error",
+      "warning",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed mypy text output and ignores summary lines", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("mypy/text-output.txt"),
+      }),
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "mypy",
+      toolRunId: "str_mypy_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "assignment",
+      "unused-ignore",
+    ]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.severity)).toEqual([
+      "error",
+      "warning",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed Pyright JSON output with file and URI paths", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("pyright/general-diagnostics.json"),
+      }),
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "pyright",
+      toolRunId: "str_pyright_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "reportAssignmentType",
+      "reportMissingImports",
+    ]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.location.filePath)).toEqual([
+      "src/app.py",
+      "src/routes.py",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed Ruff JSON output with mixed changed-line coverage", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("ruff/json-output.json"),
+      }),
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "ruff",
+      toolRunId: "str_ruff_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual(["F401", "S101"]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleUrl)).toEqual([
+      "https://docs.astral.sh/ruff/rules/unused-import",
+      "https://docs.astral.sh/ruff/rules/assert",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed Semgrep JSON output with mixed changed-line coverage", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("semgrep/json-output.json"),
+      }),
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "semgrep",
+      toolRunId: "str_semgrep_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "python.lang.security.audit.subprocess-shell-true",
+      "javascript.express.security.audit.express-check-csurf",
+    ]);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.severity)).toEqual([
+      "error",
+      "warning",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
   it("parses Pyright JSON output into normalized diagnostics", () => {
     const parsed = parseToolOutputDiagnostics({
       maxDiagnostics: 10,
