@@ -177,6 +177,8 @@ type TypeScriptImportModuleFact = {
 type TypeScriptImportBindingFact = TypeScriptImportModuleFact & {
   /** Exported name requested from the imported module. */
   readonly importedName: string;
+  /** Import binding syntax category. */
+  readonly importKind: "default" | "named";
   /** Local binding name used in the importing file. */
   readonly localName: string;
 };
@@ -1085,9 +1087,11 @@ function importedCallEdgesForSources(
           return [];
         }
 
-        const callee = symbolsByPathAndName
-          .get(resolvedModule.file.path)
-          ?.get(importFact.importedName);
+        const callee = importedSymbolForBinding(
+          symbolsByPathAndName,
+          resolvedModule.file.path,
+          importFact,
+        );
         const caller = symbolContainingLine(source.symbols, fact.lineNumber);
         if (!caller || !callee || caller.symbolId === callee.symbolId) {
           return [];
@@ -1116,6 +1120,7 @@ function importedCallEdgesForSources(
             confidence: 0.9,
             metadata: {
               ...(resolvedModule.aliasPattern ? { aliasPattern: resolvedModule.aliasPattern } : {}),
+              importKind: importFact.importKind,
               importedName: importFact.importedName,
               importPath: importFact.moduleSpecifier,
               lineNumber: fact.lineNumber,
@@ -1128,6 +1133,22 @@ function importedCallEdgesForSources(
       });
     }),
   );
+}
+
+/** Resolves an imported binding to a concrete symbol in the target file. */
+function importedSymbolForBinding(
+  symbolsByPathAndName: ReadonlyMap<string, ReadonlyMap<string, SymbolRecord>>,
+  targetPath: string,
+  importFact: TypeScriptImportBindingFact,
+): SymbolRecord | undefined {
+  const symbolsByName = symbolsByPathAndName.get(targetPath);
+  if (!symbolsByName) {
+    return undefined;
+  }
+
+  return importFact.importKind === "default"
+    ? symbolsByName.get(importFact.localName)
+    : symbolsByName.get(importFact.importedName);
 }
 
 /** Extracts module specifier facts from TS/JS import declarations. */
@@ -1146,7 +1167,7 @@ function typeScriptImportModuleFacts(sourceFile: ts.SourceFile): TypeScriptImpor
   });
 }
 
-/** Extracts named import bindings from TS/JS import declarations. */
+/** Extracts default and named import bindings from TS/JS import declarations. */
 function typeScriptImportBindingFacts(sourceFile: ts.SourceFile): TypeScriptImportBindingFact[] {
   return sourceFile.statements.flatMap((statement) => {
     if (
@@ -1157,27 +1178,40 @@ function typeScriptImportBindingFacts(sourceFile: ts.SourceFile): TypeScriptImpo
       return [];
     }
 
-    const namedBindings = statement.importClause?.namedBindings;
-    if (!namedBindings || !ts.isNamedImports(namedBindings)) {
-      return [];
-    }
-
     const lineNumber = lineRange(sourceFile, statement).startLine;
     const moduleSpecifier = statement.moduleSpecifier.text;
-    return namedBindings.elements.flatMap((specifier) => {
-      if (specifier.isTypeOnly) {
-        return [];
-      }
+    const defaultBinding = statement.importClause?.name
+      ? [
+          {
+            importedName: "default",
+            importKind: "default" as const,
+            lineNumber,
+            localName: statement.importClause.name.text,
+            moduleSpecifier,
+          },
+        ]
+      : [];
+    const namedBindings = statement.importClause?.namedBindings;
+    const namedImportBindings =
+      namedBindings && ts.isNamedImports(namedBindings)
+        ? namedBindings.elements.flatMap((specifier) => {
+            if (specifier.isTypeOnly) {
+              return [];
+            }
 
-      return [
-        {
-          importedName: specifier.propertyName?.text ?? specifier.name.text,
-          lineNumber,
-          localName: specifier.name.text,
-          moduleSpecifier,
-        },
-      ];
-    });
+            return [
+              {
+                importedName: specifier.propertyName?.text ?? specifier.name.text,
+                importKind: "named" as const,
+                lineNumber,
+                localName: specifier.name.text,
+                moduleSpecifier,
+              },
+            ];
+          })
+        : [];
+
+    return [...defaultBinding, ...namedImportBindings];
   });
 }
 

@@ -390,6 +390,71 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("resolves conservative calls through same-named default imports", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await mkdir(join(workspacePath, "src"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(workspacePath, "src", "math.ts"),
+        [
+          "export default function calculate(left: number, right: number) {",
+          "  return left + right;",
+          "}",
+          "",
+        ].join("\n"),
+      ),
+      writeFile(
+        join(workspacePath, "src", "service.ts"),
+        [
+          'import calculate from "./math";',
+          "",
+          "export function total() {",
+          "  return calculate(1, 2);",
+          "}",
+          "",
+        ].join("\n"),
+      ),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const symbolIdsByPathAndName = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "symbol"
+          ? [[`${record.path}:${record.name}`, record.symbolId] as const]
+          : [],
+      ),
+    );
+    const defaultCallEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" && record.kind === "calls" && record.metadata?.importKind === "default"
+        ? [
+            {
+              fromId: record.fromId,
+              importedName: record.metadata.importedName,
+              localName: record.metadata.localName,
+              resolvedPath: record.metadata.resolvedPath,
+              toId: record.toId,
+            },
+          ]
+        : [],
+    );
+
+    expect(defaultCallEdges).toEqual([
+      {
+        fromId: symbolIdsByPathAndName.get("src/service.ts:total"),
+        importedName: "default",
+        localName: "calculate",
+        resolvedPath: "src/math.ts",
+        toId: symbolIdsByPathAndName.get("src/math.ts:calculate"),
+      },
+    ]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("emits files, symbols, and chunks for Python sources", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await writeFile(
