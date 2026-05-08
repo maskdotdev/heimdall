@@ -585,6 +585,112 @@ describe("retrieveContext", () => {
     });
   });
 
+  it("merges duplicate snippets and records rank-fusion trace metadata", async () => {
+    const index: RetrievalIndex = {
+      indexVersionId: "idx_123",
+      getSameFileChunks: async () => [
+        {
+          chunkId: "chunk_same",
+          symbolId: "sym_same",
+          path: "src/math.ts",
+          startLine: 1,
+          endLine: 3,
+          language: "typescript",
+          contentHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          text: "export function run() {}",
+          tokenEstimate: 6,
+        },
+      ],
+      getSymbolsForFiles: async () => [],
+      getRelatedChunks: async () => [],
+      getRelatedTestChunks: async () => [],
+      searchFullTextChunks: async () => [
+        {
+          chunkId: "chunk_shared",
+          path: "src/session.ts",
+          startLine: 10,
+          endLine: 16,
+          language: "typescript",
+          contentHash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          text: "export function validateSession() { return true; }",
+          tokenEstimate: 10,
+          score: 0.88,
+          searchSource: "full_text_search",
+        },
+      ],
+      searchSimilarChunks: async () => [
+        {
+          chunkId: "chunk_vector_only",
+          path: "src/session-cache.ts",
+          startLine: 4,
+          endLine: 8,
+          language: "typescript",
+          contentHash: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          text: "export function validateCachedSession() { return true; }",
+          tokenEstimate: 10,
+          score: 0.99,
+          searchSource: "vector_search",
+        },
+        {
+          chunkId: "chunk_shared",
+          path: "src/session.ts",
+          startLine: 10,
+          endLine: 16,
+          language: "typescript",
+          contentHash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          text: "export function validateSession() { return true; }",
+          tokenEstimate: 10,
+          score: 0.82,
+          searchSource: "vector_search",
+        },
+      ],
+    };
+
+    const bundle = await retrieveContext({
+      reviewRunId: "rrn_01HREVIEW",
+      snapshot: validPullRequestSnapshotFixture,
+      index,
+      timestamp: "2026-05-05T00:00:00.000Z",
+    });
+    const similarItems = bundle.items.filter((item) => item.kind === "similar_pattern");
+    const sharedItem = similarItems.find((item) => item.snippet?.chunkId === "chunk_shared");
+
+    expect(similarItems.map((item) => item.snippet?.chunkId)).toEqual([
+      "chunk_shared",
+      "chunk_vector_only",
+    ]);
+    expect(sharedItem).toBeDefined();
+    if (!sharedItem) {
+      throw new Error("Expected merged shared chunk to be selected.");
+    }
+    expect(sharedItem).toMatchObject({
+      metadata: {
+        ranking: {
+          mergedCandidateCount: 2,
+          sourceRanks: {
+            lexical_match: 1,
+            semantic_match: 2,
+          },
+          sourceTypes: ["lexical_match", "semantic_match"],
+        },
+      },
+    });
+    expect(bundle.metadata).toMatchObject({
+      ranking: {
+        duplicateCandidateCount: 1,
+        strategy: "weighted_reciprocal_rank_fusion_v1",
+        selectedItems: expect.arrayContaining([
+          expect.objectContaining({
+            contextItemId: sharedItem.contextItemId,
+            mergedFrom: expect.arrayContaining([sharedItem.contextItemId]),
+            reason: "Full-text search related context.",
+            sourceTypes: ["lexical_match", "semantic_match"],
+          }),
+        ]),
+      },
+    });
+  });
+
   it("keeps required context when optional indexed retrievers fail", async () => {
     const index: RetrievalIndex = {
       indexVersionId: "idx_123",

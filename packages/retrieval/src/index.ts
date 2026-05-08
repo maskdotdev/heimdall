@@ -236,6 +236,54 @@ type PackedContextItems = {
   readonly items: readonly ContextItem[];
 };
 
+/** Context items after deterministic rank fusion and duplicate merging. */
+type RankedContextItems = {
+  /** Ranked and merged context items. */
+  readonly items: readonly ContextItem[];
+  /** Product-safe ranking trace for bundle metadata and replay inspection. */
+  readonly trace: RetrievalRankingTrace;
+};
+
+/** Product-safe ranking trace recorded before token-budget packing. */
+type RetrievalRankingTrace = {
+  /** Raw candidate count before duplicate merging. */
+  readonly candidateItemCount: number;
+  /** Candidates removed by merge-key dedupe. */
+  readonly duplicateCandidateCount: number;
+  /** RRF constant used to dampen lower-ranked sources. */
+  readonly k: number;
+  /** Candidate count after duplicate merging. */
+  readonly mergedItemCount: number;
+  /** Ranked item trace rows before token-budget packing. */
+  readonly items: readonly RetrievalRankingTraceItem[];
+  /** Stable ranking strategy name. */
+  readonly strategy: "weighted_reciprocal_rank_fusion_v1";
+};
+
+/** Product-safe trace row for one ranked context item. */
+type RetrievalRankingTraceItem = {
+  /** Stable context item ID. */
+  readonly contextItemId: string;
+  /** Original context item kind. */
+  readonly kind: ContextItem["kind"];
+  /** Duplicate source item IDs merged into this item. */
+  readonly mergedFrom?: readonly string[] | undefined;
+  /** Packing priority retained on the context item. */
+  readonly priority: number;
+  /** Product-safe inclusion reason from item provenance. */
+  readonly reason: string;
+  /** Rank position after fusion and domain adjustments. */
+  readonly rank: number;
+  /** Retriever that produced the selected primary item. */
+  readonly retriever: string;
+  /** Normalized rank-fusion score. */
+  readonly score: number;
+  /** Primary context item source. */
+  readonly source: ContextItem["source"];
+  /** Ranked retrieval source types that contributed to this item. */
+  readonly sourceTypes: readonly string[];
+};
+
 /** Items and trace produced by relevant memory retrieval. */
 type MemoryRetrievalResult = {
   /** Context items produced from relevant memory facts. */
@@ -285,6 +333,30 @@ type RetrievalTelemetryState = {
   readonly span: TelemetrySpanHandle | undefined;
 };
 
+/** RRF constant used by the deterministic retrieval ranker. */
+const RANK_FUSION_K = 60;
+
+/** Maximum item trace rows to store in bundle metadata. */
+const RANKING_TRACE_ITEM_LIMIT = 100;
+
+/** Source weights for deterministic retrieval rank fusion. */
+const RANK_FUSION_SOURCE_WEIGHTS: Readonly<Record<string, number>> = {
+  changed_symbol: 2.8,
+  config: 1.7,
+  dependency_manifest: 1.7,
+  diff: 3,
+  direct_callee: 2.2,
+  direct_caller: 2.4,
+  documentation: 1,
+  lexical_match: 1.4,
+  memory_fact: 2.3,
+  related_test: 1.9,
+  repo_rule: 2.6,
+  same_file: 2.5,
+  semantic_match: 1.2,
+  static_analysis: 2,
+};
+
 /** Retrieves a compact context bundle, falling back to diff context when indexes are missing. */
 export async function retrieveContext(input: RetrieveContextInput): Promise<ContextBundle> {
   const telemetry = startRetrievalTelemetry(input);
@@ -307,7 +379,8 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
       input.indexAvailable === false || !input.index
         ? [...ruleResult.items, ...memoryResult.items, ...withFallbackRule(diffItems)]
         : [...ruleResult.items, ...memoryResult.items, ...indexedResult.items, ...diffItems];
-    const packedItems = packItems(candidateItems, maxTokens);
+    const rankedItems = rankAndMergeContextItems(candidateItems, input.snapshot.changedFiles);
+    const packedItems = packItems(rankedItems.items, maxTokens);
     const items = packedItems.items;
     const warnings = retrievalWarnings(indexedResult.warnings, packedItems);
 
@@ -340,6 +413,7 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
         ...(packedItems.droppedItems.length > 0
           ? { packing: packingSummary(candidateItems, packedItems) }
           : {}),
+        ranking: rankingSummary(rankedItems.trace, packedItems),
         ...(memoryResult.trace.length > 0
           ? {
               memory: {
@@ -814,7 +888,7 @@ async function retrieveIndexedItems(
   ]);
 
   return {
-    items: dedupeContextItems([
+    items: [
       ...sameFile.map((chunk) =>
         chunkItem(chunk, "same_file_context", "Same file indexed context."),
       ),
@@ -837,7 +911,7 @@ async function retrieveIndexedItems(
       ...similarResult.items.map((chunk) =>
         chunkItem(chunk, "similar_pattern", "Vector search related context."),
       ),
-    ]),
+    ],
     warnings: [
       ...relatedResult.warnings,
       ...dependencyResult.warnings,
@@ -1648,23 +1722,417 @@ function nonEmptyValues<TValue>(
   return values && values.length > 0 ? values : undefined;
 }
 
-function dedupeContextItems(items: readonly ContextItem[]): readonly ContextItem[] {
-  const seen = new Set<string>();
-  const deduped: ContextItem[] = [];
+/** Accumulates source ranks and weighted RRF scores for raw context candidates. */
+type RankFusionObservations = {
+  /** RRF score accumulated per merge key. */
+  readonly scoreByMergeKey: ReadonlyMap<string, number>;
+  /** Source-specific raw item scores observed per merge key. */
+  readonly sourceScoresByMergeKey: ReadonlyMap<string, ReadonlyMap<string, number>>;
+  /** Source-specific ranks observed per merge key. */
+  readonly sourceRanksByMergeKey: ReadonlyMap<string, ReadonlyMap<string, number>>;
+};
+
+/** Mutable merge state used while collapsing duplicate context candidates. */
+type ContextItemMergeState = {
+  /** Raw candidates that share the same merge key. */
+  readonly candidates: ContextItem[];
+  /** Merge key used for duplicate detection. */
+  readonly mergeKey: string;
+  /** Highest-value item retained as the user-visible context item. */
+  primary: ContextItem;
+  /** Ranked retrieval source types that contributed to this item. */
+  readonly sourceTypes: Set<string>;
+};
+
+/** Context merge state with an adjusted raw score before normalization. */
+type ScoredContextItemMergeState = {
+  /** Raw adjusted score before normalization. */
+  readonly adjustedScore: number;
+  /** Merge state for the context item. */
+  readonly state: ContextItemMergeState;
+};
+
+/** Merges duplicate context candidates and applies deterministic rank-fusion scores. */
+function rankAndMergeContextItems(
+  items: readonly ContextItem[],
+  changedFiles: readonly ChangedFile[],
+): RankedContextItems {
+  const observations = observeRankFusionSources(items);
+  const stateByMergeKey = mergeContextItemsByKey(items);
+  const scoredStates = [...stateByMergeKey.values()]
+    .map((state) => ({
+      adjustedScore:
+        (observations.scoreByMergeKey.get(state.mergeKey) ?? fallbackRankScore(state.primary)) *
+        rankingMultiplierForContextItem(state.primary, changedFiles),
+      state,
+    }))
+    .sort(compareScoredContextItemMergeStates);
+  const maxScore = Math.max(0, ...scoredStates.map((state) => state.adjustedScore));
+  const rankedItems = scoredStates.map(({ adjustedScore, state }) =>
+    applyRankingMetadata(state, {
+      score: normalizeRankingScore(adjustedScore, maxScore),
+      sourceRanks: observations.sourceRanksByMergeKey.get(state.mergeKey) ?? new Map(),
+      sourceScores: observations.sourceScoresByMergeKey.get(state.mergeKey) ?? new Map(),
+    }),
+  );
+
+  return {
+    items: rankedItems,
+    trace: {
+      candidateItemCount: items.length,
+      duplicateCandidateCount: Math.max(0, items.length - rankedItems.length),
+      items: rankedItems.map(rankingTraceItem).slice(0, RANKING_TRACE_ITEM_LIMIT),
+      k: RANK_FUSION_K,
+      mergedItemCount: rankedItems.length,
+      strategy: "weighted_reciprocal_rank_fusion_v1",
+    },
+  };
+}
+
+/** Builds source-specific rank observations for raw candidates. */
+function observeRankFusionSources(items: readonly ContextItem[]): RankFusionObservations {
+  const scoreByMergeKey = new Map<string, number>();
+  const sourceScoresByMergeKey = new Map<string, Map<string, number>>();
+  const sourceRanksByMergeKey = new Map<string, Map<string, number>>();
+  const itemsBySource = new Map<string, ContextItem[]>();
 
   for (const item of items) {
-    const key =
-      item.snippet?.chunkId ??
-      (item.kind === "changed_symbol" ? item.provenance.relatedSymbolId : undefined) ??
-      item.contextItemId;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    deduped.push(item);
+    const sourceType = rankingSourceType(item);
+    itemsBySource.set(sourceType, [...(itemsBySource.get(sourceType) ?? []), item]);
   }
 
-  return deduped;
+  for (const [sourceType, sourceItems] of itemsBySource) {
+    const seenMergeKeys = new Set<string>();
+    const rankedSourceItems = [...sourceItems].sort(compareRawContextItemsForSourceRank);
+
+    for (const item of rankedSourceItems) {
+      const mergeKey = contextItemMergeKey(item);
+      if (seenMergeKeys.has(mergeKey)) {
+        continue;
+      }
+      const rank = seenMergeKeys.size + 1;
+      seenMergeKeys.add(mergeKey);
+      scoreByMergeKey.set(
+        mergeKey,
+        (scoreByMergeKey.get(mergeKey) ?? 0) +
+          (RANK_FUSION_SOURCE_WEIGHTS[sourceType] ?? 1) / (RANK_FUSION_K + rank),
+      );
+      setNestedNumber(sourceRanksByMergeKey, mergeKey, sourceType, rank);
+      setNestedNumber(sourceScoresByMergeKey, mergeKey, sourceType, rawContextItemScore(item));
+    }
+  }
+
+  return {
+    scoreByMergeKey,
+    sourceRanksByMergeKey,
+    sourceScoresByMergeKey,
+  };
+}
+
+/** Groups raw candidates by stable merge keys and keeps the best primary candidate. */
+function mergeContextItemsByKey(
+  items: readonly ContextItem[],
+): ReadonlyMap<string, ContextItemMergeState> {
+  const stateByMergeKey = new Map<string, ContextItemMergeState>();
+
+  for (const item of items) {
+    const mergeKey = contextItemMergeKey(item);
+    const state = stateByMergeKey.get(mergeKey);
+    if (!state) {
+      stateByMergeKey.set(mergeKey, {
+        candidates: [item],
+        mergeKey,
+        primary: item,
+        sourceTypes: new Set([rankingSourceType(item)]),
+      });
+      continue;
+    }
+
+    state.candidates.push(item);
+    state.sourceTypes.add(rankingSourceType(item));
+    state.primary = choosePrimaryContextItem(state.primary, item);
+  }
+
+  return stateByMergeKey;
+}
+
+/** Selects the best raw context item to represent a merged candidate. */
+function choosePrimaryContextItem(left: ContextItem, right: ContextItem): ContextItem {
+  const priorityDelta = right.priority - left.priority;
+  if (priorityDelta !== 0) {
+    return priorityDelta > 0 ? right : left;
+  }
+
+  const scoreDelta = rawContextItemScore(right) - rawContextItemScore(left);
+  if (scoreDelta !== 0) {
+    return scoreDelta > 0 ? right : left;
+  }
+
+  return right.contextItemId.localeCompare(left.contextItemId) < 0 ? right : left;
+}
+
+/** Applies normalized ranking score and merge trace metadata to one context item. */
+function applyRankingMetadata(
+  state: ContextItemMergeState,
+  input: {
+    /** Normalized score in the 0..1 range. */
+    readonly score: number;
+    /** Source ranks that contributed to this merged item. */
+    readonly sourceRanks: ReadonlyMap<string, number>;
+    /** Source scores that contributed to this merged item. */
+    readonly sourceScores: ReadonlyMap<string, number>;
+  },
+): ContextItem {
+  const sourceTypes = [...state.sourceTypes].sort();
+  const mergedFrom = state.candidates.map((candidate) => candidate.contextItemId);
+  const metadata = {
+    ...(state.primary.metadata ?? {}),
+    ranking: {
+      mergeKey: state.mergeKey,
+      mergedCandidateCount: state.candidates.length,
+      mergedFrom,
+      sourceRanks: numberMapToRecord(input.sourceRanks),
+      sourceScores: numberMapToRecord(input.sourceScores),
+      sourceTypes,
+      strategy: "weighted_reciprocal_rank_fusion_v1",
+    },
+  };
+
+  return {
+    ...state.primary,
+    metadata,
+    score: input.score,
+  };
+}
+
+/** Builds one product-safe ranking trace row for bundle metadata. */
+function rankingTraceItem(item: ContextItem, index: number): RetrievalRankingTraceItem {
+  const ranking = contextItemRankingMetadata(item);
+  const mergedFrom = stringArrayMetadataValue(ranking, "mergedFrom");
+
+  return {
+    contextItemId: item.contextItemId,
+    kind: item.kind,
+    ...(mergedFrom.length > 1 ? { mergedFrom } : {}),
+    priority: item.priority,
+    reason: item.provenance.reason,
+    rank: index + 1,
+    retriever: item.provenance.retriever,
+    score: roundRankingScore(item.score ?? 0),
+    source: item.source,
+    sourceTypes: stringArrayMetadataValue(ranking, "sourceTypes"),
+  };
+}
+
+/** Builds product-safe bundle metadata describing rank fusion and final packing. */
+function rankingSummary(
+  trace: RetrievalRankingTrace,
+  packedItems: PackedContextItems,
+): Record<string, unknown> {
+  const selectedIds = new Set(packedItems.items.map((item) => item.contextItemId));
+  const droppedIds = new Set(packedItems.droppedItems.map((item) => item.contextItemId));
+
+  return {
+    candidateItemCount: trace.candidateItemCount,
+    duplicateCandidateCount: trace.duplicateCandidateCount,
+    droppedItemCount: packedItems.droppedItems.length,
+    k: trace.k,
+    mergedItemCount: trace.mergedItemCount,
+    selectedItemCount: packedItems.items.length,
+    selectedItems: trace.items.filter((item) => selectedIds.has(item.contextItemId)),
+    droppedItems: trace.items.filter((item) => droppedIds.has(item.contextItemId)),
+    sourceWeights: RANK_FUSION_SOURCE_WEIGHTS,
+    strategy: trace.strategy,
+  };
+}
+
+/** Returns the stable merge key for duplicate context candidates. */
+function contextItemMergeKey(item: ContextItem): string {
+  if (item.snippet?.chunkId) {
+    return `chunk:${item.snippet.chunkId}`;
+  }
+  if (item.kind === "changed_symbol" && item.provenance.relatedSymbolId) {
+    return `symbol:${item.provenance.relatedSymbolId}`;
+  }
+
+  const memoryFactId = metadataStringValue(item.metadata, "memoryFactId");
+  if (memoryFactId) {
+    return `memory:${memoryFactId}`;
+  }
+
+  const ruleId = metadataStringValue(item.metadata, "ruleId");
+  if (ruleId) {
+    return `rule:${ruleId}`;
+  }
+
+  if (item.snippet) {
+    return [
+      "snippet",
+      item.snippet.path,
+      item.snippet.range.startLine,
+      item.snippet.range.endLine,
+      item.snippet.contentHash ?? stableId("text", [item.snippet.text]),
+    ].join(":");
+  }
+
+  return `item:${item.contextItemId}`;
+}
+
+/** Returns the rank-fusion source type for a context item. */
+function rankingSourceType(item: ContextItem): string {
+  if (item.source === "full_text_search") return "lexical_match";
+  if (item.source === "vector_search") return "semantic_match";
+  if (item.kind === "caller") return "direct_caller";
+  if (item.kind === "callee") return "direct_callee";
+  if (item.kind === "same_file_context") return "same_file";
+  if (item.kind === "dependency") return "dependency_manifest";
+  if (item.kind === "config") return "config";
+  if (item.kind === "related_test") return "related_test";
+  if (item.kind === "repo_rule") return "repo_rule";
+  if (item.kind === "memory_fact") return "memory_fact";
+  if (item.kind === "static_analysis") return "static_analysis";
+
+  return item.kind;
+}
+
+/** Compares raw items inside one source list before rank assignment. */
+function compareRawContextItemsForSourceRank(left: ContextItem, right: ContextItem): number {
+  return (
+    rawContextItemScore(right) - rawContextItemScore(left) ||
+    right.priority - left.priority ||
+    left.tokenEstimate - right.tokenEstimate ||
+    left.contextItemId.localeCompare(right.contextItemId)
+  );
+}
+
+/** Compares scored merge states for final item order. */
+function compareScoredContextItemMergeStates(
+  left: ScoredContextItemMergeState,
+  right: ScoredContextItemMergeState,
+): number {
+  return (
+    right.adjustedScore - left.adjustedScore ||
+    right.state.primary.priority - left.state.primary.priority ||
+    left.state.primary.tokenEstimate - right.state.primary.tokenEstimate ||
+    left.state.primary.contextItemId.localeCompare(right.state.primary.contextItemId)
+  );
+}
+
+/** Returns a raw score for source-local ranking before RRF. */
+function rawContextItemScore(item: ContextItem): number {
+  return item.score ?? item.priority / 100;
+}
+
+/** Returns a fallback score for items that do not receive source observations. */
+function fallbackRankScore(item: ContextItem): number {
+  return item.priority / (100 * RANK_FUSION_K);
+}
+
+/** Applies small deterministic domain adjustments after RRF scoring. */
+function rankingMultiplierForContextItem(
+  item: ContextItem,
+  changedFiles: readonly ChangedFile[],
+): number {
+  const changedFile = changedFiles.find((file) => file.path === contextItemPath(item));
+  let multiplier = changedFile ? 1.15 : 1;
+
+  if (item.kind === "repo_rule" && item.priority >= 95) {
+    multiplier *= 1.4;
+  }
+  if (item.kind === "memory_fact") {
+    multiplier *= 1.1;
+  }
+  if (changedFile?.isGenerated || metadataBooleanValue(item.metadata, "isGenerated")) {
+    multiplier *= 0.65;
+  }
+  if (item.tokenEstimate > 2000) {
+    multiplier *= 0.75;
+  } else if (item.tokenEstimate > 1000) {
+    multiplier *= 0.85;
+  }
+
+  return multiplier;
+}
+
+/** Returns the path associated with a context item when metadata exposes one. */
+function contextItemPath(item: ContextItem): string | undefined {
+  return (
+    item.snippet?.path ??
+    metadataStringValue(item.metadata, "path") ??
+    metadataStringValue(item.metadata, "manifestPath")
+  );
+}
+
+/** Normalizes a raw score against the maximum score in the ranked set. */
+function normalizeRankingScore(score: number, maxScore: number): number {
+  if (maxScore <= 0) {
+    return 0;
+  }
+
+  return roundRankingScore(Math.max(0, Math.min(1, score / maxScore)));
+}
+
+/** Rounds a rank-fusion score for stable metadata snapshots. */
+function roundRankingScore(score: number): number {
+  return Math.round(score * 1_000_000) / 1_000_000;
+}
+
+/** Sets a number inside a nested map. */
+function setNestedNumber(
+  target: Map<string, Map<string, number>>,
+  outerKey: string,
+  innerKey: string,
+  value: number,
+): void {
+  const inner = target.get(outerKey) ?? new Map<string, number>();
+  inner.set(innerKey, value);
+  target.set(outerKey, inner);
+}
+
+/** Converts a string-keyed number map to a stable record. */
+function numberMapToRecord(values: ReadonlyMap<string, number>): Record<string, number> {
+  const record: Record<string, number> = {};
+  for (const [key, value] of [...values].sort(([left], [right]) => left.localeCompare(right))) {
+    record[key] = roundRankingScore(value);
+  }
+
+  return record;
+}
+
+/** Reads a string metadata field if present. */
+function metadataStringValue(
+  metadata: ContextItem["metadata"] | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Reads a boolean metadata field if present. */
+function metadataBooleanValue(metadata: ContextItem["metadata"] | undefined, key: string): boolean {
+  return metadata?.[key] === true;
+}
+
+/** Reads ranking metadata from a context item. */
+function contextItemRankingMetadata(item: ContextItem): Record<string, unknown> {
+  const ranking = item.metadata?.ranking;
+
+  return ranking && typeof ranking === "object" && !Array.isArray(ranking)
+    ? (ranking as Record<string, unknown>)
+    : {};
+}
+
+/** Reads a string-array field from a metadata record. */
+function stringArrayMetadataValue(
+  metadata: Record<string, unknown>,
+  key: string,
+): readonly string[] {
+  const value = metadata[key];
+
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function jsonStringArray(value: unknown): readonly string[] {
@@ -1729,7 +2197,7 @@ function packItems(items: readonly ContextItem[], maxTokens: number): PackedCont
   const dropped: ContextItem[] = [];
   let usedTokens = 0;
 
-  for (const item of [...items].sort((left, right) => right.priority - left.priority)) {
+  for (const item of [...items].sort(comparePackedContextItems)) {
     if (usedTokens + item.tokenEstimate > maxTokens) {
       dropped.push(item);
       continue;
@@ -1739,6 +2207,16 @@ function packItems(items: readonly ContextItem[], maxTokens: number): PackedCont
   }
 
   return { droppedItems: dropped, items: packed };
+}
+
+/** Sorts ranked context items for token-budget packing. */
+function comparePackedContextItems(left: ContextItem, right: ContextItem): number {
+  return (
+    (right.score ?? 0) - (left.score ?? 0) ||
+    right.priority - left.priority ||
+    left.tokenEstimate - right.tokenEstimate ||
+    left.contextItemId.localeCompare(right.contextItemId)
+  );
 }
 
 /** Combines retriever warnings with token-budget packing warnings. */
