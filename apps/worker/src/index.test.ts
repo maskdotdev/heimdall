@@ -2316,6 +2316,15 @@ describe("createWorkerStaticAnalysisRunnerFromEnvironment", () => {
     ).toThrow("local_process sandbox runner is forbidden in production.");
   });
 
+  it("rejects fake static-analysis runners in production", () => {
+    expect(() =>
+      createWorkerStaticAnalysisRunnerFromEnvironment({
+        NODE_ENV: "production",
+        STATIC_ANALYSIS_RUNNER: "fake",
+      }),
+    ).toThrow("fake sandbox runner is forbidden in production.");
+  });
+
   it("creates Docker and gVisor sandbox-backed static-analysis runners when configured", () => {
     expect(
       createWorkerStaticAnalysisRunnerFromEnvironment({

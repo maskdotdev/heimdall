@@ -1087,11 +1087,12 @@ tracked milestone.
   local file-URI roots, deny symlink escape artifacts before copying, and clean transient output
   directories. Worker runtime selection now accepts `SANDBOX_RUNNER=docker` and
   `SANDBOX_RUNNER=gvisor` with optional Docker executable, runtime, temp-root, and artifact-root
-  environment overrides. `sandbox.cleanup.v1` jobs now provide a bounded scheduled/operator cleanup
-  path for stale sandbox runs and local file artifacts, including dry-run support and repository
-  scoping. Maintenance-capable worker runtimes now enqueue idempotent recurring retention cleanup
-  jobs for sandbox runs and expired review artifact payloads with configurable interval, limits,
-  dry-run mode, and sandbox age.
+  environment overrides, and production workers now reject `fake` and `local_process` sandbox
+  runners before static-analysis tool execution can start. `sandbox.cleanup.v1` jobs now provide a
+  bounded scheduled/operator cleanup path for stale sandbox runs and local file artifacts, including
+  dry-run support and repository scoping. Maintenance-capable worker runtimes now enqueue
+  idempotent recurring retention cleanup jobs for sandbox runs and expired review artifact payloads
+  with configurable interval, limits, dry-run mode, and sandbox age.
 - Latest sandbox DB milestone: `@repo/db` now defines `sandbox_runs`, `sandbox_artifacts`, and
   `sandbox_policy_decisions`, with generated Drizzle migration and schema tests. The tables capture
   run identity, review/static-analysis ownership, runner kind, trust/category, image, command,
