@@ -1822,6 +1822,19 @@ describe("createWorkerIndexerDriverFromEnvironment", () => {
     expect(driver).toMatchObject({ name: "remote", version: "0.0.0" });
   });
 
+  it("creates a fake driver from central indexer configuration", () => {
+    const driver = createWorkerIndexerDriverFromEnvironment(
+      {
+        INDEXER_DRIVER: "fake",
+      },
+      {
+        indexArtifactRoot: ".heimdall/index-artifacts",
+      },
+    );
+
+    expect(driver).toMatchObject({ name: "fake", version: "0.0.0" });
+  });
+
   it("requires a remote base URL for remote indexer drivers", () => {
     expect(() =>
       createWorkerIndexerDriverFromEnvironment(

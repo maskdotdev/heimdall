@@ -15,7 +15,7 @@ import {
   FakeBillingProvider,
   StripeBillingProvider,
 } from "@repo/billing";
-import { loadRuntimeConfig } from "@repo/config";
+import { type IndexerConfig, loadIndexerConfig, loadRuntimeConfig } from "@repo/config";
 import {
   type BillingReconcileJobPayload,
   type EmbeddingBatchJobPayload,
@@ -82,6 +82,7 @@ import {
   assertIndexerSupportsCurrentArtifactSchema,
   type CodeIndexerDriver,
   createCliIndexerDriver,
+  createFakeIndexerDriver,
   createRemoteIndexerDriver,
   type IndexerCapabilities,
   withIndexerTelemetry,
@@ -1398,20 +1399,25 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     traces: observability.traces,
   });
   const publishThrottle = createRedisPublishThrottle(workerConnection);
-  const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
+  const indexerConfig = loadIndexerConfig(process.env, {
+    defaultArtifactRootPath: DEFAULT_INDEX_ARTIFACT_ROOT,
+    defaultTimeoutMs: DEFAULT_INDEXER_TIMEOUT_MS,
+  });
+  const indexerTimeoutMs = indexerConfig.defaultTimeoutMs;
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const repoSyncConfig = createRepoSyncConfig({
     ...(workspaceRoot ? { cacheRoot: workspaceRoot } : {}),
   });
-  const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;
+  const indexArtifactRoot = indexerConfig.artifactRootPath;
   const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
   const reviewIndexDependencyMode = createWorkerReviewIndexDependencyModeFromEnvironment(
     process.env,
   );
   const indexerDriver =
     createWorkerIndexerDriverFromEnvironment(process.env, {
+      indexerConfig,
       indexArtifactRoot,
-      ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
+      indexerTimeoutMs,
       ...(workspaceRoot ? { workspaceRoot } : {}),
     }) ?? createTypeScriptIndexerDriver();
   await verifyWorkerIndexerCapabilities(indexerDriver);
@@ -1987,49 +1993,47 @@ export function createWorkerIndexerDriverFromEnvironment(
   options: {
     /** Durable directory used to store indexer CLI request, logs, and artifact output. */
     readonly indexArtifactRoot: string;
+    /** Parsed indexer runtime configuration. */
+    readonly indexerConfig?: IndexerConfig;
     /** Optional parent directory for repo-sync workspaces. */
     readonly workspaceRoot?: string;
     /** Maximum time allowed for one indexer run. */
     readonly indexerTimeoutMs?: number;
   },
 ): CodeIndexerDriver | undefined {
-  const driverName = env.INDEXER_DRIVER ?? "in_process_ts";
-  if (driverName === "in_process_ts" || driverName === "typescript") {
+  const indexerConfig =
+    options.indexerConfig ??
+    loadIndexerConfig(env, {
+      defaultArtifactRootPath: options.indexArtifactRoot,
+      ...(options.indexerTimeoutMs ? { defaultTimeoutMs: options.indexerTimeoutMs } : {}),
+    });
+
+  if (indexerConfig.driver === "in_process_ts") {
     return undefined;
   }
-  if (driverName === "remote") {
-    const baseUrl = env.INDEXER_REMOTE_BASE_URL?.trim();
-    if (!baseUrl) {
-      throw new Error("INDEXER_REMOTE_BASE_URL is required when INDEXER_DRIVER=remote.");
-    }
-
-    const pollIntervalMs = optionalPositiveInteger(env.INDEXER_REMOTE_POLL_INTERVAL_MS);
-    const maxPollMs =
-      optionalPositiveInteger(env.INDEXER_REMOTE_MAX_POLL_MS) ?? options.indexerTimeoutMs;
-
+  if (indexerConfig.driver === "fake") {
+    return createFakeIndexerDriver();
+  }
+  if (indexerConfig.driver === "remote") {
     return createRemoteIndexerDriver({
-      baseUrl,
-      ...(env.INDEXER_REMOTE_BEARER_TOKEN ? { bearerToken: env.INDEXER_REMOTE_BEARER_TOKEN } : {}),
-      ...(pollIntervalMs ? { pollIntervalMs } : {}),
-      ...(maxPollMs ? { maxPollMs } : {}),
+      baseUrl: indexerConfig.remote.baseUrl ?? "",
+      ...(indexerConfig.remote.bearerToken
+        ? { bearerToken: indexerConfig.remote.bearerToken }
+        : {}),
+      maxPollMs: indexerConfig.remote.maxPollMs,
+      pollIntervalMs: indexerConfig.remote.pollIntervalMs,
     });
-  }
-  if (driverName !== "cli") {
-    throw new Error(`Unsupported INDEXER_DRIVER: ${driverName}`);
-  }
-
-  const command = env.INDEXER_CLI_COMMAND?.trim();
-  if (!command) {
-    throw new Error("INDEXER_CLI_COMMAND is required when INDEXER_DRIVER=cli.");
   }
 
   return createCliIndexerDriver({
-    artifactRootPath: options.indexArtifactRoot,
-    command,
-    ...(env.INDEXER_CLI_ARGS_JSON
-      ? { args: parseIndexerCliArgsJson(env.INDEXER_CLI_ARGS_JSON) }
-      : {}),
-    ...(options.indexerTimeoutMs ? { timeoutMs: options.indexerTimeoutMs } : {}),
+    artifactRootPath: indexerConfig.artifactRootPath,
+    command: indexerConfig.cli.executablePath ?? "",
+    envAllowlist: indexerConfig.cli.envAllowlist,
+    ...(indexerConfig.cli.extraArgs.length > 0 ? { args: indexerConfig.cli.extraArgs } : {}),
+    killGraceMs: indexerConfig.cli.killGraceMs,
+    stderrMaxBytes: indexerConfig.cli.stderrMaxBytes,
+    stdoutMaxBytes: indexerConfig.cli.stdoutMaxBytes,
+    timeoutMs: Math.min(indexerConfig.defaultTimeoutMs, indexerConfig.maxTimeoutMs),
     ...(options.workspaceRoot ? { workspaceRootPath: options.workspaceRoot } : {}),
   });
 }
@@ -2166,16 +2170,6 @@ function normalizeProviderSelector(value: string): string {
     .toLowerCase()
     .replaceAll(/[^a-z0-9]+/gu, "_")
     .replaceAll(/^_+|_+$/gu, "");
-}
-
-/** Parses INDEXER_CLI_ARGS_JSON into a spawn argument array. */
-function parseIndexerCliArgsJson(value: string): readonly string[] {
-  const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
-    throw new Error("INDEXER_CLI_ARGS_JSON must be a JSON array of strings.");
-  }
-
-  return parsed;
 }
 
 /** Creates a deterministic smoke-only gateway for live PR review smoke runs. */

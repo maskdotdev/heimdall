@@ -60,6 +60,94 @@ export const RuntimeConfigSchema = Type.Object(
 );
 export type RuntimeConfig = Static<typeof RuntimeConfigSchema>;
 
+/** Indexer driver modes supported by worker runtime configuration. */
+export const IndexerDriverNameSchema = Type.Union([
+  Type.Literal("in_process_ts"),
+  Type.Literal("cli"),
+  Type.Literal("remote"),
+  Type.Literal("fake"),
+]);
+export type IndexerDriverName = Static<typeof IndexerDriverNameSchema>;
+
+/** Artifact upload modes supported by the indexer boundary. */
+export const IndexerArtifactUploadModeSchema = Type.Union([
+  Type.Literal("local_only"),
+  Type.Literal("object_storage"),
+]);
+export type IndexerArtifactUploadMode = Static<typeof IndexerArtifactUploadModeSchema>;
+
+/** Index artifact record validation modes used at the driver boundary. */
+export const IndexerValidationRecordModeSchema = Type.Union([
+  Type.Literal("full"),
+  Type.Literal("manifest_only"),
+  Type.Literal("sample"),
+]);
+export type IndexerValidationRecordMode = Static<typeof IndexerValidationRecordModeSchema>;
+
+/** Remote indexer control API authentication modes. */
+export const IndexerRemoteAuthModeSchema = Type.Union([
+  Type.Literal("bearer"),
+  Type.Literal("hmac"),
+  Type.Literal("mtls"),
+  Type.Literal("none"),
+]);
+export type IndexerRemoteAuthMode = Static<typeof IndexerRemoteAuthModeSchema>;
+
+/** CLI indexer runtime configuration. */
+export const IndexerCliConfigSchema = Type.Object(
+  {
+    envAllowlist: Type.Array(Type.String({ minLength: 1 })),
+    executablePath: Type.Optional(Type.String({ minLength: 1 })),
+    extraArgs: Type.Array(Type.String()),
+    killGraceMs: Type.Integer({ minimum: 0 }),
+    stderrMaxBytes: Type.Integer({ minimum: 1 }),
+    stdoutMaxBytes: Type.Integer({ minimum: 1 }),
+    workingDirectory: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+export type IndexerCliConfig = Static<typeof IndexerCliConfigSchema>;
+
+/** Remote indexer control API configuration. */
+export const IndexerRemoteConfigSchema = Type.Object(
+  {
+    authMode: IndexerRemoteAuthModeSchema,
+    baseUrl: Type.Optional(Type.String({ minLength: 1 })),
+    bearerToken: Type.Optional(Type.String({ minLength: 1 })),
+    maxPollMs: Type.Integer({ minimum: 1 }),
+    pollIntervalMs: Type.Integer({ minimum: 1 }),
+    timeoutMs: Type.Integer({ minimum: 1 }),
+  },
+  { additionalProperties: false },
+);
+export type IndexerRemoteConfig = Static<typeof IndexerRemoteConfigSchema>;
+
+/** Runtime configuration for the indexer boundary and selected driver. */
+export const IndexerConfigSchema = Type.Object(
+  {
+    artifactRootPath: Type.String({ minLength: 1 }),
+    artifactUploadMode: IndexerArtifactUploadModeSchema,
+    cli: IndexerCliConfigSchema,
+    defaultTimeoutMs: Type.Integer({ minimum: 1 }),
+    driver: IndexerDriverNameSchema,
+    maxTimeoutMs: Type.Integer({ minimum: 1 }),
+    remote: IndexerRemoteConfigSchema,
+    validateArtifacts: Type.Boolean(),
+    validateRecordMode: IndexerValidationRecordModeSchema,
+    validationSampleSize: Type.Integer({ minimum: 1 }),
+  },
+  { additionalProperties: false },
+);
+export type IndexerConfig = Static<typeof IndexerConfigSchema>;
+
+/** Defaults accepted while loading indexer configuration in apps. */
+export type LoadIndexerConfigOptions = {
+  /** Default artifact root when no indexer artifact-root environment variable is set. */
+  readonly defaultArtifactRootPath?: string;
+  /** Default timeout when no indexer timeout environment variable is set. */
+  readonly defaultTimeoutMs?: number;
+};
+
 /** Input map used when loading configuration from process environments. */
 export type EnvironmentRecord = Readonly<Record<string, string | undefined>>;
 
@@ -131,6 +219,128 @@ export function loadRuntimeConfig(env: EnvironmentRecord = getProcessEnvironment
   throw new ConfigValidationError(issues);
 }
 
+/** Converts environment variables into the canonical indexer runtime config object. */
+export function loadIndexerConfig(
+  env: EnvironmentRecord = getProcessEnvironment(),
+  options: LoadIndexerConfigOptions = {},
+): IndexerConfig {
+  const issues: string[] = [];
+  const driver = parseIndexerDriverName(env.INDEXER_DRIVER, issues);
+  const defaultTimeoutMs =
+    parsePositiveIntegerEnv(
+      firstEnvValue(env, ["INDEXER_DEFAULT_TIMEOUT_MS", "INDEXER_TIMEOUT_MS"]),
+      "INDEXER_DEFAULT_TIMEOUT_MS",
+      issues,
+    ) ??
+    options.defaultTimeoutMs ??
+    120_000;
+  const maxTimeoutMs =
+    parsePositiveIntegerEnv(env.INDEXER_MAX_TIMEOUT_MS, "INDEXER_MAX_TIMEOUT_MS", issues) ??
+    Math.max(defaultTimeoutMs, 600_000);
+  const cliExecutablePath = firstEnvValue(env, [
+    "INDEXER_CLI_EXECUTABLE_PATH",
+    "INDEXER_CLI_COMMAND",
+  ]);
+  const remoteBearerToken = emptyToUndefined(env.INDEXER_REMOTE_BEARER_TOKEN);
+  const config = {
+    artifactRootPath:
+      firstEnvValue(env, ["INDEXER_ARTIFACT_ROOT_PATH", "INDEX_ARTIFACT_ROOT"]) ??
+      options.defaultArtifactRootPath ??
+      ".heimdall/index-artifacts",
+    artifactUploadMode: emptyToUndefined(env.INDEXER_ARTIFACT_UPLOAD_MODE) ?? "local_only",
+    cli: {
+      envAllowlist: parseStringList(env.INDEXER_CLI_ENV_ALLOWLIST) ?? [
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "NO_COLOR",
+      ],
+      ...(cliExecutablePath ? { executablePath: cliExecutablePath } : {}),
+      extraArgs: parseJsonStringArrayEnv(
+        env.INDEXER_CLI_ARGS_JSON,
+        "INDEXER_CLI_ARGS_JSON",
+        issues,
+      ),
+      killGraceMs:
+        parseNonNegativeIntegerEnv(
+          env.INDEXER_CLI_KILL_GRACE_MS,
+          "INDEXER_CLI_KILL_GRACE_MS",
+          issues,
+        ) ?? 1_000,
+      stderrMaxBytes:
+        parsePositiveIntegerEnv(
+          env.INDEXER_CLI_STDERR_MAX_BYTES,
+          "INDEXER_CLI_STDERR_MAX_BYTES",
+          issues,
+        ) ?? 64 * 1024,
+      stdoutMaxBytes:
+        parsePositiveIntegerEnv(
+          env.INDEXER_CLI_STDOUT_MAX_BYTES,
+          "INDEXER_CLI_STDOUT_MAX_BYTES",
+          issues,
+        ) ?? 64 * 1024,
+      ...(emptyToUndefined(env.INDEXER_CLI_WORKING_DIRECTORY)
+        ? { workingDirectory: emptyToUndefined(env.INDEXER_CLI_WORKING_DIRECTORY) }
+        : {}),
+    },
+    defaultTimeoutMs,
+    driver,
+    maxTimeoutMs,
+    remote: {
+      authMode:
+        emptyToUndefined(env.INDEXER_REMOTE_AUTH_MODE) ?? (remoteBearerToken ? "bearer" : "none"),
+      ...(remoteBearerToken ? { bearerToken: remoteBearerToken } : {}),
+      ...(emptyToUndefined(env.INDEXER_REMOTE_BASE_URL)
+        ? { baseUrl: emptyToUndefined(env.INDEXER_REMOTE_BASE_URL) }
+        : {}),
+      maxPollMs:
+        parsePositiveIntegerEnv(
+          env.INDEXER_REMOTE_MAX_POLL_MS,
+          "INDEXER_REMOTE_MAX_POLL_MS",
+          issues,
+        ) ?? defaultTimeoutMs,
+      pollIntervalMs:
+        parsePositiveIntegerEnv(
+          env.INDEXER_REMOTE_POLL_INTERVAL_MS,
+          "INDEXER_REMOTE_POLL_INTERVAL_MS",
+          issues,
+        ) ?? 1_000,
+      timeoutMs:
+        parsePositiveIntegerEnv(
+          env.INDEXER_REMOTE_TIMEOUT_MS,
+          "INDEXER_REMOTE_TIMEOUT_MS",
+          issues,
+        ) ?? defaultTimeoutMs,
+    },
+    validateArtifacts: parseBooleanEnv(env.INDEXER_VALIDATE_ARTIFACTS, true, issues),
+    validateRecordMode: emptyToUndefined(env.INDEXER_VALIDATE_RECORD_MODE) ?? "full",
+    validationSampleSize:
+      parsePositiveIntegerEnv(
+        env.INDEXER_VALIDATION_SAMPLE_SIZE,
+        "INDEXER_VALIDATION_SAMPLE_SIZE",
+        issues,
+      ) ?? 1_000,
+  };
+
+  if (Value.Check(IndexerConfigSchema, config)) {
+    const validationIssues = validateIndexerConfig(config);
+    const allIssues = [...issues, ...validationIssues];
+    if (allIssues.length === 0) {
+      return config;
+    }
+
+    throw new ConfigValidationError(allIssues);
+  }
+
+  const schemaIssues = [...Value.Errors(IndexerConfigSchema, config)].map((issue) => {
+    const path = issue.path === "" ? "indexerConfig" : issue.path;
+    return `${path} ${issue.message}`;
+  });
+
+  throw new ConfigValidationError([...issues, ...schemaIssues]);
+}
+
 /** Converts blank environment values to undefined. */
 function emptyToUndefined(value: string | undefined): string | undefined {
   return value && value.trim().length > 0 ? value : undefined;
@@ -146,6 +356,138 @@ function parseStringList(value: string | undefined): readonly string[] | undefin
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+/** Returns the first configured non-empty environment value from an ordered list. */
+function firstEnvValue(env: EnvironmentRecord, names: readonly string[]): string | undefined {
+  for (const name of names) {
+    const value = emptyToUndefined(env[name]);
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+/** Parses the indexer driver name and normalizes legacy aliases. */
+function parseIndexerDriverName(value: string | undefined, issues: string[]): IndexerDriverName {
+  const driver = emptyToUndefined(value) ?? "in_process_ts";
+  if (driver === "typescript") {
+    return "in_process_ts";
+  }
+  if (driver === "in_process_ts" || driver === "cli" || driver === "remote" || driver === "fake") {
+    return driver;
+  }
+
+  issues.push(`Unsupported INDEXER_DRIVER: ${driver}`);
+  return "in_process_ts";
+}
+
+/** Parses a boolean environment value with a default. */
+function parseBooleanEnv(
+  value: string | undefined,
+  defaultValue: boolean,
+  issues: string[],
+): boolean {
+  const normalized = emptyToUndefined(value);
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+
+  issues.push(`Expected boolean environment value, got: ${normalized}`);
+  return defaultValue;
+}
+
+/** Parses a positive integer environment value. */
+function parsePositiveIntegerEnv(
+  value: string | undefined,
+  name: string,
+  issues: string[],
+): number | undefined {
+  const normalized = emptyToUndefined(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(normalized, 10);
+  if (Number.isFinite(parsed) && parsed > 0 && String(parsed) === normalized) {
+    return parsed;
+  }
+
+  issues.push(`${name} must be a positive integer`);
+  return undefined;
+}
+
+/** Parses a non-negative integer environment value. */
+function parseNonNegativeIntegerEnv(
+  value: string | undefined,
+  name: string,
+  issues: string[],
+): number | undefined {
+  const normalized = emptyToUndefined(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(normalized, 10);
+  if (Number.isFinite(parsed) && parsed >= 0 && String(parsed) === normalized) {
+    return parsed;
+  }
+
+  issues.push(`${name} must be a non-negative integer`);
+  return undefined;
+}
+
+/** Parses a JSON string-array environment value. */
+function parseJsonStringArrayEnv(
+  value: string | undefined,
+  name: string,
+  issues: string[],
+): readonly string[] {
+  const normalized = emptyToUndefined(value);
+  if (!normalized) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")) {
+      return parsed;
+    }
+  } catch {
+    // Report the normalized validation issue below.
+  }
+
+  issues.push(`${name} must be a JSON array of strings`);
+  return [];
+}
+
+/** Validates cross-field indexer configuration requirements. */
+function validateIndexerConfig(config: IndexerConfig): readonly string[] {
+  const issues: string[] = [];
+  if (config.defaultTimeoutMs > config.maxTimeoutMs) {
+    issues.push("INDEXER_DEFAULT_TIMEOUT_MS must be less than or equal to INDEXER_MAX_TIMEOUT_MS");
+  }
+  if (config.driver === "cli" && !config.cli.executablePath) {
+    issues.push(
+      "INDEXER_CLI_EXECUTABLE_PATH or INDEXER_CLI_COMMAND is required when INDEXER_DRIVER=cli.",
+    );
+  }
+  if (config.driver === "remote" && !config.remote.baseUrl) {
+    issues.push("INDEXER_REMOTE_BASE_URL is required when INDEXER_DRIVER=remote.");
+  }
+  if (config.remote.authMode === "bearer" && !config.remote.bearerToken) {
+    issues.push("INDEXER_REMOTE_BEARER_TOKEN is required when INDEXER_REMOTE_AUTH_MODE=bearer.");
+  }
+
+  return issues;
 }
 
 /** Validates fail-closed admin control-plane configuration. */
