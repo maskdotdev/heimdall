@@ -14,6 +14,7 @@ import {
 import { createFakeToolRunner } from "@repo/tool-runner";
 import { describe, expect, it } from "vitest";
 import {
+  compareStaticAnalysisDiagnosticBaselines,
   createNormalizedToolDiagnostic,
   DEFAULT_STATIC_ANALYSIS_BUDGETS,
   parseToolOutputDiagnostics,
@@ -303,6 +304,66 @@ describe("static analysis", () => {
       isOnChangedLine: true,
       ruleId: "no-unsafe-number",
     });
+  });
+
+  it("compares base and head diagnostics by stable fingerprint", () => {
+    const baseExistingDiagnostic = createNormalizedToolDiagnostic({
+      location: { filePath: "src/math.ts", startLine: 2 },
+      message: "Unexpected number coercion.",
+      ruleId: "no-unsafe-number",
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "eslint",
+      toolRunId: "str_base_existing",
+    });
+    const baseFixedDiagnostic = createNormalizedToolDiagnostic({
+      location: { filePath: "src/math.ts", startLine: 1 },
+      message: "Unused temporary value.",
+      ruleId: "no-unused-vars",
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "eslint",
+      toolRunId: "str_base_fixed",
+    });
+    const headExistingDiagnostic = createNormalizedToolDiagnostic({
+      location: { filePath: "src/math.ts", startLine: 2 },
+      message: "Unexpected number coercion.",
+      ruleId: "no-unsafe-number",
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "eslint",
+      toolRunId: "str_head_existing",
+    });
+    const headNewDiagnostic = createNormalizedToolDiagnostic({
+      location: { filePath: "src/math.ts", startLine: 2 },
+      message: "'total' is not defined.",
+      ruleId: "no-undef",
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "eslint",
+      toolRunId: "str_head_new",
+    });
+
+    const comparison = compareStaticAnalysisDiagnosticBaselines({
+      baseDiagnostics: [baseExistingDiagnostic, baseFixedDiagnostic],
+      headDiagnostics: [headExistingDiagnostic, headNewDiagnostic],
+      includeFixedDiagnostics: true,
+    });
+
+    expect(comparison.summary).toEqual({
+      baseDiagnosticCount: 2,
+      existingDiagnosticCount: 1,
+      fixedDiagnosticCount: 1,
+      headDiagnosticCount: 2,
+      newDiagnosticCount: 1,
+    });
+    expect(
+      comparison.diagnostics.map((diagnostic) => ({
+        baselineStatus: diagnostic.baselineStatus,
+        introducedByPr: diagnostic.introducedByPr,
+        ruleId: diagnostic.ruleId,
+      })),
+    ).toEqual([
+      { baselineStatus: "existing", introducedByPr: false, ruleId: "no-unsafe-number" },
+      { baselineStatus: "new", introducedByPr: true, ruleId: "no-undef" },
+      { baselineStatus: "fixed", introducedByPr: false, ruleId: "no-unused-vars" },
+    ]);
   });
 
   it("builds a deterministic report from fake runner output", async () => {

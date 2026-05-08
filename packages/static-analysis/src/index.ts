@@ -275,12 +275,46 @@ export type NormalizedToolDiagnostic = {
   readonly isOnChangedLine: boolean;
   /** Whether the primary location is in a changed file. */
   readonly isInChangedFile: boolean;
+  /** Whether base/head comparison classified the diagnostic as introduced by the PR. */
+  readonly introducedByPr?: boolean | undefined;
   /** Baseline status for base/head comparison. */
   readonly baselineStatus: "unknown" | "new" | "existing" | "fixed";
   /** Trust level of the parsed source. */
   readonly sourceTrust: "tool_output" | "parsed_text" | "adapter_inferred";
   /** Product-safe metadata. */
   readonly metadata: Readonly<Record<string, unknown>>;
+};
+
+/** Input for comparing normalized diagnostics from base and head analysis runs. */
+export type StaticAnalysisBaselineComparisonInput = {
+  /** Diagnostics parsed from the base commit analysis run. */
+  readonly baseDiagnostics: readonly NormalizedToolDiagnostic[];
+  /** Diagnostics parsed from the head commit analysis run. */
+  readonly headDiagnostics: readonly NormalizedToolDiagnostic[];
+  /** Whether base-only diagnostics should be returned as fixed diagnostics. */
+  readonly includeFixedDiagnostics?: boolean | undefined;
+};
+
+/** Summary of one static-analysis base/head diagnostic comparison. */
+export type StaticAnalysisBaselineComparisonSummary = {
+  /** Diagnostics present in the base input. */
+  readonly baseDiagnosticCount: number;
+  /** Diagnostics present in both base and head inputs. */
+  readonly existingDiagnosticCount: number;
+  /** Base diagnostics absent from the head input and returned when fixed diagnostics are included. */
+  readonly fixedDiagnosticCount: number;
+  /** Diagnostics present in the head input. */
+  readonly headDiagnosticCount: number;
+  /** Head diagnostics absent from the base input. */
+  readonly newDiagnosticCount: number;
+};
+
+/** Result from comparing normalized diagnostics from base and head analysis runs. */
+export type StaticAnalysisBaselineComparisonResult = {
+  /** Diagnostics with baseline status applied. */
+  readonly diagnostics: readonly NormalizedToolDiagnostic[];
+  /** Aggregate comparison counters. */
+  readonly summary: StaticAnalysisBaselineComparisonSummary;
 };
 
 /** Static-analysis warning. */
@@ -983,6 +1017,44 @@ export function createNormalizedToolDiagnostic(
     sourceTrust: input.sourceTrust ?? "tool_output",
     tool: input.tool,
     toolRunId: input.toolRunId,
+  };
+}
+
+/** Compares base and head diagnostics and marks baseline status by stable fingerprint. */
+export function compareStaticAnalysisDiagnosticBaselines(
+  input: StaticAnalysisBaselineComparisonInput,
+): StaticAnalysisBaselineComparisonResult {
+  const baseFingerprints = new Set(
+    input.baseDiagnostics.map((diagnostic) => diagnostic.fingerprint),
+  );
+  const headFingerprints = new Set(
+    input.headDiagnostics.map((diagnostic) => diagnostic.fingerprint),
+  );
+  const headDiagnostics = input.headDiagnostics.map((diagnostic) =>
+    diagnosticWithBaselineStatus(
+      diagnostic,
+      baseFingerprints.has(diagnostic.fingerprint) ? "existing" : "new",
+    ),
+  );
+  const fixedDiagnostics = input.includeFixedDiagnostics
+    ? input.baseDiagnostics
+        .filter((diagnostic) => !headFingerprints.has(diagnostic.fingerprint))
+        .map((diagnostic) => diagnosticWithBaselineStatus(diagnostic, "fixed"))
+    : [];
+  const newDiagnosticCount = headDiagnostics.filter(
+    (diagnostic) => diagnostic.baselineStatus === "new",
+  ).length;
+  const existingDiagnosticCount = headDiagnostics.length - newDiagnosticCount;
+
+  return {
+    diagnostics: [...headDiagnostics, ...fixedDiagnostics],
+    summary: {
+      baseDiagnosticCount: input.baseDiagnostics.length,
+      existingDiagnosticCount,
+      fixedDiagnosticCount: fixedDiagnostics.length,
+      headDiagnosticCount: input.headDiagnostics.length,
+      newDiagnosticCount,
+    },
   };
 }
 
@@ -3329,6 +3401,18 @@ function toolNetworkPolicy(tool: StaticToolName): ToolCommandSpec["networkPolicy
   }
 
   return "none";
+}
+
+/** Returns a diagnostic copy with base/head baseline metadata applied. */
+function diagnosticWithBaselineStatus(
+  diagnostic: NormalizedToolDiagnostic,
+  baselineStatus: NormalizedToolDiagnostic["baselineStatus"],
+): NormalizedToolDiagnostic {
+  return {
+    ...diagnostic,
+    baselineStatus,
+    introducedByPr: baselineStatus === "new",
+  };
 }
 
 /** Converts a runner result into a report run summary. */
