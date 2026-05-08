@@ -26,6 +26,7 @@ const githubPatPattern = /\bgithub_pat_[A-Za-z0-9_]+\b/gu;
 const bearerTokenPattern = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu;
 const authorizationHeaderPattern = /\bAuthorization:\s*[^\r\n]+/giu;
 const xAccessTokenPattern = /(x-access-token:)[^@\s/]+/giu;
+const fullCommitShaPattern = /^[0-9a-f]{40}$/u;
 const windowsDrivePathPattern = /^[A-Za-z]:($|[\\/])/u;
 
 declare const repoPathBrand: unique symbol;
@@ -197,6 +198,7 @@ export async function syncRepositoryWorkspace(
   input: SyncRepositoryWorkspaceInput,
   dependencies: SyncRepositoryWorkspaceDependencies,
 ): Promise<SyncRepositoryWorkspaceResult> {
+  assertFullCommitSha(input.commitSha);
   const telemetry = startRepoSyncTelemetry(input, dependencies);
   const workspaceRoot = resolve(input.workspaceRoot ?? tmpdir());
   const workspacePath = await mkdtemp(join(workspaceRoot, managedWorkspacePrefix));
@@ -214,7 +216,7 @@ export async function syncRepositoryWorkspace(
     await git(["init"], { cwd: workspacePath });
     await git(["remote", "add", "origin", cloneUrl], { cwd: workspacePath });
     askPassPath = await createGitAskPassScript(workspacePath);
-    await git(["fetch", "--depth=1", "origin", input.commitSha], {
+    await git(["fetch", "--depth=1", "--no-tags", "origin", input.commitSha], {
       cwd: workspacePath,
       env: gitAskPassEnvironment(cloneAuth, askPassPath),
       redact: [cloneAuth.password],
@@ -379,6 +381,13 @@ export function createAuthenticatedCloneUrl(input: {
   url.username = input.username;
   url.password = input.password;
   return url.toString();
+}
+
+/** Throws unless the input is a lowercase full-length Git commit SHA. */
+export function assertFullCommitSha(input: string): void {
+  if (!fullCommitShaPattern.test(input)) {
+    throw new Error("Repository sync requires a lowercase 40-character commit SHA.");
+  }
 }
 
 /** Creates a Git command runner with timeout and redacted failure handling. */

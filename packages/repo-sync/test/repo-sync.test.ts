@@ -13,6 +13,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertAllowedGitUrl,
+  assertFullCommitSha,
   assertInsideRoot,
   assertSafeRepositoryWorkspaceCleanupPath,
   cleanupRepositoryWorkspace,
@@ -116,7 +117,7 @@ describe("repo sync workspace", () => {
     expect(mutableCommands).toEqual([
       ["init"],
       ["remote", "add", "origin", "https://github.com/acme/api.git"],
-      ["fetch", "--depth=1", "origin", commitSha],
+      ["fetch", "--depth=1", "--no-tags", "origin", commitSha],
       ["checkout", "--detach", commitSha],
       ["rev-parse", "HEAD"],
     ]);
@@ -288,6 +289,47 @@ describe("repo sync workspace", () => {
         password: "token:with@chars",
       }),
     ).toBe("https://x-access-token:token%3Awith%40chars@github.com/acme/api.git");
+  });
+
+  it("requires lowercase full-length commit SHAs before running Git", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-sha-test-"));
+    workspaceRoots.push(workspaceRoot);
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      return "";
+    };
+
+    expect(() => assertFullCommitSha(commitSha)).not.toThrow();
+    expect(() => assertFullCommitSha("main")).toThrow("40-character commit SHA");
+    expect(() => assertFullCommitSha(commitSha.toUpperCase())).toThrow("40-character commit SHA");
+
+    await expect(
+      syncRepositoryWorkspace(
+        {
+          provider: "github",
+          installationId: "inst_test",
+          providerInstallationId: "99",
+          owner: "acme",
+          repo: "api",
+          commitSha: "main",
+          repoId: "repo_sync_test",
+          workspaceRoot,
+        },
+        {
+          gitProvider: {
+            getCloneAuth: async () => ({
+              cloneUrl: "https://github.com/acme/api.git",
+              username: "x-access-token",
+              password: "token-123",
+              expiresAt: "2026-01-01T01:00:00.000Z",
+            }),
+          },
+          gitRunner,
+        },
+      ),
+    ).rejects.toThrow("40-character commit SHA");
+    expect(mutableCommands).toEqual([]);
   });
 
   it("runs commands through the timeout-aware Git runner", async () => {
