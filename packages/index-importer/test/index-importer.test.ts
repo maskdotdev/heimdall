@@ -368,6 +368,60 @@ describe("createFileSystemIndexArtifactResolver", () => {
     ]);
   });
 
+  it("copies remote whole-artifact JSON into the configured object store", async () => {
+    const requests: { readonly init: RequestInit; readonly url: string }[] = [];
+    const store = createS3CompatibleIndexArtifactStore({
+      accessKeyId: "AKIA_TEST",
+      bucket: "heimdall-index-artifacts",
+      endpoint: "https://objects.example.test",
+      fetch: async (input, init) => {
+        requests.push({
+          init: init ?? {},
+          url: input.toString(),
+        });
+
+        return new Response(null, { status: 200 });
+      },
+      keyPrefix: "indexer",
+      now: () => new Date("2026-05-07T12:00:00.000Z"),
+      region: "auto",
+      secretAccessKey: "secret",
+    });
+    if (!store.copyArtifact) {
+      throw new Error("Expected S3-compatible index artifact store to support copyArtifact.");
+    }
+
+    const result = await store.copyArtifact({
+      artifact: emptyArtifact(),
+      sourceUri: "r2://heimdall-index-artifacts/remote/repo_1/artifact.json",
+    });
+
+    expect(result).toMatchObject({
+      hash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      sizeBytes: JSON.stringify(emptyArtifact()).length,
+      uri: expect.stringMatching(
+        /^s3:\/\/heimdall-index-artifacts\/indexer\/index-artifacts\/repo_1\/abc1234-[a-f0-9]+\.json$/u,
+      ),
+    });
+    expect(requests).toEqual([
+      expect.objectContaining({
+        init: expect.objectContaining({
+          headers: expect.objectContaining({
+            authorization: expect.stringContaining(
+              "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-copy-source;x-amz-date;x-amz-meta-sha256;x-amz-meta-size-bytes;x-amz-metadata-directive",
+            ),
+            "x-amz-copy-source": "/heimdall-index-artifacts/remote/repo_1/artifact.json",
+            "x-amz-date": "20260507T120000Z",
+          }),
+          method: "PUT",
+        }),
+        url: expect.stringMatching(
+          /^https:\/\/objects\.example\.test\/heimdall-index-artifacts\/indexer\/index-artifacts\/repo_1\/abc1234-[a-f0-9]+\.json$/u,
+        ),
+      }),
+    ]);
+  });
+
   it("creates an S3-compatible store from environment object-storage settings", async () => {
     const originalFetch = globalThis.fetch;
     const requestedUrls: string[] = [];

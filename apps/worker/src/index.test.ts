@@ -1899,6 +1899,37 @@ describe("persistIndexArtifactForImport", () => {
     expect(artifactStore.putArtifact).toHaveBeenCalledWith(artifact);
   });
 
+  it("copies remote artifacts when object storage upload mode receives a source URI", async () => {
+    const artifact = workerIndexArtifact();
+    const artifactStore = {
+      copyArtifact: vi.fn(async () => ({
+        hash: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const,
+        sizeBytes: 128,
+        uri: "s3://heimdall-index-artifacts/copied/repo_1/artifact.json",
+      })),
+      putArtifact: vi.fn(async () => ({
+        hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
+        sizeBytes: 128,
+        uri: "s3://heimdall-index-artifacts/uploaded/repo_1/artifact.json",
+      })),
+    };
+
+    await expect(
+      persistIndexArtifactForImport({
+        artifact,
+        artifactStore,
+        root: "/tmp/unused",
+        sourceArtifactUri: "s3://remote-indexer/repo_1/artifact.json",
+        uploadMode: "object_storage",
+      }),
+    ).resolves.toBe("s3://heimdall-index-artifacts/copied/repo_1/artifact.json");
+    expect(artifactStore.copyArtifact).toHaveBeenCalledWith({
+      artifact,
+      sourceUri: "s3://remote-indexer/repo_1/artifact.json",
+    });
+    expect(artifactStore.putArtifact).not.toHaveBeenCalled();
+  });
+
   it("fails object-storage upload mode without an artifact store", async () => {
     await expect(
       persistIndexArtifactForImport({
