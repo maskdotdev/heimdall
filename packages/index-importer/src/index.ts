@@ -14,12 +14,13 @@ import {
   codeDependencies,
   codeEdges,
   codeIndexDiagnostics,
-  codeIndexVersions,
   codeRoutes,
   codeTestMappings,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
+  type IndexVersionImportRecord,
+  IndexVersionRepository,
   indexedFiles,
   indexImportBatches,
   RepositoryRepository,
@@ -339,30 +340,7 @@ type DrizzleBatchIndexImportRecordWriterOptions = {
   readonly tx: Pick<HeimdallDatabase, "insert">;
 };
 
-type ExistingIndexVersionForImport = {
-  /** Artifact hash stored for the existing index version, when present. */
-  readonly artifactHash: string | null;
-  /** Number of chunks recorded on the existing index version. */
-  readonly chunkCount: number;
-  /** Number of dependencies recorded on the existing index version. */
-  readonly dependencyCount: number;
-  /** Number of diagnostics recorded on the existing index version. */
-  readonly diagnosticCount: number;
-  /** Number of edges recorded on the existing index version. */
-  readonly edgeCount: number;
-  /** Number of files recorded on the existing index version. */
-  readonly fileCount: number;
-  /** Existing index version ID. */
-  readonly indexVersionId: string;
-  /** Number of routes recorded on the existing index version. */
-  readonly routeCount: number;
-  /** Number of symbols recorded on the existing index version. */
-  readonly symbolCount: number;
-  /** Existing index version status. */
-  readonly status: string;
-  /** Number of test mappings recorded on the existing index version. */
-  readonly testMappingCount: number;
-};
+type ExistingIndexVersionForImport = IndexVersionImportRecord;
 
 type IndexImporterTelemetryState = {
   /** Low-cardinality labels shared by index-import metrics. */
@@ -556,54 +534,27 @@ export async function importIndexArtifact(
     }
 
     await options.db.transaction(async (tx) => {
-      await tx
-        .insert(codeIndexVersions)
-        .values({
-          indexVersionId: importPlan.indexVersionId,
-          repoId: artifact.manifest.repoId,
-          commitSha: artifact.manifest.commitSha,
-          indexKey: importPlan.indexKey,
-          status: "importing",
-          artifactUri: options.artifactUri,
-          artifactHash: importPlan.artifactHash,
-          indexerName: artifact.manifest.indexerName,
-          indexerVersion: artifact.manifest.indexerVersion,
-          chunkerVersion: artifact.manifest.chunkerVersion,
-          fileCount: importPlan.files.length,
-          symbolCount: importPlan.symbolRecords.length,
-          edgeCount: importPlan.edgeRecords.length,
+      await new IndexVersionRepository(tx).upsertImportingIndexVersion({
+        artifactHash: importPlan.artifactHash,
+        artifactUri: options.artifactUri,
+        chunkerVersion: artifact.manifest.chunkerVersion,
+        commitSha: artifact.manifest.commitSha,
+        counts: {
           chunkCount: importPlan.chunks.length,
-          diagnosticCount: importPlan.diagnostics.length,
           dependencyCount: importPlan.dependencies.length,
+          diagnosticCount: importPlan.diagnostics.length,
+          edgeCount: importPlan.edgeRecords.length,
+          fileCount: importPlan.files.length,
           routeCount: importPlan.routes.length,
+          symbolCount: importPlan.symbolRecords.length,
           testMappingCount: importPlan.testMappings.length,
-          embeddedChunkCount: 0,
-          completedAt: null,
-          error: null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            codeIndexVersions.repoId,
-            codeIndexVersions.commitSha,
-            codeIndexVersions.indexKey,
-            codeIndexVersions.artifactHash,
-          ],
-          set: {
-            status: "importing",
-            artifactUri: options.artifactUri,
-            artifactHash: importPlan.artifactHash,
-            fileCount: importPlan.files.length,
-            symbolCount: importPlan.symbolRecords.length,
-            edgeCount: importPlan.edgeRecords.length,
-            chunkCount: importPlan.chunks.length,
-            diagnosticCount: importPlan.diagnostics.length,
-            dependencyCount: importPlan.dependencies.length,
-            routeCount: importPlan.routes.length,
-            testMappingCount: importPlan.testMappings.length,
-            completedAt: null,
-            error: null,
-          },
-        });
+        },
+        indexerName: artifact.manifest.indexerName,
+        indexerVersion: artifact.manifest.indexerVersion,
+        indexKey: importPlan.indexKey,
+        indexVersionId: importPlan.indexVersionId,
+        repoId: artifact.manifest.repoId,
+      });
 
       await tx
         .update(indexImportBatches)
@@ -732,13 +683,10 @@ export async function reconcileStaleIndexImports(
     }
 
     for (const indexVersionId of indexVersionIds) {
-      await tx
-        .update(codeIndexVersions)
-        .set({
-          error: serializedError,
-          status: "failed",
-        })
-        .where(eq(codeIndexVersions.indexVersionId, indexVersionId));
+      await new IndexVersionRepository(tx).markIndexVersionFailedRecord({
+        error: serializedError,
+        indexVersionId,
+      });
     }
   });
 
@@ -758,19 +706,17 @@ export async function reconcileStaleIndexImports(
 export async function cleanupIndexImportRows(
   options: CleanupIndexImportRowsOptions,
 ): Promise<CleanupIndexImportRowsResult> {
-  const [row] = await options.db
-    .select({ status: codeIndexVersions.status })
-    .from(codeIndexVersions)
-    .where(eq(codeIndexVersions.indexVersionId, options.indexVersionId))
-    .limit(1);
+  const status = await new IndexVersionRepository(options.db).getIndexVersionStatus(
+    options.indexVersionId,
+  );
 
-  if (!row) {
+  if (!status) {
     throw new Error(`Index version ${options.indexVersionId} was not found.`);
   }
 
-  if (!options.force && row.status !== "failed") {
+  if (!options.force && status !== "failed") {
     throw new Error(
-      `Refusing to cleanup index version ${options.indexVersionId} with status ${row.status}. Use --force only for a documented break-glass cleanup.`,
+      `Refusing to cleanup index version ${options.indexVersionId} with status ${status}. Use --force only for a documented break-glass cleanup.`,
     );
   }
 
@@ -788,7 +734,7 @@ export async function cleanupIndexImportRows(
     embeddingJobIds,
     force: options.force ?? false,
     indexVersionId: options.indexVersionId,
-    status: row.status,
+    status,
   };
 }
 
@@ -1014,14 +960,10 @@ async function completeIndexImportBatch(
   const now = new Date();
 
   await db.transaction(async (tx) => {
-    await tx
-      .update(codeIndexVersions)
-      .set({
-        completedAt: new Date(artifact.manifest.generatedAt),
-        error: null,
-        status: "ready",
-      })
-      .where(eq(codeIndexVersions.indexVersionId, plan.indexVersionId));
+    await new IndexVersionRepository(tx).markIndexVersionReadyRecord({
+      completedAt: new Date(artifact.manifest.generatedAt),
+      indexVersionId: plan.indexVersionId,
+    });
 
     await tx
       .update(indexImportBatches)
@@ -1042,32 +984,12 @@ async function findExistingIndexVersionForImport(
   artifact: IndexArtifact,
   plan: IndexImportPlan,
 ): Promise<ExistingIndexVersionForImport | undefined> {
-  const [row] = await db
-    .select({
-      artifactHash: codeIndexVersions.artifactHash,
-      chunkCount: codeIndexVersions.chunkCount,
-      dependencyCount: codeIndexVersions.dependencyCount,
-      diagnosticCount: codeIndexVersions.diagnosticCount,
-      edgeCount: codeIndexVersions.edgeCount,
-      fileCount: codeIndexVersions.fileCount,
-      indexVersionId: codeIndexVersions.indexVersionId,
-      routeCount: codeIndexVersions.routeCount,
-      status: codeIndexVersions.status,
-      symbolCount: codeIndexVersions.symbolCount,
-      testMappingCount: codeIndexVersions.testMappingCount,
-    })
-    .from(codeIndexVersions)
-    .where(
-      and(
-        eq(codeIndexVersions.repoId, artifact.manifest.repoId),
-        eq(codeIndexVersions.commitSha, artifact.manifest.commitSha),
-        eq(codeIndexVersions.indexKey, plan.indexKey),
-        eq(codeIndexVersions.artifactHash, plan.artifactHash),
-      ),
-    )
-    .limit(1);
-
-  return row;
+  return new IndexVersionRepository(db).findIndexVersionForImport({
+    artifactHash: plan.artifactHash,
+    commitSha: artifact.manifest.commitSha,
+    indexKey: plan.indexKey,
+    repoId: artifact.manifest.repoId,
+  });
 }
 
 /** Marks the visible import batch and its index version as failed. */
@@ -1090,13 +1012,10 @@ async function markIndexImportBatchFailed(
     })
     .where(eq(indexImportBatches.indexImportBatchId, plan.importBatchId));
 
-  await db
-    .update(codeIndexVersions)
-    .set({
-      error: serializedError,
-      status: "failed",
-    })
-    .where(eq(codeIndexVersions.indexVersionId, plan.indexVersionId));
+  await new IndexVersionRepository(db).markIndexVersionFailedRecord({
+    error: serializedError,
+    indexVersionId: plan.indexVersionId,
+  });
 
   await cleanupFailedIndexImportRows(db, plan).catch(() => undefined);
 }

@@ -6,6 +6,9 @@ import { toCodeIndexVersion } from "./row-mappers";
 
 type CodeIndexVersionRow = typeof codeIndexVersions.$inferSelect;
 
+/** Database surface required by index version repository methods. */
+type IndexVersionRepositoryDatabase = Pick<HeimdallDatabase, "insert" | "select" | "update">;
+
 /** Natural lookup key for an index version. */
 export type IndexVersionLookupInput = {
   /** Repository ID that owns the index version. */
@@ -78,6 +81,68 @@ export type IndexVersionRecord = {
   readonly createdAt: Date;
 };
 
+/** Natural import key for one deterministic index artifact import. */
+export type IndexVersionImportLookupInput = {
+  /** Repository ID carried by the index artifact manifest. */
+  readonly repoId: string;
+  /** Commit SHA carried by the index artifact manifest. */
+  readonly commitSha: string;
+  /** Stable indexer/chunker key. */
+  readonly indexKey: string;
+  /** Artifact content hash used for idempotency. */
+  readonly artifactHash: string;
+};
+
+/** Existing index version fields used by artifact import idempotency checks. */
+export type IndexVersionImportRecord = Pick<
+  IndexVersionRecord,
+  | "artifactHash"
+  | "chunkCount"
+  | "dependencyCount"
+  | "diagnosticCount"
+  | "edgeCount"
+  | "fileCount"
+  | "indexVersionId"
+  | "routeCount"
+  | "status"
+  | "symbolCount"
+  | "testMappingCount"
+>;
+
+/** Input used to create or refresh an importing index version. */
+export type UpsertImportingIndexVersionInput = {
+  /** Deterministic index version ID. */
+  readonly indexVersionId: string;
+  /** Repository ID carried by the artifact. */
+  readonly repoId: string;
+  /** Commit SHA carried by the artifact. */
+  readonly commitSha: string;
+  /** Stable indexer/chunker key. */
+  readonly indexKey: string;
+  /** Artifact URI being imported. */
+  readonly artifactUri: string;
+  /** Artifact content hash used for idempotency. */
+  readonly artifactHash: string;
+  /** Indexer implementation name. */
+  readonly indexerName: string;
+  /** Indexer implementation version. */
+  readonly indexerVersion: string;
+  /** Chunker implementation version. */
+  readonly chunkerVersion: string;
+  /** Imported entity counts available before record writes begin. */
+  readonly counts: Pick<
+    IndexVersionRecord,
+    | "chunkCount"
+    | "dependencyCount"
+    | "diagnosticCount"
+    | "edgeCount"
+    | "fileCount"
+    | "routeCount"
+    | "symbolCount"
+    | "testMappingCount"
+  >;
+};
+
 /** Input used to mark an index version ready. */
 export type MarkIndexReadyInput = {
   /** Index version ID to update. */
@@ -102,6 +167,22 @@ export type MarkIndexFailedInput = {
   readonly completedAt?: string;
 };
 
+/** Input used to store a serialized importer failure without altering completion time. */
+export type MarkIndexVersionFailedRecordInput = {
+  /** Index version ID to update. */
+  readonly indexVersionId: string;
+  /** Serialized failure payload to persist. */
+  readonly error: unknown;
+};
+
+/** Input used to mark an already-counted index version ready. */
+export type MarkIndexVersionReadyRecordInput = {
+  /** Index version ID to update. */
+  readonly indexVersionId: string;
+  /** Completion timestamp from the imported artifact manifest. */
+  readonly completedAt: Date;
+};
+
 /** Returns a row from a write query or throws when the database returned nothing. */
 const requireReturnedRow = <T>(row: T | undefined): T => {
   if (!row) {
@@ -118,7 +199,7 @@ const indexKeyFor = (indexVersion: CodeIndexVersion): string =>
 /** Query helper for code index version metadata. */
 export class IndexVersionRepository {
   /** Creates an index version query helper. */
-  public constructor(private readonly db: HeimdallDatabase) {}
+  public constructor(private readonly db: IndexVersionRepositoryDatabase) {}
 
   /** Creates or updates an index version idempotently. */
   public async createIndexVersion(indexVersion: CodeIndexVersion): Promise<CodeIndexVersion> {
@@ -224,6 +305,101 @@ export class IndexVersionRepository {
     return row ? toIndexVersionRecord(row) : undefined;
   }
 
+  /** Gets one index version status by ID. */
+  public async getIndexVersionStatus(indexVersionId: string): Promise<string | undefined> {
+    const [row] = await this.db
+      .select({ status: codeIndexVersions.status })
+      .from(codeIndexVersions)
+      .where(eq(codeIndexVersions.indexVersionId, indexVersionId))
+      .limit(1);
+
+    return row?.status;
+  }
+
+  /** Finds an existing index version for an artifact import idempotency key. */
+  public async findIndexVersionForImport(
+    input: IndexVersionImportLookupInput,
+  ): Promise<IndexVersionImportRecord | undefined> {
+    const [row] = await this.db
+      .select({
+        artifactHash: codeIndexVersions.artifactHash,
+        chunkCount: codeIndexVersions.chunkCount,
+        dependencyCount: codeIndexVersions.dependencyCount,
+        diagnosticCount: codeIndexVersions.diagnosticCount,
+        edgeCount: codeIndexVersions.edgeCount,
+        fileCount: codeIndexVersions.fileCount,
+        indexVersionId: codeIndexVersions.indexVersionId,
+        routeCount: codeIndexVersions.routeCount,
+        status: codeIndexVersions.status,
+        symbolCount: codeIndexVersions.symbolCount,
+        testMappingCount: codeIndexVersions.testMappingCount,
+      })
+      .from(codeIndexVersions)
+      .where(
+        and(
+          eq(codeIndexVersions.repoId, input.repoId),
+          eq(codeIndexVersions.commitSha, input.commitSha),
+          eq(codeIndexVersions.indexKey, input.indexKey),
+          eq(codeIndexVersions.artifactHash, input.artifactHash),
+        ),
+      )
+      .limit(1);
+
+    return row;
+  }
+
+  /** Inserts or refreshes an importing index version for an artifact import. */
+  public async upsertImportingIndexVersion(input: UpsertImportingIndexVersionInput): Promise<void> {
+    await this.db
+      .insert(codeIndexVersions)
+      .values({
+        artifactHash: input.artifactHash,
+        artifactUri: input.artifactUri,
+        chunkCount: input.counts.chunkCount,
+        chunkerVersion: input.chunkerVersion,
+        commitSha: input.commitSha,
+        completedAt: null,
+        dependencyCount: input.counts.dependencyCount,
+        diagnosticCount: input.counts.diagnosticCount,
+        edgeCount: input.counts.edgeCount,
+        embeddedChunkCount: 0,
+        error: null,
+        fileCount: input.counts.fileCount,
+        indexKey: input.indexKey,
+        indexerName: input.indexerName,
+        indexerVersion: input.indexerVersion,
+        indexVersionId: input.indexVersionId,
+        repoId: input.repoId,
+        routeCount: input.counts.routeCount,
+        status: "importing",
+        symbolCount: input.counts.symbolCount,
+        testMappingCount: input.counts.testMappingCount,
+      })
+      .onConflictDoUpdate({
+        target: [
+          codeIndexVersions.repoId,
+          codeIndexVersions.commitSha,
+          codeIndexVersions.indexKey,
+          codeIndexVersions.artifactHash,
+        ],
+        set: {
+          artifactHash: input.artifactHash,
+          artifactUri: input.artifactUri,
+          chunkCount: input.counts.chunkCount,
+          completedAt: null,
+          dependencyCount: input.counts.dependencyCount,
+          diagnosticCount: input.counts.diagnosticCount,
+          edgeCount: input.counts.edgeCount,
+          error: null,
+          fileCount: input.counts.fileCount,
+          routeCount: input.counts.routeCount,
+          status: "importing",
+          symbolCount: input.counts.symbolCount,
+          testMappingCount: input.counts.testMappingCount,
+        },
+      });
+  }
+
   /** Marks an index version as importing. */
   public async markIndexImporting(indexVersionId: string): Promise<CodeIndexVersion> {
     const [row] = await this.db
@@ -272,6 +448,31 @@ export class IndexVersionRepository {
       .returning();
 
     return toCodeIndexVersion(requireReturnedRow(row));
+  }
+
+  /** Marks an index version failed with a caller-provided serialized error payload. */
+  public async markIndexVersionFailedRecord(
+    input: MarkIndexVersionFailedRecordInput,
+  ): Promise<void> {
+    await this.db
+      .update(codeIndexVersions)
+      .set({
+        error: input.error,
+        status: "failed",
+      })
+      .where(eq(codeIndexVersions.indexVersionId, input.indexVersionId));
+  }
+
+  /** Marks an index version ready without changing its precomputed import counts. */
+  public async markIndexVersionReadyRecord(input: MarkIndexVersionReadyRecordInput): Promise<void> {
+    await this.db
+      .update(codeIndexVersions)
+      .set({
+        completedAt: input.completedAt,
+        error: null,
+        status: "ready",
+      })
+      .where(eq(codeIndexVersions.indexVersionId, input.indexVersionId));
   }
 }
 

@@ -84,6 +84,61 @@ describe.runIf(integrationDatabaseUrl)("IndexVersionRepository integration", () 
       routeCount: 0,
       testMappingCount: 0,
     });
+    await indexVersionRepository.upsertImportingIndexVersion({
+      artifactHash: `sha256:${"d".repeat(64)}`,
+      artifactUri: "smoke://index-version/importing-upsert",
+      chunkerVersion: "chunks-v1",
+      commitSha: "abcdef123456",
+      counts: {
+        chunkCount: 8,
+        dependencyCount: 4,
+        diagnosticCount: 2,
+        edgeCount: 7,
+        fileCount: 3,
+        routeCount: 5,
+        symbolCount: 6,
+        testMappingCount: 1,
+      },
+      indexerName: "tree-sitter",
+      indexerVersion: "importing",
+      indexKey: "tree-sitter:importing:chunks-v1",
+      indexVersionId: "idx_repository_importing_upsert",
+      repoId: "repo_index_version_test",
+    });
+    await expect(
+      indexVersionRepository.findIndexVersionForImport({
+        artifactHash: `sha256:${"d".repeat(64)}`,
+        commitSha: "abcdef123456",
+        indexKey: "tree-sitter:importing:chunks-v1",
+        repoId: "repo_index_version_test",
+      }),
+    ).resolves.toMatchObject({
+      chunkCount: 8,
+      dependencyCount: 4,
+      diagnosticCount: 2,
+      indexVersionId: "idx_repository_importing_upsert",
+      status: "importing",
+    });
+    await expect(
+      indexVersionRepository.getIndexVersionStatus("idx_repository_importing_upsert"),
+    ).resolves.toBe("importing");
+    await indexVersionRepository.markIndexVersionFailedRecord({
+      error: { code: "index.import_failed", message: "Import write failed." },
+      indexVersionId: "idx_repository_importing_upsert",
+    });
+    await expect(
+      indexVersionRepository.getIndexVersionStatus("idx_repository_importing_upsert"),
+    ).resolves.toBe("failed");
+    await indexVersionRepository.markIndexVersionReadyRecord({
+      completedAt: new Date("2026-05-08T00:05:00.000Z"),
+      indexVersionId: "idx_repository_importing_upsert",
+    });
+    await expect(
+      indexVersionRepository.getIndexVersionRecord("idx_repository_importing_upsert"),
+    ).resolves.toMatchObject({
+      completedAt: new Date("2026-05-08T00:05:00.000Z"),
+      status: "ready",
+    });
 
     const importing = await indexVersionRepository.markIndexImporting("idx_repository_transition");
     expect(importing.status).toBe("importing");
