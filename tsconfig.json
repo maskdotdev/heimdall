@@ -3,6 +3,7 @@
   "references": [
     { "path": "./apps/api" },
     { "path": "./apps/admin-gateway" },
+    { "path": "./apps/marketing" },
     { "path": "./apps/web" },
     { "path": "./apps/worker" },
     { "path": "./apps/indexer-cli" },
@@ -27,10 +28,14 @@
     { "path": "./packages/llm-gateway" },
     { "path": "./packages/publisher" },
     { "path": "./packages/artifacts" },
+    { "path": "./packages/billing" },
     { "path": "./packages/evaluation" },
     { "path": "./packages/memory" },
+    { "path": "./packages/rules" },
     { "path": "./packages/observability" },
     { "path": "./packages/security" },
+    { "path": "./packages/usage" },
+    { "path": "./packages/webhook-ingestion" },
     { "path": "./packages/admin-tools" }
   ]
 }
