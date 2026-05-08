@@ -302,6 +302,24 @@ export type ListReviewFindingsInput = {
   readonly limit?: number | undefined;
 };
 
+/** Input used to list recent completed review runs for one repository. */
+export type ListRecentCompletedReviewRunsInput = {
+  /** Maximum rows to return. */
+  readonly limit: number;
+  /** Optional pull request number filter. */
+  readonly pullRequestNumber?: number | undefined;
+  /** Repository that owns the review runs. */
+  readonly repoId: string;
+};
+
+/** Recent completed review run fields needed by worker reconciliation jobs. */
+export type RecentCompletedReviewRunRecord = {
+  /** Git provider pull request number. */
+  readonly pullRequestNumber: number;
+  /** Durable review run ID. */
+  readonly reviewRunId: string;
+};
+
 /** Published finding target used to correlate provider feedback events. */
 export type PublishedFindingFeedbackTargetRecord = {
   /** Candidate finding linked to the published finding. */
@@ -456,6 +474,29 @@ export class ReviewRepository {
       .where(eq(reviewRuns.reviewRunId, reviewRunId));
 
     return row ? toReviewRun(row) : undefined;
+  }
+
+  /** Lists recent completed review runs for one repository. */
+  public async listRecentCompletedReviewRuns(
+    input: ListRecentCompletedReviewRunsInput,
+  ): Promise<readonly RecentCompletedReviewRunRecord[]> {
+    const filters = [
+      eq(reviewRuns.repoId, input.repoId),
+      eq(reviewRuns.status, "completed"),
+      ...(input.pullRequestNumber !== undefined
+        ? [eq(reviewRuns.pullRequestNumber, input.pullRequestNumber)]
+        : []),
+    ];
+
+    return this.db
+      .select({
+        pullRequestNumber: reviewRuns.pullRequestNumber,
+        reviewRunId: reviewRuns.reviewRunId,
+      })
+      .from(reviewRuns)
+      .where(and(...filters))
+      .orderBy(desc(reviewRuns.updatedAt), desc(reviewRuns.reviewRunId))
+      .limit(repositoryInspectionLimit(input.limit));
   }
 
   /** Inserts a candidate finding and preserves existing fingerprint idempotency. */

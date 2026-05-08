@@ -64,6 +64,46 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
       status: "completed",
       summary: "One finding validated.",
     });
+    await reviewRepository.upsertReviewRun(
+      reviewRunFixture({
+        reviewRunId: "rrn_review_repository_older_completed",
+        status: "completed",
+        updatedAt: "2026-05-08T00:01:30.000Z",
+      }),
+    );
+    await reviewRepository.upsertReviewRun(
+      reviewRunFixture({
+        pullRequestNumber: 43,
+        reviewRunId: "rrn_review_repository_recent_completed",
+        status: "completed",
+        updatedAt: "2026-05-08T00:04:00.000Z",
+      }),
+    );
+    await expect(
+      reviewRepository.listRecentCompletedReviewRuns({
+        limit: 2,
+        repoId: "repo_review_repository_test",
+      }),
+    ).resolves.toEqual([
+      { pullRequestNumber: 43, reviewRunId: "rrn_review_repository_recent_completed" },
+      { pullRequestNumber: 42, reviewRunId: "rrn_review_repository" },
+    ]);
+    await expect(
+      reviewRepository.listRecentCompletedReviewRuns({
+        limit: 10,
+        pullRequestNumber: 42,
+        repoId: "repo_review_repository_test",
+      }),
+    ).resolves.toEqual([
+      { pullRequestNumber: 42, reviewRunId: "rrn_review_repository" },
+      { pullRequestNumber: 42, reviewRunId: "rrn_review_repository_older_completed" },
+    ]);
+    await expect(
+      reviewRepository.listRecentCompletedReviewRuns({
+        limit: 0,
+        repoId: "repo_review_repository_test",
+      }),
+    ).rejects.toThrow(/limit must be an integer/u);
 
     const candidate = await reviewRepository.insertCandidateFinding(
       candidateFindingFixture({

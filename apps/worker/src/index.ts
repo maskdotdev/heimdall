@@ -156,7 +156,7 @@ import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } fro
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Worker } from "bullmq";
-import { and, asc, desc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -2397,22 +2397,11 @@ async function loadRecentReviewThreadReconciliationTargets(
     return [];
   }
 
-  const filters = [
-    eq(reviewRuns.repoId, payload.repoId),
-    eq(reviewRuns.status, "completed"),
-    ...(payload.pullRequestNumber
-      ? [eq(reviewRuns.pullRequestNumber, payload.pullRequestNumber)]
-      : []),
-  ];
-  const runs = await db
-    .select({
-      pullRequestNumber: reviewRuns.pullRequestNumber,
-      reviewRunId: reviewRuns.reviewRunId,
-    })
-    .from(reviewRuns)
-    .where(and(...filters))
-    .orderBy(desc(reviewRuns.updatedAt))
-    .limit(THREAD_RECONCILIATION_REVIEW_RUN_LIMIT);
+  const runs = await new ReviewRepository(db).listRecentCompletedReviewRuns({
+    limit: THREAD_RECONCILIATION_REVIEW_RUN_LIMIT,
+    ...(payload.pullRequestNumber ? { pullRequestNumber: payload.pullRequestNumber } : {}),
+    repoId: payload.repoId,
+  });
 
   return runs.map((run) => ({
     installationId: repository.installationId,
