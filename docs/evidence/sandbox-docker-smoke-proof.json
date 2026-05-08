@@ -1,0 +1,21 @@
+{
+  "command": "pnpm --filter @repo/admin-tools smoke:sandbox:docker",
+  "dockerServerVersion": "29.2.1",
+  "generatedAt": "2026-05-08T20:51:05Z",
+  "imageId": "sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1",
+  "proof": {
+    "artifact": {
+      "name": "proof.json",
+      "sha256": "8b0ae68b6b0b54b171d838bb091bf6190a585d5a5158cd84b790a6c7bcaf53fc",
+      "sizeBytes": 52
+    },
+    "artifactCount": 1,
+    "image": "alpine:3.19",
+    "policyDeniedCount": 0,
+    "runner": "docker",
+    "status": "passed",
+    "stderrBytes": 0,
+    "stdoutBytes": 0
+  },
+  "status": "sandbox docker smoke passed"
+}

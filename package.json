@@ -68,6 +68,7 @@
     "smoke:llm:openai": "pnpm --filter @repo/admin-tools smoke:llm:openai",
     "smoke:github-provider-errors": "pnpm --filter @repo/admin-tools smoke:github-provider-errors",
     "smoke:review:github": "pnpm --filter @repo/admin-tools smoke:review:github",
+    "smoke:sandbox:docker": "pnpm --filter @repo/admin-tools smoke:sandbox:docker",
     "smoke:control-plane:local": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; API_URL=${API_URL:-http://localhost:3000} HEIMDALL_ADMIN_SMOKE_ASSERTION_URL=${HEIMDALL_ADMIN_SMOKE_ASSERTION_URL:-http://127.0.0.1:4317/assertion} HEIMDALL_ADMIN_SMOKE_ORG_ID=${HEIMDALL_ADMIN_SMOKE_ORG_ID:-org_local} HEIMDALL_ADMIN_SMOKE_REPO_ID=${HEIMDALL_ADMIN_SMOKE_REPO_ID:-repo_local} HEIMDALL_ADMIN_SMOKE_ALLOW_LOCAL_TARGET=true bun run scripts/control-plane-staging-smoke.ts",
     "preflight:control-plane:staging": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/control-plane-staging-preflight.ts",
     "proof:control-plane:staging": "set -a; [ ! -f .env.smoke.local ] || . ./.env.smoke.local; set +a; bun run scripts/control-plane-staging-proof.ts",
