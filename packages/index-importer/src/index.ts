@@ -1551,13 +1551,13 @@ async function readFilesystemIndexArtifact(
   return JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
 }
 
-/** Reads an artifact directory containing manifest.json and records.jsonl files. */
+/** Reads an artifact directory containing index-manifest.json and records.jsonl files. */
 async function readSplitIndexArtifactDirectory(
   directoryPath: string,
   options: IndexArtifactReadOptions | undefined,
 ): Promise<IndexArtifact> {
   const [manifestJson, records] = await Promise.all([
-    readFile(resolve(directoryPath, "manifest.json"), "utf8"),
+    readSplitIndexManifest(directoryPath),
     readJsonlIndexRecords(resolve(directoryPath, "records.jsonl"), options),
   ]);
 
@@ -1565,6 +1565,22 @@ async function readSplitIndexArtifactDirectory(
     manifest: JSON.parse(manifestJson) as IndexArtifact["manifest"],
     records,
   };
+}
+
+/** Reads the canonical split artifact manifest file. */
+async function readSplitIndexManifest(directoryPath: string): Promise<string> {
+  const manifestPath = resolve(directoryPath, "index-manifest.json");
+  try {
+    return await readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      throw new Error("Index artifact directory is missing index-manifest.json.", {
+        cause: error,
+      });
+    }
+
+    throw error;
+  }
 }
 
 /** Streams newline-delimited index records from a split artifact records file. */
@@ -1591,7 +1607,7 @@ async function readJsonlIndexRecords(
 
     const trimmed = line.trim();
     if (trimmed.length === 0) {
-      continue;
+      throw new Error(`Invalid index artifact JSONL record at line ${lineNumber}: empty line.`);
     }
     if (records.length + 1 > limits.maxRecords) {
       throw new Error(
@@ -1609,6 +1625,16 @@ async function readJsonlIndexRecords(
   }
 
   return records;
+}
+
+/** Returns whether an unknown error has the supplied Node error code. */
+function isNodeErrorWithCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === code
+  );
 }
 
 /** Converts R2 object URIs to S3-compatible URIs for the shared object reader. */

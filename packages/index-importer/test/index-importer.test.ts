@@ -115,7 +115,7 @@ describe("createFileSystemIndexArtifactResolver", () => {
     await mkdir(artifactPath, { recursive: true });
     await Promise.all([
       writeFile(
-        join(artifactPath, "manifest.json"),
+        join(artifactPath, "index-manifest.json"),
         `${JSON.stringify(emptyArtifact().manifest)}\n`,
       ),
       writeFile(join(artifactPath, "records.jsonl"), "{}\nnot-json\n"),
@@ -124,6 +124,42 @@ describe("createFileSystemIndexArtifactResolver", () => {
 
     await expect(resolver.readArtifact("repo_1/index-artifact")).rejects.toThrow(
       "Invalid index artifact JSONL record at line 2.",
+    );
+  });
+
+  it("rejects empty split artifact JSONL lines with the line number", async () => {
+    const root = await createTempRoot();
+    const artifactPath = join(root, "repo_1", "index-artifact");
+    await mkdir(artifactPath, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(artifactPath, "index-manifest.json"),
+        `${JSON.stringify(emptyArtifact().manifest)}\n`,
+      ),
+      writeFile(join(artifactPath, "records.jsonl"), "\n"),
+    ]);
+    const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
+
+    await expect(resolver.readArtifact("repo_1/index-artifact")).rejects.toThrow(
+      "Invalid index artifact JSONL record at line 1: empty line.",
+    );
+  });
+
+  it("requires the canonical split artifact manifest filename", async () => {
+    const root = await createTempRoot();
+    const artifactPath = join(root, "repo_1", "index-artifact");
+    await mkdir(artifactPath, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(artifactPath, "manifest.json"),
+        `${JSON.stringify(emptyArtifact().manifest)}\n`,
+      ),
+      writeFile(join(artifactPath, "records.jsonl"), ""),
+    ]);
+    const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
+
+    await expect(resolver.readArtifact("repo_1/index-artifact")).rejects.toThrow(
+      "Index artifact directory is missing index-manifest.json.",
     );
   });
 
@@ -837,7 +873,7 @@ async function writeArtifact(path: string, artifact: IndexArtifact): Promise<voi
 async function writeSplitArtifact(path: string, artifact: IndexArtifact): Promise<void> {
   await mkdir(path, { recursive: true });
   await Promise.all([
-    writeFile(join(path, "manifest.json"), `${JSON.stringify(artifact.manifest, null, 2)}\n`),
+    writeFile(join(path, "index-manifest.json"), `${JSON.stringify(artifact.manifest, null, 2)}\n`),
     writeFile(
       join(path, "records.jsonl"),
       `${artifact.records.map((record) => JSON.stringify(record)).join("\n")}\n`,
