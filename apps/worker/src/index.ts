@@ -76,6 +76,7 @@ import {
   createIndexArtifactResolverFromEnvironment,
   createIndexArtifactStoreFromEnvironment,
   createIndexImportLimitsFromEnvironment,
+  createIndexImportRecordBatchSizeFromEnvironment,
   type IndexArtifactResolver,
   type IndexArtifactStore,
   importIndexArtifact,
@@ -293,6 +294,8 @@ export type CreateWorkerHandlersOptions = {
   readonly indexArtifactStore?: IndexArtifactStore;
   /** Optional resolver used when importing index artifacts from durable URIs. */
   readonly indexArtifactResolver?: IndexArtifactResolver;
+  /** Optional normalized record batch size for index import database writes. */
+  readonly indexImportRecordBatchSize?: number;
   /** Optional indexer driver selected by runtime configuration or tests. */
   readonly indexerDriver?: CodeIndexerDriver;
   /** Maximum time allowed for one indexer run. */
@@ -666,6 +669,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         }
 
         const importLimits = createIndexImportLimitsFromEnvironment(process.env);
+        const importRecordBatchSize = options.indexImportRecordBatchSize;
         const artifactUploadMode = options.indexArtifactUploadMode ?? "local_only";
         if (result.artifactUri && artifactUploadMode !== "object_storage") {
           await importIndexArtifact(result.artifact, {
@@ -673,6 +677,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             db: options.db,
             enqueueEmbeddings: true,
             importLimits,
+            ...(importRecordBatchSize === undefined ? {} : { importRecordBatchSize }),
             ...(options.metrics ? { metrics: options.metrics } : {}),
             ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
             ...(options.traces ? { traces: options.traces } : {}),
@@ -694,6 +699,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             db: options.db,
             enqueueEmbeddings: true,
             importLimits,
+            ...(importRecordBatchSize === undefined ? {} : { importRecordBatchSize }),
             ...(options.metrics ? { metrics: options.metrics } : {}),
             ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
             ...(options.traces ? { traces: options.traces } : {}),
@@ -1427,6 +1433,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     indexerConfig.artifactUploadMode === "object_storage"
       ? createIndexArtifactStoreFromEnvironment(process.env)
       : undefined;
+  const indexImportRecordBatchSize = createIndexImportRecordBatchSizeFromEnvironment(process.env);
   const indexerTimeoutMs = indexerConfig.defaultTimeoutMs;
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const repoSyncConfig = createRepoSyncConfig({
@@ -1467,6 +1474,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       indexArtifactUploadMode: indexerConfig.artifactUploadMode,
       ...(indexArtifactStore ? { indexArtifactStore } : {}),
       indexArtifactResolver,
+      indexImportRecordBatchSize,
       indexerDriver,
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
       logger: observability.logger,
