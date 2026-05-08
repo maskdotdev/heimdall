@@ -129,6 +129,7 @@ type AdminBackgroundJobCancelFixture = Awaited<
   ReturnType<AdminDebugService["cancelBackgroundJob"]>
 >;
 type AdminReviewDebugFixture = Awaited<ReturnType<AdminDebugService["getReviewDebugDetails"]>>;
+type AdminSandboxRunFixture = Awaited<ReturnType<AdminDebugService["listSandboxRuns"]>>[number];
 type AdminDebugBundleFixture = Awaited<ReturnType<AdminDebugService["exportReviewRunDebugBundle"]>>;
 type AdminEvalImportDraftFixture = Awaited<
   ReturnType<AdminDebugService["createReviewRunEvalImportDraft"]>
@@ -5655,6 +5656,90 @@ describe("api app", () => {
     });
   });
 
+  it("lists scoped sandbox run history for inspectors", async () => {
+    const sandboxQueries: unknown[] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({}),
+      adminDebugService: createMockAdminDebugService({
+        listSandboxRuns: async (query) => {
+          sandboxQueries.push(query);
+          return [
+            sandboxRunFixture({
+              policyDecisionCounts: { allowed: 4, denied: 1, warning: 1 },
+              status: "policy_denied",
+            }),
+          ];
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect"],
+      providerSubject: "usr_support",
+    });
+
+    const response = await app.handle(
+      new Request(
+        "http://localhost/admin/sandbox/runs?repoId=repo_1&status=policy_denied&limit=5",
+        {
+          headers: { cookie: login.cookie },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(sandboxQueries).toContainEqual(
+      expect.objectContaining({
+        limit: 5,
+        repoId: "repo_1",
+        status: "policy_denied",
+      }),
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        sandboxRuns: [
+          {
+            policyDecisionCounts: { denied: 1 },
+            repoId: "repo_1",
+            sandboxRunId: "srun_1",
+            status: "policy_denied",
+          },
+        ],
+      },
+    });
+  });
+
+  it("requires repository scope for scoped sandbox run inspectors", async () => {
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({}),
+      adminDebugService: createMockAdminDebugService({
+        listSandboxRuns: async () => [sandboxRunFixture()],
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect"],
+      providerSubject: "usr_support",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/admin/sandbox/runs?limit=5", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "admin.sandbox_run_scope_required",
+      },
+    });
+  });
+
   it("enqueues scoped sandbox cleanup jobs for settings managers", async () => {
     const cleanupQueries: unknown[] = [];
     const app = createApiApp({
@@ -6556,6 +6641,7 @@ function createMockAdminDebugService(overrides: Partial<AdminDebugService>): Adm
     executeBackgroundJobReplay: unexpectedReplayCall,
     cancelBackgroundJob: unexpectedCancelCall,
     getReviewDebugDetails: unexpectedCall,
+    listSandboxRuns: unexpectedCall,
     createReviewReplayPlan: unexpectedCall,
     replayRetrievalDryRun: unexpectedCall,
     replayValidationDryRun: unexpectedCall,
@@ -7520,6 +7606,32 @@ function reviewDebugDetailsFixture(
     sandboxRuns: [],
     stageEvents: [],
     validatedFindings: [],
+  };
+}
+
+/** Creates a sandbox run debug fixture. */
+function sandboxRunFixture(
+  overrides: Partial<AdminSandboxRunFixture> = {},
+): AdminSandboxRunFixture {
+  return {
+    artifacts: [],
+    category: "lint",
+    createdAt: "2026-05-07T12:00:00.000Z",
+    image: "ghcr.io/heimdall/static-analysis:latest",
+    orgId: "org_1",
+    policyDecisionCounts: { allowed: 3, denied: 0, warning: 0 },
+    repoId: "repo_1",
+    requestId: "sandbox_request_1",
+    reviewRunId: "rrn_1",
+    runnerKind: "docker",
+    sandboxRunId: "srun_1",
+    status: "succeeded",
+    stderrTruncated: false,
+    stdoutTruncated: false,
+    toolRunId: "str_eslint",
+    trustLevel: "trusted_pr",
+    warningCount: 0,
+    ...overrides,
   };
 }
 

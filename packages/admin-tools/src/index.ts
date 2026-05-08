@@ -809,6 +809,12 @@ export type AdminSandboxPolicyDecisionCounts = {
 export type AdminSandboxRunDebugSummary = {
   /** Sandbox run row ID. */
   readonly sandboxRunId: string;
+  /** Organization that owns the sandbox run. */
+  readonly orgId: string;
+  /** Repository that owns the sandbox run. */
+  readonly repoId: string;
+  /** Review run that owns the sandbox run when available. */
+  readonly reviewRunId?: string;
   /** Unique sandbox request ID. */
   readonly requestId: string;
   /** Runner kind, such as docker or gvisor. */
@@ -853,6 +859,18 @@ export type AdminSandboxRunDebugSummary = {
   readonly createdAt: string;
   /** Structured sandbox failure when available. */
   readonly failure?: AdminFailureDetail;
+};
+
+/** Filter options for product-safe sandbox run history. */
+export type AdminSandboxRunListQuery = {
+  /** Maximum sandbox runs to return. */
+  readonly limit?: number | undefined;
+  /** Repository scope for sandbox run history. */
+  readonly repoId?: string | undefined;
+  /** Review run scope for sandbox run history. */
+  readonly reviewRunId?: string | undefined;
+  /** Optional sandbox run status filter. */
+  readonly status?: string | undefined;
 };
 
 /** Debug summary for one candidate finding. */
@@ -1699,6 +1717,10 @@ export type AdminDebugService = {
   ) => Promise<AdminBackgroundJobCancelResult>;
   /** Gets review run debug details. */
   readonly getReviewDebugDetails: (reviewRunId: string) => Promise<AdminReviewDebugDetails>;
+  /** Lists product-safe sandbox run history. */
+  readonly listSandboxRuns: (
+    query: AdminSandboxRunListQuery,
+  ) => Promise<readonly AdminSandboxRunDebugSummary[]>;
   /** Creates a gated review replay plan. */
   readonly createReviewReplayPlan: (reviewRunId: string) => Promise<ReviewReplayPlan>;
   /** Replays retrieval in dry-run mode without mutating review state. */
@@ -1759,6 +1781,7 @@ export function createAdminDebugService(
     cancelBackgroundJob: (backgroundJobId, reason, actor) =>
       cancelBackgroundJob(backgroundJobId, reason, dependencies, actor),
     getReviewDebugDetails: (reviewRunId) => getReviewDebugDetails(reviewRunId, dependencies),
+    listSandboxRuns: (query) => listSandboxRuns(query, dependencies),
     createReviewReplayPlan: (reviewRunId) => createReviewReplayPlan(reviewRunId, dependencies),
     replayRetrievalDryRun: (reviewRunId) => replayRetrievalDryRun(reviewRunId, dependencies),
     replayValidationDryRun: (reviewRunId) => replayValidationDryRun(reviewRunId, dependencies),
@@ -2320,6 +2343,39 @@ export async function getReviewDebugDetails(
     replayAudits,
     failures,
   };
+}
+
+/** Lists product-safe sandbox run history for operator inspection. */
+export async function listSandboxRuns(
+  query: AdminSandboxRunListQuery,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<readonly AdminSandboxRunDebugSummary[]> {
+  const conditions = [
+    ...(query.repoId ? [eq(sandboxRuns.repoId, query.repoId)] : []),
+    ...(query.reviewRunId ? [eq(sandboxRuns.reviewRunId, query.reviewRunId)] : []),
+    ...(query.status ? [eq(sandboxRuns.status, query.status)] : []),
+  ];
+  const sandboxRunRows = await dependencies.db
+    .select()
+    .from(sandboxRuns)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(sandboxRuns.createdAt), desc(sandboxRuns.sandboxRunId))
+    .limit(adminSandboxRunListLimit(query.limit));
+  const sandboxRunIds = sandboxRunRows.map((row) => row.sandboxRunId);
+  const [sandboxArtifactRows, sandboxPolicyDecisionRows] = await Promise.all([
+    listSandboxArtifactsForRuns(dependencies.db, sandboxRunIds),
+    listSandboxPolicyDecisionsForRuns(dependencies.db, sandboxRunIds),
+  ]);
+  const sandboxArtifactsByRun = rowsBySandboxRunId(sandboxArtifactRows);
+  const sandboxPolicyDecisionsByRun = rowsBySandboxRunId(sandboxPolicyDecisionRows);
+
+  return sandboxRunRows.map((row) =>
+    toSandboxRunDebugSummary(
+      row,
+      sandboxArtifactsByRun.get(row.sandboxRunId) ?? [],
+      sandboxPolicyDecisionsByRun.get(row.sandboxRunId) ?? [],
+    ),
+  );
 }
 
 /** Gets usage ledger events, billable units, costs, and quota state for one review run. */
@@ -4504,6 +4560,9 @@ function toSandboxRunDebugSummary(
 
   return {
     sandboxRunId: row.sandboxRunId,
+    orgId: row.orgId,
+    repoId: row.repoId,
+    ...(row.reviewRunId ? { reviewRunId: row.reviewRunId } : {}),
     requestId: row.requestId,
     runnerKind: row.runnerKind,
     trustLevel: row.trustLevel,
@@ -4844,6 +4903,15 @@ function sandboxPolicyDecisionCounts(
 /** Counts product-safe sandbox warnings stored as JSON. */
 function sandboxWarningCount(warningsJson: unknown): number {
   return Array.isArray(warningsJson) ? warningsJson.length : 0;
+}
+
+/** Returns a bounded sandbox run list limit for operator history views. */
+function adminSandboxRunListLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return 25;
+  }
+
+  return Math.min(100, Math.max(1, limit));
 }
 
 /** Returns whether a sandbox run status should surface as a failure. */
