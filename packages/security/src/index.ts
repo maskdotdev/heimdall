@@ -1184,6 +1184,7 @@ export type SecurityEventSeverity = (typeof SECURITY_EVENT_SEVERITIES)[number];
 
 /** Sources that can emit security events. */
 export const SECURITY_EVENT_SOURCES = [
+  "admin_gateway",
   "api",
   "worker",
   "github",
