@@ -1,4 +1,5 @@
 export * from "./client";
+export * from "./repositories/code-intelligence-repository";
 export * from "./repositories/evaluation-repository";
 export * from "./repositories/index-version-repository";
 export * from "./repositories/pull-request-repository";
