@@ -36,7 +36,7 @@ import {
 } from "@repo/contracts";
 import {
   BackgroundJobRepository,
-  billingProviderRequests,
+  BillingRepository,
   type CreateFeedbackEventInput,
   type CreateFeedbackSignalInput,
   type CreateMemoryCandidateInput,
@@ -3216,45 +3216,16 @@ function stripeCheckoutPriceMapFromEnv(
 
 /** Durable logger for worker-owned outbound billing provider requests. */
 class WorkerBillingProviderRequestLogger implements BillingProviderRequestLogger {
+  private readonly billingRepository: BillingRepository;
+
   /** Creates a Postgres-backed provider request logger. */
-  public constructor(private readonly db: HeimdallDatabase) {}
+  public constructor(db: HeimdallDatabase) {
+    this.billingRepository = new BillingRepository(db);
+  }
 
   /** Records one provider request outcome. */
   public async record(input: BillingProviderRequestLogInput): Promise<void> {
-    await this.db
-      .insert(billingProviderRequests)
-      .values({
-        billingAccountId: input.billingAccountId ?? null,
-        billingProviderRequestId: `bpr_${randomUUID()}`,
-        completedAt: input.completedAt ? new Date(input.completedAt) : null,
-        errorCode: input.errorCode ?? null,
-        errorMessage: input.errorMessage ?? null,
-        idempotencyKey: input.idempotencyKey ?? null,
-        operation: input.operation,
-        orgId: input.orgId ?? null,
-        provider: input.provider,
-        providerRequestId: input.providerRequestId ?? null,
-        requestMetadata: input.requestMetadata,
-        responseMetadata: input.responseMetadata,
-        startedAt: new Date(input.startedAt),
-        status: input.status,
-      })
-      .onConflictDoUpdate({
-        target: [billingProviderRequests.provider, billingProviderRequests.idempotencyKey],
-        set: {
-          billingAccountId: input.billingAccountId ?? null,
-          completedAt: input.completedAt ? new Date(input.completedAt) : null,
-          errorCode: input.errorCode ?? null,
-          errorMessage: input.errorMessage ?? null,
-          operation: input.operation,
-          orgId: input.orgId ?? null,
-          providerRequestId: input.providerRequestId ?? null,
-          requestMetadata: input.requestMetadata,
-          responseMetadata: input.responseMetadata,
-          startedAt: new Date(input.startedAt),
-          status: input.status,
-        },
-      });
+    await this.billingRepository.recordBillingProviderRequest(input);
   }
 }
 

@@ -82,11 +82,11 @@ import {
   auditLogs,
   type BackgroundJobRecord,
   BackgroundJobRepository,
+  BillingRepository,
   billingAccounts,
   billingMeterEvents,
   billingPlans,
   billingPlanVersions,
-  billingProviderRequests,
   billingWebhookEvents,
   createDatabaseClient,
   type DatabaseClient,
@@ -12243,17 +12243,11 @@ async function listProviderRequestIssues(
   db: HeimdallDatabase,
   query: ScopedAdminBillingReconciliationQuery,
 ): Promise<readonly AdminBillingReconciliationIssue[]> {
-  const rows = await db
-    .select()
-    .from(billingProviderRequests)
-    .where(
-      and(
-        eq(billingProviderRequests.orgId, query.orgId),
-        eq(billingProviderRequests.status, "failed"),
-      ),
-    )
-    .orderBy(desc(billingProviderRequests.startedAt))
-    .limit(query.limit);
+  const billingRepository = new BillingRepository(db);
+  const rows = await billingRepository.listFailedBillingProviderRequests({
+    limit: query.limit,
+    orgId: query.orgId,
+  });
 
   return rows.map((row) => ({
     category: "provider_request_failed",
@@ -13204,45 +13198,16 @@ function parseJsonObjectEnv(rawValue: string, name: string): unknown {
 
 /** Durable logger for outbound billing provider requests. */
 class PostgresBillingProviderRequestLogger implements BillingProviderRequestLogger {
+  private readonly billingRepository: BillingRepository;
+
   /** Creates a Postgres-backed provider request logger. */
-  public constructor(private readonly db: HeimdallDatabase) {}
+  public constructor(db: HeimdallDatabase) {
+    this.billingRepository = new BillingRepository(db);
+  }
 
   /** Records one provider request outcome. */
   public async record(input: BillingProviderRequestLogInput): Promise<void> {
-    await this.db
-      .insert(billingProviderRequests)
-      .values({
-        billingAccountId: input.billingAccountId ?? null,
-        billingProviderRequestId: `bpr_${randomUUID()}`,
-        completedAt: input.completedAt ? new Date(input.completedAt) : null,
-        errorCode: input.errorCode ?? null,
-        errorMessage: input.errorMessage ?? null,
-        idempotencyKey: input.idempotencyKey ?? null,
-        operation: input.operation,
-        orgId: input.orgId ?? null,
-        provider: input.provider,
-        providerRequestId: input.providerRequestId ?? null,
-        requestMetadata: input.requestMetadata,
-        responseMetadata: input.responseMetadata,
-        startedAt: new Date(input.startedAt),
-        status: input.status,
-      })
-      .onConflictDoUpdate({
-        target: [billingProviderRequests.provider, billingProviderRequests.idempotencyKey],
-        set: {
-          billingAccountId: input.billingAccountId ?? null,
-          completedAt: input.completedAt ? new Date(input.completedAt) : null,
-          errorCode: input.errorCode ?? null,
-          errorMessage: input.errorMessage ?? null,
-          operation: input.operation,
-          orgId: input.orgId ?? null,
-          providerRequestId: input.providerRequestId ?? null,
-          requestMetadata: input.requestMetadata,
-          responseMetadata: input.responseMetadata,
-          startedAt: new Date(input.startedAt),
-          status: input.status,
-        },
-      });
+    await this.billingRepository.recordBillingProviderRequest(input);
   }
 }
 
