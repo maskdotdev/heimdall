@@ -1351,6 +1351,32 @@ export async function runPullRequestReview(
         status: event.status,
       })),
     );
+    await reviewRepository.insertSuppressionMatches(
+      validationResult.suppressionMatches.map((match) => ({
+        candidateFindingId: match.candidateFindingId,
+        confidence: match.confidence,
+        createdAt: validationResult.trace.completedAt,
+        findingId: match.findingId,
+        matchKind: match.matchKind,
+        memoryFactId: match.memoryFactId,
+        metadata: {
+          source: "finding_validation",
+          traceCompletedAt: validationResult.trace.completedAt,
+          traceStartedAt: validationResult.trace.startedAt,
+          validatorVersion: validationResult.trace.validatorVersion,
+        },
+        orgId: repositoryRecord.orgId,
+        reason: match.reason ?? null,
+        repoId: snapshot.repoId,
+        reviewRunId,
+        suppressionMatchId: stableId("sm", [
+          reviewRunId,
+          match.candidateFindingId,
+          match.memoryFactId,
+          match.matchKind,
+        ]),
+      })),
+    );
     await reviewRepository.insertFindingDuplicateGroups(
       validationResult.duplicateGroups.map((group) => {
         const duplicateFindingIds = group.duplicateCandidateFindingIds.flatMap(
@@ -1427,6 +1453,7 @@ export async function runPullRequestReview(
       payload: {
         schemaVersion: "rejected_findings.v1",
         findings: validationResult.rejected,
+        suppressionMatches: validationResult.suppressionMatches,
         stats: validationResult.stats,
       },
       createdAt: now().toISOString(),

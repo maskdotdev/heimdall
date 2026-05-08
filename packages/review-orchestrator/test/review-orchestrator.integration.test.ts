@@ -228,6 +228,86 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
     });
   });
 
+  it("persists memory suppression matches for rejected findings", async () => {
+    await resetDatabase(sql, schemaName);
+    await sql`
+      INSERT INTO memory_facts (
+        memory_fact_id,
+        org_id,
+        repo_id,
+        fact_type,
+        body,
+        status,
+        confidence,
+        metadata
+      )
+      VALUES (
+        'mem_suppress_src_correctness',
+        'org_test',
+        'repo_test',
+        'suppression',
+        'Do not comment on correctness findings under src.',
+        'active',
+        0.93,
+        '{"appliesTo":{"pathGlobs":["src/**"],"categories":["correctness"]}}'::jsonb
+      )
+    `;
+
+    const result = await runPullRequestReview(
+      {
+        repoId: "repo_test",
+        installationId: "inst_test",
+        pullRequestNumber: 7,
+        baseSha: "1111111",
+        headSha: "2222222",
+        trigger: "webhook",
+      },
+      {
+        db,
+        gitProvider: fakeGitProvider,
+        now: () => new Date(now),
+        llmGateway: createStaticLLMGateway({
+          findings: [
+            {
+              path: "src/index.ts",
+              line: 1,
+              severity: "medium",
+              category: "correctness",
+              title: "Check exported value",
+              body: "The exported value is hard-coded without validation.",
+              evidence: ["The added line exports a literal value."],
+              confidence: 0.82,
+            },
+          ],
+        }),
+        syncWorkspace: async () => ({
+          workspacePath: "/tmp/heimdall-review-test",
+          checkedOutSha: "2222222",
+          cleanedUp: true,
+        }),
+        indexWaitTimeoutMs: 0,
+      },
+    );
+
+    expect(result.validatedFindingCount).toBe(0);
+    expect(result.publishJobKey).toBeUndefined();
+
+    const [counts] = await sql`
+      SELECT
+        (SELECT count(*)::int FROM suppression_matches) AS suppression_matches,
+        (SELECT count(*)::int FROM suppression_matches WHERE memory_fact_id = 'mem_suppress_src_correctness' AND match_kind = 'path_category') AS path_suppression_matches,
+        (SELECT count(*)::int FROM validated_findings WHERE decision = 'reject' AND validation->'reasons' ? 'suppressed_by_memory') AS memory_rejected_findings,
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs
+    `;
+
+    expect(counts).toEqual({
+      memory_rejected_findings: 1,
+      path_suppression_matches: 1,
+      publish_jobs: 0,
+      suppression_matches: 1,
+    });
+  });
+
   it("runs the full review pipeline in dry-run mode without enqueueing publish work", async () => {
     await resetDatabase(sql, schemaName);
 

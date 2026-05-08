@@ -982,12 +982,44 @@ type ProductMemoryCandidateSummary = {
   readonly updatedAt: string;
 };
 
+/** Recent memory suppression match returned by product repository memory routes. */
+type ProductSuppressionMatchSummary = {
+  /** Durable suppression match row ID. */
+  readonly suppressionMatchId: string;
+  /** Review run that emitted the suppression decision. */
+  readonly reviewRunId: string;
+  /** Validated finding row suppressed by memory. */
+  readonly findingId: string;
+  /** Durable memory fact responsible for suppression. */
+  readonly memoryFactId: string;
+  /** Human-readable memory fact body. */
+  readonly memoryText: string;
+  /** Finding title associated with the suppressed candidate. */
+  readonly findingTitle: string;
+  /** Finding category associated with the suppressed candidate. */
+  readonly findingCategory: string;
+  /** Finding severity associated with the suppressed candidate. */
+  readonly findingSeverity: string;
+  /** Finding location associated with the suppressed candidate. */
+  readonly location: unknown;
+  /** Suppression match strategy. */
+  readonly matchKind: string;
+  /** Suppression matcher confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe matcher reason when available. */
+  readonly reason?: string;
+  /** Match creation timestamp. */
+  readonly createdAt: string;
+};
+
 /** Product repository memory response. */
 type ProductRepositoryMemoryResponse = {
   /** Stored memory facts that can apply to the repository. */
   readonly memoryFacts: readonly ProductMemoryFactSummary[];
   /** Proposed memory candidates that can apply to the repository. */
   readonly memoryCandidates: readonly ProductMemoryCandidateSummary[];
+  /** Recent suppression matches recorded for the repository. */
+  readonly suppressionMatches: readonly ProductSuppressionMatchSummary[];
 };
 
 /** Effective rule row returned by the memory and rules inspector. */
@@ -2154,6 +2186,8 @@ type ProductRepositorySettingsState = {
   memoryFacts: readonly ProductMemoryFactSummary[];
   /** Proposed memory candidates that can apply to the repository. */
   memoryCandidates: readonly ProductMemoryCandidateSummary[];
+  /** Recent suppression matches recorded for this repository. */
+  suppressionMatches: readonly ProductSuppressionMatchSummary[];
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -4087,6 +4121,7 @@ async function loadProductRepositorySettings(
     repoId,
     ruleForm: defaultRuleForm(),
     rules: [],
+    suppressionMatches: [],
     loading: "Loading repository settings",
   };
   replaceDashboardRouteFromState(historyMode);
@@ -4112,6 +4147,7 @@ async function loadProductRepositorySettings(
       repoId,
       ruleForm: defaultRuleForm(),
       rules: rulesData.rules,
+      suppressionMatches: memoryData.suppressionMatches,
     };
   } catch (error) {
     state.product.repositorySettings = {
@@ -4120,6 +4156,7 @@ async function loadProductRepositorySettings(
       repoId,
       ruleForm: defaultRuleForm(),
       rules: [],
+      suppressionMatches: [],
       error: errorMessage(error),
     };
   } finally {
@@ -4305,6 +4342,7 @@ async function refreshProductRepositoryMemory(repoId: string): Promise<void> {
   const data = await requestProductRepositoryMemory(repoId);
   settings.memoryCandidates = data.memoryCandidates;
   settings.memoryFacts = data.memoryFacts;
+  settings.suppressionMatches = data.suppressionMatches;
 }
 
 /** Requests product repository and organization rules for one repository. */
@@ -6733,6 +6771,7 @@ function renderProductRepositoryMemoryPanel(
     (candidate) => candidate.status === "pending",
   );
   const activeFacts = settings.memoryFacts.filter((fact) => fact.status === "active");
+  const recentSuppressionMatches = settings.suppressionMatches;
 
   return `
     <section class="settings-inline-panel product-memory-panel">
@@ -6752,6 +6791,7 @@ function renderProductRepositoryMemoryPanel(
       </div>
       ${renderProductMemoryCandidateRows(pendingCandidates, canManageMemory)}
       ${renderProductMemoryFactRows(activeFacts)}
+      ${renderProductSuppressionMatchRows(recentSuppressionMatches)}
     </section>
   `;
 }
@@ -6820,6 +6860,54 @@ function renderProductMemoryCandidateRow(
           </button>
         </div>
       </td>
+    </tr>
+  `;
+}
+
+/** Renders recent product memory suppression matches. */
+function renderProductSuppressionMatchRows(
+  matches: readonly ProductSuppressionMatchSummary[],
+): string {
+  if (matches.length === 0) {
+    return "";
+  }
+
+  return `
+    <details class="finding-json product-suppression-matches">
+      <summary class="finding-json-summary">Suppression hits</summary>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead>
+            <tr><th>Finding</th><th>Memory</th><th>Match</th><th>When</th></tr>
+          </thead>
+          <tbody>
+            ${matches.map(renderProductSuppressionMatchRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+/** Renders one recent product memory suppression match row. */
+function renderProductSuppressionMatchRow(match: ProductSuppressionMatchSummary): string {
+  return `
+    <tr>
+      <td>
+        <strong>${escapeHtml(match.findingTitle)}</strong>
+        <p class="muted-text">${escapeHtml(locationLabel(match.location))}</p>
+        <small>${escapeHtml(`${match.findingSeverity} / ${match.findingCategory}`)}</small>
+      </td>
+      <td>
+        <strong>${escapeHtml(shortHash(match.memoryFactId))}</strong>
+        <p class="muted-text">${escapeHtml(match.memoryText)}</p>
+      </td>
+      <td>
+        <strong>${escapeHtml(match.matchKind)}</strong>
+        <p class="muted-text">${escapeHtml(match.reason ?? "No reason recorded")}</p>
+        <small>${formatPercent(match.confidence)}</small>
+      </td>
+      <td>${formatTime(match.createdAt)}</td>
     </tr>
   `;
 }

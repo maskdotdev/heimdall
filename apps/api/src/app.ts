@@ -112,6 +112,7 @@ import {
   reviewRuns,
   securityEvents,
   subscriptions,
+  suppressionMatches,
   usageEvents,
   userProviderAccounts,
   userSessions,
@@ -1598,6 +1599,12 @@ type AdminMemoryCandidateListQuery = {
   readonly limit?: number | undefined;
 };
 
+/** Query options for repository suppression match audit history. */
+type AdminSuppressionMatchListQuery = {
+  /** Maximum rows to return. */
+  readonly limit?: number | undefined;
+};
+
 /** Memory fact row returned by scoped product API routes. */
 type AdminMemoryFactSummary = {
   /** Memory fact ID. */
@@ -1747,6 +1754,40 @@ type AdminMemoryCandidateSummary = {
   readonly updatedAt: string;
 };
 
+/** Recent memory suppression match returned by repository memory APIs. */
+type AdminSuppressionMatchSummary = {
+  /** Durable suppression match row ID. */
+  readonly suppressionMatchId: string;
+  /** Review run that emitted the suppression decision. */
+  readonly reviewRunId: string;
+  /** Validated finding row suppressed by memory. */
+  readonly findingId: string;
+  /** Candidate finding inspected by the memory matcher. */
+  readonly candidateFindingId: string;
+  /** Durable memory fact responsible for suppression. */
+  readonly memoryFactId: string;
+  /** Human-readable memory fact body. */
+  readonly memoryText: string;
+  /** Current status of the memory fact. */
+  readonly memoryStatus: string;
+  /** Finding title associated with the suppressed candidate. */
+  readonly findingTitle: string;
+  /** Finding category associated with the suppressed candidate. */
+  readonly findingCategory: string;
+  /** Finding severity associated with the suppressed candidate. */
+  readonly findingSeverity: string;
+  /** Finding location associated with the suppressed candidate. */
+  readonly location: unknown;
+  /** Suppression match strategy. */
+  readonly matchKind: string;
+  /** Suppression matcher confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe matcher reason when available. */
+  readonly reason?: string | undefined;
+  /** Match creation timestamp. */
+  readonly createdAt: string;
+};
+
 /** Parsed request body for memory candidate moderation. */
 type MemoryCandidateModerationBody = {
   /** Operator reason for the moderation decision. */
@@ -1788,6 +1829,40 @@ type MemoryFactRow = typeof memoryFacts.$inferSelect;
 
 /** Database row shape for memory candidate queries. */
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
+
+/** Joined row shape for repository suppression match history. */
+type SuppressionMatchRow = {
+  /** Durable suppression match row ID. */
+  readonly suppressionMatchId: string;
+  /** Review run that emitted the suppression decision. */
+  readonly reviewRunId: string;
+  /** Validated finding row suppressed by memory. */
+  readonly findingId: string;
+  /** Candidate finding inspected by the memory matcher. */
+  readonly candidateFindingId: string;
+  /** Durable memory fact responsible for suppression. */
+  readonly memoryFactId: string;
+  /** Human-readable memory fact body. */
+  readonly memoryText: string;
+  /** Current status of the memory fact. */
+  readonly memoryStatus: string;
+  /** Finding title associated with the suppressed candidate. */
+  readonly findingTitle: string;
+  /** Finding category associated with the suppressed candidate. */
+  readonly findingCategory: string;
+  /** Finding severity associated with the suppressed candidate. */
+  readonly findingSeverity: string;
+  /** Finding location associated with the suppressed candidate. */
+  readonly location: unknown;
+  /** Suppression match strategy. */
+  readonly matchKind: string;
+  /** Suppression matcher confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe matcher reason when available. */
+  readonly reason: string | null;
+  /** Match creation timestamp. */
+  readonly createdAt: Date;
+};
 
 /** Query options for repository discovery. */
 type AdminRepositoryListQuery = {
@@ -2707,6 +2782,11 @@ export type AdminControlPlaneService = {
     repoId: string,
     query: AdminMemoryCandidateListQuery,
   ) => Promise<readonly AdminMemoryCandidateSummary[]>;
+  /** Lists recent suppression matches recorded for one repository. */
+  readonly listRepositorySuppressionMatches: (
+    repoId: string,
+    query: AdminSuppressionMatchListQuery,
+  ) => Promise<readonly AdminSuppressionMatchSummary[]>;
   /** Gets one memory fact by ID. */
   readonly getMemoryFact: (memoryFactId: string) => Promise<AdminMemoryFactSummary>;
   /** Gets one memory candidate by ID. */
@@ -3764,7 +3844,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         }
 
         const url = new URL(request.url);
-        const [memoryFacts, memoryCandidates] = await Promise.all([
+        const [memoryFacts, memoryCandidates, suppressionMatches] = await Promise.all([
           getAdminControlPlaneService().listRepositoryMemoryFacts(
             params.repoId,
             memoryFactListQueryFromUrl(url),
@@ -3773,9 +3853,20 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
             params.repoId,
             memoryCandidateListQueryFromUrl(url),
           ),
+          getAdminControlPlaneService().listRepositorySuppressionMatches(
+            params.repoId,
+            suppressionMatchListQueryFromUrl(url),
+          ),
         ]);
 
-        return { data: { memoryCandidates, memoryFacts, repository: settings.repository } };
+        return {
+          data: {
+            memoryCandidates,
+            memoryFacts,
+            repository: settings.repository,
+            suppressionMatches,
+          },
+        };
       } catch (error) {
         return handleAdminControlPlaneError(error, set);
       }
@@ -7189,6 +7280,8 @@ function createAdminControlPlaneService(dependencies: {
       listRepositoryMemoryCandidates(dependencies.db, repoId, query),
     listRepositoryMemoryFacts: (repoId, query) =>
       listRepositoryMemoryFacts(dependencies.db, repoId, query),
+    listRepositorySuppressionMatches: (repoId, query) =>
+      listRepositorySuppressionMatches(dependencies.db, repoId, query),
     listOrganizations: (query) => listOrganizations(dependencies.db, query),
     listProductUsageEvents: (query) => listProductUsageEvents(dependencies.db, query),
     listProviderInstallations: (query) => listProviderInstallations(dependencies.db, query),
@@ -10493,6 +10586,40 @@ async function listRepositoryMemoryCandidates(
   return rows.map(toAdminMemoryCandidateSummary);
 }
 
+/** Lists recent memory suppression matches for one repository. */
+async function listRepositorySuppressionMatches(
+  db: HeimdallDatabase,
+  repoId: string,
+  query: AdminSuppressionMatchListQuery,
+): Promise<readonly AdminSuppressionMatchSummary[]> {
+  const rows = await db
+    .select({
+      candidateFindingId: suppressionMatches.candidateFindingId,
+      confidence: suppressionMatches.confidence,
+      createdAt: suppressionMatches.createdAt,
+      findingCategory: validatedFindings.category,
+      findingId: suppressionMatches.findingId,
+      findingSeverity: validatedFindings.severity,
+      findingTitle: validatedFindings.title,
+      location: validatedFindings.location,
+      matchKind: suppressionMatches.matchKind,
+      memoryFactId: suppressionMatches.memoryFactId,
+      memoryStatus: memoryFacts.status,
+      memoryText: memoryFacts.body,
+      reason: suppressionMatches.reason,
+      reviewRunId: suppressionMatches.reviewRunId,
+      suppressionMatchId: suppressionMatches.suppressionMatchId,
+    })
+    .from(suppressionMatches)
+    .innerJoin(memoryFacts, eq(suppressionMatches.memoryFactId, memoryFacts.memoryFactId))
+    .innerJoin(validatedFindings, eq(suppressionMatches.findingId, validatedFindings.findingId))
+    .where(eq(suppressionMatches.repoId, repoId))
+    .orderBy(desc(suppressionMatches.createdAt), desc(suppressionMatches.suppressionMatchId))
+    .limit(boundedListLimit(query.limit));
+
+  return rows.map(toAdminSuppressionMatchSummary);
+}
+
 /** Gets one memory fact row by ID. */
 async function getMemoryFact(
   db: HeimdallDatabase,
@@ -10858,6 +10985,27 @@ function toAdminMemoryCandidateSummary(row: MemoryCandidateRow): AdminMemoryCand
     status: row.status,
     trustLevel: row.trustLevel,
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+/** Converts a joined suppression match row into a scoped API DTO. */
+function toAdminSuppressionMatchSummary(row: SuppressionMatchRow): AdminSuppressionMatchSummary {
+  return {
+    candidateFindingId: row.candidateFindingId,
+    confidence: normalizedConfidence(row.confidence),
+    createdAt: row.createdAt.toISOString(),
+    findingCategory: row.findingCategory,
+    findingId: row.findingId,
+    findingSeverity: row.findingSeverity,
+    findingTitle: row.findingTitle,
+    location: row.location,
+    matchKind: row.matchKind,
+    memoryFactId: row.memoryFactId,
+    memoryStatus: row.memoryStatus,
+    memoryText: row.memoryText,
+    ...(row.reason ? { reason: row.reason } : {}),
+    reviewRunId: row.reviewRunId,
+    suppressionMatchId: row.suppressionMatchId,
   };
 }
 
@@ -16666,6 +16814,13 @@ function memoryCandidateListQueryFromUrl(url: URL): AdminMemoryCandidateListQuer
     includeOrgCandidates: optionalBooleanQuery(url, "includeOrgCandidates"),
     limit: listLimitFromUrl(url),
     ...(status ? { status } : {}),
+  };
+}
+
+/** Converts a URL into a repository suppression match query. */
+function suppressionMatchListQueryFromUrl(url: URL): AdminSuppressionMatchListQuery {
+  return {
+    limit: listLimitFromUrl(url),
   };
 }
 

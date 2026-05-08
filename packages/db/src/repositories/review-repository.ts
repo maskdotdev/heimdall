@@ -17,6 +17,7 @@ import {
   reviewRunMetrics,
   reviewRunStageEvents,
   reviewRuns,
+  suppressionMatches,
   validatedFindings,
 } from "../schema";
 import { toCandidateFinding, toReviewRun, toValidatedFinding } from "./row-mappers";
@@ -80,6 +81,34 @@ export type FindingDuplicateGroupInsert = {
   /** Optional product-safe duplicate metadata. */
   readonly metadata?: Record<string, unknown>;
   /** Group creation time. */
+  readonly createdAt?: Date | string;
+};
+
+/** Product-safe suppression match row to persist for memory audit history. */
+export type SuppressionMatchInsert = {
+  /** Stable suppression match row ID. */
+  readonly suppressionMatchId: string;
+  /** Organization that owns the review run. */
+  readonly orgId: string;
+  /** Repository that owns the review run. */
+  readonly repoId: string;
+  /** Review run that emitted the suppression decision. */
+  readonly reviewRunId: string;
+  /** Validated finding row produced for the suppressed candidate. */
+  readonly findingId: string;
+  /** Candidate finding inspected by the memory matcher. */
+  readonly candidateFindingId: string;
+  /** Durable memory fact responsible for the suppression decision. */
+  readonly memoryFactId: string;
+  /** Suppression match strategy that produced the decision. */
+  readonly matchKind: string;
+  /** Suppression matcher confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe matcher reason for audit displays. */
+  readonly reason?: string | null;
+  /** Optional product-safe match metadata. */
+  readonly metadata?: Record<string, unknown>;
+  /** Match creation time. */
   readonly createdAt?: Date | string;
 };
 
@@ -342,6 +371,33 @@ export class ReviewRepository {
           metadata: group.metadata,
           reason: group.reason ?? undefined,
           reviewRunId: group.reviewRunId,
+        })),
+      )
+      .onConflictDoNothing();
+  }
+
+  /** Inserts suppression matches and preserves existing stable match IDs. */
+  public async insertSuppressionMatches(matches: readonly SuppressionMatchInsert[]): Promise<void> {
+    if (matches.length === 0) {
+      return;
+    }
+
+    await this.db
+      .insert(suppressionMatches)
+      .values(
+        matches.map((match) => ({
+          candidateFindingId: match.candidateFindingId,
+          confidence: match.confidence,
+          createdAt: match.createdAt ? new Date(match.createdAt) : undefined,
+          findingId: match.findingId,
+          matchKind: match.matchKind,
+          memoryFactId: match.memoryFactId,
+          metadata: match.metadata,
+          orgId: match.orgId,
+          reason: match.reason ?? undefined,
+          repoId: match.repoId,
+          reviewRunId: match.reviewRunId,
+          suppressionMatchId: match.suppressionMatchId,
         })),
       )
       .onConflictDoNothing();

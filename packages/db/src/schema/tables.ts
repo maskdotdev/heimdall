@@ -1699,6 +1699,53 @@ export const memoryFacts = pgTable("memory_facts", {
   ...timestamps,
 });
 
+/** Auditable memory suppression decisions emitted during finding validation. */
+export const suppressionMatches = pgTable(
+  "suppression_matches",
+  {
+    suppressionMatchId: text("suppression_match_id").primaryKey(),
+    orgId: text("org_id")
+      .notNull()
+      .references(() => orgs.orgId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    reviewRunId: text("review_run_id")
+      .notNull()
+      .references(() => reviewRuns.reviewRunId),
+    findingId: text("finding_id")
+      .notNull()
+      .references(() => validatedFindings.findingId),
+    candidateFindingId: text("candidate_finding_id")
+      .notNull()
+      .references(() => candidateFindings.findingId),
+    memoryFactId: text("memory_fact_id")
+      .notNull()
+      .references(() => memoryFacts.memoryFactId),
+    matchKind: text("match_kind").notNull(),
+    confidence: real("confidence").notNull(),
+    reason: text("reason"),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("suppression_matches_review_candidate_fact_unique").on(
+      table.reviewRunId,
+      table.candidateFindingId,
+      table.memoryFactId,
+      table.matchKind,
+    ),
+    index("suppression_matches_org_repo_created_idx").on(
+      table.orgId,
+      table.repoId,
+      table.createdAt,
+    ),
+    index("suppression_matches_review_run_idx").on(table.reviewRunId),
+    index("suppression_matches_memory_fact_idx").on(table.memoryFactId),
+    index("suppression_matches_finding_idx").on(table.findingId),
+  ],
+);
+
 /** Candidate memory facts proposed from maintainer feedback or automated signals. */
 export const memoryCandidates = pgTable(
   "memory_candidates",

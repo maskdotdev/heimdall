@@ -56,6 +56,7 @@ import {
   sandboxRuns,
   subscriptionItems,
   subscriptions,
+  suppressionMatches,
   usageEvents,
   userProviderAccounts,
   userSessions,
@@ -110,6 +111,10 @@ const feedbackTimelineMigrationPath = resolve(
   testDirectory,
   "../migrations/0024_swift_tinkerer.sql",
 );
+const suppressionMatchesMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0025_eminent_scrambler.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -148,6 +153,7 @@ describe("database schema foundation", () => {
     expect(memoryCandidates.memoryCandidateId.name).toBe("memory_candidate_id");
     expect(feedbackEvents.feedbackEventId.name).toBe("feedback_event_id");
     expect(feedbackSignals.feedbackSignalId.name).toBe("feedback_signal_id");
+    expect(suppressionMatches.suppressionMatchId.name).toBe("suppression_match_id");
     expect(publishedReviews.publishedReviewId.name).toBe("published_review_id");
     expect(publishedSummaryComments.publishedSummaryCommentId.name).toBe(
       "published_summary_comment_id",
@@ -211,6 +217,7 @@ describe("database schema foundation", () => {
     );
     const optionalIndexRecordsMigration = await readFile(optionalIndexRecordsMigrationPath, "utf8");
     const feedbackTimelineMigration = await readFile(feedbackTimelineMigrationPath, "utf8");
+    const suppressionMatchesMigration = await readFile(suppressionMatchesMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -251,6 +258,10 @@ describe("database schema foundation", () => {
     expect(memoryCandidatesMigration).toContain('CREATE TABLE "memory_candidates"');
     expect(feedbackTimelineMigration).toContain('CREATE TABLE "feedback_events"');
     expect(feedbackTimelineMigration).toContain('CREATE TABLE "feedback_signals"');
+    expect(suppressionMatchesMigration).toContain('CREATE TABLE "suppression_matches"');
+    expect(suppressionMatchesMigration).toContain(
+      'CREATE UNIQUE INDEX "suppression_matches_review_candidate_fact_unique"',
+    );
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_runs"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_artifacts"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_policy_decisions"');
@@ -451,6 +462,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('eval_baselines')::text) AS eval_baselines_table,
         (SELECT to_regclass('feedback_events')::text) AS feedback_events_table,
         (SELECT to_regclass('feedback_signals')::text) AS feedback_signals_table,
+        (SELECT to_regclass('suppression_matches')::text) AS suppression_matches_table,
         (SELECT to_regclass('review_run_metrics')::text) AS review_run_metrics_table,
         (SELECT to_regclass('users')::text) AS users_table,
         (SELECT to_regclass('oauth_states')::text) AS oauth_states_table
@@ -478,6 +490,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       oauth_states_table: "oauth_states",
       replay_runs_table: "replay_runs",
       review_run_metrics_table: "review_run_metrics",
+      suppression_matches_table: "suppression_matches",
       sandbox_artifacts_table: "sandbox_artifacts",
       sandbox_policy_decisions_table: "sandbox_policy_decisions",
       sandbox_runs_table: "sandbox_runs",

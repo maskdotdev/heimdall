@@ -1218,6 +1218,16 @@ describe("validateAndRankCandidateFindings", () => {
         memoryFactId: "mem_suppress_exact",
       },
     });
+    expect(result.suppressionMatches).toEqual([
+      {
+        candidateFindingId: validCandidateFindingFixture.findingId,
+        confidence: 0.99,
+        findingId: result.rejected[0]?.findingId,
+        matchKind: "exact_fingerprint",
+        memoryFactId: "mem_suppress_exact",
+        reason: "Maintainer suppressed this exact finding fingerprint.",
+      },
+    ]);
     expect(result.trace.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

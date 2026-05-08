@@ -1276,6 +1276,22 @@ export type FindingValidationStats = {
   readonly rejectionReasonCounts: Partial<Record<FindingRejectionReason, number>>;
 };
 
+/** Product-safe memory suppression match emitted for durable audit history. */
+export type FindingSuppressionMatch = {
+  /** Validated finding row produced for the suppressed candidate. */
+  readonly findingId: string;
+  /** Candidate finding inspected by the suppression matcher. */
+  readonly candidateFindingId: string;
+  /** Durable memory fact responsible for the suppression decision. */
+  readonly memoryFactId: string;
+  /** Suppression match strategy that produced the decision. */
+  readonly matchKind: NonNullable<SuppressionDecision["matchKind"]>;
+  /** Suppression matcher confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe matcher reason for audit displays. */
+  readonly reason?: string | undefined;
+};
+
 /** Full validation result with publishable findings, rejected findings, stats, and trace data. */
 export type FindingValidationResult = {
   /** Accepted findings in publish rank order. */
@@ -1286,6 +1302,8 @@ export type FindingValidationResult = {
   readonly validated: readonly ValidatedFinding[];
   /** Duplicate groups discovered during validation. */
   readonly duplicateGroups: readonly FindingDuplicateGroup[];
+  /** Durable memory suppression matches discovered during validation. */
+  readonly suppressionMatches: readonly FindingSuppressionMatch[];
   /** Aggregate validation statistics. */
   readonly stats: FindingValidationStats;
   /** Product-safe validation trace. */
@@ -1352,6 +1370,7 @@ function validateCandidateFindingsCore(
   const accepted: ValidatedFinding[] = [];
   const rejected: ValidatedFinding[] = [];
   const normalizedCandidates: CandidateFinding[] = [];
+  const suppressionMatches: FindingSuppressionMatch[] = [];
 
   for (const rawFinding of input.findings as readonly unknown[]) {
     const normalizedFinding = normalizeCandidateFindingForValidation(rawFinding, input.timestamp);
@@ -1373,6 +1392,10 @@ function validateCandidateFindingsCore(
     };
     const decision = analysis.reasons.length === 0 ? "publish" : "reject";
     const validated = toValidatedFinding(finding, input.timestamp, decision, analysis);
+    const suppressionMatch = suppressionMatchForAnalysis(validated, analysis);
+    if (suppressionMatch) {
+      suppressionMatches.push(suppressionMatch);
+    }
 
     if (decision === "publish") {
       seenFingerprints.add(finding.fingerprint);
@@ -1402,6 +1425,7 @@ function validateCandidateFindingsCore(
     duplicateGroups: buildDuplicateGroups(normalizedCandidates),
     rejected: finalRejected,
     stats: buildValidationStats(input.findings.length, finalAccepted, finalRejected),
+    suppressionMatches,
     trace: buildValidationTrace(input.timestamp, validated),
     validated,
   };
@@ -2834,6 +2858,26 @@ function validationMetadata(
   }
 
   return metadata;
+}
+
+/** Converts an explainable memory suppression decision into an audit row input. */
+function suppressionMatchForAnalysis(
+  finding: ValidatedFinding,
+  analysis: FindingRejectionAnalysis,
+): FindingSuppressionMatch | undefined {
+  const decision = analysis.memorySuppression;
+  if (!decision?.suppressed || !decision.memoryFactId || !decision.matchKind) {
+    return undefined;
+  }
+
+  return {
+    candidateFindingId: finding.candidateFindingId,
+    confidence: decision.confidence,
+    findingId: finding.findingId,
+    matchKind: decision.matchKind,
+    memoryFactId: decision.memoryFactId,
+    ...(decision.reason ? { reason: decision.reason } : {}),
+  };
 }
 
 function rankFindings(findings: readonly ValidatedFinding[]): readonly ValidatedFinding[] {

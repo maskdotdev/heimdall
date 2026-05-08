@@ -176,6 +176,13 @@
       "when": 1778218858146,
       "tag": "0024_swift_tinkerer",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1778220453779,
+      "tag": "0025_eminent_scrambler",
+      "breakpoints": true
     }
   ]
 }

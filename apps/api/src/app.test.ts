@@ -111,6 +111,9 @@ type AdminMemoryCandidateApprovalFixture = Awaited<
 type AdminMemoryCandidateRejectionFixture = Awaited<
   ReturnType<AdminControlPlaneService["rejectMemoryCandidate"]>
 >;
+type AdminSuppressionMatchFixture = Awaited<
+  ReturnType<AdminControlPlaneService["listRepositorySuppressionMatches"]>
+>[number];
 type AdminBackgroundJobDebugFixture = Awaited<
   ReturnType<AdminDebugService["getBackgroundJobDebugDetails"]>
 >;
@@ -3298,6 +3301,9 @@ describe("api app", () => {
     const candidateQueries: Parameters<
       AdminControlPlaneService["listRepositoryMemoryCandidates"]
     >[1][] = [];
+    const suppressionQueries: Parameters<
+      AdminControlPlaneService["listRepositorySuppressionMatches"]
+    >[1][] = [];
     const app = createApiApp({
       adminControlPlaneAuth: auth,
       adminControlPlaneService: createMockControlPlaneService({
@@ -3313,6 +3319,10 @@ describe("api app", () => {
         listRepositoryMemoryCandidates: async (_repoId, query) => {
           candidateQueries.push(query);
           return [memoryCandidateFixture()];
+        },
+        listRepositorySuppressionMatches: async (_repoId, query) => {
+          suppressionQueries.push(query);
+          return [suppressionMatchFixture()];
         },
       }),
       githubWebhookHandler: noopWebhookHandler(),
@@ -3356,6 +3366,13 @@ describe("api app", () => {
             text: "Prefer bounded retries for provider calls.",
           },
         ],
+        suppressionMatches: [
+          {
+            matchKind: "path_category",
+            memoryFactId: "mem_1",
+            suppressionMatchId: "sm_1",
+          },
+        ],
       },
     });
     await expect(detailResponse.json()).resolves.toMatchObject({
@@ -3378,6 +3395,7 @@ describe("api app", () => {
         status: "pending",
       }),
     ]);
+    expect(suppressionQueries).toEqual([expect.objectContaining({ limit: 50 })]);
   });
 
   it("creates, updates, and deletes scoped API v1 memory facts", async () => {
@@ -6083,6 +6101,7 @@ function createMockControlPlaneService(
     listBillingMeterEvents: async () => billingMeterEventsFixture(),
     listRepositoryMemoryCandidates: async () => [memoryCandidateFixture()],
     listRepositoryMemoryFacts: async () => [memoryFactFixture()],
+    listRepositorySuppressionMatches: async () => [suppressionMatchFixture()],
     getReviewArtifactPayload: async () => reviewArtifactPayloadFixture(),
     getReviewFinding: async () => reviewFindingFixture(),
     getReviewMetricsSummary: async () => reviewMetricsFixture(),
@@ -6496,6 +6515,34 @@ function memoryCandidateFixture(
     status: "pending",
     trustLevel: "explicit_maintainer",
     updatedAt: "2026-05-05T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Creates a suppression match fixture. */
+function suppressionMatchFixture(
+  overrides: Partial<AdminSuppressionMatchFixture> = {},
+): AdminSuppressionMatchFixture {
+  return {
+    candidateFindingId: "fnd_candidate_1",
+    confidence: 0.93,
+    createdAt: "2026-05-05T12:30:00.000Z",
+    findingCategory: "correctness",
+    findingId: "fnd_validated_1",
+    findingSeverity: "medium",
+    findingTitle: "Provider retry loop is unbounded",
+    location: {
+      line: 42,
+      path: "src/provider.ts",
+      side: "RIGHT",
+    },
+    matchKind: "path_category",
+    memoryFactId: "mem_1",
+    memoryStatus: "active",
+    memoryText: "Prefer bounded retries for provider calls.",
+    reason: "Repo memory suppresses this category under the matched path.",
+    reviewRunId: "rrn_1",
+    suppressionMatchId: "sm_1",
     ...overrides,
   };
 }
