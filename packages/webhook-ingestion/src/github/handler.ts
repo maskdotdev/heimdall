@@ -2,9 +2,8 @@ import type { OrgSettings, RepositorySettings } from "@repo/contracts";
 import type { HeimdallDatabase } from "@repo/db";
 import {
   BackgroundJobRepository,
-  orgs,
+  ProviderInstallationRepository,
   PullRequestRepository,
-  providerInstallations,
   RepositoryRepository,
   WebhookRepository,
 } from "@repo/db";
@@ -324,53 +323,31 @@ async function persistInstallation(
   action: string | undefined,
 ): Promise<void> {
   const account = normalizeGitHubAccount(payload);
-  const now = new Date();
-  const deletedAt = action === "deleted" ? now : null;
+  const now = new Date().toISOString();
+  const deletedAt = action === "deleted" ? now : undefined;
 
-  await tx
-    .insert(orgs)
-    .values({
+  await new ProviderInstallationRepository(tx).upsertProviderInstallation({
+    installation: {
+      accountLogin: installation.accountLogin,
+      accountType: installation.accountType,
+      ...(deletedAt ? { deletedAt } : {}),
+      installationId: installation.installationId,
+      installedAt: installation.installedAt,
+      metadata: installation.metadata,
+      orgId: installation.orgId,
+      permissions: installation.permissions,
+      provider: "github",
+      providerInstallationId: installation.providerInstallationId,
+    },
+    org: {
+      createdAt: now,
+      metadata: account.metadata,
       orgId: account.orgId,
       name: account.login,
       slug: account.login.toLowerCase(),
-      metadata: account.metadata,
-      createdAt: now,
       updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: orgs.orgId,
-      set: {
-        name: account.login,
-        slug: account.login.toLowerCase(),
-        metadata: account.metadata,
-        updatedAt: now,
-      },
-    });
-
-  await tx
-    .insert(providerInstallations)
-    .values({
-      installationId: installation.installationId,
-      orgId: installation.orgId,
-      provider: "github",
-      providerInstallationId: installation.providerInstallationId,
-      accountLogin: installation.accountLogin,
-      accountType: installation.accountType,
-      permissions: installation.permissions,
-      installedAt: new Date(installation.installedAt),
-      deletedAt,
-      metadata: installation.metadata,
-    })
-    .onConflictDoUpdate({
-      target: [providerInstallations.provider, providerInstallations.providerInstallationId],
-      set: {
-        accountLogin: installation.accountLogin,
-        accountType: installation.accountType,
-        deletedAt,
-        permissions: installation.permissions,
-        metadata: installation.metadata,
-      },
-    });
+    },
+  });
 }
 
 async function persistRepository(

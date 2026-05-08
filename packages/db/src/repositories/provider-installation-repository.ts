@@ -1,8 +1,24 @@
-import type { ProviderInstallation } from "@repo/contracts";
+import type { Org, ProviderInstallation } from "@repo/contracts";
 import { and, desc, eq, ilike, inArray, isNull, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { providerInstallations } from "../schema";
+import { orgs, providerInstallations } from "../schema";
 import { toProviderInstallation } from "./row-mappers";
+
+/** Input for upserting a provider account organization and its installation. */
+export type UpsertProviderInstallationInput = {
+  /** Organization row that owns the provider installation. */
+  readonly org: Org;
+  /** Provider installation row to insert or update. */
+  readonly installation: ProviderInstallation;
+};
+
+const requireReturnedRow = <T>(row: T | undefined): T => {
+  if (!row) {
+    throw new Error("Database write did not return a row.");
+  }
+
+  return row;
+};
 
 /** Input for bounded provider installation listing. */
 export type ListProviderInstallationsInput = {
@@ -26,6 +42,66 @@ export type ListRecentProviderInstallationsInput = {
 export class ProviderInstallationRepository {
   /** Creates a provider installation query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
+
+  /** Inserts or updates a provider account organization and its installation. */
+  public async upsertProviderInstallation(
+    input: UpsertProviderInstallationInput,
+  ): Promise<ProviderInstallation> {
+    await this.db
+      .insert(orgs)
+      .values({
+        createdAt: new Date(input.org.createdAt),
+        metadata: input.org.metadata ?? null,
+        name: input.org.name,
+        orgId: input.org.orgId,
+        slug: input.org.slug,
+        updatedAt: new Date(input.org.updatedAt),
+      })
+      .onConflictDoUpdate({
+        target: orgs.orgId,
+        set: {
+          metadata: input.org.metadata ?? null,
+          name: input.org.name,
+          slug: input.org.slug,
+          updatedAt: new Date(input.org.updatedAt),
+        },
+      });
+
+    const [row] = await this.db
+      .insert(providerInstallations)
+      .values({
+        accountLogin: input.installation.accountLogin,
+        accountType: input.installation.accountType,
+        deletedAt: input.installation.deletedAt ? new Date(input.installation.deletedAt) : null,
+        installationId: input.installation.installationId,
+        installedAt: new Date(input.installation.installedAt),
+        metadata: input.installation.metadata ?? null,
+        orgId: input.installation.orgId,
+        permissions: input.installation.permissions,
+        provider: input.installation.provider,
+        providerInstallationId: input.installation.providerInstallationId,
+        suspendedAt: input.installation.suspendedAt
+          ? new Date(input.installation.suspendedAt)
+          : null,
+      })
+      .onConflictDoUpdate({
+        target: [providerInstallations.provider, providerInstallations.providerInstallationId],
+        set: {
+          accountLogin: input.installation.accountLogin,
+          accountType: input.installation.accountType,
+          deletedAt: input.installation.deletedAt ? new Date(input.installation.deletedAt) : null,
+          metadata: input.installation.metadata ?? null,
+          orgId: input.installation.orgId,
+          permissions: input.installation.permissions,
+          suspendedAt: input.installation.suspendedAt
+            ? new Date(input.installation.suspendedAt)
+            : null,
+        },
+      })
+      .returning();
+
+    return toProviderInstallation(requireReturnedRow(row));
+  }
 
   /** Gets one provider installation by durable installation ID. */
   public async getProviderInstallation(

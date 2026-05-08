@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_ORG_SETTINGS,
+  type Org,
   type OrgSettings,
   type ProviderInstallation,
   type Repository,
@@ -231,6 +232,63 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
   });
 
   it("loads provider installations through the repository boundary", async () => {
+    const upsertedInstallation = await providerInstallationRepository.upsertProviderInstallation({
+      installation: providerInstallationFixture({
+        accountLogin: "upserted",
+        installationId: "inst_repository_upsert",
+        orgId: "org_repository_upsert",
+        providerInstallationId: "repository-upsert-installation",
+      }),
+      org: orgFixture({
+        name: "Repository Upsert Org",
+        orgId: "org_repository_upsert",
+        slug: "repository-upsert-org",
+      }),
+    });
+    expect(upsertedInstallation).toMatchObject({
+      accountLogin: "upserted",
+      installationId: "inst_repository_upsert",
+      orgId: "org_repository_upsert",
+      providerInstallationId: "repository-upsert-installation",
+    } satisfies Partial<ProviderInstallation>);
+
+    const deletedInstallation = await providerInstallationRepository.upsertProviderInstallation({
+      installation: providerInstallationFixture({
+        accountLogin: "upserted-renamed",
+        deletedAt: "2026-05-08T04:00:00.000Z",
+        installationId: "inst_repository_upsert",
+        orgId: "org_repository_upsert",
+        permissions: { metadata: "write" },
+        providerInstallationId: "repository-upsert-installation",
+      }),
+      org: orgFixture({
+        metadata: { source: "upsert" },
+        name: "Repository Upsert Org Renamed",
+        orgId: "org_repository_upsert",
+        slug: "repository-upsert-org-renamed",
+      }),
+    });
+    expect(deletedInstallation).toMatchObject({
+      accountLogin: "upserted-renamed",
+      deletedAt: "2026-05-08T04:00:00.000Z",
+      permissions: { metadata: "write" },
+    } satisfies Partial<ProviderInstallation>);
+    const [upsertedOrg] = await sql<
+      { name: string; slug: string; metadataSource: string | null }[]
+    >`
+      SELECT
+        name,
+        slug,
+        metadata->>'source' AS "metadataSource"
+      FROM orgs
+      WHERE org_id = 'org_repository_upsert'
+    `;
+    expect(upsertedOrg).toEqual({
+      metadataSource: "upsert",
+      name: "Repository Upsert Org Renamed",
+      slug: "repository-upsert-org-renamed",
+    });
+
     await expect(
       providerInstallationRepository.getProviderInstallation("inst_repository_test"),
     ).resolves.toMatchObject({
@@ -405,6 +463,35 @@ function repositorySettingsFixture(
     skipDraftPullRequests: true,
     createdAt: "2026-05-08T00:00:00.000Z",
     updatedAt: "2026-05-08T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Builds an organization contract fixture for repository query tests. */
+function orgFixture(overrides: Partial<Org> = {}): Org {
+  return {
+    createdAt: "2026-05-08T00:00:00.000Z",
+    name: "Repository Test Org",
+    orgId: "org_repository_test",
+    slug: "repository-test-org",
+    updatedAt: "2026-05-08T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Builds a provider installation contract fixture for repository query tests. */
+function providerInstallationFixture(
+  overrides: Partial<ProviderInstallation> = {},
+): ProviderInstallation {
+  return {
+    accountLogin: "acme",
+    accountType: "organization",
+    installationId: "inst_repository_test",
+    installedAt: "2026-05-08T00:00:00.000Z",
+    orgId: "org_repository_test",
+    permissions: {},
+    provider: "github",
+    providerInstallationId: "repository-test-installation",
     ...overrides,
   };
 }
