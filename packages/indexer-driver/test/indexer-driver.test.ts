@@ -45,6 +45,21 @@ describe("validateIndexArtifact", () => {
     expect(validateIndexArtifact(validSemanticArtifact())).toEqual([]);
   });
 
+  it("rejects artifacts that move backward in canonical record type order", () => {
+    const artifact = validSemanticArtifact();
+    const [file, symbol, chunk, edge] = artifact.records;
+    if (!file || !symbol || !chunk || !edge) {
+      throw new Error("Semantic validation fixture is missing records.");
+    }
+
+    expect(
+      validateIndexArtifact({
+        ...artifact,
+        records: [edge, file, symbol, chunk],
+      }),
+    ).toEqual(expect.arrayContaining(["records[1].type file appears after edge records"]));
+  });
+
   it("reports cross-record semantic errors without exposing record text", () => {
     const errors = validateIndexArtifact(invalidSemanticArtifact());
 

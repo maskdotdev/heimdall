@@ -417,6 +417,18 @@ const DEFAULT_REMOTE_POLL_INTERVAL_MS = 1_000;
 /** Default maximum time spent polling a remote indexer job. */
 const DEFAULT_REMOTE_MAX_POLL_MS = 120_000;
 
+/** Canonical record ordering required for portable index artifacts. */
+const INDEX_RECORD_TYPE_ORDER = {
+  file: 0,
+  symbol: 1,
+  chunk: 2,
+  dependency: 3,
+  route: 4,
+  test_mapping: 5,
+  edge: 6,
+  diagnostic: 7,
+} satisfies Record<IndexRecord["type"], number>;
+
 /** Validates an index artifact before it crosses the importer boundary. */
 export function validateIndexArtifact(artifact: IndexArtifact): readonly string[] {
   const errors: string[] = [];
@@ -456,8 +468,10 @@ function validateIndexArtifactRecordSemantics(artifact: IndexArtifact): string[]
   const chunkIds = new Set<string>();
   const edgeIds = new Set<string>();
   const counts = { chunk: 0, edge: 0, file: 0, symbol: 0 };
+  const ordering: ArtifactRecordOrderingState = { highestOrder: -1, highestType: undefined };
 
   artifact.records.forEach((record, index) => {
+    collectRecordOrderingError(errors, ordering, record, index);
     collectRecordIdentity(errors, {
       index,
       record,
@@ -488,6 +502,32 @@ function validateIndexArtifactRecordSemantics(artifact: IndexArtifact): string[]
   });
 
   return errors;
+}
+
+/** Mutable state used while validating canonical record type ordering. */
+type ArtifactRecordOrderingState = {
+  /** Highest canonical record type order seen so far. */
+  highestOrder: number;
+  /** Record type associated with the highest order seen so far. */
+  highestType: IndexRecord["type"] | undefined;
+};
+
+/** Records an error when an artifact moves backward in canonical record type order. */
+function collectRecordOrderingError(
+  errors: string[],
+  state: ArtifactRecordOrderingState,
+  record: IndexRecord,
+  index: number,
+): void {
+  const order = INDEX_RECORD_TYPE_ORDER[record.type];
+  if (order < state.highestOrder) {
+    errors.push(`records[${index}].type ${record.type} appears after ${state.highestType} records`);
+    return;
+  }
+  if (order > state.highestOrder) {
+    state.highestOrder = order;
+    state.highestType = record.type;
+  }
 }
 
 /** Mutable state used while collecting artifact identity invariants. */
