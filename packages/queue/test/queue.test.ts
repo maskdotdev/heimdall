@@ -430,6 +430,43 @@ describe("durable worker processor", () => {
 
     expect(store.list()[0]).toMatchObject({ attempts: 1, status: "canceled" });
   });
+
+  it("stops handlers at cooperative cancellation checkpoints", async () => {
+    const store = new InMemoryDurableJobStore([durableJob({ status: "queued" })]);
+    const reachedAfterCheckpoint: string[] = [];
+    const processor = createDurableJobProcessor({
+      heartbeatIntervalMs: 1,
+      store,
+      handlers: {
+        [JOB_TYPES.SyncInstallation]: async (_envelope, context) => {
+          if (!context) {
+            throw new Error("Expected durable handler context.");
+          }
+
+          const runningJob = store.list()[0];
+          if (!runningJob) {
+            throw new Error("Expected a running durable job.");
+          }
+
+          store.add({
+            ...runningJob,
+            completedAt: new Date("2026-05-08T00:35:00.000Z"),
+            status: "canceled",
+            updatedAt: new Date("2026-05-08T00:35:00.000Z"),
+          });
+          await context.throwIfCanceled();
+          reachedAfterCheckpoint.push("continued");
+        },
+      },
+    });
+
+    await expect(
+      processor({ data: syncInstallationEnvelope, attemptsMade: 0 } as never),
+    ).resolves.toBeUndefined();
+
+    expect(reachedAfterCheckpoint).toEqual([]);
+    expect(store.list()[0]).toMatchObject({ attempts: 1, status: "canceled" });
+  });
 });
 
 const redisUrl = process.env.HEIMDALL_REDIS_TEST_URL;

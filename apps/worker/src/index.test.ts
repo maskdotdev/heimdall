@@ -850,6 +850,48 @@ describe("createWorkerHandlers", () => {
     expect(JSON.stringify(usageEvents)).not.toContain("secretValue");
   });
 
+  it("checks cancellation before starting embedding batches", async () => {
+    const payload = validEmbeddingBatchJobPayloadFixture;
+    const providerCalls: string[] = [];
+    const handlers = createWorkerHandlers({
+      db: createWorkerEmbeddingDatabaseStub(payload.chunkIds),
+      embeddingProvider: {
+        dimensions: 2,
+        embedTexts: async () => {
+          providerCalls.push("embed");
+          return [[0.1, 0.2]];
+        },
+        model: payload.embeddingModel,
+        providerId: "fake",
+      },
+      gitProvider: {} as never,
+    });
+
+    await expect(
+      handlers[JOB_TYPES.EmbeddingBatch]?.(
+        {
+          attempt: 0,
+          createdAt: "2026-05-07T12:00:00.000Z",
+          idempotencyKey: "embedding:batch:idx_01HXAMPLE:chunk_01HXAMPLE",
+          jobId: "job_embedding_batch",
+          jobType: JOB_TYPES.EmbeddingBatch,
+          maxAttempts: 3,
+          payload,
+          schemaVersion: "embedding_batch_job.v1",
+        },
+        {
+          heartbeat: async () => "canceled",
+          isCancellationRequested: async () => true,
+          throwIfCanceled: async () => {
+            throw new Error("worker job canceled");
+          },
+        },
+      ),
+    ).rejects.toThrow("worker job canceled");
+
+    expect(providerCalls).toEqual([]);
+  });
+
   it("dispatches billing reconciliation jobs through the configured reconciler", async () => {
     const payloads: unknown[] = [];
     const handlers = createWorkerHandlers({
