@@ -143,6 +143,48 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         repoId: "repo_review_repository_test",
       }),
     ).rejects.toThrow(/limit must be an integer/u);
+    await reviewRepository.insertStageEvent({
+      message: "Retrieved indexed context.",
+      metadata: { contextItems: 3 },
+      reviewRunId: "rrn_review_repository",
+      stage: "retrieval",
+      status: "completed",
+    });
+    await expect(
+      reviewRepository.listReviewStageEventsForRun("rrn_review_repository"),
+    ).resolves.toMatchObject([
+      {
+        message: "Retrieved indexed context.",
+        metadata: { contextItems: 3 },
+        reviewRunId: "rrn_review_repository",
+        stage: "retrieval",
+        status: "completed",
+      },
+    ]);
+    await sql`
+      INSERT INTO review_run_dependencies (
+        review_run_id,
+        dependency_type,
+        dependency_id,
+        metadata
+      )
+      VALUES (
+        'rrn_review_repository',
+        'index_version',
+        'idx_review_repository_test',
+        '{"source":"integration"}'::jsonb
+      )
+    `;
+    await expect(
+      reviewRepository.listReviewDependenciesForRun("rrn_review_repository"),
+    ).resolves.toEqual([
+      {
+        dependencyId: "idx_review_repository_test",
+        dependencyType: "index_version",
+        metadata: { source: "integration" },
+        reviewRunId: "rrn_review_repository",
+      },
+    ]);
     await reviewRepository.insertReviewArtifact({
       artifact: {
         artifactId: "art_review_repository_expired",
@@ -159,6 +201,23 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
       retentionUntil: "2026-05-08T00:04:00.000Z",
       reviewRunId: "rrn_review_repository",
       sizeBytes: 123,
+    });
+    await expect(
+      reviewRepository.listReviewArtifactsForRun("rrn_review_repository"),
+    ).resolves.toMatchObject([
+      {
+        kind: "context_bundle",
+        reviewArtifactId: "art_review_repository_expired",
+        reviewRunId: "rrn_review_repository",
+      },
+    ]);
+    await expect(
+      reviewRepository.getLatestReviewArtifactForKind({
+        kind: "context_bundle",
+        reviewRunId: "rrn_review_repository",
+      }),
+    ).resolves.toMatchObject({
+      reviewArtifactId: "art_review_repository_expired",
     });
     await expect(
       reviewRepository.listExpiredReviewArtifactCleanupTargets({
@@ -217,6 +276,15 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
     expect(candidates.map((finding) => finding.findingId)).toEqual([
       "fnd_review_repository_candidate",
     ]);
+    await expect(
+      reviewRepository.listCandidateFindingRecordsForRun("rrn_review_repository"),
+    ).resolves.toMatchObject([
+      {
+        findingId: "fnd_review_repository_candidate",
+        reviewRunId: "rrn_review_repository",
+        title: "Validate user input before saving",
+      },
+    ]);
 
     const validated = await reviewRepository.insertValidatedFinding(
       validatedFindingFixture({
@@ -240,6 +308,16 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
     const validatedFindings = await reviewRepository.listValidatedFindings("rrn_review_repository");
     expect(validatedFindings.map((finding) => finding.findingId)).toEqual([
       "fnd_review_repository_validated",
+    ]);
+    await expect(
+      reviewRepository.listValidatedFindingRecordsForRun("rrn_review_repository"),
+    ).resolves.toMatchObject([
+      {
+        candidateFindingId: "fnd_review_repository_candidate",
+        findingId: "fnd_review_repository_validated",
+        reviewRunId: "rrn_review_repository",
+        title: "Validate user input before saving",
+      },
     ]);
 
     await sql`

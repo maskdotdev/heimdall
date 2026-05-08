@@ -254,10 +254,14 @@ tracked milestone.
   fields for API review finding list/detail routes, owns finding outcome creation/idempotent lookup
   and latest-outcome reads for API and worker finding outcome routes, owns provider-feedback target
   lookups for published findings and summary comments, and owns repository suppression-match audit
-  reads joined with memory fact and finding display fields for API memory inspection. The
-  Postgres-backed integration test verifies review-run upsert behavior, candidate/validated finding
-  idempotency, review finding inspection rows, provider-feedback target lookups, finding outcome
-  idempotency/lookups, and suppression-match inspection rows against the current migration chain.
+  reads joined with memory fact and finding display fields for API memory inspection. The repository
+  also exposes admin-debug review timeline, dependency, artifact, candidate-row, validated-row, and
+  latest artifact-by-kind reads, and `@repo/admin-tools` uses those reads for review inspection,
+  retrieval replay, and validation replay instead of raw review tables. The Postgres-backed
+  integration test verifies review-run upsert behavior, ordered review debug reads,
+  candidate/validated finding idempotency, review finding inspection rows, provider-feedback target
+  lookups, finding outcome idempotency/lookups, and suppression-match inspection rows against the
+  current migration chain.
 - Latest index artifact schema milestone: `@repo/index-schema` now owns a checked-in split
   fixture catalog for the Phase #10 valid and invalid artifact cases. The CLI can generate the
   same fixture shapes, preserves read-time integrity failures as JSON validation output, and the

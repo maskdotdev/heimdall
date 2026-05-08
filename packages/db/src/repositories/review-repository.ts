@@ -31,6 +31,7 @@ import {
   publishPlans,
   repositories,
   reviewArtifacts,
+  reviewRunDependencies,
   reviewRunMetrics,
   reviewRunStageEvents,
   reviewRuns,
@@ -232,6 +233,21 @@ export type ReviewRunMetricsInput = {
   /** Estimated model cost in USD, serialized for numeric storage. */
   readonly estimatedCostUsd?: string | null;
 };
+
+/** Review stage event row returned for debug timelines. */
+export type ReviewStageEventRecord = typeof reviewRunStageEvents.$inferSelect;
+
+/** Review dependency row returned for debug dependency inspection. */
+export type ReviewDependencyRecord = typeof reviewRunDependencies.$inferSelect;
+
+/** Review artifact row returned for debug artifact inspection. */
+export type ReviewArtifactRecord = typeof reviewArtifacts.$inferSelect;
+
+/** Candidate finding row returned for debug finding inspection. */
+export type CandidateFindingRecord = typeof candidateFindings.$inferSelect;
+
+/** Validated finding row returned for debug finding inspection. */
+export type ValidatedFindingRecord = typeof validatedFindings.$inferSelect;
 
 /** Published finding fields used by validation to avoid duplicate comments on reruns. */
 export type PublishedFindingForValidation = {
@@ -597,6 +613,64 @@ export class ReviewRepository {
       .limit(repositoryInspectionLimit(input.limit));
   }
 
+  /** Lists review stage events for one review run in timeline order. */
+  public async listReviewStageEventsForRun(
+    reviewRunId: string,
+  ): Promise<readonly ReviewStageEventRecord[]> {
+    return this.db
+      .select()
+      .from(reviewRunStageEvents)
+      .where(eq(reviewRunStageEvents.reviewRunId, reviewRunId))
+      .orderBy(
+        asc(reviewRunStageEvents.occurredAt),
+        asc(reviewRunStageEvents.reviewRunStageEventId),
+      );
+  }
+
+  /** Lists stored input dependencies for one review run. */
+  public async listReviewDependenciesForRun(
+    reviewRunId: string,
+  ): Promise<readonly ReviewDependencyRecord[]> {
+    return this.db
+      .select()
+      .from(reviewRunDependencies)
+      .where(eq(reviewRunDependencies.reviewRunId, reviewRunId))
+      .orderBy(asc(reviewRunDependencies.dependencyType), asc(reviewRunDependencies.dependencyId));
+  }
+
+  /** Lists review artifacts for one review run in creation order. */
+  public async listReviewArtifactsForRun(
+    reviewRunId: string,
+  ): Promise<readonly ReviewArtifactRecord[]> {
+    return this.db
+      .select()
+      .from(reviewArtifacts)
+      .where(eq(reviewArtifacts.reviewRunId, reviewRunId))
+      .orderBy(asc(reviewArtifacts.createdAt), asc(reviewArtifacts.reviewArtifactId));
+  }
+
+  /** Gets the newest review artifact for one review run and artifact kind. */
+  public async getLatestReviewArtifactForKind(input: {
+    /** Review run that owns the artifact. */
+    readonly reviewRunId: string;
+    /** Artifact kind to select. */
+    readonly kind: string;
+  }): Promise<ReviewArtifactRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(reviewArtifacts)
+      .where(
+        and(
+          eq(reviewArtifacts.reviewRunId, input.reviewRunId),
+          eq(reviewArtifacts.kind, input.kind),
+        ),
+      )
+      .orderBy(desc(reviewArtifacts.createdAt), desc(reviewArtifacts.reviewArtifactId))
+      .limit(1);
+
+    return row;
+  }
+
   /** Inserts a candidate finding and preserves existing fingerprint idempotency. */
   public async insertCandidateFinding(finding: CandidateFinding): Promise<CandidateFinding> {
     const [row] = await this.db
@@ -621,6 +695,17 @@ export class ReviewRepository {
     return rows.map(toCandidateFinding);
   }
 
+  /** Lists stored candidate finding rows for one review run in creation order. */
+  public async listCandidateFindingRecordsForRun(
+    reviewRunId: string,
+  ): Promise<readonly CandidateFindingRecord[]> {
+    return this.db
+      .select()
+      .from(candidateFindings)
+      .where(eq(candidateFindings.reviewRunId, reviewRunId))
+      .orderBy(asc(candidateFindings.createdAt), asc(candidateFindings.findingId));
+  }
+
   /** Inserts a validated finding and preserves existing validation idempotency. */
   public async insertValidatedFinding(finding: ValidatedFinding): Promise<ValidatedFinding> {
     const [row] = await this.db
@@ -640,6 +725,17 @@ export class ReviewRepository {
       .where(eq(validatedFindings.reviewRunId, reviewRunId));
 
     return rows.map(toValidatedFinding);
+  }
+
+  /** Lists stored validated finding rows for one review run in rank order. */
+  public async listValidatedFindingRecordsForRun(
+    reviewRunId: string,
+  ): Promise<readonly ValidatedFindingRecord[]> {
+    return this.db
+      .select()
+      .from(validatedFindings)
+      .where(eq(validatedFindings.reviewRunId, reviewRunId))
+      .orderBy(asc(validatedFindings.rank), asc(validatedFindings.findingId));
   }
 
   /** Lists validated findings with repository and publication state for inspection. */
