@@ -31,6 +31,10 @@ describe.runIf(integrationDatabaseUrl)("ComplianceEvidenceRepository integration
       INSERT INTO orgs (org_id, name, slug)
       VALUES ('org_compliance_evidence', 'Compliance Evidence Org', 'compliance-evidence-org')
     `;
+    await sql`
+      INSERT INTO users (user_id, primary_email, display_name)
+      VALUES ('user_compliance_owner', 'compliance-owner@example.test', 'Compliance Owner')
+    `;
   });
 
   afterAll(async () => {
@@ -98,6 +102,216 @@ describe.runIf(integrationDatabaseUrl)("ComplianceEvidenceRepository integration
     ).resolves.toMatchObject([{ complianceEvidenceId: "cmpev_audit_export" }]);
     await expect(repository.listComplianceEvidence({ limit: 101 })).rejects.toThrow(
       /limit must be an integer/u,
+    );
+  });
+
+  it("lists scoped source rows for evidence collectors", async () => {
+    await sql`
+      INSERT INTO org_memberships (org_id, user_id, role, metadata)
+      VALUES (
+        'org_compliance_evidence',
+        'user_compliance_owner',
+        'owner',
+        '{"privateNote":"not exported"}'::jsonb
+      )
+    `;
+    await sql`
+      INSERT INTO audit_logs (
+        audit_log_id,
+        org_id,
+        actor_type,
+        actor_user_id,
+        action,
+        resource_type,
+        resource_id,
+        occurred_at,
+        metadata
+      )
+      VALUES (
+        'audit_compliance_source',
+        'org_compliance_evidence',
+        'admin',
+        'user_compliance_owner',
+        'repo.settings.updated',
+        'repository',
+        'repo_compliance_source',
+        '2026-05-08T15:00:00.000Z',
+        '{"ticket":"SEC-1"}'::jsonb
+      )
+    `;
+    await sql`
+      INSERT INTO provider_installations (
+        installation_id,
+        org_id,
+        provider,
+        provider_installation_id,
+        account_login,
+        account_type,
+        installed_at
+      )
+      VALUES (
+        'inst_compliance_source',
+        'org_compliance_evidence',
+        'github',
+        '9001',
+        'compliance-org',
+        'Organization',
+        '2026-05-08T15:00:00.000Z'
+      )
+    `;
+    await sql`
+      INSERT INTO repositories (
+        repo_id,
+        org_id,
+        installation_id,
+        provider,
+        provider_repo_id,
+        owner,
+        name,
+        full_name,
+        default_branch,
+        visibility
+      )
+      VALUES (
+        'repo_compliance_source',
+        'org_compliance_evidence',
+        'inst_compliance_source',
+        'github',
+        '1239001',
+        'compliance-org',
+        'source',
+        'compliance-org/source',
+        'main',
+        'private'
+      )
+    `;
+    await sql`
+      INSERT INTO repository_settings (
+        repo_id,
+        review_policy,
+        severity_threshold,
+        max_comments_per_review,
+        ignored_paths,
+        ignored_authors,
+        ignored_labels,
+        require_label,
+        custom_instructions,
+        sandbox_policy
+      )
+      VALUES (
+        'repo_compliance_source',
+        'balanced',
+        'medium',
+        5,
+        '["vendor/**"]'::jsonb,
+        '["dependabot"]'::jsonb,
+        '["wip"]'::jsonb,
+        'review-me',
+        'Do not export raw instructions.',
+        '{"network":"none"}'::jsonb
+      )
+    `;
+    await sql`
+      INSERT INTO org_settings (
+        org_id,
+        settings_json,
+        version,
+        updated_by_user_id
+      )
+      VALUES (
+        'org_compliance_evidence',
+        '{"defaultReviewPolicy":"balanced"}'::jsonb,
+        2,
+        'user_compliance_owner'
+      )
+    `;
+    await sql`
+      INSERT INTO security_events (
+        security_event_id,
+        org_id,
+        repo_id,
+        type,
+        severity,
+        source,
+        status,
+        actor_id,
+        resource_type,
+        resource_id,
+        metadata
+      )
+      VALUES (
+        'secevt_compliance_source',
+        'org_compliance_evidence',
+        'repo_compliance_source',
+        'provider_permission_denied',
+        'high',
+        'github',
+        'open',
+        'user_compliance_owner',
+        'repository',
+        'repo_compliance_source',
+        '{"metadataKey":"metadataValue"}'::jsonb
+      )
+    `;
+
+    await expect(
+      repository.listAccessReviewEvidenceRows({
+        limit: 10,
+        orgId: "org_compliance_evidence",
+      }),
+    ).resolves.toMatchObject([
+      {
+        orgId: "org_compliance_evidence",
+        role: "owner",
+        userId: "user_compliance_owner",
+      },
+    ]);
+    await expect(
+      repository.listAuditLogEvidenceRows({
+        limit: 10,
+        orgId: "org_compliance_evidence",
+      }),
+    ).resolves.toMatchObject([
+      {
+        action: "repo.settings.updated",
+        auditLogId: "audit_compliance_source",
+      },
+    ]);
+    await expect(
+      repository.listSecurityEventEvidenceRows({
+        limit: 10,
+        orgId: "org_compliance_evidence",
+      }),
+    ).resolves.toMatchObject([
+      {
+        securityEventId: "secevt_compliance_source",
+        type: "provider_permission_denied",
+      },
+    ]);
+
+    const configRows = await repository.listConfigSnapshotEvidenceRows({
+      limit: 10,
+      orgId: "org_compliance_evidence",
+    });
+    expect(configRows.orgSettingsRows).toMatchObject([
+      {
+        orgId: "org_compliance_evidence",
+        version: 2,
+      },
+    ]);
+    expect(configRows.repositoryRows).toMatchObject([
+      {
+        repoId: "repo_compliance_source",
+      },
+    ]);
+    expect(configRows.repositorySettingsRows).toMatchObject([
+      {
+        repoId: "repo_compliance_source",
+        reviewPolicy: "balanced",
+      },
+    ]);
+    await expect(repository.listAccessReviewEvidenceRows({ limit: 1_001 })).rejects.toThrow(
+      /source row limit must be an integer/u,
     );
   });
 });

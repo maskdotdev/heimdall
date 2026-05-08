@@ -1,6 +1,14 @@
-import { and, desc, eq, ilike, or, type SQL, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { complianceEvidence } from "../schema";
+import {
+  auditLogs,
+  complianceEvidence,
+  orgMemberships,
+  orgSettings,
+  repositories,
+  repositorySettings,
+  securityEvents,
+} from "../schema";
 
 /** Input used to record one compliance evidence row. */
 export type RecordComplianceEvidenceInput = {
@@ -80,6 +88,33 @@ export type ListComplianceEvidenceInput = {
   readonly limit: number;
 };
 
+/** Input used to list source rows for compliance evidence collectors. */
+export type ListComplianceEvidenceSourceRowsInput = {
+  /** Organization scope to collect, when tenant-specific. */
+  readonly orgId?: string | undefined;
+  /** Maximum number of rows to return. */
+  readonly limit: number;
+};
+
+/** Source row used to build product-safe access review evidence. */
+export type ComplianceAccessReviewEvidenceRow = typeof orgMemberships.$inferSelect;
+
+/** Source row used to build product-safe audit log evidence. */
+export type ComplianceAuditLogEvidenceRow = typeof auditLogs.$inferSelect;
+
+/** Source row used to build product-safe security event evidence. */
+export type ComplianceSecurityEventEvidenceRow = typeof securityEvents.$inferSelect;
+
+/** Source rows used to build a product-safe configuration snapshot. */
+export type ComplianceConfigSnapshotEvidenceRows = {
+  /** Organization-level settings rows. */
+  readonly orgSettingsRows: readonly (typeof orgSettings.$inferSelect)[];
+  /** Repository rows used to scope and label repository settings. */
+  readonly repositoryRows: readonly (typeof repositories.$inferSelect)[];
+  /** Repository settings rows included in the snapshot. */
+  readonly repositorySettingsRows: readonly (typeof repositorySettings.$inferSelect)[];
+};
+
 /** Query helper for durable compliance evidence records. */
 export class ComplianceEvidenceRepository {
   /** Creates a compliance evidence query helper. */
@@ -128,6 +163,86 @@ export class ComplianceEvidenceRepository {
       .orderBy(desc(complianceEvidence.collectedAt), desc(complianceEvidence.complianceEvidenceId))
       .limit(complianceEvidenceListLimit(input.limit));
   }
+
+  /** Lists organization membership rows used for access review evidence collection. */
+  public async listAccessReviewEvidenceRows(
+    input: ListComplianceEvidenceSourceRowsInput,
+  ): Promise<readonly ComplianceAccessReviewEvidenceRow[]> {
+    return this.db
+      .select()
+      .from(orgMemberships)
+      .where(input.orgId ? eq(orgMemberships.orgId, input.orgId) : undefined)
+      .orderBy(asc(orgMemberships.orgId), asc(orgMemberships.userId))
+      .limit(complianceEvidenceSourceListLimit(input.limit));
+  }
+
+  /** Lists audit log rows used for audit evidence collection. */
+  public async listAuditLogEvidenceRows(
+    input: ListComplianceEvidenceSourceRowsInput,
+  ): Promise<readonly ComplianceAuditLogEvidenceRow[]> {
+    return this.db
+      .select()
+      .from(auditLogs)
+      .where(input.orgId ? eq(auditLogs.orgId, input.orgId) : undefined)
+      .orderBy(asc(auditLogs.occurredAt), asc(auditLogs.auditLogId))
+      .limit(complianceEvidenceSourceListLimit(input.limit));
+  }
+
+  /** Lists security event rows used for security event evidence collection. */
+  public async listSecurityEventEvidenceRows(
+    input: ListComplianceEvidenceSourceRowsInput,
+  ): Promise<readonly ComplianceSecurityEventEvidenceRow[]> {
+    return this.db
+      .select()
+      .from(securityEvents)
+      .where(input.orgId ? eq(securityEvents.orgId, input.orgId) : undefined)
+      .orderBy(asc(securityEvents.createdAt), asc(securityEvents.securityEventId))
+      .limit(complianceEvidenceSourceListLimit(input.limit));
+  }
+
+  /** Lists source rows used for product-safe configuration snapshot evidence collection. */
+  public async listConfigSnapshotEvidenceRows(
+    input: ListComplianceEvidenceSourceRowsInput,
+  ): Promise<ComplianceConfigSnapshotEvidenceRows> {
+    const limit = complianceEvidenceSourceListLimit(input.limit);
+    const orgSettingsRows = await this.db
+      .select()
+      .from(orgSettings)
+      .where(input.orgId ? eq(orgSettings.orgId, input.orgId) : undefined)
+      .orderBy(asc(orgSettings.orgId))
+      .limit(limit);
+    const repositoryRows = await this.db
+      .select()
+      .from(repositories)
+      .where(input.orgId ? eq(repositories.orgId, input.orgId) : undefined)
+      .orderBy(asc(repositories.repoId))
+      .limit(limit);
+    const repositorySettingsRows = await this.listConfigSnapshotRepositorySettingsRows({
+      limit,
+      repositoryIds: input.orgId ? repositoryRows.map((row) => row.repoId) : undefined,
+    });
+
+    return { orgSettingsRows, repositoryRows, repositorySettingsRows };
+  }
+
+  /** Lists repository settings rows for configuration snapshot collection. */
+  private async listConfigSnapshotRepositorySettingsRows(input: {
+    readonly limit: number;
+    readonly repositoryIds?: readonly string[] | undefined;
+  }): Promise<readonly (typeof repositorySettings.$inferSelect)[]> {
+    if (input.repositoryIds && input.repositoryIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(repositorySettings)
+      .where(
+        input.repositoryIds ? inArray(repositorySettings.repoId, input.repositoryIds) : undefined,
+      )
+      .orderBy(asc(repositorySettings.repoId))
+      .limit(input.limit);
+  }
 }
 
 /** Builds compliance evidence filters for admin inspection. */
@@ -172,6 +287,15 @@ function complianceEvidenceFilters(input: ListComplianceEvidenceInput): SQL[] {
 function complianceEvidenceListLimit(limit: number): number {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new Error("Compliance evidence list limit must be an integer from 1 to 100.");
+  }
+
+  return limit;
+}
+
+/** Validates and bounds compliance evidence source collector limits. */
+function complianceEvidenceSourceListLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new Error("Compliance evidence source row limit must be an integer from 1 to 1000.");
   }
 
   return limit;
