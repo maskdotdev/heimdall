@@ -8,6 +8,7 @@ import {
   createAdminSessionManager,
   createAwsSecretsManager,
   createComplianceEvidenceDescriptor,
+  createGcpSecretManager,
   createLocalEnvSecretsManager,
   createMemorySecurityEventSink,
   createNoopSecurityEventSink,
@@ -17,6 +18,7 @@ import {
   DEFAULT_RETENTION_POLICY,
   defaultSecurityEventSeverity,
   formatSecretRef,
+  type GcpSecretManagerFetch,
   isProductRole,
   parseSecretRef,
   productActorHasOrgPermission,
@@ -407,7 +409,83 @@ describe("admin security", () => {
     });
   });
 
-  it("routes environment and AWS secret refs from runtime environment configuration", async () => {
+  it("resolves GCP Secret Manager payloads with bearer authentication", async () => {
+    let requestedUrl: string | undefined;
+    let requestedInit: Parameters<GcpSecretManagerFetch>[1] | undefined;
+    const fetch: GcpSecretManagerFetch = async (url, init) => {
+      requestedUrl = url;
+      requestedInit = init;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            name: "projects/prod/secrets/github-app-private-key/versions/5",
+            payload: {
+              data: Buffer.from("gcp-secret-value", "utf8").toString("base64"),
+            },
+          }),
+      };
+    };
+    const manager = createGcpSecretManager({
+      accessToken: "gcp-access-token",
+      fetch,
+      now: () => new Date("2026-05-08T14:15:16.000Z"),
+    });
+
+    const resolved = await manager.resolveSecret(
+      parseSecretRef("gcp:projects/prod/secrets/github-app-private-key#5"),
+    );
+
+    expect(resolved).toEqual({
+      ref: {
+        name: "projects/prod/secrets/github-app-private-key",
+        provider: "gcp_secret_manager",
+        version: "5",
+      },
+      resolvedAt: "2026-05-08T14:15:16.000Z",
+      value: "gcp-secret-value",
+      version: "5",
+    });
+    expect(requestedUrl).toBe(
+      "https://secretmanager.googleapis.com/v1/projects/prod/secrets/github-app-private-key/versions/5:access",
+    );
+    expect(requestedInit).toEqual({
+      headers: {
+        accept: "application/json",
+        authorization: "Bearer gcp-access-token",
+      },
+      method: "GET",
+    });
+  });
+
+  it("maps GCP Secret Manager provider failures to product-safe resolution errors", async () => {
+    const fetchNotFound: GcpSecretManagerFetch = async () => ({
+      ok: false,
+      status: 404,
+      text: async () =>
+        JSON.stringify({
+          error: {
+            status: "NOT_FOUND",
+          },
+        }),
+    });
+    const manager = createGcpSecretManager({
+      accessToken: "gcp-access-token",
+      fetch: fetchNotFound,
+    });
+
+    await expect(manager.resolveSecret(parseSecretRef("gcp:prod/missing"))).rejects.toMatchObject({
+      code: "secret_not_found",
+    });
+    await expect(
+      manager.resolveSecret(parseSecretRef("gcp:prod/not/a/supported/ref")),
+    ).rejects.toMatchObject({
+      code: "secret_ref_invalid",
+    });
+  });
+
+  it("routes environment and managed secret refs from runtime environment configuration", async () => {
     const fetch: AwsSecretsManagerFetch = async () => ({
       ok: true,
       status: 200,
@@ -417,14 +495,27 @@ describe("admin security", () => {
           VersionId: "binary-version",
         }),
     });
+    const gcpFetch: GcpSecretManagerFetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          name: "projects/prod/secrets/llm-api-key/versions/9",
+          payload: {
+            data: Buffer.from("gcp-env-secret", "utf8").toString("base64"),
+          },
+        }),
+    });
     const manager = createSecretsManagerFromEnvironment({
       env: {
         AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
         AWS_REGION: "us-east-1",
         AWS_SECRET_ACCESS_KEY: "secret-access-key",
+        GCP_SECRET_MANAGER_ACCESS_TOKEN: "gcp-access-token",
         LOCAL_SECRET: "local-secret",
       },
       fetch,
+      gcpFetch,
       now: () => new Date("2026-05-08T14:15:16.000Z"),
     });
 
@@ -437,6 +528,12 @@ describe("admin security", () => {
       value: "aws-binary-secret",
       version: "binary-version",
     });
+    await expect(
+      manager.resolveSecret(parseSecretRef("gcp:projects/prod/secrets/llm-api-key#9")),
+    ).resolves.toMatchObject({
+      value: "gcp-env-secret",
+      version: "9",
+    });
 
     const envOnlyManager = createSecretsManagerFromEnvironment({
       env: {
@@ -446,6 +543,11 @@ describe("admin security", () => {
     });
     await expect(
       envOnlyManager.resolveSecret(parseSecretRef("aws:prod/missing-config")),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+    await expect(
+      envOnlyManager.resolveSecret(parseSecretRef("gcp:projects/prod/secrets/missing-config")),
     ).rejects.toMatchObject({
       code: "secret_provider_unsupported",
     });

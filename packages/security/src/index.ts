@@ -489,6 +489,51 @@ export type AwsSecretsManagerFromEnvironmentOptions = {
   readonly now?: (() => Date) | undefined;
 };
 
+/** Minimal fetch response surface used by the GCP Secret Manager adapter. */
+export type GcpSecretManagerFetchResponse = {
+  /** Whether the HTTP status is in the successful range. */
+  readonly ok: boolean;
+  /** HTTP status code returned by GCP. */
+  readonly status: number;
+  /** Reads the response body as text. */
+  readonly text: () => Promise<string>;
+};
+
+/** Minimal fetch function used by the GCP Secret Manager adapter. */
+export type GcpSecretManagerFetch = (
+  url: string,
+  init: {
+    /** Request headers sent to GCP. */
+    readonly headers: Readonly<Record<string, string>>;
+    /** HTTP method used for the request. */
+    readonly method: "GET";
+  },
+) => Promise<GcpSecretManagerFetchResponse>;
+
+/** Options used to construct a GCP Secret Manager adapter. */
+export type GcpSecretManagerOptions = {
+  /** OAuth2 bearer token used to call GCP Secret Manager. */
+  readonly accessToken: string;
+  /** Optional endpoint override for tests and private endpoints. */
+  readonly endpoint?: string | undefined;
+  /** Fetch implementation used for GCP requests. Defaults to global fetch. */
+  readonly fetch?: GcpSecretManagerFetch | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+};
+
+/** Options used to construct a GCP adapter from environment variables. */
+export type GcpSecretManagerFromEnvironmentOptions = {
+  /** Optional endpoint override for tests and private endpoints. */
+  readonly endpoint?: string | undefined;
+  /** Environment map used to read GCP configuration. Defaults to process.env. */
+  readonly env?: SecretsManagerEnvironment | undefined;
+  /** Fetch implementation used for GCP requests. Defaults to global fetch. */
+  readonly fetch?: GcpSecretManagerFetch | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+};
+
 /** Options used to construct a provider-routing secrets manager from environment variables. */
 export type SecretsManagerFromEnvironmentOptions = {
   /** Optional AWS endpoint override for tests and private endpoints. */
@@ -497,6 +542,10 @@ export type SecretsManagerFromEnvironmentOptions = {
   readonly env?: SecretsManagerEnvironment | undefined;
   /** Fetch implementation used for AWS requests. Defaults to global fetch. */
   readonly fetch?: AwsSecretsManagerFetch | undefined;
+  /** Optional GCP endpoint override for tests and private endpoints. */
+  readonly gcpEndpoint?: string | undefined;
+  /** Fetch implementation used for GCP requests. Defaults to global fetch. */
+  readonly gcpFetch?: GcpSecretManagerFetch | undefined;
   /** Current time provider used by tests. */
   readonly now?: (() => Date) | undefined;
 };
@@ -593,6 +642,79 @@ export class AwsSecretsManager implements SecretsManager {
   }
 }
 
+/** GCP Secret Manager adapter for production secret references. */
+export class GcpSecretManager implements SecretsManager {
+  /** OAuth2 bearer token used to call GCP Secret Manager. */
+  private readonly accessToken: string;
+  /** GCP Secret Manager API endpoint. */
+  private readonly endpoint: string;
+  /** Fetch implementation used for provider requests. */
+  private readonly fetch: GcpSecretManagerFetch;
+  /** Current time provider. */
+  private readonly now: () => Date;
+
+  /** Creates a GCP Secret Manager adapter. */
+  public constructor(options: GcpSecretManagerOptions) {
+    const accessToken = options.accessToken.trim();
+    if (!accessToken) {
+      throw new SecretResolutionError(
+        "secret_provider_error",
+        "GCP Secret Manager requires a non-empty access token.",
+      );
+    }
+
+    this.accessToken = accessToken;
+    this.endpoint = options.endpoint ?? "https://secretmanager.googleapis.com/v1";
+    this.fetch = options.fetch ?? defaultGcpSecretManagerFetch;
+    this.now = options.now ?? (() => new Date());
+  }
+
+  /** Resolves a `gcp_secret_manager:` reference through GCP Secret Manager. */
+  public async resolveSecret(ref: SecretRef): Promise<ResolvedSecret> {
+    assertValidSecretRef(ref);
+    if (ref.provider !== "gcp_secret_manager") {
+      throw new SecretResolutionError(
+        "secret_provider_unsupported",
+        `GcpSecretManager can only resolve gcp_secret_manager secret refs, not ${ref.provider}.`,
+        ref,
+      );
+    }
+
+    const resourceName = gcpSecretVersionResourceName(ref);
+    let response: GcpSecretManagerFetchResponse;
+    try {
+      response = await this.fetch(gcpSecretAccessUrl(this.endpoint, resourceName), {
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${this.accessToken}`,
+        },
+        method: "GET",
+      });
+    } catch (error) {
+      if (error instanceof SecretResolutionError) {
+        throw error;
+      }
+      throw new SecretResolutionError(
+        "secret_provider_error",
+        `GCP Secret Manager request failed with ${safeErrorName(error)}.`,
+        ref,
+      );
+    }
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw gcpSecretResolutionError(response.status, responseText, ref);
+    }
+
+    const parsed = parseGcpAccessSecretVersionResponse(responseText, ref);
+    return {
+      ref,
+      resolvedAt: this.now().toISOString(),
+      value: parsed.value,
+      ...(parsed.version ? { version: parsed.version } : {}),
+    };
+  }
+}
+
 /** Secrets manager that routes refs to provider-specific managers. */
 export class ProviderRoutingSecretsManager implements SecretsManager {
   /** Managers keyed by canonical secret ref provider. */
@@ -655,6 +777,11 @@ export function createAwsSecretsManager(options: AwsSecretsManagerOptions): Secr
   return new AwsSecretsManager(options);
 }
 
+/** Creates a GCP Secret Manager-backed secrets manager. */
+export function createGcpSecretManager(options: GcpSecretManagerOptions): SecretsManager {
+  return new GcpSecretManager(options);
+}
+
 /** Creates an AWS Secrets Manager adapter when environment configuration is complete. */
 export function createAwsSecretsManagerFromEnvironment(
   options: AwsSecretsManagerFromEnvironmentOptions = {},
@@ -689,6 +816,32 @@ export function createAwsSecretsManagerFromEnvironment(
   });
 }
 
+/** Creates a GCP Secret Manager adapter when environment configuration is complete. */
+export function createGcpSecretManagerFromEnvironment(
+  options: GcpSecretManagerFromEnvironmentOptions = {},
+): SecretsManager | undefined {
+  const env = options.env ?? process.env;
+  const accessToken =
+    optionalEnvironmentString(env.HEIMDALL_GCP_SECRET_MANAGER_ACCESS_TOKEN) ??
+    optionalEnvironmentString(env.GCP_SECRET_MANAGER_ACCESS_TOKEN) ??
+    optionalEnvironmentString(env.GOOGLE_OAUTH_ACCESS_TOKEN) ??
+    optionalEnvironmentString(env.GOOGLE_ACCESS_TOKEN);
+  if (!accessToken) {
+    return undefined;
+  }
+
+  const endpoint =
+    options.endpoint ??
+    optionalEnvironmentString(env.HEIMDALL_GCP_SECRET_MANAGER_ENDPOINT) ??
+    optionalEnvironmentString(env.GCP_SECRET_MANAGER_ENDPOINT);
+  return createGcpSecretManager({
+    accessToken,
+    ...(endpoint ? { endpoint } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
+}
+
 /** Creates a provider-routing secrets manager from runtime environment variables. */
 export function createSecretsManagerFromEnvironment(
   options: SecretsManagerFromEnvironmentOptions = {},
@@ -708,6 +861,15 @@ export function createSecretsManagerFromEnvironment(
   });
   if (awsSecretsManager) {
     managers.aws_secrets_manager = awsSecretsManager;
+  }
+  const gcpSecretsManager = createGcpSecretManagerFromEnvironment({
+    env,
+    ...(options.gcpEndpoint ? { endpoint: options.gcpEndpoint } : {}),
+    ...(options.gcpFetch ? { fetch: options.gcpFetch } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
+  if (gcpSecretsManager) {
+    managers.gcp_secret_manager = gcpSecretsManager;
   }
 
   return new ProviderRoutingSecretsManager(managers);
@@ -2191,6 +2353,32 @@ async function defaultAwsSecretsManagerFetch(
   };
 }
 
+/** Returns a fetch implementation backed by the runtime global fetch function. */
+async function defaultGcpSecretManagerFetch(
+  url: string,
+  init: {
+    readonly headers: Readonly<Record<string, string>>;
+    readonly method: "GET";
+  },
+): Promise<GcpSecretManagerFetchResponse> {
+  if (typeof fetch !== "function") {
+    throw new SecretResolutionError(
+      "secret_provider_unsupported",
+      "GCP Secret Manager resolution requires a runtime fetch implementation.",
+    );
+  }
+
+  const response = await fetch(url, {
+    headers: init.headers,
+    method: init.method,
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
+  };
+}
+
 /** Signed AWS Secrets Manager request data. */
 type AwsSecretsManagerSignedRequest = {
   /** Headers required for the signed AWS request. */
@@ -2378,6 +2566,106 @@ function awsSecretResolutionError(
     `AWS Secrets Manager returned HTTP ${status}${errorType ? ` (${errorType})` : ""}.`,
     ref,
   );
+}
+
+/** Product-safe parsed GCP AccessSecretVersion response data. */
+type ParsedGcpSecretAccessResponse = {
+  /** Resolved secret value. */
+  readonly value: string;
+  /** Provider version identifier when returned by GCP. */
+  readonly version?: string | undefined;
+};
+
+/** Creates the provider resource name for a GCP secret version. */
+function gcpSecretVersionResourceName(ref: SecretRef): string {
+  const name = ref.name.trim().replace(/^\/+|\/+$/gu, "");
+  const version = ref.version ?? "latest";
+  if (/^projects\/[^/]+\/secrets\/[^/]+\/versions\/[^/]+$/u.test(name)) {
+    return name;
+  }
+  if (/^projects\/[^/]+\/secrets\/[^/]+$/u.test(name)) {
+    return `${name}/versions/${version}`;
+  }
+
+  const shorthandParts = name.split("/");
+  if (shorthandParts.length === 2 && shorthandParts.every((part) => part.trim().length > 0)) {
+    const [projectId, secretId] = shorthandParts;
+    return `projects/${projectId}/secrets/${secretId}/versions/${version}`;
+  }
+
+  throw new SecretResolutionError(
+    "secret_ref_invalid",
+    "GCP Secret Manager refs must use projects/{project}/secrets/{secret}[#version] or {project}/{secret}[#version].",
+    ref,
+  );
+}
+
+/** Builds the GCP AccessSecretVersion URL for one resource name. */
+function gcpSecretAccessUrl(endpoint: string, resourceName: string): string {
+  const normalizedEndpoint = endpoint.replace(/\/+$/u, "");
+  const encodedResourceName = resourceName.split("/").map(encodeURIComponent).join("/");
+  return `${normalizedEndpoint}/${encodedResourceName}:access`;
+}
+
+/** Parses a GCP AccessSecretVersion response body into product-safe resolved data. */
+function parseGcpAccessSecretVersionResponse(
+  responseText: string,
+  ref: SecretRef,
+): ParsedGcpSecretAccessResponse {
+  const record = parseJsonRecord(responseText);
+  const payload = asRecord(record?.payload);
+  if (!record || !payload) {
+    throw new SecretResolutionError(
+      "secret_provider_error",
+      "GCP Secret Manager returned an invalid response envelope.",
+      ref,
+    );
+  }
+
+  const data = stringField(payload, "data");
+  if (!data) {
+    throw new SecretResolutionError(
+      "secret_provider_error",
+      "GCP Secret Manager response did not include a secret value.",
+      ref,
+    );
+  }
+
+  const version = gcpVersionFromResourceName(stringField(record, "name")) ?? ref.version;
+  return {
+    value: Buffer.from(data, "base64").toString("utf8"),
+    ...(version ? { version } : {}),
+  };
+}
+
+/** Creates a product-safe secret resolution error from a GCP error response. */
+function gcpSecretResolutionError(
+  status: number,
+  responseText: string,
+  ref: SecretRef,
+): SecretResolutionError {
+  const record = parseJsonRecord(responseText);
+  const error = asRecord(record?.error);
+  const errorStatus = stringField(error, "status") ?? stringField(record, "status");
+  if (status === 404 || errorStatus === "NOT_FOUND") {
+    return new SecretResolutionError(
+      "secret_not_found",
+      `GCP Secret Manager could not find secret ref ${secretRefLabel(ref)}.`,
+      ref,
+    );
+  }
+
+  return new SecretResolutionError(
+    "secret_provider_error",
+    `GCP Secret Manager returned HTTP ${status}${errorStatus ? ` (${errorStatus})` : ""}.`,
+    ref,
+  );
+}
+
+/** Reads the version segment from a GCP secret version resource name. */
+function gcpVersionFromResourceName(name: string | undefined): string | undefined {
+  const match = /^projects\/[^/]+\/secrets\/[^/]+\/versions\/(?<version>[^/]+)$/u.exec(name ?? "");
+  return match?.groups?.version;
 }
 
 /** Parses JSON text as an object record. */

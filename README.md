@@ -42,6 +42,13 @@ work without a network provider. For OpenAI-compatible embeddings, set `EMBEDDIN
 `EMBEDDING_DIMENSIONS=1536` unless the database vector schema and selected model are changed
 together.
 
+## Secret References
+
+Secret reference variables accept `env:NAME`, `aws:secret-name#version`, and
+`gcp:projects/project-id/secrets/secret-id#version`. AWS refs require AWS credentials and region
+environment variables. GCP refs require `GCP_SECRET_MANAGER_ACCESS_TOKEN`,
+`GOOGLE_OAUTH_ACCESS_TOKEN`, or `GOOGLE_ACCESS_TOKEN`.
+
 ## Queue Maintenance
 
 Workers periodically repair durable jobs that stay in `running` after a crash or lost BullMQ
