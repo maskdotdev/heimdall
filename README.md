@@ -96,6 +96,7 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models
+pnpm smoke:sandbox:docker
 pnpm infra:up
 pnpm infra:down
 ```
@@ -112,6 +113,18 @@ pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models
 The command writes CI-safe Markdown and JSON reports under `.heimdall/eval-runs/`. The report omits
 raw code and retrieved context text. `pnpm check` runs the same suite in CI mode and fails if recall,
 precision, false-positive, anchor, retrieval, latency, or cost thresholds regress.
+
+## Sandbox Smoke
+
+Run the local Docker sandbox smoke before changing sandbox execution, static-analysis runner
+wiring, or Docker policy defaults:
+
+```bash
+pnpm smoke:sandbox:docker
+```
+
+The command runs a no-network, read-only-root, non-root container and verifies bounded artifact
+collection. The latest product-safe proof lives in `docs/evidence/sandbox-docker-smoke-proof.json`.
 
 ## Rules and Policy Snapshots
 
