@@ -31,12 +31,10 @@ import {
   llmCalls,
   memoryFacts,
   PullRequestRepository,
-  providerInstallations,
   RepoRuleRepository,
   RepositoryRepository,
   ReviewRepository,
   type ReviewRunMetricsInput,
-  repositories,
 } from "@repo/db";
 import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
 import {
@@ -2983,43 +2981,20 @@ async function loadGitHubRepositoryRef(
   db: HeimdallDatabase,
   input: Pick<ReviewPullRequestInput, "repoId" | "installationId">,
 ): Promise<GitHubRepositoryRef> {
-  const [repository] = await db
-    .select({
-      owner: repositories.owner,
-      repo: repositories.name,
-      providerRepoId: repositories.providerRepoId,
-      provider: repositories.provider,
-    })
-    .from(repositories)
-    .where(eq(repositories.repoId, input.repoId))
-    .limit(1);
+  const repository = await new RepositoryRepository(db).getRepositoryProviderRef({
+    installationId: input.installationId,
+    provider: "github",
+    repoId: input.repoId,
+  });
 
-  if (!repository || repository.provider !== "github") {
+  if (!repository) {
     throw new Error(`GitHub repository ${input.repoId} was not found.`);
-  }
-
-  const [installation] = await db
-    .select({
-      installationId: providerInstallations.installationId,
-      providerInstallationId: providerInstallations.providerInstallationId,
-    })
-    .from(providerInstallations)
-    .where(
-      and(
-        eq(providerInstallations.provider, "github"),
-        eq(providerInstallations.installationId, input.installationId),
-      ),
-    )
-    .limit(1);
-
-  if (!installation) {
-    throw new Error(`GitHub installation ${input.installationId} was not found.`);
   }
 
   return {
     provider: "github",
-    installationId: installation.installationId,
-    providerInstallationId: installation.providerInstallationId,
+    installationId: repository.installationId,
+    providerInstallationId: repository.providerInstallationId,
     owner: repository.owner,
     repo: repository.repo,
     providerRepoId: repository.providerRepoId,

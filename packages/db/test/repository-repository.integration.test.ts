@@ -88,6 +88,26 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
     await expect(repositoryRepository.getRepositoryOrgId("repo_repository_missing")).resolves.toBe(
       undefined,
     );
+    await expect(
+      repositoryRepository.getRepositoryProviderRef({
+        provider: "github",
+        repoId: "repo_repository_alpha",
+      }),
+    ).resolves.toMatchObject({
+      installationId: "inst_repository_test",
+      owner: "acme",
+      provider: "github",
+      providerInstallationId: "repository-test-installation",
+      providerRepoId: "1001",
+      repo: "alpha",
+    });
+    await expect(
+      repositoryRepository.getRepositoryProviderRef({
+        installationId: "inst_repository_other",
+        provider: "github",
+        repoId: "repo_repository_alpha",
+      }),
+    ).resolves.toBeUndefined();
 
     const firstPage = await repositoryRepository.listEnabledRepositories({
       orgId: "org_repository_test",

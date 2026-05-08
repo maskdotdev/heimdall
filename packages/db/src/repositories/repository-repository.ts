@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import type { OrgSettings, PageInfo, Repository, RepositorySettings } from "@repo/contracts";
 import { and, asc, eq, gt, inArray, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { orgSettings, repositories, repositorySettings } from "../schema";
+import { orgSettings, providerInstallations, repositories, repositorySettings } from "../schema";
 import { toOrgSettings, toRepository, toRepositorySettings } from "./row-mappers";
 
 /** Provider identity used to find a repository row. */
@@ -11,6 +11,32 @@ export type RepositoryProviderIdentity = {
   readonly provider: Repository["provider"];
   /** Provider-native repository ID. */
   readonly providerRepoId: string;
+};
+
+/** Repository and installation fields needed to call a git provider. */
+export type RepositoryProviderRef = {
+  /** Heimdall installation ID that owns the repository. */
+  readonly installationId: string;
+  /** Repository owner or organization login. */
+  readonly owner: string;
+  /** Git provider that owns the repository. */
+  readonly provider: Repository["provider"];
+  /** Provider-native installation ID. */
+  readonly providerInstallationId: string;
+  /** Provider-native repository ID. */
+  readonly providerRepoId: string;
+  /** Repository short name. */
+  readonly repo: string;
+};
+
+/** Input for loading repository and installation fields for provider calls. */
+export type GetRepositoryProviderRefInput = {
+  /** Optional installation ID that must own the repository. */
+  readonly installationId?: string;
+  /** Git provider that owns the repository. */
+  readonly provider: Repository["provider"];
+  /** Durable repository ID. */
+  readonly repoId: string;
 };
 
 /** Input for listing enabled repositories within one organization. */
@@ -131,6 +157,39 @@ export class RepositoryRepository {
       .limit(1);
 
     return row?.orgId;
+  }
+
+  /** Gets repository and installation fields needed for provider calls. */
+  public async getRepositoryProviderRef(
+    input: GetRepositoryProviderRefInput,
+  ): Promise<RepositoryProviderRef | undefined> {
+    const filters: SQL[] = [
+      eq(repositories.repoId, input.repoId),
+      eq(repositories.provider, input.provider),
+      eq(providerInstallations.provider, input.provider),
+    ];
+    if (input.installationId !== undefined) {
+      filters.push(eq(providerInstallations.installationId, input.installationId));
+    }
+
+    const [row] = await this.db
+      .select({
+        installationId: repositories.installationId,
+        owner: repositories.owner,
+        provider: repositories.provider,
+        providerInstallationId: providerInstallations.providerInstallationId,
+        providerRepoId: repositories.providerRepoId,
+        repo: repositories.name,
+      })
+      .from(repositories)
+      .innerJoin(
+        providerInstallations,
+        eq(providerInstallations.installationId, repositories.installationId),
+      )
+      .where(and(...filters))
+      .limit(1);
+
+    return row ? { ...row, provider: row.provider as Repository["provider"] } : undefined;
   }
 
   /** Gets a repository by provider and provider-native repository ID. */

@@ -7,15 +7,14 @@ import type {
 } from "@repo/contracts";
 import {
   type HeimdallDatabase,
-  providerInstallations,
   publishedCheckRuns,
   publishedFindings,
   publishedReviews,
   publishedSummaryComments,
   publishOperations,
   publishRuns,
+  RepositoryRepository,
   ReviewRepository,
-  repositories,
 } from "@repo/db";
 import {
   type GitHubErrorCode,
@@ -34,7 +33,7 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import type { EffectivePublishingPolicy } from "@repo/rules";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 /** Legacy publisher behavior for review runs created before policy snapshots existed. */
 const LEGACY_PUBLISHING_POLICY = {
@@ -1173,22 +1172,10 @@ async function loadGitHubRepositoryRef(
   db: HeimdallDatabase,
   repoId: string,
 ): Promise<GitHubRepositoryRef> {
-  const [repository] = await db
-    .select({
-      owner: repositories.owner,
-      repo: repositories.name,
-      providerRepoId: repositories.providerRepoId,
-      installationId: repositories.installationId,
-      providerInstallationId: providerInstallations.providerInstallationId,
-      provider: repositories.provider,
-    })
-    .from(repositories)
-    .innerJoin(
-      providerInstallations,
-      eq(providerInstallations.installationId, repositories.installationId),
-    )
-    .where(and(eq(repositories.repoId, repoId), eq(repositories.provider, "github")))
-    .limit(1);
+  const repository = await new RepositoryRepository(db).getRepositoryProviderRef({
+    provider: "github",
+    repoId,
+  });
 
   if (!repository) {
     throw new Error(`GitHub repository ${repoId} was not found.`);
