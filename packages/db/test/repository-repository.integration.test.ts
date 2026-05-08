@@ -13,6 +13,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { HeimdallDatabase } from "../src/client";
+import { OrganizationRepository } from "../src/repositories/organization-repository";
 import { ProviderInstallationRepository } from "../src/repositories/provider-installation-repository";
 import { RepositoryRepository } from "../src/repositories/repository-repository";
 
@@ -28,6 +29,7 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
   );
   const sql = postgres(integrationDatabaseUrl ?? "", { max: 1, onnotice: () => undefined });
   const db = drizzle(sql) as HeimdallDatabase;
+  const organizationRepository = new OrganizationRepository(db);
   const providerInstallationRepository = new ProviderInstallationRepository(db);
   const repositoryRepository = new RepositoryRepository(db);
 
@@ -79,6 +81,39 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
         providerRepoId: "2001",
         repoId: "repo_repository_other",
       }),
+    );
+
+    const organizationSummaries = await organizationRepository.listOrganizationSummaries({
+      limit: 10,
+      search: "Repository Test",
+    });
+    const primaryOrgSummary = organizationSummaries.find(
+      (organization) => organization.orgId === "org_repository_test",
+    );
+    expect(primaryOrgSummary).toMatchObject({
+      installationCount: 2,
+      name: "Repository Test Org",
+      orgId: "org_repository_test",
+      repositoryCount: 3,
+      slug: "repository-test-org",
+    });
+    await expect(
+      organizationRepository.getOrganizationSummary("org_repository_test"),
+    ).resolves.toMatchObject({
+      installationCount: 2,
+      repositoryCount: 3,
+    });
+    await expect(
+      organizationRepository.getOrganizationSummary("org_repository_missing"),
+    ).resolves.toBeUndefined();
+    await expect(
+      organizationRepository.listOrganizationSummaries({
+        orgIds: [],
+        limit: 10,
+      }),
+    ).resolves.toEqual([]);
+    await expect(organizationRepository.listOrganizationSummaries({ limit: 0 })).rejects.toThrow(
+      /limit must be an integer/u,
     );
 
     const foundByProvider = await repositoryRepository.getRepositoryByProviderId({

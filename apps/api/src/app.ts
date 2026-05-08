@@ -109,10 +109,10 @@ import {
   MemoryFactRepository,
   type memoryCandidates,
   type memoryFacts,
-  orgs,
+  OrganizationRepository,
+  type OrganizationSummaryRecord,
   ProductAuthRepository,
   ProviderInstallationRepository,
-  providerInstallations,
   pullRequestSnapshots,
   QueueHealthRepository,
   type QueueHealthSnapshotRecord,
@@ -8728,25 +8728,12 @@ async function listOrganizations(
   db: HeimdallDatabase,
   query: AdminOrganizationListQuery,
 ): Promise<readonly AdminOrganizationSummary[]> {
-  const conditions = organizationListConditions(query);
-  const rows = await db
-    .select({
-      createdAt: orgs.createdAt,
-      installationCount: sql<number>`count(distinct ${providerInstallations.installationId})::int`,
-      metadata: orgs.metadata,
-      name: orgs.name,
-      orgId: orgs.orgId,
-      repositoryCount: sql<number>`count(distinct ${repositories.repoId})::int`,
-      slug: orgs.slug,
-      updatedAt: orgs.updatedAt,
-    })
-    .from(orgs)
-    .leftJoin(providerInstallations, eq(providerInstallations.orgId, orgs.orgId))
-    .leftJoin(repositories, eq(repositories.orgId, orgs.orgId))
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .groupBy(orgs.orgId, orgs.name, orgs.slug, orgs.metadata, orgs.createdAt, orgs.updatedAt)
-    .orderBy(asc(orgs.name), asc(orgs.slug))
-    .limit(boundedListLimit(query.limit));
+  const scopedOrgIds = query.orgIds?.includes("*") ? undefined : query.orgIds;
+  const rows = await new OrganizationRepository(db).listOrganizationSummaries({
+    limit: boundedListLimit(query.limit),
+    ...(scopedOrgIds !== undefined ? { orgIds: scopedOrgIds } : {}),
+    ...(query.search !== undefined ? { search: query.search } : {}),
+  });
 
   return rows.map(toAdminOrganizationSummary);
 }
@@ -8756,23 +8743,7 @@ async function getOrganization(
   db: HeimdallDatabase,
   orgId: string,
 ): Promise<AdminOrganizationSummary> {
-  const [row] = await db
-    .select({
-      createdAt: orgs.createdAt,
-      installationCount: sql<number>`count(distinct ${providerInstallations.installationId})::int`,
-      metadata: orgs.metadata,
-      name: orgs.name,
-      orgId: orgs.orgId,
-      repositoryCount: sql<number>`count(distinct ${repositories.repoId})::int`,
-      slug: orgs.slug,
-      updatedAt: orgs.updatedAt,
-    })
-    .from(orgs)
-    .leftJoin(providerInstallations, eq(providerInstallations.orgId, orgs.orgId))
-    .leftJoin(repositories, eq(repositories.orgId, orgs.orgId))
-    .where(eq(orgs.orgId, orgId))
-    .groupBy(orgs.orgId, orgs.name, orgs.slug, orgs.metadata, orgs.createdAt, orgs.updatedAt)
-    .limit(1);
+  const row = await new OrganizationRepository(db).getOrganizationSummary(orgId);
 
   if (!row) {
     throw new AdminControlPlaneNotFoundError("organization", orgId);
@@ -8781,49 +8752,8 @@ async function getOrganization(
   return toAdminOrganizationSummary(row);
 }
 
-/** Builds SQL predicates for organization discovery. */
-function organizationListConditions(query: AdminOrganizationListQuery): SQL[] {
-  const conditions: SQL[] = [];
-  const orgIds = query.orgIds ?? [];
-  if (query.orgIds !== undefined && !orgIds.includes("*")) {
-    conditions.push(orgIds.length > 0 ? inArray(orgs.orgId, [...orgIds]) : sql`false`);
-  }
-
-  const search = query.search?.trim();
-  if (search) {
-    const pattern = `%${search}%`;
-    const searchCondition = or(
-      ilike(orgs.name, pattern),
-      ilike(orgs.slug, pattern),
-      ilike(orgs.orgId, pattern),
-    );
-    if (searchCondition) {
-      conditions.push(searchCondition);
-    }
-  }
-
-  return conditions;
-}
-
 /** Converts an organization row into a scoped API DTO. */
-function toAdminOrganizationSummary(row: {
-  /** Organization ID. */
-  readonly orgId: string;
-  /** Organization display name. */
-  readonly name: string;
-  /** Organization slug. */
-  readonly slug: string;
-  /** Organization metadata. */
-  readonly metadata: unknown;
-  /** Associated provider installation count. */
-  readonly installationCount: number;
-  /** Associated repository count. */
-  readonly repositoryCount: number;
-  /** Creation timestamp. */
-  readonly createdAt: Date;
-  /** Update timestamp. */
-  readonly updatedAt: Date;
-}): AdminOrganizationSummary {
+function toAdminOrganizationSummary(row: OrganizationSummaryRecord): AdminOrganizationSummary {
   const metadata = asOptionalRecord(row.metadata);
   return {
     createdAt: row.createdAt.toISOString(),
