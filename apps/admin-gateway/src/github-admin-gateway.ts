@@ -1,6 +1,14 @@
 import { Buffer } from "node:buffer";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  createTelemetryTraceContextFromHeaders,
+  normalizeTelemetryTraceContext,
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
+import {
   ADMIN_PERMISSIONS,
   type AdminIdentityAssertion,
   type AdminPermission,
@@ -175,13 +183,23 @@ export type GitHubAdminGatewayConfig = {
 export type GitHubAdminGatewayDependencies = {
   /** Fetch implementation used for GitHub HTTP calls. */
   readonly fetch?: GitHubAdminGatewayFetch;
+  /** Optional metric recorder for product-safe gateway request telemetry. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Current time provider. */
   readonly now?: () => Date;
   /** Random token provider. */
   readonly randomToken?: () => string;
+  /** Optional span recorder for product-safe gateway request traces. */
+  readonly traces?: TelemetrySpanRecorder;
   /** Operator logger. */
   readonly logger?: GitHubAdminGatewayLogger;
 };
+
+/** Runtime dependencies resolved after defaults are applied. */
+type GitHubAdminGatewayRuntime = Required<
+  Pick<GitHubAdminGatewayDependencies, "fetch" | "logger" | "now" | "randomToken">
+> &
+  Pick<GitHubAdminGatewayDependencies, "metrics" | "traces">;
 
 /** Created GitHub admin gateway request handler. */
 export type GitHubAdminGateway = {
@@ -214,21 +232,19 @@ export function createGitHubAdminGateway(
   dependencies: GitHubAdminGatewayDependencies = {},
 ): GitHubAdminGateway {
   const validatedConfig = validateGatewayConfig(config);
-  const runtime = {
+  const runtime: GitHubAdminGatewayRuntime = {
     fetch: dependencies.fetch ?? fetch,
     logger: dependencies.logger ?? console,
     now: dependencies.now ?? (() => new Date()),
     randomToken: dependencies.randomToken ?? (() => randomBytes(32).toString("base64url")),
+    ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
+    ...(dependencies.traces ? { traces: dependencies.traces } : {}),
   };
 
   return {
     config: validatedConfig,
     handle: async (request) => {
-      try {
-        return await handleGatewayRequest(request, validatedConfig, runtime);
-      } catch (error) {
-        return handleGatewayError(error, runtime.logger);
-      }
+      return handleGatewayRequestWithTelemetry(request, validatedConfig, runtime);
     },
   };
 }
@@ -295,11 +311,72 @@ export function readGitHubAdminGatewayConfig(
   };
 }
 
+/** Handles one gateway request with product-safe request telemetry. */
+async function handleGatewayRequestWithTelemetry(
+  request: Request,
+  config: GitHubAdminGatewayConfig,
+  runtime: GitHubAdminGatewayRuntime,
+): Promise<Response> {
+  const startedAt = runtime.now();
+  const url = new URL(request.url);
+  const route = gatewayRouteTemplate(url);
+  const requestId = gatewayRequestId(request, runtime);
+  const traceContext = normalizeTelemetryTraceContext({
+    ...createTelemetryTraceContextFromHeaders(request.headers),
+    requestId,
+  });
+  const span = runtime.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.adminGatewayRequest, {
+    attributes: {
+      "admin_gateway.method": request.method,
+      "admin_gateway.route": route,
+    },
+    kind: "server",
+    traceContext,
+  });
+
+  try {
+    const response = await handleGatewayRequest(request, config, runtime);
+    const durationMs = Math.max(0, runtime.now().getTime() - startedAt.getTime());
+    recordGatewayRequestMetrics(runtime.metrics, {
+      durationMs,
+      method: request.method,
+      route,
+      status: response.status,
+    });
+    span?.end({
+      attributes: {
+        "admin_gateway.status_code": response.status,
+      },
+      status: response.status >= 500 ? "error" : "ok",
+    });
+
+    return withRequestIdHeader(response, requestId);
+  } catch (error) {
+    const response = handleGatewayError(error, runtime.logger);
+    const durationMs = Math.max(0, runtime.now().getTime() - startedAt.getTime());
+    recordGatewayRequestMetrics(runtime.metrics, {
+      durationMs,
+      method: request.method,
+      route,
+      status: response.status,
+    });
+    span?.end({
+      attributes: {
+        "admin_gateway.status_code": response.status,
+      },
+      error,
+      status: "error",
+    });
+
+    return withRequestIdHeader(response, requestId);
+  }
+}
+
 /** Handles one gateway request. */
 async function handleGatewayRequest(
   request: Request,
   config: GitHubAdminGatewayConfig,
-  runtime: Required<GitHubAdminGatewayDependencies>,
+  runtime: GitHubAdminGatewayRuntime,
 ): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "OPTIONS") {
@@ -341,6 +418,82 @@ async function handleGatewayRequest(
   throw new GatewayHttpError(404, "admin_gateway.not_found", "Route not found.");
 }
 
+/** Returns the product-safe route template used for gateway telemetry. */
+function gatewayRouteTemplate(url: URL): string {
+  if (url.pathname === "/healthz") {
+    return "/healthz";
+  }
+  if (url.pathname === "/auth/github/start") {
+    return "/auth/github/start";
+  }
+  if (url.pathname === "/auth/github/callback") {
+    return "/auth/github/callback";
+  }
+  if (url.pathname === "/auth/logout") {
+    return "/auth/logout";
+  }
+  if (url.pathname === "/heimdall/assertion" || url.pathname === "/assertion") {
+    return "/assertion";
+  }
+
+  return "unknown";
+}
+
+/** Returns the request ID to propagate through gateway telemetry and responses. */
+function gatewayRequestId(request: Request, runtime: GitHubAdminGatewayRuntime): string {
+  const provided = request.headers.get("x-request-id")?.trim();
+  if (provided && /^[A-Za-z0-9_.:-]{1,120}$/u.test(provided)) {
+    return provided;
+  }
+
+  return `req_${runtime
+    .randomToken()
+    .replace(/[^A-Za-z0-9_.:-]/gu, "_")
+    .slice(0, 96)}`;
+}
+
+/** Adds the request ID response header without mutating an existing response. */
+function withRequestIdHeader(response: Response, requestId: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set("x-request-id", requestId);
+
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
+/** Records aggregate gateway request metrics with bounded labels. */
+function recordGatewayRequestMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  input: {
+    /** Request duration in milliseconds. */
+    readonly durationMs: number;
+    /** HTTP method. */
+    readonly method: string;
+    /** Product-safe route template. */
+    readonly route: string;
+    /** HTTP response status code. */
+    readonly status: number;
+  },
+): void {
+  if (!metrics) {
+    return;
+  }
+
+  const labels = {
+    method: input.method.toUpperCase(),
+    route: input.route,
+    status_class: `${Math.trunc(input.status / 100)}xx`,
+  };
+  metrics.count(OBSERVABILITY_METRIC_NAMES.adminGatewayRequestsTotal, { labels });
+  metrics.histogram(OBSERVABILITY_METRIC_NAMES.adminGatewayRequestDurationMs, input.durationMs, {
+    labels,
+    unit: "ms",
+  });
+}
+
 /** Handles a CORS preflight request for credentialed assertion endpoints. */
 function handlePreflight(request: Request, config: GitHubAdminGatewayConfig): Response {
   assertAllowedOrigin(request, config);
@@ -351,7 +504,7 @@ function handlePreflight(request: Request, config: GitHubAdminGatewayConfig): Re
 function startGitHubLogin(
   url: URL,
   config: GitHubAdminGatewayConfig,
-  runtime: Required<GitHubAdminGatewayDependencies>,
+  runtime: GitHubAdminGatewayRuntime,
 ): Response {
   const now = runtime.now();
   const statePayload: OAuthState = {
@@ -387,7 +540,7 @@ async function finishGitHubLogin(
   request: Request,
   url: URL,
   config: GitHubAdminGatewayConfig,
-  runtime: Required<GitHubAdminGatewayDependencies>,
+  runtime: GitHubAdminGatewayRuntime,
 ): Promise<Response> {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
@@ -450,7 +603,7 @@ function logoutGatewaySession(request: Request, config: GitHubAdminGatewayConfig
 async function issueAssertion(
   request: Request,
   config: GitHubAdminGatewayConfig,
-  runtime: Required<GitHubAdminGatewayDependencies>,
+  runtime: GitHubAdminGatewayRuntime,
 ): Promise<Response> {
   assertAllowedOrigin(request, config);
   const session = readGatewaySession(request, config, runtime.now());
@@ -588,7 +741,7 @@ async function getGitHubMembershipForLogin(
   user: GitHubUser,
   accessToken: string,
   config: GitHubAdminGatewayConfig,
-  runtime: Required<GitHubAdminGatewayDependencies>,
+  runtime: GitHubAdminGatewayRuntime,
 ): Promise<GitHubMembership | undefined> {
   try {
     return await getGitHubMembership(config.githubOrg, accessToken, runtime.fetch);
@@ -682,7 +835,7 @@ function createGatewaySession(
   user: GitHubUser,
   membership: GitHubMembership | undefined,
   config: GitHubAdminGatewayConfig,
-  runtime: Required<GitHubAdminGatewayDependencies>,
+  runtime: GitHubAdminGatewayRuntime,
 ): GatewaySession {
   const issuedAt = runtime.now();
   const expiresAt = new Date(issuedAt.getTime() + config.sessionMaxAgeSeconds * 1000);
