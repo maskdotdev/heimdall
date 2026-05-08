@@ -143,6 +143,7 @@ import {
   type DurableJobHandlerMap,
   dispatchPendingJobs,
   QUEUE_NAMES,
+  type QueueName,
 } from "@repo/queue";
 import {
   type AcquireRepositoryWorkspaceDependencies,
@@ -192,6 +193,31 @@ const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
 const EMBEDDING_REPAIR_BATCH_SIZE = 128;
 /** Maximum completed review runs inspected by one scheduled thread reconciliation job. */
 const THREAD_RECONCILIATION_REVIEW_RUN_LIMIT = 10;
+/** Worker queues registered when the runtime is started in all-role mode. */
+const ALL_WORKER_QUEUE_NAMES = [
+  QUEUE_NAMES.repoSync,
+  QUEUE_NAMES.indexing,
+  QUEUE_NAMES.embedding,
+  QUEUE_NAMES.review,
+  QUEUE_NAMES.memory,
+  QUEUE_NAMES.publishing,
+  QUEUE_NAMES.billing,
+] as const satisfies readonly QueueName[];
+
+/** Worker role names accepted by runtime queue selection. */
+export type WorkerRuntimeRole =
+  | "all"
+  | "repo-sync"
+  | "indexing"
+  | "embedding"
+  | "review"
+  | "memory"
+  | "publishing"
+  | "billing"
+  | "maintenance";
+
+/** Environment values used to select worker runtime queue roles. */
+export type WorkerRuntimeRoleEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** Environment map used by worker runtime secret resolution. */
 type WorkerSecretEnvironment = Readonly<Record<string, string | undefined>>;
@@ -1444,6 +1470,8 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   });
   const indexArtifactRoot = indexerConfig.artifactRootPath;
   const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
+  const workerQueueNames = createWorkerQueueNamesFromEnvironment(process.env);
+  const workerRoleLabel = createWorkerRoleLabelFromEnvironment(process.env);
   const reviewIndexDependencyMode = createWorkerReviewIndexDependencyModeFromEnvironment(
     process.env,
   );
@@ -1518,15 +1546,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       });
     }
   };
-  const workers = [
-    QUEUE_NAMES.repoSync,
-    QUEUE_NAMES.indexing,
-    QUEUE_NAMES.embedding,
-    QUEUE_NAMES.review,
-    QUEUE_NAMES.memory,
-    QUEUE_NAMES.publishing,
-    QUEUE_NAMES.billing,
-  ].map((queueName) => new Worker(queueName, processor, { connection: workerConnection }));
+  const workers = workerQueueNames.map(
+    (queueName) => new Worker(queueName, processor, { connection: workerConnection }),
+  );
   const dispatch = async () => {
     await dispatchPendingJobs({ store, queueProducer });
   };
@@ -1553,6 +1575,8 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     attributes: {
       "event.name": "worker.service.started",
       "queue.count": workers.length,
+      "queue.names": workerQueueNames.join(","),
+      "worker.role": workerRoleLabel,
     },
   });
   observability.metrics.count(OBSERVABILITY_METRIC_NAMES.workerServiceStartsTotal, {
@@ -2118,6 +2142,107 @@ export async function verifyWorkerIndexerCapabilities(
   });
 
   return capabilities;
+}
+
+/** Creates the queue names registered by this worker runtime from environment role values. */
+export function createWorkerQueueNamesFromEnvironment(
+  env: WorkerRuntimeRoleEnvironment,
+): readonly QueueName[] {
+  const roles = createWorkerRolesFromEnvironment(env);
+  if (roles.includes("all")) {
+    return ALL_WORKER_QUEUE_NAMES;
+  }
+
+  const queueNames = new Set<QueueName>();
+  for (const role of roles) {
+    for (const queueName of queueNamesForWorkerRole(role)) {
+      queueNames.add(queueName);
+    }
+  }
+
+  return [...queueNames];
+}
+
+/** Creates normalized worker runtime roles from environment values. */
+function createWorkerRolesFromEnvironment(
+  env: WorkerRuntimeRoleEnvironment,
+): readonly WorkerRuntimeRole[] {
+  const configuredRoles =
+    optionalEnvString(env.HEIMDALL_WORKER_ROLE) ?? optionalEnvString(env.WORKER_ROLE) ?? "all";
+  const roles = configuredRoles
+    .split(/[,\s]+/)
+    .map((role) => role.trim())
+    .filter((role) => role.length > 0)
+    .map(normalizeWorkerRuntimeRole);
+
+  if (roles.length === 0) {
+    return ["all"];
+  }
+
+  return [...new Set(roles)];
+}
+
+/** Creates the original worker role label used in startup logs. */
+function createWorkerRoleLabelFromEnvironment(env: WorkerRuntimeRoleEnvironment): string {
+  return optionalEnvString(env.HEIMDALL_WORKER_ROLE) ?? optionalEnvString(env.WORKER_ROLE) ?? "all";
+}
+
+/** Normalizes one configured worker role value. */
+function normalizeWorkerRuntimeRole(value: string): WorkerRuntimeRole {
+  const normalized = value.trim().toLowerCase().replaceAll("_", "-");
+  if (normalized === "all") {
+    return "all";
+  }
+  if (normalized === "repo-sync" || normalized === "github-sync" || normalized === "sync") {
+    return "repo-sync";
+  }
+  if (normalized === "index" || normalized === "indexing") {
+    return "indexing";
+  }
+  if (normalized === "embedding" || normalized === "embeddings") {
+    return "embedding";
+  }
+  if (normalized === "review" || normalized === "reviews") {
+    return "review";
+  }
+  if (normalized === "memory") {
+    return "memory";
+  }
+  if (normalized === "publish" || normalized === "publisher" || normalized === "publishing") {
+    return "publishing";
+  }
+  if (normalized === "billing") {
+    return "billing";
+  }
+  if (normalized === "maintenance" || normalized === "maint") {
+    return "maintenance";
+  }
+
+  throw new Error(`Unsupported worker role: ${value}`);
+}
+
+/** Returns the queues owned by one normalized worker role. */
+function queueNamesForWorkerRole(role: WorkerRuntimeRole): readonly QueueName[] {
+  switch (role) {
+    case "all":
+      return ALL_WORKER_QUEUE_NAMES;
+    case "repo-sync":
+      return [QUEUE_NAMES.repoSync];
+    case "indexing":
+      return [QUEUE_NAMES.indexing];
+    case "embedding":
+      return [QUEUE_NAMES.embedding];
+    case "review":
+      return [QUEUE_NAMES.review];
+    case "memory":
+      return [QUEUE_NAMES.memory];
+    case "publishing":
+      return [QUEUE_NAMES.publishing];
+    case "billing":
+      return [QUEUE_NAMES.billing];
+    case "maintenance":
+      return [];
+  }
 }
 
 /** Creates queue maintenance settings from worker environment values. */

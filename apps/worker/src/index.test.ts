@@ -20,6 +20,7 @@ import {
   type TelemetryMetricRecorder,
 } from "@repo/observability";
 import type { PublishOperationType, PublishThrottleSlotInput } from "@repo/publisher";
+import { QUEUE_NAMES } from "@repo/queue";
 import {
   createRepoSyncConfig,
   getRepoSyncMirrorPath,
@@ -38,6 +39,7 @@ import {
   createWorkerIndexerDriverFromEnvironment,
   createWorkerLlmBudgetFromEnvironment,
   createWorkerLlmGatewayFromEnvironment,
+  createWorkerQueueNamesFromEnvironment,
   createWorkerRepoSyncCleanupLimitFromEnvironment,
   createWorkerReviewIndexDependencyModeFromEnvironment,
   createWorkerReviewSmokeGateway,
@@ -611,6 +613,53 @@ describe("createWorkerReviewIndexDependencyModeFromEnvironment", () => {
         HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: "wait",
       }),
     ).toThrow("Unsupported HEIMDALL_REVIEW_INDEX_DEPENDENCY_MODE: wait");
+  });
+});
+
+describe("createWorkerQueueNamesFromEnvironment", () => {
+  it("uses all worker queues when no role is configured", () => {
+    expect(createWorkerQueueNamesFromEnvironment({})).toEqual([
+      QUEUE_NAMES.repoSync,
+      QUEUE_NAMES.indexing,
+      QUEUE_NAMES.embedding,
+      QUEUE_NAMES.review,
+      QUEUE_NAMES.memory,
+      QUEUE_NAMES.publishing,
+      QUEUE_NAMES.billing,
+    ]);
+  });
+
+  it("selects independent queues for comma-separated worker roles", () => {
+    expect(
+      createWorkerQueueNamesFromEnvironment({
+        WORKER_ROLE: "review,publisher",
+      }),
+    ).toEqual([QUEUE_NAMES.review, QUEUE_NAMES.publishing]);
+  });
+
+  it("lets the Heimdall-specific role override the generic worker role", () => {
+    expect(
+      createWorkerQueueNamesFromEnvironment({
+        HEIMDALL_WORKER_ROLE: "index",
+        WORKER_ROLE: "review",
+      }),
+    ).toEqual([QUEUE_NAMES.indexing]);
+  });
+
+  it("supports a maintenance-only worker with no queue consumers", () => {
+    expect(
+      createWorkerQueueNamesFromEnvironment({
+        WORKER_ROLE: "maintenance",
+      }),
+    ).toEqual([]);
+  });
+
+  it("rejects unknown worker roles", () => {
+    expect(() =>
+      createWorkerQueueNamesFromEnvironment({
+        WORKER_ROLE: "not-a-role",
+      }),
+    ).toThrow("Unsupported worker role: not-a-role");
   });
 });
 
