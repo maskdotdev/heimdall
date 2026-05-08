@@ -4,6 +4,7 @@ import {
   validChangedFileFixture,
   validPullRequestSnapshotFixture,
 } from "@repo/contracts/fixtures/pull-request.fixture";
+import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import { createStaticRelevantMemoryRetriever, type MemoryFact } from "@repo/memory";
 import {
   OBSERVABILITY_METRIC_NAMES,
@@ -335,6 +336,66 @@ describe("retrieveContext", () => {
           changeType: "renamed",
           newRange: { startLine: 2, endLine: 2 },
           path: "src/new-name.ts",
+        }),
+      ]),
+    );
+  });
+
+  it("emits fallback diff context for added and renamed files while skipping deleted files", async () => {
+    const changedFiles = [
+      {
+        ...validChangedFileFixture,
+        path: "src/math.ts",
+        status: "modified",
+      },
+      {
+        ...validChangedFileFixture,
+        path: "src/added.ts",
+        status: "added",
+      },
+      {
+        ...validChangedFileFixture,
+        path: "src/deleted.ts",
+        status: "deleted",
+      },
+      {
+        ...validChangedFileFixture,
+        oldPath: "src/old-name.ts",
+        path: "src/new-name.ts",
+        status: "renamed",
+      },
+    ] satisfies ChangedFile[];
+
+    const bundle = await retrieveContext({
+      reviewRunId: "rrn_01HREVIEW",
+      snapshot: {
+        ...validPullRequestSnapshotFixture,
+        changedFileCount: changedFiles.length,
+        changedFiles,
+      },
+      indexAvailable: false,
+      timestamp: "2026-05-05T00:00:00.000Z",
+    });
+    const diffItems = bundle.items.filter((item) => item.kind === "diff");
+
+    expect(diffItems.map((item) => item.snippet?.path).sort()).toEqual([
+      "src/added.ts",
+      "src/math.ts",
+      "src/new-name.ts",
+    ]);
+    expect(diffItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          metadata: expect.objectContaining({ status: "modified" }),
+          snippet: expect.objectContaining({ path: "src/math.ts" }),
+        }),
+        expect.objectContaining({
+          metadata: expect.objectContaining({ status: "added" }),
+          snippet: expect.objectContaining({ path: "src/added.ts" }),
+        }),
+        expect.objectContaining({
+          metadata: expect.objectContaining({ status: "renamed" }),
+          snippet: expect.objectContaining({ path: "src/new-name.ts" }),
         }),
       ]),
     );
