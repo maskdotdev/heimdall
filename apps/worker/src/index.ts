@@ -511,6 +511,8 @@ export type WorkerStaticAnalysisRunnerOptions = {
   readonly db?: HeimdallDatabase | undefined;
   /** Optional metric recorder used for sandbox run telemetry. */
   readonly metrics?: TelemetryMetricRecorder;
+  /** Optional sink used to record sandbox-originated security events. */
+  readonly securityEventSink?: SecurityEventSink;
   /** Optional span recorder used for sandbox run telemetry. */
   readonly traces?: TelemetrySpanRecorder;
 };
@@ -1779,6 +1781,16 @@ type RecordWorkerComplianceEvidenceSecurityEventInput = {
   readonly type: "compliance_evidence_collected" | "compliance_evidence_failed";
 };
 
+/** Input used to record a sandbox policy-denial security event. */
+type RecordSandboxPolicyDeniedSecurityEventInput = {
+  /** Sandbox request that triggered the denied policy decision. */
+  readonly request: SandboxRunRequest;
+  /** Sandbox result containing product-safe policy decisions. */
+  readonly result: SandboxRunResult;
+  /** Sink configured for sandbox-originated security events. */
+  readonly securityEventSink: SecurityEventSink;
+};
+
 /** Executes a planned data-deletion request and records product-safe verification metadata. */
 export async function executeDataDeletionRequest(
   db: HeimdallDatabase,
@@ -2628,6 +2640,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const staticAnalysisRunner = createWorkerStaticAnalysisRunnerFromEnvironment(process.env, {
     db: databaseClient.db,
     metrics: observability.metrics,
+    securityEventSink,
     traces: observability.traces,
   });
   const publishThrottle = createRedisPublishThrottle(workerConnection);
@@ -2929,11 +2942,15 @@ export function createWorkerStaticAnalysisRunnerFromEnvironment(
   }
 
   const instrumentedRunner = withSandboxTelemetry(sandboxRunner, sandboxTelemetry);
+  const persistingRunner = options.db
+    ? createPersistingSandboxRunner(instrumentedRunner, options.db)
+    : instrumentedRunner;
+  const securityReportingRunner = options.securityEventSink
+    ? createSandboxSecurityEventRunner(persistingRunner, options.securityEventSink)
+    : persistingRunner;
 
   return createSandboxToolRunner({
-    runner: options.db
-      ? createPersistingSandboxRunner(instrumentedRunner, options.db)
-      : instrumentedRunner,
+    runner: securityReportingRunner,
   });
 }
 
@@ -3030,6 +3047,21 @@ function createPersistingSandboxRunner(runner: SandboxRunner, db: HeimdallDataba
     run: async (request) => {
       const result = await runner.run(request);
       await persistSandboxRun(db, request, result);
+
+      return result;
+    },
+  };
+}
+
+/** Wraps a sandbox runner so denied policy decisions emit product-safe security events. */
+function createSandboxSecurityEventRunner(
+  runner: SandboxRunner,
+  securityEventSink: SecurityEventSink,
+): SandboxRunner {
+  return {
+    run: async (request) => {
+      const result = await runner.run(request);
+      recordSandboxPolicyDeniedSecurityEvent({ request, result, securityEventSink });
 
       return result;
     },
@@ -3350,6 +3382,45 @@ function sandboxPolicyDecisionRowsFromRequestResult(
     sandboxRunId: result.runId,
     status: decision.status,
   }));
+}
+
+/** Records a product-safe security event when sandbox policy denies execution. */
+function recordSandboxPolicyDeniedSecurityEvent(
+  input: RecordSandboxPolicyDeniedSecurityEventInput,
+): void {
+  const deniedDecisions = input.result.policyDecisions.filter(
+    (decision) => decision.status === "denied",
+  );
+  if (deniedDecisions.length === 0) {
+    return;
+  }
+
+  recordSecurityEvent(input.securityEventSink, {
+    createdAt: input.result.finishedAt,
+    id: stableWorkerId("secevt", ["sandbox_policy_denied", input.result.runId]),
+    metadata: {
+      category: input.request.category,
+      hasStaticAnalysisRun: Boolean(input.request.staticAnalysisRunId),
+      policyDecisionCount: input.result.policyDecisions.length,
+      primaryViolation: deniedDecisions[0]?.code ?? "unknown",
+      runnerKind: input.result.runner.kind,
+      sandboxRequestId: input.request.requestId,
+      sandboxStatus: input.result.status,
+      toolRunId: input.request.toolRunId ?? "unknown",
+      trustLevel: input.request.trustLevel,
+      violationCount: deniedDecisions.length,
+      violationTypes: [...new Set(deniedDecisions.map((decision) => decision.code))]
+        .sort()
+        .join(","),
+    },
+    orgId: input.request.orgId,
+    repoId: input.request.repoId,
+    resourceId: input.result.runId,
+    resourceType: "sandbox_run",
+    severity: "medium",
+    source: "sandbox",
+    type: "sandbox_policy_denied",
+  });
 }
 
 /** Returns product-safe sandbox policy metadata without environment values. */
