@@ -253,9 +253,11 @@ tracked milestone.
   evidence mapping and redaction in the admin-tools package.
 - Latest DB publisher milestone: `PublisherRepository` now owns publisher persistence writes for
   publish runs, publish operations, provider check runs, grouped reviews, summary comments, and
-  published findings. `@repo/publisher` uses this repository boundary instead of importing raw
-  publish-state tables, and Postgres-backed integration coverage verifies idempotent output
-  upserts and operation recording.
+  published findings, plus publisher debug and reconciliation reads for publish attempts,
+  operations, provider outputs, and published findings. `@repo/publisher` uses this repository
+  boundary instead of importing raw publish-state tables, admin tooling uses it for publisher
+  inspector and reconciliation reads, and Postgres-backed integration coverage verifies idempotent
+  output upserts, operation recording, and read-side inspection queries.
 - Latest DB review milestone: `ReviewRepository` now returns the stored candidate row when an
   idempotent insert conflicts on review/fingerprint uniqueness, instead of echoing the rejected
   input, owns validated finding inspection reads joined with repository and publication display

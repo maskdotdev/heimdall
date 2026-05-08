@@ -164,6 +164,62 @@ describe.runIf(integrationDatabaseUrl)("PublisherRepository integration", () => 
       conclusion: "success",
       metadata: { annotationCount: 0 },
     });
+
+    await expect(
+      repository.getLatestPublishRunForReviewRun("rrn_publisher"),
+    ).resolves.toMatchObject({
+      publishRunId: "pub_publisher",
+      status: "completed",
+    });
+    await expect(repository.listPublishRunsForReviewRun("rrn_publisher")).resolves.toMatchObject([
+      {
+        publishRunId: "pub_publisher",
+        status: "completed",
+      },
+    ]);
+    await expect(repository.listPublishOperationsForRuns(["pub_publisher"])).resolves.toMatchObject(
+      [
+        {
+          publishOperationId: "pop_publisher_check_started",
+          status: "running",
+        },
+        {
+          publishOperationId: "pop_publisher_check_completed",
+          status: "completed",
+        },
+      ],
+    );
+    await expect(
+      repository.listPublishedCheckRunsForRuns(["pub_publisher"]),
+    ).resolves.toMatchObject([
+      {
+        conclusion: "success",
+        publishedCheckRunId: "pcr_publisher",
+      },
+    ]);
+    await expect(repository.listPublishedReviewsForRuns(["pub_publisher"])).resolves.toMatchObject([
+      {
+        providerReviewId: "review_1",
+        publishedReviewId: "prev_publisher",
+      },
+    ]);
+    await expect(
+      repository.listPublishedSummaryCommentsForRuns(["pub_publisher"]),
+    ).resolves.toMatchObject([
+      {
+        providerCommentId: "summary_1",
+        publishedSummaryCommentId: "psc_publisher",
+      },
+    ]);
+    await expect(
+      repository.listPublishedFindingsForReviewRun("rrn_publisher", "github"),
+    ).resolves.toMatchObject([
+      {
+        findingId: "pf_publisher",
+        providerCommentId: "comment_1",
+      },
+    ]);
+    await expect(repository.listPublishOperationsForRuns([])).resolves.toEqual([]);
   });
 });
 

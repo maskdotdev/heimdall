@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   publishedCheckRuns,
@@ -8,6 +8,24 @@ import {
   publishOperations,
   publishRuns,
 } from "../schema";
+
+/** Durable publish run row returned for admin inspection. */
+export type PublishRunRecord = typeof publishRuns.$inferSelect;
+
+/** Durable publish operation row returned for admin inspection. */
+export type PublishOperationRecord = typeof publishOperations.$inferSelect;
+
+/** Durable published check-run row returned for admin inspection. */
+export type PublishedCheckRunRecord = typeof publishedCheckRuns.$inferSelect;
+
+/** Durable published review row returned for admin inspection. */
+export type PublishedReviewRecord = typeof publishedReviews.$inferSelect;
+
+/** Durable published summary-comment row returned for admin inspection. */
+export type PublishedSummaryCommentRecord = typeof publishedSummaryComments.$inferSelect;
+
+/** Durable published finding row returned for admin inspection. */
+export type PublishedFindingRecord = typeof publishedFindings.$inferSelect;
 
 /** Input used to create or reset a running publish run. */
 export type UpsertRunningPublishRunInput = {
@@ -153,6 +171,110 @@ export type UpsertPublishedFindingInput = {
 export class PublisherRepository {
   /** Creates a publisher persistence query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
+
+  /** Lists publish runs for one review run with newest attempts first. */
+  public async listPublishRunsForReviewRun(
+    reviewRunId: string,
+  ): Promise<readonly PublishRunRecord[]> {
+    return this.db
+      .select()
+      .from(publishRuns)
+      .where(eq(publishRuns.reviewRunId, reviewRunId))
+      .orderBy(desc(publishRuns.createdAt), desc(publishRuns.publishRunId));
+  }
+
+  /** Gets the newest publish run for one review run. */
+  public async getLatestPublishRunForReviewRun(
+    reviewRunId: string,
+  ): Promise<PublishRunRecord | undefined> {
+    const [row] = await this.listPublishRunsForReviewRun(reviewRunId);
+
+    return row;
+  }
+
+  /** Lists publish operations attached to the given publish runs. */
+  public async listPublishOperationsForRuns(
+    publishRunIds: readonly string[],
+  ): Promise<readonly PublishOperationRecord[]> {
+    const uniquePublishRunIds = uniqueStableStrings(publishRunIds);
+    if (uniquePublishRunIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(publishOperations)
+      .where(inArray(publishOperations.publishRunId, uniquePublishRunIds))
+      .orderBy(asc(publishOperations.createdAt), asc(publishOperations.publishOperationId));
+  }
+
+  /** Lists published check-run rows attached to the given publish runs. */
+  public async listPublishedCheckRunsForRuns(
+    publishRunIds: readonly string[],
+  ): Promise<readonly PublishedCheckRunRecord[]> {
+    const uniquePublishRunIds = uniqueStableStrings(publishRunIds);
+    if (uniquePublishRunIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(publishedCheckRuns)
+      .where(inArray(publishedCheckRuns.publishRunId, uniquePublishRunIds))
+      .orderBy(asc(publishedCheckRuns.createdAt), asc(publishedCheckRuns.publishedCheckRunId));
+  }
+
+  /** Lists published review rows attached to the given publish runs. */
+  public async listPublishedReviewsForRuns(
+    publishRunIds: readonly string[],
+  ): Promise<readonly PublishedReviewRecord[]> {
+    const uniquePublishRunIds = uniqueStableStrings(publishRunIds);
+    if (uniquePublishRunIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(publishedReviews)
+      .where(inArray(publishedReviews.publishRunId, uniquePublishRunIds))
+      .orderBy(asc(publishedReviews.createdAt), asc(publishedReviews.publishedReviewId));
+  }
+
+  /** Lists published summary-comment rows attached to the given publish runs. */
+  public async listPublishedSummaryCommentsForRuns(
+    publishRunIds: readonly string[],
+  ): Promise<readonly PublishedSummaryCommentRecord[]> {
+    const uniquePublishRunIds = uniqueStableStrings(publishRunIds);
+    if (uniquePublishRunIds.length === 0) {
+      return [];
+    }
+
+    return this.db
+      .select()
+      .from(publishedSummaryComments)
+      .where(inArray(publishedSummaryComments.publishRunId, uniquePublishRunIds))
+      .orderBy(
+        asc(publishedSummaryComments.createdAt),
+        asc(publishedSummaryComments.publishedSummaryCommentId),
+      );
+  }
+
+  /** Lists published finding rows for one review run. */
+  public async listPublishedFindingsForReviewRun(
+    reviewRunId: string,
+    provider?: string,
+  ): Promise<readonly PublishedFindingRecord[]> {
+    const conditions = [
+      eq(publishedFindings.reviewRunId, reviewRunId),
+      ...(provider ? [eq(publishedFindings.provider, provider)] : []),
+    ];
+
+    return this.db
+      .select()
+      .from(publishedFindings)
+      .where(and(...conditions))
+      .orderBy(asc(publishedFindings.publishedAt), asc(publishedFindings.findingId));
+  }
 
   /** Creates or resets a publish run to running using its idempotency key. */
   public async upsertRunningPublishRun(input: UpsertRunningPublishRunInput): Promise<void> {
@@ -308,6 +430,11 @@ export class PublisherRepository {
         },
       });
   }
+}
+
+/** Returns stable unique string values while preserving caller order. */
+function uniqueStableStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
 }
 
 /** Builds a sparse publish-run status update that preserves omitted fields. */
