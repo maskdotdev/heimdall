@@ -169,6 +169,12 @@ export type CancelBackgroundJobInput = {
   readonly now?: Date;
 };
 
+/** Input for recording a heartbeat on one running durable background job. */
+export type HeartbeatBackgroundJobInput = BackgroundJobTypeIdentity & {
+  /** Current time used for deterministic tests. */
+  readonly now?: Date;
+};
+
 /** Result returned after attempting to cancel one durable background job. */
 export type CancelBackgroundJobResult = {
   /** Whether this request moved the job into the canceled state. */
@@ -342,15 +348,7 @@ export class BackgroundJobRepository {
         maxAttempts: backgroundJobs.maxAttempts,
       })
       .from(backgroundJobs)
-      .where(
-        and(
-          eq(backgroundJobs.status, "running"),
-          or(
-            lte(backgroundJobs.startedAt, cutoff),
-            and(isNull(backgroundJobs.startedAt), lte(backgroundJobs.updatedAt, cutoff)),
-          ),
-        ),
-      )
+      .where(and(eq(backgroundJobs.status, "running"), lte(backgroundJobs.updatedAt, cutoff)))
       .orderBy(asc(backgroundJobs.updatedAt))
       .limit(limit);
     const retryableIds = rows
@@ -462,21 +460,28 @@ export class BackgroundJobRepository {
       return "running";
     }
 
-    const [existing] = await this.db
-      .select({ status: backgroundJobs.status })
-      .from(backgroundJobs)
-      .where(
-        and(eq(backgroundJobs.jobType, input.jobType), eq(backgroundJobs.jobKey, input.jobKey)),
-      )
-      .limit(1);
+    return await this.getRunStateByTypeAndKey(input);
+  }
 
-    if (!existing) {
-      return "missing";
+  /** Refreshes the update timestamp for a running durable job. */
+  public async markHeartbeat(input: HeartbeatBackgroundJobInput): Promise<BackgroundJobRunState> {
+    const [updated] = await this.db
+      .update(backgroundJobs)
+      .set({ updatedAt: input.now ?? new Date() })
+      .where(
+        and(
+          eq(backgroundJobs.jobType, input.jobType),
+          eq(backgroundJobs.jobKey, input.jobKey),
+          eq(backgroundJobs.status, "running"),
+        ),
+      )
+      .returning({ status: backgroundJobs.status });
+
+    if (updated) {
+      return "running";
     }
-    if (existing.status === "canceled") {
-      return "canceled";
-    }
-    return isTerminalBackgroundJobStatus(existing.status) ? "already_completed" : "missing";
+
+    return await this.getRunStateByTypeAndKey(input);
   }
 
   /** Marks a durable job as completed. */
@@ -529,6 +534,27 @@ export class BackgroundJobRepository {
           inArray(backgroundJobs.status, ["pending", "queued", "running"]),
         ),
       );
+  }
+
+  /** Reads the current run state after a lifecycle update did not match a running row. */
+  private async getRunStateByTypeAndKey(
+    input: BackgroundJobTypeIdentity,
+  ): Promise<BackgroundJobRunState> {
+    const [existing] = await this.db
+      .select({ status: backgroundJobs.status })
+      .from(backgroundJobs)
+      .where(
+        and(eq(backgroundJobs.jobType, input.jobType), eq(backgroundJobs.jobKey, input.jobKey)),
+      )
+      .limit(1);
+
+    if (!existing) {
+      return "missing";
+    }
+    if (existing.status === "canceled") {
+      return "canceled";
+    }
+    return isTerminalBackgroundJobStatus(existing.status) ? "already_completed" : "missing";
   }
 
   /** Moves retryable stale running rows back to queued. */

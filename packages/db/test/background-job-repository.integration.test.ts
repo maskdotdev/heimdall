@@ -42,6 +42,7 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
 
   it("inserts jobs idempotently and applies lifecycle transitions", async () => {
     const now = new Date("2026-05-08T00:10:00.000Z");
+    const heartbeatAt = new Date("2026-05-08T00:11:00.000Z");
     const pendingEnvelope = syncInstallationEnvelope("sync:background:pending");
     const inserted = await backgroundJobRepository.insertBackgroundJob({
       backgroundJobId: "job_background_pending",
@@ -118,6 +119,19 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
         queueName: "repo-sync",
       }),
     ).toMatchObject({ attempts: 1, status: "running" });
+    await expect(
+      backgroundJobRepository.markHeartbeat({
+        jobKey: pendingEnvelope.idempotencyKey,
+        jobType: pendingEnvelope.jobType,
+        now: heartbeatAt,
+      }),
+    ).resolves.toBe("running");
+    expect(
+      await backgroundJobRepository.getBackgroundJobByQueueAndKey({
+        jobKey: pendingEnvelope.idempotencyKey,
+        queueName: "repo-sync",
+      }),
+    ).toMatchObject({ status: "running", updatedAt: heartbeatAt });
 
     await backgroundJobRepository.markRetrying(
       { jobKey: pendingEnvelope.idempotencyKey, jobType: pendingEnvelope.jobType },
@@ -200,6 +214,12 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
         jobType: envelope.jobType,
       }),
     ).resolves.toBe("canceled");
+    await expect(
+      backgroundJobRepository.markHeartbeat({
+        jobKey: envelope.idempotencyKey,
+        jobType: envelope.jobType,
+      }),
+    ).resolves.toBe("canceled");
 
     await backgroundJobRepository.markCompleted({
       jobKey: envelope.idempotencyKey,
@@ -245,6 +265,16 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
       startedAt: freshTimestamp,
       updatedAt: freshTimestamp,
     });
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: "job_background_heartbeating",
+      queueName: "repo-sync",
+      envelope: syncInstallationEnvelope("sync:background:heartbeating"),
+      status: "running",
+      attempts: 1,
+      maxAttempts: 3,
+      startedAt: staleTimestamp,
+      updatedAt: freshTimestamp,
+    });
 
     const result = await backgroundJobRepository.recoverStaleRunningJobs({
       now,
@@ -275,6 +305,12 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
       error: { name: "StaleDurableJobError" },
       status: "dead_lettered",
     });
+    await expect(
+      backgroundJobRepository.getBackgroundJobByQueueAndKey({
+        jobKey: "sync:background:heartbeating",
+        queueName: "repo-sync",
+      }),
+    ).resolves.toMatchObject({ status: "running" });
     await expect(
       backgroundJobRepository.getBackgroundJobByQueueAndKey({
         jobKey: "sync:background:fresh",

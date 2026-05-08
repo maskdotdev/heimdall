@@ -114,6 +114,8 @@ export type DurableJobStore = {
   readonly markQueued: (job: DurableJob) => Promise<void>;
   /** Marks a queued durable job as running and records a handler attempt. */
   readonly markRunning: (envelope: JobEnvelope<JobPayload>) => Promise<DurableJobRunState>;
+  /** Refreshes heartbeat state for a running durable job. */
+  readonly markHeartbeat: (envelope: JobEnvelope<JobPayload>) => Promise<DurableJobRunState>;
   /** Marks a durable job as completed. */
   readonly markCompleted: (envelope: JobEnvelope<JobPayload>) => Promise<void>;
   /** Marks a durable job as queued for a BullMQ retry. */
@@ -162,6 +164,8 @@ export type DurableJobProcessorOptions = {
   readonly handlers: DurableJobHandlerMap;
   /** Optional metric recorder used to aggregate durable job processing. */
   readonly metrics?: TelemetryMetricRecorder;
+  /** Optional interval between durable heartbeat updates. Defaults to 30 seconds. */
+  readonly heartbeatIntervalMs?: number;
   /** Optional span recorder used to trace durable job processing. */
   readonly traces?: TelemetrySpanRecorder;
 };
@@ -171,6 +175,7 @@ const defaultStaleRunningJobRecoveryLimit = 100;
 const maxStaleRunningJobRecoveryLimit = 1_000;
 const queueNameValues = new Set<string>(Object.values(QUEUE_NAMES));
 const staleRunningJobErrorName = "StaleDurableJobError";
+const defaultHeartbeatIntervalMs = 30_000;
 
 /** Parses and validates a durable job envelope. */
 export function parseJobEnvelope(input: unknown): JobEnvelope<JobPayload> {
@@ -297,11 +302,11 @@ export class InMemoryDurableJobStore implements DurableJobStore {
     if (!existing) {
       return "missing";
     }
-    if (existing.status === "canceled") {
-      return "canceled";
+    if (existing.status === "canceled" || isTerminalDurableJobStatus(existing.status)) {
+      return nonRunnableRunStateFromDurableJobStatus(existing.status);
     }
-    if (isTerminalDurableJobStatus(existing.status)) {
-      return "already_completed";
+    if (existing.status !== "pending" && existing.status !== "queued") {
+      return "missing";
     }
 
     const now = new Date();
@@ -311,6 +316,23 @@ export class InMemoryDurableJobStore implements DurableJobStore {
       startedAt: now,
       status: "running",
       updatedAt: now,
+    });
+    return "running";
+  }
+
+  /** Refreshes heartbeat state for a running durable job. */
+  public async markHeartbeat(envelope: JobEnvelope<JobPayload>): Promise<DurableJobRunState> {
+    const existing = this.jobs.get(this.key(envelope));
+    if (!existing) {
+      return "missing";
+    }
+    if (existing.status !== "running") {
+      return nonRunnableRunStateFromDurableJobStatus(existing.status);
+    }
+
+    this.jobs.set(this.key(envelope), {
+      ...existing,
+      updatedAt: new Date(),
     });
     return "running";
   }
@@ -401,6 +423,14 @@ export class DrizzleDurableJobStore implements DurableJobStore {
   /** Marks a queued durable job as running. */
   public async markRunning(envelope: JobEnvelope<JobPayload>): Promise<DurableJobRunState> {
     return this.backgroundJobs.markRunning({
+      jobKey: envelope.idempotencyKey,
+      jobType: envelope.jobType,
+    });
+  }
+
+  /** Refreshes heartbeat state for a running durable job. */
+  public async markHeartbeat(envelope: JobEnvelope<JobPayload>): Promise<DurableJobRunState> {
+    return this.backgroundJobs.markHeartbeat({
       jobKey: envelope.idempotencyKey,
       jobType: envelope.jobType,
     });
@@ -533,6 +563,7 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
     const envelope = parseJobEnvelope(job.data);
     const queueName = queueNameFromBullMqJob(job);
     const startedAtMs = Date.now();
+    const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
     const span = options.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.durableJobProcess, {
       attributes: durableJobSpanAttributes(envelope, queueName),
       kind: "consumer",
@@ -593,8 +624,48 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       throw error;
     }
 
+    let heartbeatError: unknown;
+    const recordHeartbeat = async (): Promise<DurableJobRunState> => {
+      try {
+        return await options.store.markHeartbeat(envelope);
+      } catch (error) {
+        heartbeatError = error;
+        return "missing";
+      }
+    };
+    const heartbeatInterval = setInterval(() => {
+      void recordHeartbeat();
+    }, heartbeatIntervalMs);
+
     try {
       await handler(envelope);
+      clearInterval(heartbeatInterval);
+      if (heartbeatError) {
+        throw heartbeatError;
+      }
+      const finalRunState = await recordHeartbeat();
+      if (heartbeatError) {
+        throw heartbeatError;
+      }
+      if (finalRunState === "already_completed" || finalRunState === "canceled") {
+        span?.end({ attributes: { "job.run_state": finalRunState } });
+        return;
+      }
+      if (finalRunState === "missing") {
+        const error = new Error(
+          `Durable job ${envelope.jobType}:${envelope.idempotencyKey} disappeared before completion.`,
+        );
+        recordDurableJobFailureMetrics(
+          options.metrics,
+          envelope,
+          queueName,
+          finalRunState,
+          Date.now() - startedAtMs,
+          error,
+        );
+        span?.end({ attributes: { "job.run_state": finalRunState }, error });
+        throw error;
+      }
       await options.store.markCompleted(envelope);
       recordDurableJobCompletedMetrics(
         options.metrics,
@@ -604,6 +675,7 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       );
       span?.end({ attributes: { "job.run_state": "completed" } });
     } catch (error) {
+      clearInterval(heartbeatInterval);
       const serialized = serializeJobError(error);
       const isFinalAttempt = job.attemptsMade + 1 >= envelope.maxAttempts;
       try {
@@ -743,6 +815,14 @@ function isActiveDurableJobStatus(status: JobStatus): boolean {
   return status === "pending" || status === "queued" || status === "running";
 }
 
+/** Converts a non-runnable durable status to the worker run-state contract. */
+function nonRunnableRunStateFromDurableJobStatus(status: JobStatus): DurableJobRunState {
+  if (status === "canceled") {
+    return "canceled";
+  }
+  return isTerminalDurableJobStatus(status) ? "already_completed" : "missing";
+}
+
 /** Returns whether a durable job status is terminal for handler dispatch. */
 function isTerminalDurableJobStatus(status: JobStatus): boolean {
   return (
@@ -755,12 +835,10 @@ function isTerminalDurableJobStatus(status: JobStatus): boolean {
 
 /** Returns whether a durable job is running beyond the configured cutoff. */
 function isStaleRunningJob(job: DurableJob, cutoff: Date): boolean {
-  const runningTimestamp = job.startedAt ?? job.updatedAt;
-
   return (
     job.status === "running" &&
-    runningTimestamp !== undefined &&
-    runningTimestamp.getTime() <= cutoff.getTime()
+    job.updatedAt !== undefined &&
+    job.updatedAt.getTime() <= cutoff.getTime()
   );
 }
 
@@ -788,6 +866,13 @@ function normalizeStaleRunningJobRecoveryLimit(limit: number | undefined): numbe
       : Math.trunc(limit);
 
   return Math.min(maxStaleRunningJobRecoveryLimit, Math.max(1, requestedLimit));
+}
+
+/** Normalizes durable heartbeat intervals to a positive finite millisecond value. */
+function normalizeHeartbeatIntervalMs(intervalMs: number | undefined): number {
+  return intervalMs !== undefined && Number.isFinite(intervalMs) && intervalMs > 0
+    ? Math.trunc(intervalMs)
+    : defaultHeartbeatIntervalMs;
 }
 
 function toQueueName(value: string): QueueName {
