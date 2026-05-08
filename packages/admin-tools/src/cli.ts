@@ -18,10 +18,12 @@ import {
   type AdminReplayExecutionResult,
   type AdminReviewDebugDetails,
   type AdminReviewRunDebugBundle,
+  type AdminReviewRunEvalImportDraft,
   type AdminUsageCostInspection,
   type AdminWebhookDebugDetails,
   type BackgroundJobReplayPlan,
   createAdminDebugService,
+  type ImportReviewRunToEvalRequest,
   type PublisherDryRunPlan,
   type PublisherReplayPlan,
   redactDebugBundleValue,
@@ -99,6 +101,28 @@ export type AdminCliCommand =
       readonly execute: boolean;
       /** Confirmation token supplied with an unsupported dispatch attempt. */
       readonly confirmationToken?: string;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "eval_import";
+      /** Review run to convert into an eval import draft. */
+      readonly reviewRunId: string;
+      /** Eval suite that would receive the approved case. */
+      readonly suiteId: string;
+      /** Human-readable case name. */
+      readonly caseName: string;
+      /** Audit reason for creating the draft. */
+      readonly reason: string;
+      /** Redaction level for generated draft files. */
+      readonly redactionLevel: ImportReviewRunToEvalRequest["redactionLevel"];
+      /** Optional labels to attach to the generated eval case. */
+      readonly labels: readonly string[];
+      /** Artifact groups to include in the generated draft. */
+      readonly includeArtifacts: ImportReviewRunToEvalRequest["includeArtifacts"];
+      /** Whether output should be JSON. */
+      readonly json: boolean;
       /** Optional direct database URL override. */
       readonly databaseUrl?: string;
     }
@@ -304,6 +328,8 @@ export async function runAdminCli(
         return await runReviewRetrievalReplayCommand(command, handle.service);
       case "review_validation_replay":
         return await runReviewValidationReplayCommand(command, handle.service);
+      case "eval_import":
+        return await runEvalImportCommand(command, handle.service, env);
       case "webhook_inspect":
         return await runWebhookInspectCommand(command, handle.service);
       case "webhook_retry":
@@ -385,6 +411,28 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
       json,
       reviewRunId,
       stage,
+    };
+  }
+
+  if (domain === "eval" && (action === "import" || action === "import-draft") && reviewRunId) {
+    const reason = requiredStringFlag(parsed.flags, "reason", "eval import");
+    return {
+      kind: "eval_import",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      caseName: stringFlag(parsed.flags, "case-name") ?? `Imported review ${reviewRunId}`,
+      includeArtifacts: {
+        contextBundle: parsed.flags.has("include-context-bundle"),
+        pullRequestSnapshot: !parsed.flags.has("omit-pull-request-snapshot"),
+        rawDiff: parsed.flags.has("include-raw-diff"),
+        reviewOutputs: !parsed.flags.has("omit-review-outputs"),
+        validationOutputs: !parsed.flags.has("omit-validation-outputs"),
+      },
+      json,
+      labels: stringListFlag(parsed.flags, "labels"),
+      reason,
+      redactionLevel: evalImportRedactionLevel(stringFlag(parsed.flags, "redaction-level")),
+      reviewRunId,
+      suiteId: stringFlag(parsed.flags, "suite-id") ?? "smoke-full-pipeline-v1",
     };
   }
 
@@ -531,6 +579,7 @@ export function adminCliUsage(): string {
     "  admin review replay <reviewRunId> [--stage review] [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin review replay <reviewRunId> --stage retrieval [--json] [--database-url <url>]",
     "  admin review replay <reviewRunId> --stage validation [--json] [--database-url <url>]",
+    "  admin eval import <reviewRunId> --reason <reason> [--suite-id <suiteId>] [--case-name <name>] [--labels <csv>] [--redaction-level <level>] [--include-context-bundle] [--include-raw-diff] [--json] [--database-url <url>]",
     "  admin webhook inspect <webhookEventId> [--json] [--database-url <url>]",
     "  admin webhook retry <webhookEventId> [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin job inspect <backgroundJobId> [--json] [--database-url <url>]",
@@ -635,6 +684,30 @@ async function runReviewValidationReplayCommand(
   return {
     exitCode: 0,
     stdout: command.json ? jsonOutput(dryRun) : formatValidationReplayDryRun(dryRun),
+  };
+}
+
+/** Runs audited eval import draft creation and formats the result. */
+async function runEvalImportCommand(
+  command: Extract<AdminCliCommand, { kind: "eval_import" }>,
+  service: AdminDebugService,
+  env: AdminCliEnvironment,
+): Promise<AdminCliResult> {
+  const draft = await service.createReviewRunEvalImportDraft(
+    {
+      caseName: command.caseName,
+      includeArtifacts: command.includeArtifacts,
+      ...(command.labels.length > 0 ? { labels: command.labels } : {}),
+      reason: command.reason,
+      redactionLevel: command.redactionLevel,
+      reviewRunId: command.reviewRunId,
+      suiteId: command.suiteId,
+    },
+    cliActor(env),
+  );
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(draft) : formatEvalImportDraft(draft),
   };
 }
 
@@ -963,6 +1036,29 @@ function requiredStringFlag(
   return value;
 }
 
+/** Returns a comma-separated string flag as normalized values. */
+function stringListFlag(
+  flags: ReadonlyMap<string, string | true>,
+  name: string,
+): readonly string[] {
+  const value = stringFlag(flags, name);
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+/** Narrows eval import redaction levels. */
+function evalImportRedactionLevel(
+  value: string | undefined,
+): ImportReviewRunToEvalRequest["redactionLevel"] {
+  return value === "synthetic" || value === "raw_allowed" ? value : "redacted";
+}
+
 /** Returns an error when direct database mode appears to target production. */
 function directDatabaseProductionGuard(env: AdminCliEnvironment): string | undefined {
   const environment = env.HEIMDALL_ENV ?? env.NODE_ENV;
@@ -1069,6 +1165,25 @@ function formatDebugBundleExport(bundle: AdminReviewRunDebugBundle): string {
     `Review run: ${bundle.reviewRunId}`,
     `Payload hash: ${bundle.payloadHash}`,
     `Expires at: ${bundle.expiresAt}`,
+  ].join("\n");
+}
+
+/** Formats an eval import draft summary for terminal output. */
+function formatEvalImportDraft(draft: AdminReviewRunEvalImportDraft): string {
+  return [
+    `Eval import draft: ${draft.importDraftId}`,
+    `Admin action: ${draft.adminActionId}`,
+    `Audit log: ${draft.auditLogId}`,
+    `Review run: ${draft.reviewRunId}`,
+    `Repository: ${draft.repoId}`,
+    `Suite: ${draft.suiteId}`,
+    `Case: ${draft.evalCase.caseId}`,
+    `Redaction: ${draft.redactionLevel}`,
+    `Files: ${draft.files.length}`,
+    `Warnings: ${draft.warnings.length}`,
+    ...(draft.files.length > 0
+      ? ["Proposed files:", ...draft.files.map((file) => `- ${file.path}`)]
+      : []),
   ].join("\n");
 }
 

@@ -46,6 +46,42 @@ describe("parseAdminCliCommand", () => {
       reviewRunId: "rrn_1",
     });
 
+    expect(
+      parseAdminCliCommand([
+        "eval",
+        "import",
+        "rrn_1",
+        "--reason",
+        "Regression fixture",
+        "--suite-id",
+        "smoke-full-pipeline-v1",
+        "--case-name",
+        "Imported case",
+        "--labels",
+        "admin-import, regression",
+        "--include-context-bundle",
+        "--include-raw-diff",
+        "--redaction-level",
+        "synthetic",
+      ]),
+    ).toEqual({
+      caseName: "Imported case",
+      includeArtifacts: {
+        contextBundle: true,
+        pullRequestSnapshot: true,
+        rawDiff: true,
+        reviewOutputs: true,
+        validationOutputs: true,
+      },
+      json: false,
+      kind: "eval_import",
+      labels: ["admin-import", "regression"],
+      reason: "Regression fixture",
+      redactionLevel: "synthetic",
+      reviewRunId: "rrn_1",
+      suiteId: "smoke-full-pipeline-v1",
+    });
+
     expect(parseAdminCliCommand(["webhook", "inspect", "wh_1", "--json"])).toEqual({
       json: true,
       kind: "webhook_inspect",
@@ -167,6 +203,7 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin review inspect <reviewRunId>");
     expect(adminCliUsage()).toContain("admin review replay <reviewRunId> --stage retrieval");
     expect(adminCliUsage()).toContain("admin review replay <reviewRunId> --stage validation");
+    expect(adminCliUsage()).toContain("admin eval import <reviewRunId>");
     expect(adminCliUsage()).toContain("admin webhook inspect <webhookEventId>");
     expect(adminCliUsage()).toContain("admin webhook retry <webhookEventId>");
     expect(adminCliUsage()).toContain("admin job inspect <backgroundJobId>");

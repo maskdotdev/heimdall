@@ -45,6 +45,7 @@
     "admin:replay-retrieval": "pnpm --filter @repo/admin-tools admin -- review replay --stage retrieval",
     "admin:replay-validation": "pnpm --filter @repo/admin-tools admin -- review replay --stage validation",
     "admin:export-debug-bundle": "pnpm --filter @repo/admin-tools admin -- review export",
+    "admin:import-eval-draft": "pnpm --filter @repo/admin-tools admin -- eval import",
     "admin:inspect-webhook": "pnpm --filter @repo/admin-tools admin -- webhook inspect",
     "admin:retry-webhook": "pnpm --filter @repo/admin-tools admin -- webhook retry",
     "admin:inspect-job": "pnpm --filter @repo/admin-tools admin -- job inspect",
