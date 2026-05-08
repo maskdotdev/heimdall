@@ -7,10 +7,12 @@ import {
   codeChunkEmbeddings,
   codeChunks,
   codeEdges,
+  codeIndexVersions,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
   indexedFiles,
+  indexImportBatches,
   symbols,
 } from "@repo/db";
 import type { IndexArtifact } from "@repo/indexer-driver";
@@ -31,6 +33,7 @@ import {
   createS3CompatibleIndexArtifactResolver,
   importIndexArtifact,
   readIndexArtifactFromUri,
+  reconcileStaleIndexImports,
 } from "../src";
 
 /** Temporary directories created by tests. */
@@ -60,6 +63,13 @@ type RecordedSpan = {
   readonly startAttributes?: TelemetrySpanOptions["attributes"] | undefined;
   /** Span status attached when the span ended. */
   readonly status?: TelemetrySpanEndOptions["status"] | undefined;
+};
+
+type RecordedTableUpdate = {
+  /** Database table passed to the update statement. */
+  readonly table: unknown;
+  /** Values passed to the update statement. */
+  readonly values: unknown;
 };
 
 afterEach(async () => {
@@ -619,6 +629,69 @@ describe("importIndexArtifact telemetry", () => {
     expect(first.indexVersionId).not.toBe(second.indexVersionId);
   });
 
+  it("marks stale import batches failed and cleans partial rows", async () => {
+    const updatedRows: RecordedTableUpdate[] = [];
+    const deletedTables: unknown[] = [];
+
+    const result = await reconcileStaleIndexImports({
+      db: createStaleImportReconciliationDatabaseStub({
+        deletedTables,
+        embeddingJobIds: ["embjob_stale"],
+        staleImportRows: [
+          {
+            importBatchId: "imb_stale",
+            indexVersionId: "idx_stale",
+          },
+        ],
+        updatedRows,
+      }),
+      limit: 10,
+      now: new Date("2026-05-07T13:00:00.000Z"),
+      staleAfterMs: 30 * 60 * 1000,
+    });
+
+    expect(result).toEqual({
+      cutoff: "2026-05-07T12:30:00.000Z",
+      importBatchCount: 1,
+      importBatchIds: ["imb_stale"],
+      indexVersionIds: ["idx_stale"],
+    });
+    expect(updatedRows).toEqual(
+      expect.arrayContaining([
+        {
+          table: indexImportBatches,
+          values: expect.objectContaining({
+            error: expect.objectContaining({
+              class: "timeout_error",
+              message: expect.stringContaining("2026-05-07T12:30:00.000Z"),
+            }),
+            phase: "failed",
+            status: "failed",
+          }),
+        },
+        {
+          table: codeIndexVersions,
+          values: expect.objectContaining({
+            error: expect.objectContaining({
+              class: "timeout_error",
+            }),
+            status: "failed",
+          }),
+        },
+      ]),
+    );
+    expect(deletedTables).toEqual([
+      backgroundJobs,
+      embeddingJobItems,
+      codeChunkEmbeddings,
+      embeddingJobs,
+      codeEdges,
+      codeChunks,
+      symbols,
+      indexedFiles,
+    ]);
+  });
+
   it("marks import batches failed when record writes fail", async () => {
     const insertedRows: unknown[] = [];
     const updatedRows: unknown[] = [];
@@ -1086,6 +1159,66 @@ function createEmbeddingPlanningImportDatabaseStub(
   };
 
   return db as unknown as HeimdallDatabase;
+}
+
+/** Creates the DB surface needed by stale import reconciliation tests. */
+function createStaleImportReconciliationDatabaseStub(options: {
+  /** Tables passed to delete statements. */
+  readonly deletedTables: unknown[];
+  /** Embedding job IDs selected for stale index versions. */
+  readonly embeddingJobIds: readonly string[];
+  /** Stale import rows returned by the reconciliation scan. */
+  readonly staleImportRows: readonly Readonly<Record<string, string | null>>[];
+  /** Recorded update statements. */
+  readonly updatedRows: RecordedTableUpdate[];
+}): HeimdallDatabase {
+  const tx = {
+    delete: (table: unknown) => ({
+      where: async (_input: unknown) => {
+        options.deletedTables.push(table);
+      },
+    }),
+    update: (table: unknown) => ({
+      set: (values: unknown) => ({
+        where: async (_input: unknown) => {
+          options.updatedRows.push({ table, values });
+        },
+      }),
+    }),
+  };
+  const db = {
+    select: (selection?: Readonly<Record<string, unknown>>) => ({
+      from: () => ({
+        where: () =>
+          Object.assign(Promise.resolve(selectRowsForStaleImportStub(selection, options)), {
+            orderBy: () => ({
+              limit: async (count: number) =>
+                selectRowsForStaleImportStub(selection, options).slice(0, count),
+            }),
+          }),
+      }),
+    }),
+    transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+  };
+
+  return db as unknown as HeimdallDatabase;
+}
+
+/** Returns canned select rows for stale import reconciliation tests. */
+function selectRowsForStaleImportStub(
+  selection: Readonly<Record<string, unknown>> | undefined,
+  options: {
+    /** Embedding job IDs selected for stale index versions. */
+    readonly embeddingJobIds: readonly string[];
+    /** Stale import rows returned by the reconciliation scan. */
+    readonly staleImportRows: readonly Readonly<Record<string, string | null>>[];
+  },
+): readonly Readonly<Record<string, string | null>>[] {
+  if (selection && "embeddingJobId" in selection) {
+    return options.embeddingJobIds.map((embeddingJobId) => ({ embeddingJobId }));
+  }
+
+  return options.staleImportRows;
 }
 
 /** Returns canned select rows for importer preflight and repository-owner lookups. */

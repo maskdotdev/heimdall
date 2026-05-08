@@ -37,7 +37,7 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
-import { and, eq, like, or } from "drizzle-orm";
+import { and, asc, eq, inArray, like, lt, not, or } from "drizzle-orm";
 
 export const packageName = "@repo/index-importer" as const;
 
@@ -190,6 +190,30 @@ export type ImportIndexArtifactResult = {
   readonly chunkCount: number;
   /** Number of queued embedding jobs. */
   readonly embeddingJobCount: number;
+};
+
+/** Options for reconciling abandoned import batches after worker crashes. */
+export type ReconcileStaleIndexImportsOptions = {
+  /** Database used to mark stale imports failed and clean partial rows. */
+  readonly db: HeimdallDatabase;
+  /** Maximum stale import batches reconciled in one pass. */
+  readonly limit?: number;
+  /** Current time used to calculate the stale cutoff. */
+  readonly now?: Date;
+  /** Running duration after which an import batch is considered stale. */
+  readonly staleAfterMs: number;
+};
+
+/** Summary returned after one stale index import reconciliation pass. */
+export type ReconcileStaleIndexImportsResult = {
+  /** Cutoff timestamp used to select stale import batches. */
+  readonly cutoff: string;
+  /** Stale import batch IDs selected for reconciliation. */
+  readonly importBatchIds: readonly string[];
+  /** Number of stale import batches marked failed. */
+  readonly importBatchCount: number;
+  /** Failed index version IDs that had partial child rows cleaned. */
+  readonly indexVersionIds: readonly string[];
 };
 
 type IndexImporterTelemetryStatus = "failed" | "succeeded";
@@ -625,6 +649,81 @@ export async function importIndexArtifact(
   }
 }
 
+/** Marks stale running import batches failed and cleans their partial index rows. */
+export async function reconcileStaleIndexImports(
+  options: ReconcileStaleIndexImportsOptions,
+): Promise<ReconcileStaleIndexImportsResult> {
+  const now = options.now ?? new Date();
+  const cutoff = staleIndexImportCutoff(now, options.staleAfterMs);
+  const limit = boundedReconciliationLimit(options.limit);
+  const rows = await options.db
+    .select({
+      importBatchId: indexImportBatches.indexImportBatchId,
+      indexVersionId: indexImportBatches.indexVersionId,
+    })
+    .from(indexImportBatches)
+    .where(
+      and(
+        not(inArray(indexImportBatches.status, ["complete", "failed"])),
+        lt(indexImportBatches.updatedAt, cutoff),
+      ),
+    )
+    .orderBy(asc(indexImportBatches.updatedAt))
+    .limit(limit);
+  const importBatchIds = rows.map((row) => row.importBatchId);
+  const indexVersionIds = uniqueStrings(
+    rows
+      .map((row) => row.indexVersionId)
+      .filter((indexVersionId): indexVersionId is string => indexVersionId !== null),
+  );
+
+  if (rows.length === 0) {
+    return {
+      cutoff: cutoff.toISOString(),
+      importBatchCount: 0,
+      importBatchIds,
+      indexVersionIds,
+    };
+  }
+
+  const serializedError = staleIndexImportError(cutoff);
+  await options.db.transaction(async (tx) => {
+    for (const importBatchId of importBatchIds) {
+      await tx
+        .update(indexImportBatches)
+        .set({
+          error: serializedError,
+          finishedAt: now,
+          phase: "failed",
+          status: "failed",
+          updatedAt: now,
+        })
+        .where(eq(indexImportBatches.indexImportBatchId, importBatchId));
+    }
+
+    for (const indexVersionId of indexVersionIds) {
+      await tx
+        .update(codeIndexVersions)
+        .set({
+          error: serializedError,
+          status: "failed",
+        })
+        .where(eq(codeIndexVersions.indexVersionId, indexVersionId));
+    }
+  });
+
+  for (const indexVersionId of indexVersionIds) {
+    await cleanupFailedIndexVersionRows(options.db, { indexVersionId });
+  }
+
+  return {
+    cutoff: cutoff.toISOString(),
+    importBatchCount: rows.length,
+    importBatchIds,
+    indexVersionIds,
+  };
+}
+
 /** Builds deterministic IDs and typed record groups for one artifact import. */
 function createIndexImportPlan(
   artifact: IndexArtifact,
@@ -911,28 +1010,64 @@ async function cleanupFailedIndexImportRows(
   db: HeimdallDatabase,
   plan: IndexImportPlan,
 ): Promise<void> {
+  await cleanupFailedIndexVersionRows(db, {
+    embeddingJobIds: [plan.embeddingJobId],
+    indexVersionId: plan.indexVersionId,
+  });
+}
+
+/** Deletes partial child rows for a failed index version while keeping diagnostic parent rows. */
+async function cleanupFailedIndexVersionRows(
+  db: HeimdallDatabase,
+  input: {
+    /** Embedding job IDs to clean without an extra lookup when already known. */
+    readonly embeddingJobIds?: readonly string[];
+    /** Failed index version whose partial child rows should be deleted. */
+    readonly indexVersionId: string;
+  },
+): Promise<void> {
+  const embeddingJobIds =
+    input.embeddingJobIds ?? (await loadEmbeddingJobIdsForIndexVersion(db, input.indexVersionId));
+
   await db.transaction(async (tx) => {
-    await tx
-      .delete(backgroundJobs)
-      .where(
-        or(
-          like(backgroundJobs.jobKey, `embedding:${plan.embeddingJobId}:%`),
-          eq(backgroundJobs.jobKey, `embedding:repair:${plan.embeddingJobId}`),
-          like(backgroundJobs.jobKey, `embedding:repair:${plan.embeddingJobId}:batch:%`),
-        ),
-      );
-    await tx
-      .delete(embeddingJobItems)
-      .where(eq(embeddingJobItems.embeddingJobId, plan.embeddingJobId));
+    for (const embeddingJobId of embeddingJobIds) {
+      await tx
+        .delete(backgroundJobs)
+        .where(
+          or(
+            like(backgroundJobs.jobKey, `embedding:${embeddingJobId}:%`),
+            eq(backgroundJobs.jobKey, `embedding:repair:${embeddingJobId}`),
+            like(backgroundJobs.jobKey, `embedding:repair:${embeddingJobId}:batch:%`),
+          ),
+        );
+    }
+    if (embeddingJobIds.length > 0) {
+      await tx
+        .delete(embeddingJobItems)
+        .where(inArray(embeddingJobItems.embeddingJobId, [...embeddingJobIds]));
+    }
     await tx
       .delete(codeChunkEmbeddings)
-      .where(eq(codeChunkEmbeddings.indexVersionId, plan.indexVersionId));
-    await tx.delete(embeddingJobs).where(eq(embeddingJobs.embeddingJobId, plan.embeddingJobId));
-    await tx.delete(codeEdges).where(eq(codeEdges.indexVersionId, plan.indexVersionId));
-    await tx.delete(codeChunks).where(eq(codeChunks.indexVersionId, plan.indexVersionId));
-    await tx.delete(symbols).where(eq(symbols.indexVersionId, plan.indexVersionId));
-    await tx.delete(indexedFiles).where(eq(indexedFiles.indexVersionId, plan.indexVersionId));
+      .where(eq(codeChunkEmbeddings.indexVersionId, input.indexVersionId));
+    await tx.delete(embeddingJobs).where(eq(embeddingJobs.indexVersionId, input.indexVersionId));
+    await tx.delete(codeEdges).where(eq(codeEdges.indexVersionId, input.indexVersionId));
+    await tx.delete(codeChunks).where(eq(codeChunks.indexVersionId, input.indexVersionId));
+    await tx.delete(symbols).where(eq(symbols.indexVersionId, input.indexVersionId));
+    await tx.delete(indexedFiles).where(eq(indexedFiles.indexVersionId, input.indexVersionId));
   });
+}
+
+/** Loads embedding job IDs attached to an index version for stale import cleanup. */
+async function loadEmbeddingJobIdsForIndexVersion(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<readonly string[]> {
+  const rows = await db
+    .select({ embeddingJobId: embeddingJobs.embeddingJobId })
+    .from(embeddingJobs)
+    .where(eq(embeddingJobs.indexVersionId, indexVersionId));
+
+  return rows.map((row) => row.embeddingJobId);
 }
 
 /** Serializes an import failure into product-safe database metadata. */
@@ -941,6 +1076,14 @@ function serializeIndexImportError(error: unknown): Record<string, string> {
     class: classifyTelemetryError(error),
     message:
       error instanceof Error ? error.message.slice(0, 1_000) : "Unknown index import failure.",
+  };
+}
+
+/** Serializes an abandoned import failure into product-safe database metadata. */
+function staleIndexImportError(cutoff: Date): Record<string, string> {
+  return {
+    class: "timeout_error",
+    message: `Index import did not update before ${cutoff.toISOString()} and was marked failed.`,
   };
 }
 
@@ -1161,6 +1304,28 @@ function boundedEmbeddingBatchSize(value: number | undefined): number {
   }
 
   return Math.max(1, value);
+}
+
+/** Calculates the stale import cutoff from a current time and duration. */
+function staleIndexImportCutoff(now: Date, staleAfterMs: number): Date {
+  const boundedStaleAfterMs =
+    Number.isFinite(staleAfterMs) && staleAfterMs > 0 ? Math.trunc(staleAfterMs) : 1;
+
+  return new Date(now.getTime() - boundedStaleAfterMs);
+}
+
+/** Bounds stale import reconciliation batches to a positive safety limit. */
+function boundedReconciliationLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isSafeInteger(value)) {
+    return 100;
+  }
+
+  return Math.min(Math.max(value, 1), 1_000);
+}
+
+/** Returns unique strings while preserving first-seen order. */
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
 }
 
 /** Yields stable slices of row values for bounded batch inserts. */

@@ -69,6 +69,7 @@ import {
   createIndexImportLimitsFromEnvironment,
   importIndexArtifact,
   importIndexArtifactFromUri,
+  reconcileStaleIndexImports,
 } from "@repo/index-importer";
 import {
   assertIndexerSupportsCurrentArtifactSchema,
@@ -155,6 +156,10 @@ const DEFAULT_STALE_RUNNING_JOB_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
 const DEFAULT_STALE_RUNNING_JOB_RECOVERY_INTERVAL_MS = 60_000;
 /** Default stale running rows repaired by one worker maintenance pass. */
 const DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE = 100;
+/** Default age after which an index import batch is considered stale. */
+const DEFAULT_STALE_INDEX_IMPORT_TIMEOUT_MS = 30 * 60 * 1000;
+/** Default stale index import batches repaired by one worker maintenance pass. */
+const DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE = 50;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
 const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
 /** Maximum chunk IDs placed in one repair-triggered embedding batch. */
@@ -229,6 +234,10 @@ export type WorkerEmbeddingProviderEnvironment = Readonly<Record<string, string 
 
 /** Worker queue maintenance settings derived from environment values. */
 type WorkerQueueMaintenanceConfig = {
+  /** Maximum stale index import batches to mark failed in one pass. */
+  readonly indexImportRecoveryBatchSize: number;
+  /** Import duration after which an index import batch is considered stale. */
+  readonly indexImportStaleTimeoutMs: number;
   /** Maximum stale running rows to repair in one pass. */
   readonly recoveryBatchSize: number;
   /** Milliseconds between stale running recovery passes. */
@@ -1126,17 +1135,32 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     traces: observability.traces,
   });
   const recoverStaleRunningJobs = async () => {
-    const result = await store.recoverStaleRunningJobs({
+    const jobRecovery = await store.recoverStaleRunningJobs({
       limit: queueMaintenance.recoveryBatchSize,
       staleAfterMs: queueMaintenance.staleRunningTimeoutMs,
     });
-    if (result.requeued > 0 || result.deadLettered > 0) {
+    if (jobRecovery.requeued > 0 || jobRecovery.deadLettered > 0) {
       observability.logger.warn("stale durable jobs recovered", {
         attributes: {
           "event.name": "worker.queue.stale_jobs_recovered",
-          "job.dead_lettered": result.deadLettered,
-          "job.inspected": result.inspected,
-          "job.requeued": result.requeued,
+          "job.dead_lettered": jobRecovery.deadLettered,
+          "job.inspected": jobRecovery.inspected,
+          "job.requeued": jobRecovery.requeued,
+        },
+      });
+    }
+
+    const indexImportRecovery = await reconcileStaleIndexImports({
+      db: databaseClient.db,
+      limit: queueMaintenance.indexImportRecoveryBatchSize,
+      staleAfterMs: queueMaintenance.indexImportStaleTimeoutMs,
+    });
+    if (indexImportRecovery.importBatchCount > 0) {
+      observability.logger.warn("stale index imports marked failed", {
+        attributes: {
+          "event.name": "worker.index_import.stale_imports_recovered",
+          "index_import.batch_count": indexImportRecovery.importBatchCount,
+          "index_import.index_version_count": indexImportRecovery.indexVersionIds.length,
         },
       });
     }
@@ -1160,7 +1184,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   }, 5_000);
   const staleRunningRecoveryInterval = setInterval(() => {
     recoverStaleRunningJobs().catch((error: unknown) => {
-      console.error("stale running job recovery failed", error);
+      console.error("worker maintenance recovery failed", error);
     });
   }, queueMaintenance.recoveryIntervalMs);
 
@@ -1786,6 +1810,12 @@ function createWorkerQueueMaintenanceConfig(
   env: Readonly<Record<string, string | undefined>>,
 ): WorkerQueueMaintenanceConfig {
   return {
+    indexImportRecoveryBatchSize:
+      optionalPositiveInteger(env.HEIMDALL_INDEX_IMPORT_STALE_RECOVERY_BATCH_SIZE) ??
+      DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE,
+    indexImportStaleTimeoutMs:
+      optionalPositiveInteger(env.HEIMDALL_INDEX_IMPORT_STALE_TIMEOUT_MS) ??
+      DEFAULT_STALE_INDEX_IMPORT_TIMEOUT_MS,
     recoveryBatchSize:
       optionalPositiveInteger(env.HEIMDALL_QUEUE_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE) ??
       DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE,
