@@ -11,6 +11,7 @@ import {
   IndexArtifactSchema,
   type IndexRecord,
   IndexRecordSchema,
+  isSupportedIndexArtifactFeature,
   isSupportedIndexManifestVersion,
   isSupportedIndexRecordVersion,
   parseIndexRecordsJsonl,
@@ -145,6 +146,33 @@ describe("IndexArtifactSchema", () => {
     const artifact = readArtifactFixture("current-artifact.json");
 
     expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("rejects unsupported required manifest features and ignores optional feature extensions", () => {
+    const artifact = readArtifactFixture("current-artifact.json");
+    const unsupportedRequiredFeatureArtifact = {
+      ...asRecord(artifact),
+      manifest: {
+        ...asRecord(asRecord(artifact).manifest),
+        requiredFeatures: ["record_ordering.v1", "future_required_feature.v1"],
+      },
+    };
+    const optionalFeatureArtifact = {
+      ...asRecord(artifact),
+      manifest: {
+        ...asRecord(asRecord(artifact).manifest),
+        optionalFeatures: ["future_optional_feature.v1"],
+      },
+    };
+
+    expect(isSupportedIndexArtifactFeature("record_ordering.v1")).toBe(true);
+    expect(isSupportedIndexArtifactFeature("future_required_feature.v1")).toBe(false);
+    expect(validateIndexArtifact(unsupportedRequiredFeatureArtifact)).toEqual(
+      expect.arrayContaining([
+        "manifest.requiredFeatures includes unsupported feature future_required_feature.v1",
+      ]),
+    );
+    expect(validateIndexArtifact(optionalFeatureArtifact)).toEqual([]);
   });
 
   it("round-trips compact JSONL records and reports bounded parse failures", () => {

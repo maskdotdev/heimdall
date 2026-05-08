@@ -18,6 +18,7 @@
     "parserVersions": {
       "typescript": "5.0.0"
     },
+    "optionalFeatures": ["parser_diagnostics.v1"],
     "metadata": {
       "optionalFeatures": ["parser_diagnostics.v1"]
     }

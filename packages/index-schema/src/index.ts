@@ -8,6 +8,16 @@ export const INDEX_RECORD_SCHEMA_VERSION = "index_record.v1" as const;
 export const INDEX_MANIFEST_FILE_NAME = "index-manifest.json" as const;
 export const INDEX_RECORDS_FILE_NAME = "records.jsonl" as const;
 
+/** Required manifest features that this package can safely read and validate. */
+export const SUPPORTED_INDEX_ARTIFACT_FEATURES = [
+  "record_ordering.v1",
+  "repo_paths.posix.v1",
+  "stable_ids.v1",
+] as const;
+
+/** Manifest feature value known to this version of the artifact schema. */
+export type SupportedIndexArtifactFeature = (typeof SUPPORTED_INDEX_ARTIFACT_FEATURES)[number];
+
 const DATE_TIME_FORMAT = "date-time";
 
 if (!FormatRegistry.Has(DATE_TIME_FORMAT)) {
@@ -146,6 +156,8 @@ export const IndexManifestSchema = Type.Object(
     parserVersions: Type.Record(Type.String(), Type.String()),
     previousIndexId: Type.Optional(IndexVersionIdSchema),
     artifactHash: Type.Optional(Sha256Schema),
+    requiredFeatures: Type.Optional(Type.Array(Type.String())),
+    optionalFeatures: Type.Optional(Type.Array(Type.String())),
     metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   },
   { additionalProperties: false },
@@ -154,6 +166,13 @@ export type IndexManifest = Static<typeof IndexManifestSchema>;
 
 export function isSupportedIndexManifestVersion(version: string): boolean {
   return version === INDEX_ARTIFACT_SCHEMA_VERSION;
+}
+
+/** Returns whether a required manifest feature is supported by this schema package. */
+export function isSupportedIndexArtifactFeature(
+  feature: string,
+): feature is SupportedIndexArtifactFeature {
+  return SUPPORTED_INDEX_ARTIFACT_FEATURES.includes(feature as SupportedIndexArtifactFeature);
 }
 
 export const FileRecordSchema = Type.Object(
@@ -523,6 +542,7 @@ export function validateIndexArtifact(value: unknown): readonly string[] {
       `manifest.recordCount ${artifact.manifest.recordCount} does not match ${artifact.records.length} records`,
     );
   }
+  validateManifestRequiredFeatures(errors, artifact.manifest);
   errors.push(...validateIndexArtifactRecordSemantics(artifact));
 
   return errors;
@@ -706,6 +726,29 @@ function validateIndexArtifactRecordSemantics(artifact: IndexArtifact): string[]
   });
 
   return errors;
+}
+
+/** Validates required manifest feature flags against the current reader support. */
+function validateManifestRequiredFeatures(errors: string[], manifest: IndexManifest): void {
+  const requiredFeatures = manifest.requiredFeatures ?? [];
+  const seen = new Set<string>();
+
+  for (const feature of requiredFeatures) {
+    collectDuplicateFeatureError(errors, seen, feature);
+    if (!isSupportedIndexArtifactFeature(feature)) {
+      errors.push(`manifest.requiredFeatures includes unsupported feature ${feature}`);
+    }
+  }
+}
+
+/** Records a duplicate required feature error when a feature is declared twice. */
+function collectDuplicateFeatureError(errors: string[], seen: Set<string>, feature: string): void {
+  if (seen.has(feature)) {
+    errors.push(`manifest.requiredFeatures duplicates ${feature}`);
+    return;
+  }
+
+  seen.add(feature);
 }
 
 /** Mutable state used while validating canonical record type ordering. */
