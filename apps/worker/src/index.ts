@@ -1098,13 +1098,28 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     },
     [JOB_TYPES.ComplianceEvidenceCollect]: async (envelope, context) => {
       const payload = asComplianceEvidenceCollectPayload(envelope.payload);
-      await throwIfWorkerJobCanceled(context);
-      if (options.complianceEvidenceCollector) {
-        await options.complianceEvidenceCollector(payload);
-        return;
-      }
+      try {
+        await throwIfWorkerJobCanceled(context);
+        if (options.complianceEvidenceCollector) {
+          await options.complianceEvidenceCollector(payload);
+        } else {
+          await collectScheduledComplianceEvidence(options.db, payload);
+        }
 
-      await collectScheduledComplianceEvidence(options.db, payload);
+        recordWorkerComplianceEvidenceSecurityEvent({
+          payload,
+          securityEventSink: options.securityEventSink,
+          type: "compliance_evidence_collected",
+        });
+      } catch (error) {
+        recordWorkerComplianceEvidenceSecurityEvent({
+          error,
+          payload,
+          securityEventSink: options.securityEventSink,
+          type: "compliance_evidence_failed",
+        });
+        throw error;
+      }
     },
   };
 }
@@ -1460,6 +1475,18 @@ type RecordWorkerDataDeletionSecurityEventInput = {
   readonly type: "data_deletion_completed" | "data_deletion_failed";
 };
 
+/** Input used to record a worker-originated compliance evidence security event. */
+type RecordWorkerComplianceEvidenceSecurityEventInput = {
+  /** Error that caused the evidence collection workflow to fail. */
+  readonly error?: unknown;
+  /** Compliance evidence collection payload being handled. */
+  readonly payload: ComplianceEvidenceCollectJobPayload;
+  /** Optional sink configured for worker-originated security events. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+  /** Normalized security event type. */
+  readonly type: "compliance_evidence_collected" | "compliance_evidence_failed";
+};
+
 /** Executes a planned data-deletion request and records product-safe verification metadata. */
 export async function executeDataDeletionRequest(
   db: HeimdallDatabase,
@@ -1811,6 +1838,36 @@ function recordWorkerDataDeletionSecurityEvent(
     resourceId: input.payload.dataDeletionRequestId,
     resourceType: "data_deletion_request",
     severity: input.type === "data_deletion_failed" ? "high" : "info",
+    source: "worker",
+    type: input.type,
+  });
+}
+
+/** Records a product-safe security event for worker compliance evidence collection outcomes. */
+function recordWorkerComplianceEvidenceSecurityEvent(
+  input: RecordWorkerComplianceEvidenceSecurityEventInput,
+): void {
+  if (!input.securityEventSink) {
+    return;
+  }
+
+  recordSecurityEvent(input.securityEventSink, {
+    actorId: input.payload.collectedBy ?? "worker:scheduled_compliance_evidence",
+    metadata: {
+      artifactRootConfigured: Boolean(input.payload.artifactRootDir),
+      collectedByConfigured: Boolean(input.payload.collectedBy),
+      ...(input.error
+        ? { errorName: input.error instanceof Error ? input.error.name : "UnknownError" }
+        : {}),
+      ...(input.payload.limit ? { limit: input.payload.limit } : {}),
+      orgScoped: Boolean(input.payload.orgId),
+      reason: input.payload.reason ?? "scheduled",
+      target: input.payload.target,
+    },
+    orgId: input.payload.orgId,
+    resourceId: `${input.payload.target}:${input.payload.orgId ?? "global"}`,
+    resourceType: "compliance_evidence_collection",
+    severity: input.type === "compliance_evidence_failed" ? "high" : "info",
     source: "worker",
     type: input.type,
   });
