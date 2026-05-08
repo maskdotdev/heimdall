@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -33,6 +34,8 @@ const CHUNKER_VERSION = "line-symbol-v1";
 const PYTHON_PARSER_VERSION = "heuristic-python-v1";
 const MAX_FILE_BYTES = 1_000_000;
 const BINARY_CONTENT_SAMPLE_BYTES = 8_192;
+const GIT_LS_FILES_TIMEOUT_MS = 10_000;
+const GIT_LS_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
 const GENERATED_CONTENT_HEADER_BYTES = 8_192;
 const PACKAGE_JSON_FILE_NAME = "package.json";
@@ -537,8 +540,122 @@ async function validateWorkspacePath(workspacePath: string): Promise<void> {
   }
 }
 
-/** Finds source and package manifest paths that can produce index records. */
-async function findIndexablePaths(root: string, directory = ""): Promise<string[]> {
+/** Finds source and package manifest paths, preferring tracked Git files when available. */
+async function findIndexablePaths(root: string): Promise<string[]> {
+  const gitTrackedPaths = await findGitTrackedIndexablePaths(root);
+  if (gitTrackedPaths) {
+    return gitTrackedPaths;
+  }
+
+  return findFilesystemIndexablePaths(root);
+}
+
+/** Finds indexable files from `git ls-files` output, or returns undefined when Git is unavailable. */
+async function findGitTrackedIndexablePaths(root: string): Promise<string[] | undefined> {
+  const output = await runGitLsFiles(root);
+  if (output === undefined) {
+    return undefined;
+  }
+
+  return filterExistingIndexablePaths(
+    root,
+    output.split("\0").flatMap((path) => {
+      const normalizedPath = normalizeDiscoveredRepoPath(path);
+      return normalizedPath ? [normalizedPath] : [];
+    }),
+  );
+}
+
+/** Runs `git ls-files -z` without a shell and returns stdout when the command succeeds. */
+async function runGitLsFiles(root: string): Promise<string | undefined> {
+  return await new Promise<string | undefined>((resolveGitLsFiles) => {
+    let settled = false;
+    let stdout = "";
+    let stdoutBytes = 0;
+    const child = spawn("git", ["-C", root, "ls-files", "-z"], {
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (output: string | undefined) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      resolveGitLsFiles(output);
+    };
+
+    timeoutId = setTimeout(() => {
+      finish(undefined);
+      child.kill("SIGTERM");
+    }, GIT_LS_FILES_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      if (settled) {
+        return;
+      }
+      const text = chunk.toString();
+      stdoutBytes += Buffer.byteLength(text);
+      if (stdoutBytes > GIT_LS_FILES_MAX_OUTPUT_BYTES) {
+        finish(undefined);
+        child.kill("SIGTERM");
+        return;
+      }
+      stdout += text;
+    });
+    child.on("error", () => finish(undefined));
+    child.on("close", (exitCode) => finish(exitCode === 0 ? stdout : undefined));
+  });
+}
+
+/** Keeps only safe, regular, size-bounded paths that can produce index records. */
+async function filterExistingIndexablePaths(
+  root: string,
+  paths: readonly string[],
+): Promise<string[]> {
+  const uniquePaths = [...new Set(paths)].sort();
+  const pathResults = await Promise.all(
+    uniquePaths.map(async (path) => {
+      if (!isIndexablePath(path)) {
+        return [];
+      }
+
+      try {
+        const info = await lstat(join(root, path));
+        return info.isFile() && info.size <= MAX_FILE_BYTES ? [path] : [];
+      } catch {
+        return [];
+      }
+    }),
+  );
+
+  return pathResults.flat();
+}
+
+/** Normalizes a discovered repository path and rejects absolute or traversal paths. */
+function normalizeDiscoveredRepoPath(path: string): string | undefined {
+  const normalizedPath = path.replaceAll("\\", "/");
+  if (
+    normalizedPath.length === 0 ||
+    normalizedPath.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalizedPath) ||
+    isGitDirectory(normalizedPath)
+  ) {
+    return undefined;
+  }
+
+  const segments = normalizedPath.split("/");
+  return segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+    ? undefined
+    : normalizedPath;
+}
+
+/** Finds source and package manifest paths by recursively walking the workspace. */
+async function findFilesystemIndexablePaths(root: string, directory = ""): Promise<string[]> {
   const entries = await readdir(join(root, directory), { withFileTypes: true });
   const files = await Promise.all(
     entries.map(async (entry) => {
@@ -547,7 +664,7 @@ async function findIndexablePaths(root: string, directory = ""): Promise<string[
         return [];
       }
       if (entry.isDirectory()) {
-        return shouldSkipDirectory(path) ? [] : findIndexablePaths(root, path);
+        return shouldSkipDirectory(path) ? [] : findFilesystemIndexablePaths(root, path);
       }
       if (!isIndexablePath(path)) {
         return [];

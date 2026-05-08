@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, parse } from "node:path";
@@ -87,6 +88,28 @@ describe("indexTypeScriptRepository", () => {
     expect(
       artifact.records.flatMap((record) => (record.type === "file" ? [record.path] : [])),
     ).toEqual(["a.ts", "b.ts"]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("prefers Git-tracked files over untracked workspace files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await runGitCommand(workspacePath, ["init"]);
+    await Promise.all([
+      writeFile(join(workspacePath, "tracked.ts"), "export const tracked = true;\n"),
+      writeFile(join(workspacePath, "untracked.ts"), "export const untracked = true;\n"),
+    ]);
+    await runGitCommand(workspacePath, ["add", "tracked.ts"]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const filePaths = artifact.records.flatMap((record) =>
+      record.type === "file" ? [record.path] : [],
+    );
+    expect(filePaths).toEqual(["tracked.ts"]);
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
@@ -1043,3 +1066,16 @@ describe("indexTypeScriptRepository", () => {
     );
   });
 });
+
+/** Runs a Git command in a temporary workspace for discovery tests. */
+async function runGitCommand(cwd: string, args: readonly string[]): Promise<void> {
+  await new Promise<void>((resolveGitCommand, rejectGitCommand) => {
+    execFile("git", [...args], { cwd }, (error) => {
+      if (error) {
+        rejectGitCommand(error);
+        return;
+      }
+      resolveGitCommand();
+    });
+  });
+}

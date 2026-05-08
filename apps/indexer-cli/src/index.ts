@@ -96,6 +96,8 @@ type IndexerCliFlagValues = {
 
 const HELP_TEXT = `Usage:
   indexer capabilities --json
+  indexer run --repo-id <repo_id> --commit-sha <sha> --workspace <path> [--output <path>] [--format json|split] [--pretty]
+  indexer run --request <request.json> [--output <path>] [--format json|split] [--pretty]
   indexer index --repo-id <repo_id> --commit-sha <sha> --workspace <path> [--output <path>] [--format json|split] [--pretty]
   indexer index --request <request.json> [--output <path>] [--format json|split] [--pretty]
   indexer validate --artifact <path>
@@ -263,7 +265,7 @@ export async function parseIndexerCliArgs(
   if (command === "--help" || command === "-h" || command === "help") {
     return { ok: false, help: true };
   }
-  if (command !== "index") {
+  if (command !== "index" && command !== "run") {
     return { ok: false, help: false, message: `Unknown command: ${command}` };
   }
 

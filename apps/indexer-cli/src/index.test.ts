@@ -41,6 +41,29 @@ describe("parseIndexerCliArgs", () => {
     });
   });
 
+  it("accepts run as the artifact creation command", async () => {
+    await expect(
+      parseIndexerCliArgs([
+        "run",
+        "--repo-id",
+        "repo_test",
+        "--commit-sha",
+        "abcdef1",
+        "--workspace",
+        "/tmp/workspace",
+      ]),
+    ).resolves.toEqual({
+      ok: true,
+      request: {
+        commitSha: "abcdef1",
+        outputFormat: "json",
+        pretty: false,
+        repoId: "repo_test",
+        workspacePath: "/tmp/workspace",
+      },
+    });
+  });
+
   it("rejects missing required index inputs", async () => {
     await expect(parseIndexerCliArgs(["index", "--repo-id", "repo_test"])).resolves.toEqual({
       help: false,
