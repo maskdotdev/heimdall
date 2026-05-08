@@ -17,7 +17,10 @@ import {
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import { createPolicyFixture } from "@repo/rules";
-import type { StaticAnalysisReport } from "@repo/static-analysis";
+import {
+  STATIC_ANALYSIS_RAW_OUTPUT_POLICY,
+  type StaticAnalysisReport,
+} from "@repo/static-analysis";
 import { describe, expect, it } from "vitest";
 import {
   createDefaultReviewPassRegistry,
@@ -779,6 +782,7 @@ function staticAnalysisReportFixture(
     durationMs: 1,
     finishedAt: "2026-05-06T00:00:00.001Z",
     mode: "changed_files_fast",
+    rawOutputPolicy: STATIC_ANALYSIS_RAW_OUTPUT_POLICY,
     repoId: validPullRequestSnapshotFixture.repoId,
     reportId: "star_test",
     reviewRunId: validCandidateFindingFixture.reviewRunId,

@@ -14,6 +14,7 @@ import {
   parseToolOutputDiagnostics,
   planStaticAnalysis,
   runStaticAnalysis,
+  STATIC_ANALYSIS_RAW_OUTPUT_POLICY,
   type StaticAnalysisRequest,
 } from "../src/index";
 
@@ -83,6 +84,11 @@ describe("static analysis", () => {
     });
 
     expect(report).toMatchObject({
+      rawOutputPolicy: {
+        schemaVersion: "static_analysis_raw_output_policy.v1",
+        storesRawStderr: false,
+        storesRawStdout: false,
+      },
       repoId: validPullRequestSnapshotFixture.repoId,
       schemaVersion: "static_analysis_report.v1",
       status: "succeeded",
@@ -93,6 +99,7 @@ describe("static analysis", () => {
       },
     });
     expect(report.diagnostics[0]?.toolRunId).toBe(report.toolRuns[0]?.toolRunId);
+    expect(report.rawOutputPolicy).toEqual(STATIC_ANALYSIS_RAW_OUTPUT_POLICY);
   });
 
   it("records static-analysis telemetry without raw output or workspace paths", async () => {
@@ -113,6 +120,7 @@ describe("static analysis", () => {
                 {
                   line: 2,
                   message: "raw diagnostic text",
+                  rawOnlyField: "raw stdout field not retained",
                   ruleId: "no-undef",
                   severity: 2,
                 },
@@ -125,6 +133,9 @@ describe("static analysis", () => {
     });
 
     expect(report.summary.diagnosticCount).toBe(1);
+    expect(report.rawOutputPolicy.storesRawStderr).toBe(false);
+    expect(report.rawOutputPolicy.storesRawStdout).toBe(false);
+    expect(JSON.stringify(report)).not.toContain("raw stdout field not retained");
     expect(metrics).toContainEqual({
       kind: "counter",
       labels: {

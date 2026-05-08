@@ -319,6 +319,39 @@ export type ToolRunResultSummary = {
   readonly diagnosticCount: number;
 };
 
+/** Static-analysis raw tool output retention policy. */
+export type StaticAnalysisRawOutputPolicy = {
+  /** Policy schema version. */
+  readonly schemaVersion: "static_analysis_raw_output_policy.v1";
+  /** Whether complete tool stdout bytes are stored in the report artifact. */
+  readonly storesRawStdout: false;
+  /** Whether complete tool stderr bytes are stored in the report artifact. */
+  readonly storesRawStderr: false;
+  /** Product-safe fields retained from tool execution results. */
+  readonly retainedFields: readonly string[];
+  /** Human-readable retention reason for operators. */
+  readonly retentionReason: string;
+};
+
+/** Default policy for static-analysis report artifacts. */
+export const STATIC_ANALYSIS_RAW_OUTPUT_POLICY = {
+  retainedFields: [
+    "diagnostics",
+    "exitCode",
+    "finishedAt",
+    "startedAt",
+    "status",
+    "stderrBytes",
+    "stdoutBytes",
+    "tool",
+  ],
+  retentionReason:
+    "Static-analysis reports retain normalized diagnostics and execution metadata, not full stdout or stderr payloads.",
+  schemaVersion: "static_analysis_raw_output_policy.v1",
+  storesRawStderr: false,
+  storesRawStdout: false,
+} as const satisfies StaticAnalysisRawOutputPolicy;
+
 /** Static-analysis report. */
 export type StaticAnalysisReport = {
   /** Schema version. */
@@ -343,6 +376,8 @@ export type StaticAnalysisReport = {
   readonly durationMs: number;
   /** Tool run summaries. */
   readonly toolRuns: readonly ToolRunResultSummary[];
+  /** Raw tool output storage policy applied to this report. */
+  readonly rawOutputPolicy: StaticAnalysisRawOutputPolicy;
   /** Normalized diagnostics. */
   readonly diagnostics: readonly NormalizedToolDiagnostic[];
   /** Aggregate report summary. */
@@ -1751,6 +1786,7 @@ function staticAnalysisReport(input: {
     durationMs: Math.max(0, Date.parse(input.finishedAt) - Date.parse(input.startedAt)),
     finishedAt: input.finishedAt,
     mode: input.request.mode,
+    rawOutputPolicy: STATIC_ANALYSIS_RAW_OUTPUT_POLICY,
     repoId: input.request.repoId,
     reportId: stableId("star", [input.request.reviewRunId, input.request.workspace.commitSha]),
     reviewRunId: input.request.reviewRunId,
