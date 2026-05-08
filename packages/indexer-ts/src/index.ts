@@ -54,6 +54,21 @@ const packageDependencySections = [
   { dependencyType: "optional", fieldName: "optionalDependencies" },
 ] as const satisfies readonly PackageDependencySection[];
 
+/** Python identifiers that should not be treated as meaningful same-file callees. */
+const pythonCallExcludedNames = new Set([
+  "bool",
+  "dict",
+  "float",
+  "int",
+  "len",
+  "list",
+  "print",
+  "set",
+  "str",
+  "super",
+  "tuple",
+]);
+
 /** package.json dependency section mapping. */
 type PackageDependencySection = {
   /** Artifact dependency type emitted for dependencies in this section. */
@@ -86,6 +101,26 @@ type PythonSymbolStackEntry = {
   readonly kind: SymbolKind;
   /** Symbol name used in descendant qualified names. */
   readonly name: string;
+};
+
+/** Python import statement facts used to emit conservative import edges. */
+type PythonImportFact = {
+  /** Imported module path or package name. */
+  readonly moduleName: string;
+  /** Imported names when the source uses from-import syntax. */
+  readonly importedNames: readonly string[];
+  /** 1-based line where the import starts. */
+  readonly lineNumber: number;
+  /** Import syntax category. */
+  readonly syntax: "import" | "from_import";
+};
+
+/** Python call expression fact used to emit same-file call edges. */
+type PythonCallFact = {
+  /** Direct callee identifier. */
+  readonly calleeName: string;
+  /** 1-based line where the call appears. */
+  readonly lineNumber: number;
 };
 
 /** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
@@ -200,6 +235,9 @@ export async function indexTypeScriptRepository(input: {
       recordGroups.files.push(file);
       recordGroups.symbols.push(...symbols);
       recordGroups.chunks.push(...chunkRecordsForFile(file, content, symbols));
+      recordGroups.edges.push(
+        ...pythonEdgeRecordsForFile(input.repoId, input.commitSha, file.fileId, content, symbols),
+      );
       languages.add(language);
       continue;
     }
@@ -723,23 +761,91 @@ function edgeRecordsForFile(
     }
   }
 
-  return [
+  return uniqueEdges([
     ...edges,
     ...callEdgesForFile(repoId, commitSha, sourceFile, symbols),
-    ...symbols.map((symbol) => ({
-      type: "edge" as const,
-      schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-      edgeId: createStableId("edge", [repoId, commitSha, fileId, "defines", symbol.symbolId]),
-      repoId,
-      commitSha,
-      fromId: fileId,
-      toId: symbol.symbolId,
-      fromKind: "file" as const,
-      toKind: "symbol" as const,
-      kind: "defines" as const,
-      confidence: 1,
-    })),
-  ];
+    ...defineEdgesForSymbols(repoId, commitSha, fileId, symbols),
+  ]);
+}
+
+/** Emits Python import, same-file call, and define edges for one source file. */
+function pythonEdgeRecordsForFile(
+  repoId: string,
+  commitSha: string,
+  fileId: string,
+  content: string,
+  symbols: readonly SymbolRecord[],
+): EdgeRecord[] {
+  return uniqueEdges([
+    ...pythonImportFacts(content).map((fact) => pythonImportEdge(repoId, commitSha, fileId, fact)),
+    ...pythonCallEdgesForFile(repoId, commitSha, content, symbols),
+    ...defineEdgesForSymbols(repoId, commitSha, fileId, symbols),
+  ]);
+}
+
+/** Emits file-to-symbol definition edges for symbols extracted from one file. */
+function defineEdgesForSymbols(
+  repoId: string,
+  commitSha: string,
+  fileId: string,
+  symbols: readonly SymbolRecord[],
+): EdgeRecord[] {
+  return symbols.map((symbol) => ({
+    type: "edge" as const,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    edgeId: createStableId("edge", [repoId, commitSha, fileId, "defines", symbol.symbolId]),
+    repoId,
+    commitSha,
+    fromId: fileId,
+    toId: symbol.symbolId,
+    fromKind: "file" as const,
+    toKind: "symbol" as const,
+    kind: "defines" as const,
+    confidence: 1,
+  }));
+}
+
+/** Drops duplicate edge IDs while preserving deterministic order. */
+function uniqueEdges(edges: readonly EdgeRecord[]): EdgeRecord[] {
+  const seen = new Set<string>();
+
+  return edges.filter((edge) => {
+    if (seen.has(edge.edgeId)) {
+      return false;
+    }
+
+    seen.add(edge.edgeId);
+    return true;
+  });
+}
+
+/** Converts one Python import fact into a file-to-external import edge. */
+function pythonImportEdge(
+  repoId: string,
+  commitSha: string,
+  fileId: string,
+  fact: PythonImportFact,
+): EdgeRecord {
+  const toId = `external:${fact.moduleName}`;
+
+  return {
+    type: "edge",
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    edgeId: createStableId("edge", [repoId, commitSha, fileId, "imports", toId, fact.lineNumber]),
+    repoId,
+    commitSha,
+    fromId: fileId,
+    toId,
+    fromKind: "file",
+    toKind: "external",
+    kind: "imports",
+    confidence: 1,
+    metadata: {
+      importedNames: [...fact.importedNames],
+      lineNumber: fact.lineNumber,
+      syntax: fact.syntax,
+    },
+  };
 }
 
 function callEdgesForFile(
@@ -784,6 +890,138 @@ function callEdgesForFile(
 
   visit(sourceFile);
   return edges;
+}
+
+/** Extracts import statements from Python source text. */
+function pythonImportFacts(content: string): PythonImportFact[] {
+  return content.split("\n").flatMap((line, index): PythonImportFact[] => {
+    const lineNumber = index + 1;
+    const statement = stripPythonInlineComment(line).trim();
+    if (statement.length === 0) {
+      return [];
+    }
+
+    const importMatch = statement.match(/^import\s+(.+)$/);
+    if (importMatch?.[1]) {
+      return importedNamesFromPythonList(importMatch[1]).map((moduleName) => ({
+        importedNames: [],
+        lineNumber,
+        moduleName,
+        syntax: "import" as const,
+      }));
+    }
+
+    const fromImportMatch = statement.match(/^from\s+([.\w]+)\s+import\s+(.+)$/);
+    if (!fromImportMatch?.[1] || !fromImportMatch[2]) {
+      return [];
+    }
+
+    const importedNames = importedNamesFromPythonList(fromImportMatch[2]);
+    return [
+      {
+        importedNames,
+        lineNumber,
+        moduleName: fromImportMatch[1],
+        syntax: "from_import" as const,
+      },
+    ];
+  });
+}
+
+/** Extracts direct same-file Python call edges from source text. */
+function pythonCallEdgesForFile(
+  repoId: string,
+  commitSha: string,
+  content: string,
+  symbols: readonly SymbolRecord[],
+): EdgeRecord[] {
+  const symbolsByName = new Map(symbols.map((symbol) => [symbol.name, symbol]));
+  const edges: EdgeRecord[] = [];
+
+  for (const fact of pythonCallFacts(content)) {
+    const caller = symbolContainingLine(symbols, fact.lineNumber);
+    const callee = symbolsByName.get(fact.calleeName);
+    if (!caller || !callee || caller.symbolId === callee.symbolId) {
+      continue;
+    }
+
+    edges.push({
+      type: "edge",
+      schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+      edgeId: createStableId("edge", [
+        repoId,
+        commitSha,
+        caller.symbolId,
+        "calls",
+        callee.symbolId,
+        fact.lineNumber,
+      ]),
+      repoId,
+      commitSha,
+      fromId: caller.symbolId,
+      toId: callee.symbolId,
+      fromKind: "symbol",
+      toKind: "symbol",
+      kind: "calls",
+      confidence: 1,
+      metadata: { lineNumber: fact.lineNumber },
+    });
+  }
+
+  return uniqueEdges(edges);
+}
+
+/** Extracts direct call identifiers from Python source lines. */
+function pythonCallFacts(content: string): PythonCallFact[] {
+  return content.split("\n").flatMap((line, index) => {
+    const lineNumber = index + 1;
+    const statement = stripPythonInlineComment(line).trim();
+    if (isNonCallPythonStatement(statement)) {
+      return [];
+    }
+
+    const facts: PythonCallFact[] = [];
+    const callPattern = /(^|[^\w.])([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+    for (const match of statement.matchAll(callPattern)) {
+      const calleeName = match[2];
+      if (!calleeName || pythonCallExcludedNames.has(calleeName)) {
+        continue;
+      }
+
+      facts.push({ calleeName, lineNumber });
+    }
+
+    return facts;
+  });
+}
+
+/** Returns whether a Python line cannot contain a useful direct call edge. */
+function isNonCallPythonStatement(statement: string): boolean {
+  return (
+    statement.length === 0 ||
+    statement.startsWith("#") ||
+    statement.startsWith("def ") ||
+    statement.startsWith("async def ") ||
+    statement.startsWith("class ") ||
+    statement.startsWith("import ") ||
+    statement.startsWith("from ")
+  );
+}
+
+/** Pulls imported identifiers or modules out of a comma-delimited Python import list. */
+function importedNamesFromPythonList(value: string): readonly string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && entry !== "*")
+    .map((entry) => entry.split(/\s+as\s+/u)[0]?.trim())
+    .filter((entry): entry is string => entry !== undefined && entry.length > 0)
+    .sort();
+}
+
+/** Removes a simple Python inline comment from a source line. */
+function stripPythonInlineComment(line: string): string {
+  return line.split("#", 1)[0] ?? "";
 }
 
 function symbolContainingLine(

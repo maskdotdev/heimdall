@@ -181,12 +181,18 @@ describe("indexTypeScriptRepository", () => {
     await writeFile(
       join(workspacePath, "service.py"),
       [
+        "import os",
+        "from app.auth import load_user, Session",
+        "",
         "class UserService:",
         "    def update_email(self, user_id: str, email: str) -> str:",
-        "        return email.lower()",
+        "        return normalize_email(email)",
+        "",
+        "def normalize_email(value: str) -> str:",
+        "    return value.lower()",
         "",
         "async def validate_session(token: str) -> bool:",
-        "    return token.startswith('session_')",
+        "    return normalize_email(token).startswith('session_')",
         "",
       ].join("\n"),
     );
@@ -215,6 +221,27 @@ describe("indexTypeScriptRepository", () => {
     const chunkLanguages = artifact.records.flatMap((record) =>
       record.type === "chunk" ? [record.language] : [],
     );
+    const symbolIdsByName = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "symbol" ? [[record.name, record.symbolId] as const] : [],
+      ),
+    );
+    const importEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" && record.kind === "imports"
+        ? [
+            {
+              importedNames: record.metadata?.importedNames,
+              syntax: record.metadata?.syntax,
+              toId: record.toId,
+            },
+          ]
+        : [],
+    );
+    const callEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" && record.kind === "calls"
+        ? [{ fromId: record.fromId, toId: record.toId }]
+        : [],
+    );
 
     expect(fileRecords).toEqual([{ language: "python", path: "service.py" }]);
     expect(symbolRecords).toEqual([
@@ -232,12 +259,36 @@ describe("indexTypeScriptRepository", () => {
       },
       {
         kind: "function",
+        name: "normalize_email",
+        qualifiedName: "normalize_email",
+        signature: "def normalize_email(value: str) -> str:",
+      },
+      {
+        kind: "function",
         name: "validate_session",
         qualifiedName: "validate_session",
         signature: "async def validate_session(token: str) -> bool:",
       },
     ]);
-    expect(chunkLanguages).toEqual(["python", "python", "python"]);
+    expect(chunkLanguages).toEqual(["python", "python", "python", "python"]);
+    expect(importEdges).toEqual([
+      { importedNames: [], syntax: "import", toId: "external:os" },
+      {
+        importedNames: ["Session", "load_user"],
+        syntax: "from_import",
+        toId: "external:app.auth",
+      },
+    ]);
+    expect(callEdges).toEqual([
+      {
+        fromId: symbolIdsByName.get("update_email"),
+        toId: symbolIdsByName.get("normalize_email"),
+      },
+      {
+        fromId: symbolIdsByName.get("validate_session"),
+        toId: symbolIdsByName.get("normalize_email"),
+      },
+    ]);
     expect(artifact.manifest.languages).toEqual(["python"]);
     expect(artifact.manifest.parserVersions).toEqual({ python: "heuristic-python-v1" });
     expect(validateIndexArtifact(artifact)).toEqual([]);
