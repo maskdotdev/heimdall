@@ -707,6 +707,127 @@ const SemgrepJsonOutputSchema = Type.Object(
 /** Semgrep JSON result. */
 type SemgrepJsonResult = Static<typeof SemgrepJsonResultSchema>;
 
+/** Go vet JSON diagnostic. */
+const GoVetJsonDiagnosticSchema = Type.Object(
+  {
+    category: Type.Optional(Type.String()),
+    end: Type.Optional(Type.String()),
+    message: Type.String(),
+    posn: Type.String(),
+  },
+  { additionalProperties: true },
+);
+
+/** Go vet JSON error result. */
+const GoVetJsonErrorSchema = Type.Object(
+  {
+    error: Type.String(),
+  },
+  { additionalProperties: true },
+);
+
+/** Go vet JSON output. */
+const GoVetJsonOutputSchema = Type.Record(
+  Type.String(),
+  Type.Record(Type.String(), Type.Unknown()),
+);
+
+/** Go vet JSON diagnostic. */
+type GoVetJsonDiagnostic = Static<typeof GoVetJsonDiagnosticSchema>;
+
+/** Staticcheck JSON formatter location. */
+const StaticcheckJsonLocationSchema = Type.Object(
+  {
+    column: Type.Integer({ minimum: 0 }),
+    file: Type.String(),
+    line: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: true },
+);
+
+/** Staticcheck JSON formatter diagnostic. */
+const StaticcheckJsonDiagnosticSchema = Type.Object(
+  {
+    code: Type.String(),
+    end: Type.Optional(StaticcheckJsonLocationSchema),
+    location: StaticcheckJsonLocationSchema,
+    message: Type.String(),
+    severity: Type.String(),
+  },
+  { additionalProperties: true },
+);
+
+/** Staticcheck JSON formatter diagnostic. */
+type StaticcheckJsonDiagnostic = Static<typeof StaticcheckJsonDiagnosticSchema>;
+
+/** Rust compiler JSON diagnostic code. */
+const RustcJsonDiagnosticCodeSchema = Type.Union([
+  Type.Object(
+    {
+      code: Type.String(),
+      explanation: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    },
+    { additionalProperties: true },
+  ),
+  Type.Null(),
+]);
+
+/** Rust compiler JSON diagnostic span source line. */
+const RustcJsonSpanTextSchema = Type.Object(
+  {
+    highlight_end: Type.Optional(Type.Integer({ minimum: 0 })),
+    highlight_start: Type.Optional(Type.Integer({ minimum: 0 })),
+    text: Type.Optional(Type.String()),
+  },
+  { additionalProperties: true },
+);
+
+/** Rust compiler JSON diagnostic span. */
+const RustcJsonSpanSchema = Type.Object(
+  {
+    column_end: Type.Integer({ minimum: 0 }),
+    column_start: Type.Integer({ minimum: 0 }),
+    file_name: Type.String(),
+    is_primary: Type.Boolean(),
+    line_end: Type.Integer({ minimum: 0 }),
+    line_start: Type.Integer({ minimum: 0 }),
+    text: Type.Optional(Type.Array(RustcJsonSpanTextSchema)),
+  },
+  { additionalProperties: true },
+);
+
+/** Rust compiler JSON diagnostic. */
+const RustcJsonDiagnosticSchema = Type.Object(
+  {
+    code: RustcJsonDiagnosticCodeSchema,
+    level: Type.String(),
+    message: Type.String(),
+    rendered: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    spans: Type.Array(RustcJsonSpanSchema),
+  },
+  { additionalProperties: true },
+);
+
+/** Cargo JSON compiler message. */
+const CargoJsonCompilerMessageSchema = Type.Object(
+  {
+    manifest_path: Type.Optional(Type.String()),
+    message: RustcJsonDiagnosticSchema,
+    package_id: Type.Optional(Type.String()),
+    reason: Type.Literal("compiler-message"),
+  },
+  { additionalProperties: true },
+);
+
+/** Rust compiler JSON diagnostic. */
+type RustcJsonDiagnostic = Static<typeof RustcJsonDiagnosticSchema>;
+
+/** Rust compiler JSON diagnostic span. */
+type RustcJsonSpan = Static<typeof RustcJsonSpanSchema>;
+
+/** Cargo JSON compiler message. */
+type CargoJsonCompilerMessage = Static<typeof CargoJsonCompilerMessageSchema>;
+
 /** Parsed mypy text diagnostic. */
 type MypyTextDiagnostic = {
   /** One-based column parsed from the diagnostic location. */
@@ -758,6 +879,10 @@ export const STATIC_TOOL_DESCRIPTORS = [
   descriptor("ruff", "Ruff", ["python"], ["maintainability"]),
   descriptor("pyright", "Pyright", ["python"], ["correctness"]),
   descriptor("mypy", "Mypy", ["python"], ["correctness"]),
+  descriptor("go_vet", "Go vet", ["go"], ["correctness"]),
+  descriptor("staticcheck", "Staticcheck", ["go"], ["correctness", "maintainability"]),
+  descriptor("cargo_check", "Cargo check", ["rust"], ["correctness"]),
+  descriptor("cargo_clippy", "Cargo Clippy", ["rust"], ["maintainability"]),
   descriptor(
     "semgrep",
     "Semgrep",
@@ -882,6 +1007,15 @@ export function parseToolOutputDiagnostics(
   }
   if (input.tool === "semgrep") {
     return parseSemgrepJsonDiagnostics(input);
+  }
+  if (input.tool === "go_vet") {
+    return parseGoVetJsonDiagnostics(input);
+  }
+  if (input.tool === "staticcheck") {
+    return parseStaticcheckJsonDiagnostics(input);
+  }
+  if (input.tool === "cargo_check" || input.tool === "cargo_clippy") {
+    return parseCargoJsonDiagnostics(input);
   }
   if (input.tool === "mypy") {
     return parseMypyTextDiagnostics(input);
@@ -1674,6 +1808,155 @@ function parseSemgrepJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses Go vet JSON output into normalized diagnostics. */
+function parseGoVetJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = input.result.stdout.trim();
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedOutput = parseJson(rawOutput);
+  if (!parsedOutput.ok) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+          format: "go_vet_json",
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ],
+    };
+  }
+  if (!Value.Check(GoVetJsonOutputSchema, parsedOutput.value)) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning(
+          "tool_output_schema_mismatch",
+          "Static analysis tool output did not match the expected schema.",
+          {
+            format: "go_vet_json",
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          },
+        ),
+      ],
+    };
+  }
+
+  const parsedDiagnostics = goVetDiagnosticsFromTree(parsedOutput.value).flatMap(
+    ({ analyzer, diagnostic, packageId }) =>
+      goVetDiagnosticToNormalizedDiagnostic({ analyzer, diagnostic, input, packageId }) ?? [],
+  );
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings = goVetWarningsFromTree(input, parsedOutput.value);
+  if (parsedDiagnostics.length > diagnostics.length) {
+    warnings.push(
+      warning(
+        "tool_output_diagnostic_budget_truncated",
+        "Static analysis tool output diagnostics were truncated.",
+        {
+          diagnosticCount: parsedDiagnostics.length,
+          maxDiagnostics: input.maxDiagnostics,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        },
+      ),
+    );
+  }
+
+  return { diagnostics, warnings };
+}
+
+/** Parses Staticcheck JSONL output into normalized diagnostics. */
+function parseStaticcheckJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const parsedOutput = parseJsonLines(input.result.stdout, "staticcheck_jsonl", input);
+  if (!parsedOutput.ok) {
+    return { diagnostics: [], warnings: parsedOutput.warnings };
+  }
+
+  const validDiagnostics = parsedOutput.values.filter((value): value is StaticcheckJsonDiagnostic =>
+    Value.Check(StaticcheckJsonDiagnosticSchema, value),
+  );
+  const parsedDiagnostics = validDiagnostics
+    .map((diagnostic) => staticcheckDiagnosticToNormalizedDiagnostic({ diagnostic, input }))
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings: StaticAnalysisWarning[] = [...parsedOutput.warnings];
+
+  if (parsedOutput.values.length > validDiagnostics.length) {
+    warnings.push(
+      warning(
+        "tool_output_schema_mismatch",
+        "Static analysis tool output did not match the expected schema.",
+        {
+          format: "staticcheck_jsonl",
+          invalidDiagnosticCount: parsedOutput.values.length - validDiagnostics.length,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        },
+      ),
+    );
+  }
+  if (parsedDiagnostics.length > diagnostics.length) {
+    warnings.push(
+      warning(
+        "tool_output_diagnostic_budget_truncated",
+        "Static analysis tool output diagnostics were truncated.",
+        {
+          diagnosticCount: parsedDiagnostics.length,
+          maxDiagnostics: input.maxDiagnostics,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        },
+      ),
+    );
+  }
+
+  return { diagnostics, warnings };
+}
+
+/** Parses Cargo JSONL compiler messages into normalized diagnostics. */
+function parseCargoJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const parsedOutput = parseJsonLines(input.result.stdout, "cargo_jsonl", input);
+  if (!parsedOutput.ok) {
+    return { diagnostics: [], warnings: parsedOutput.warnings };
+  }
+
+  const compilerMessages = parsedOutput.values.filter((value): value is CargoJsonCompilerMessage =>
+    Value.Check(CargoJsonCompilerMessageSchema, value),
+  );
+  const parsedDiagnostics = compilerMessages
+    .map((message) => cargoMessageToNormalizedDiagnostic({ input, message }))
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings: StaticAnalysisWarning[] = [...parsedOutput.warnings];
+
+  if (parsedDiagnostics.length > diagnostics.length) {
+    warnings.push(
+      warning(
+        "tool_output_diagnostic_budget_truncated",
+        "Static analysis tool output diagnostics were truncated.",
+        {
+          diagnosticCount: parsedDiagnostics.length,
+          maxDiagnostics: input.maxDiagnostics,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        },
+      ),
+    );
+  }
+
+  return { diagnostics, warnings };
+}
+
 /** Parses mypy text output into normalized diagnostics. */
 function parseMypyTextDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
@@ -2080,6 +2363,133 @@ function semgrepResultToNormalizedDiagnostic(input: {
   });
 }
 
+/** Converts one Go vet JSON diagnostic into the normalized report shape. */
+function goVetDiagnosticToNormalizedDiagnostic(input: {
+  /** Go vet analyzer name that emitted the diagnostic. */
+  readonly analyzer: string;
+  /** Go vet diagnostic emitted by JSON output. */
+  readonly diagnostic: GoVetJsonDiagnostic;
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+  /** Go package ID that emitted the diagnostic. */
+  readonly packageId: string;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.diagnostic.message.trim();
+  const startPosition = parseColonFilePosition(input.diagnostic.posn);
+  if (!startPosition || message.length === 0) {
+    return undefined;
+  }
+
+  const endPosition = input.diagnostic.end
+    ? parseColonFilePosition(input.diagnostic.end)
+    : undefined;
+  const filePath = normalizeToolFilePath(startPosition.filePath, input.input.workspacePath);
+  const analyzer = input.analyzer.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: "correctness",
+    location: {
+      ...(endPosition ? { endColumn: endPosition.column, endLine: endPosition.line } : {}),
+      filePath,
+      ...(filePath === startPosition.filePath ? {} : { originalPath: startPosition.filePath }),
+      startColumn: startPosition.column,
+      startLine: startPosition.line,
+    },
+    message,
+    metadata: goVetDiagnosticMetadata({
+      analyzer,
+      diagnostic: input.diagnostic,
+      packageId: input.packageId,
+    }),
+    rawMessage: input.diagnostic.message,
+    ...(analyzer ? { ruleId: analyzer, ruleName: analyzer } : {}),
+    severity: "warning",
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "go_vet",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
+/** Converts one Staticcheck JSON diagnostic into the normalized report shape. */
+function staticcheckDiagnosticToNormalizedDiagnostic(input: {
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+  /** Staticcheck diagnostic emitted by JSON output. */
+  readonly diagnostic: StaticcheckJsonDiagnostic;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.diagnostic.message.trim();
+  const originalPath = input.diagnostic.location.file.trim();
+  if (originalPath.length === 0 || message.length === 0 || input.diagnostic.location.line < 1) {
+    return undefined;
+  }
+
+  const filePath = normalizeToolFilePath(originalPath, input.input.workspacePath);
+  const ruleId = input.diagnostic.code.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: categoryForStaticcheckRule(ruleId),
+    location: {
+      ...(input.diagnostic.end ? { endColumn: Math.max(1, input.diagnostic.end.column) } : {}),
+      ...(input.diagnostic.end && input.diagnostic.end.line > 0
+        ? { endLine: input.diagnostic.end.line }
+        : {}),
+      filePath,
+      ...(filePath === originalPath ? {} : { originalPath }),
+      startColumn: Math.max(1, input.diagnostic.location.column),
+      startLine: input.diagnostic.location.line,
+    },
+    message,
+    metadata: staticcheckDiagnosticMetadata(input.diagnostic),
+    rawMessage: input.diagnostic.message,
+    ...(ruleId ? { ruleId, ruleName: ruleId } : {}),
+    severity: staticcheckSeverity(input.diagnostic.severity),
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "staticcheck",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
+/** Converts one Cargo compiler message into the normalized report shape. */
+function cargoMessageToNormalizedDiagnostic(input: {
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+  /** Cargo compiler message emitted by JSON output. */
+  readonly message: CargoJsonCompilerMessage;
+}): NormalizedToolDiagnostic | undefined {
+  const diagnostic = input.message.message;
+  const message = diagnostic.message.trim();
+  const span = primaryRustSpan(diagnostic);
+  if (!span || message.length === 0 || span.line_start < 1) {
+    return undefined;
+  }
+
+  const filePath = normalizeToolFilePath(span.file_name, input.input.workspacePath);
+  const ruleId = diagnostic.code?.code.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: categoryForCargoDiagnostic(input.input.tool, ruleId, message),
+    location: {
+      endColumn: Math.max(1, span.column_end),
+      endLine: Math.max(1, span.line_end),
+      filePath,
+      ...(filePath === span.file_name ? {} : { originalPath: span.file_name }),
+      startColumn: Math.max(1, span.column_start),
+      startLine: span.line_start,
+    },
+    message,
+    metadata: cargoDiagnosticMetadata(input.message),
+    rawMessage: diagnostic.message,
+    ...(ruleId ? { ruleId, ruleName: ruleId } : {}),
+    severity: rustcSeverity(diagnostic.level),
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: input.input.tool,
+    toolRunId: input.input.toolRunId,
+  });
+}
+
 /** Parses JSON without throwing into the report builder. */
 function parseJson(
   value: string,
@@ -2089,6 +2499,143 @@ function parseJson(
   } catch {
     return { ok: false };
   }
+}
+
+/** Parses JSON object-per-line output without throwing into the report builder. */
+function parseJsonLines(
+  output: string,
+  format: string,
+  input: ParseToolOutputDiagnosticsInput,
+):
+  | {
+      readonly ok: true;
+      readonly values: readonly unknown[];
+      readonly warnings: StaticAnalysisWarning[];
+    }
+  | { readonly ok: false; readonly warnings: StaticAnalysisWarning[] } {
+  const lines = output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{"));
+  if (lines.length === 0) {
+    return { ok: true, values: [], warnings: [] };
+  }
+
+  const values: unknown[] = [];
+  let invalidLineCount = 0;
+  for (const line of lines) {
+    const parsedLine = parseJson(line);
+    if (parsedLine.ok) {
+      values.push(parsedLine.value);
+    } else {
+      invalidLineCount += 1;
+    }
+  }
+
+  const warnings =
+    invalidLineCount > 0
+      ? [
+          warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+            format,
+            invalidLineCount,
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          }),
+        ]
+      : [];
+  if (values.length === 0 && invalidLineCount > 0) {
+    return { ok: false, warnings };
+  }
+
+  return { ok: true, values, warnings };
+}
+
+/** Flattens Go vet's package/analyzer diagnostic tree. */
+function goVetDiagnosticsFromTree(value: unknown): readonly {
+  readonly analyzer: string;
+  readonly diagnostic: GoVetJsonDiagnostic;
+  readonly packageId: string;
+}[] {
+  const tree = value as Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  return Object.entries(tree).flatMap(([packageId, analyzers]) =>
+    Object.entries(analyzers).flatMap(([analyzer, analyzerOutput]) => {
+      if (!Value.Check(Type.Array(GoVetJsonDiagnosticSchema), analyzerOutput)) {
+        return [];
+      }
+
+      return (analyzerOutput as readonly GoVetJsonDiagnostic[]).map((diagnostic) => ({
+        analyzer,
+        diagnostic,
+        packageId,
+      }));
+    }),
+  );
+}
+
+/** Returns product-safe Go vet analyzer error warnings. */
+function goVetWarningsFromTree(
+  input: ParseToolOutputDiagnosticsInput,
+  value: unknown,
+): StaticAnalysisWarning[] {
+  const tree = value as Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  return Object.entries(tree).flatMap(([packageId, analyzers]) =>
+    Object.entries(analyzers).flatMap(([analyzer, analyzerOutput]) => {
+      if (!Value.Check(GoVetJsonErrorSchema, analyzerOutput)) {
+        return [];
+      }
+
+      return [
+        warning("tool_output_tool_error", "Static analysis tool reported an analyzer error.", {
+          analyzer,
+          packageId,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ];
+    }),
+  );
+}
+
+/** Parsed colon-delimited file position. */
+type ColonFilePosition = {
+  /** One-based column. */
+  readonly column: number;
+  /** File path before the line and column suffix. */
+  readonly filePath: string;
+  /** One-based line. */
+  readonly line: number;
+};
+
+/** Parses a file position of the form `file.go:line:column`. */
+function parseColonFilePosition(value: string): ColonFilePosition | undefined {
+  const columnSeparator = value.lastIndexOf(":");
+  if (columnSeparator < 0) {
+    return undefined;
+  }
+  const lineSeparator = value.lastIndexOf(":", columnSeparator - 1);
+  if (lineSeparator < 0) {
+    return undefined;
+  }
+
+  const line = Number.parseInt(value.slice(lineSeparator + 1, columnSeparator), 10);
+  const column = Number.parseInt(value.slice(columnSeparator + 1), 10);
+  if (!Number.isFinite(line) || !Number.isFinite(column)) {
+    return undefined;
+  }
+
+  return {
+    column: Math.max(1, column),
+    filePath: value.slice(0, lineSeparator),
+    line: Math.max(1, line),
+  };
+}
+
+/** Returns the primary Rust compiler span for a diagnostic. */
+function primaryRustSpan(diagnostic: RustcJsonDiagnostic): RustcJsonSpan | undefined {
+  return (
+    diagnostic.spans.find((span) => span.is_primary && span.line_start > 0) ??
+    diagnostic.spans.find((span) => span.line_start > 0)
+  );
 }
 
 /** Maps ESLint severity numbers to normalized diagnostic severities. */
@@ -2139,6 +2686,23 @@ function semgrepSeverity(severity: string | undefined): ToolDiagnosticSeverity {
 function pyrightSeverity(severity: PyrightJsonDiagnostic["severity"]): ToolDiagnosticSeverity {
   if (severity === "error") return "error";
   if (severity === "warning") return "warning";
+  return "info";
+}
+
+/** Maps Staticcheck severity strings to normalized diagnostic severities. */
+function staticcheckSeverity(severity: string): ToolDiagnosticSeverity {
+  const normalizedSeverity = severity.toLowerCase();
+  if (normalizedSeverity === "error") return "error";
+  if (normalizedSeverity === "warning") return "warning";
+  return "info";
+}
+
+/** Maps Rust compiler diagnostic levels to normalized diagnostic severities. */
+function rustcSeverity(level: string): ToolDiagnosticSeverity {
+  const normalizedLevel = level.toLowerCase();
+  if (normalizedLevel.includes("internal compiler error")) return "critical";
+  if (normalizedLevel === "error") return "error";
+  if (normalizedLevel === "warning") return "warning";
   return "info";
 }
 
@@ -2219,6 +2783,50 @@ function categoryForMypyDiagnostic(code: string | undefined): FindingCategory {
   }
 
   return "correctness";
+}
+
+/** Returns a product category for a Staticcheck rule code. */
+function categoryForStaticcheckRule(ruleId: string | undefined): FindingCategory {
+  const normalizedRule = ruleId?.toUpperCase() ?? "";
+  if (normalizedRule.startsWith("S1") || normalizedRule.startsWith("ST")) return "style";
+  if (normalizedRule.startsWith("SA")) return "correctness";
+  if (normalizedRule.startsWith("QF") || normalizedRule.startsWith("U")) {
+    return "maintainability";
+  }
+
+  return "correctness";
+}
+
+/** Returns a product category for a Cargo diagnostic. */
+function categoryForCargoDiagnostic(
+  tool: StaticToolName,
+  ruleId: string | undefined,
+  message: string,
+): FindingCategory {
+  const normalizedRule = ruleId?.toLowerCase() ?? "";
+  const normalizedMessage = message.toLowerCase();
+  if (
+    normalizedRule.includes("unresolved") ||
+    normalizedMessage.includes("unresolved import") ||
+    normalizedMessage.includes("can't find crate") ||
+    normalizedMessage.includes("could not find")
+  ) {
+    return "dependency";
+  }
+  if (tool === "cargo_check") {
+    return "correctness";
+  }
+  if (normalizedRule.includes("perf") || normalizedRule.includes("slow")) {
+    return "performance";
+  }
+  if (normalizedRule.includes("doc") || normalizedRule.includes("missing_docs")) {
+    return "documentation";
+  }
+  if (normalizedRule.includes("style") || normalizedRule.includes("format")) {
+    return "style";
+  }
+
+  return "maintainability";
 }
 
 /** Returns a product category for a Biome diagnostic category. */
@@ -2307,6 +2915,45 @@ function semgrepResultMetadata(result: SemgrepJsonResult): Readonly<Record<strin
   };
 }
 
+/** Returns product-safe metadata for a Go vet diagnostic. */
+function goVetDiagnosticMetadata(input: {
+  /** Go vet analyzer name. */
+  readonly analyzer: string;
+  /** Go vet diagnostic. */
+  readonly diagnostic: GoVetJsonDiagnostic;
+  /** Go package ID. */
+  readonly packageId: string;
+}): Readonly<Record<string, unknown>> {
+  const category = input.diagnostic.category?.trim();
+  return {
+    ...(input.analyzer ? { analyzer: input.analyzer } : {}),
+    ...(category ? { category } : {}),
+    packageId: input.packageId,
+  };
+}
+
+/** Returns product-safe metadata for a Staticcheck diagnostic. */
+function staticcheckDiagnosticMetadata(
+  diagnostic: StaticcheckJsonDiagnostic,
+): Readonly<Record<string, unknown>> {
+  return {
+    code: diagnostic.code,
+    severity: diagnostic.severity,
+  };
+}
+
+/** Returns product-safe metadata for a Cargo compiler diagnostic. */
+function cargoDiagnosticMetadata(
+  message: CargoJsonCompilerMessage,
+): Readonly<Record<string, unknown>> {
+  const code = message.message.code?.code.trim();
+  return {
+    ...(code ? { code } : {}),
+    level: message.message.level,
+    ...(message.package_id ? { packageId: message.package_id } : {}),
+  };
+}
+
 /** Returns a compact Biome rule name from a diagnostic category. */
 function biomeRuleName(category: string): string {
   const parts = category.split("/").filter((part) => part.length > 0);
@@ -2379,14 +3026,41 @@ function descriptor(
     mayExecuteProjectCode: name !== "typescript",
     mutatesWorkspace: false,
     name,
-    outputFormats: ["json", "text"],
-    preferredOutputFormat: name === "typescript" || name === "mypy" ? "text" : "json",
+    outputFormats: toolOutputFormats(name),
+    preferredOutputFormat: toolPreferredOutputFormat(name),
     requiresDependencies: name !== "semgrep",
     supportsBaseHeadDelta: true,
     supportsChangedFiles: true,
     supportsFullRepo: true,
-    supportsProjectScope: name === "typescript" || name === "pyright",
+    supportsProjectScope:
+      name === "typescript" ||
+      name === "pyright" ||
+      name === "go_vet" ||
+      name === "staticcheck" ||
+      name === "cargo_check" ||
+      name === "cargo_clippy",
   };
+}
+
+/** Returns output formats supported by one static-analysis tool. */
+function toolOutputFormats(name: StaticToolName): ToolOutputFormat[] {
+  if (name === "staticcheck" || name === "cargo_check" || name === "cargo_clippy") {
+    return ["jsonl", "json", "text"];
+  }
+
+  return ["json", "text"];
+}
+
+/** Returns the preferred output format for one static-analysis tool. */
+function toolPreferredOutputFormat(name: StaticToolName): ToolOutputFormat {
+  if (name === "typescript" || name === "mypy") {
+    return "text";
+  }
+  if (name === "staticcheck" || name === "cargo_check" || name === "cargo_clippy") {
+    return "jsonl";
+  }
+
+  return "json";
 }
 
 /** Returns reviewable changed files for static analysis. */
@@ -2456,7 +3130,7 @@ function toolCommand(
     args,
     cwd: workspacePath,
     displayCommand: [executable, ...args].join(" ").trim(),
-    env: {},
+    env: toolCommandEnv(tool),
     executable,
     filesystemPolicy: "read_only",
     networkPolicy: toolNetworkPolicy(tool),
@@ -2465,6 +3139,13 @@ function toolCommand(
 
 /** Returns the process executable for one static-analysis tool. */
 function toolExecutable(tool: StaticToolName): string {
+  if (tool === "go_vet") {
+    return "go";
+  }
+  if (tool === "cargo_check" || tool === "cargo_clippy") {
+    return "cargo";
+  }
+
   return tool === "typescript" ? "tsc" : tool;
 }
 
@@ -2495,11 +3176,39 @@ function toolCommandArgs(tool: StaticToolName, paths: readonly string[]): readon
   if (tool === "semgrep") {
     return ["scan", "--json", "--metrics=off", "--config=auto", ...paths];
   }
+  if (tool === "go_vet") {
+    return ["vet", "-json", "./..."];
+  }
+  if (tool === "staticcheck") {
+    return ["-f", "json", "./..."];
+  }
+  if (tool === "cargo_check") {
+    return ["check", "--message-format=json", "--all-targets", "--locked"];
+  }
+  if (tool === "cargo_clippy") {
+    return ["clippy", "--message-format=json", "--all-targets", "--locked"];
+  }
   if (tool === "typescript") {
     return ["--noEmit", "--pretty", "false"];
   }
 
   return ["--changed-files", ...paths];
+}
+
+/** Returns deterministic environment overrides for one static-analysis command. */
+function toolCommandEnv(tool: StaticToolName): Readonly<Record<string, string>> {
+  if (tool === "go_vet" || tool === "staticcheck") {
+    return {
+      GOCACHE: "/tmp/heimdall-go-cache",
+    };
+  }
+  if (tool === "cargo_check" || tool === "cargo_clippy") {
+    return {
+      CARGO_TARGET_DIR: "/tmp/heimdall-cargo-target",
+    };
+  }
+
+  return {};
 }
 
 /** Returns the network policy required by one static-analysis tool. */

@@ -77,6 +77,78 @@ const pythonRequest = {
   snapshot: pythonPullRequestSnapshotFixture,
 } satisfies StaticAnalysisRequest;
 
+const goChangedFile = {
+  ...validChangedFileFixture,
+  language: "go",
+  path: "pkg/foo.go",
+  patch: "@@ -8,3 +8,5 @@",
+  hunks: [
+    {
+      ...validDiffHunkFixture,
+      lines: [
+        {
+          kind: "context",
+          content: "func main() {",
+          oldLine: 9,
+          newLine: 9,
+        },
+        {
+          kind: "addition",
+          content: 'fmt.Printf("%s")',
+          newLine: 10,
+        },
+      ],
+    },
+  ],
+} satisfies ChangedFile;
+
+const goPullRequestSnapshotFixture = {
+  ...validPullRequestSnapshotFixture,
+  changedFiles: [goChangedFile],
+  changedFileCount: 1,
+} satisfies PullRequestSnapshot;
+
+const goRequest = {
+  ...request,
+  snapshot: goPullRequestSnapshotFixture,
+} satisfies StaticAnalysisRequest;
+
+const rustChangedFile = {
+  ...validChangedFileFixture,
+  language: "rust",
+  path: "src/lib.rs",
+  patch: "@@ -1,3 +1,5 @@",
+  hunks: [
+    {
+      ...validDiffHunkFixture,
+      lines: [
+        {
+          kind: "context",
+          content: "pub fn compute() -> i32 {",
+          oldLine: 2,
+          newLine: 2,
+        },
+        {
+          kind: "addition",
+          content: "let value = 1;",
+          newLine: 3,
+        },
+      ],
+    },
+  ],
+} satisfies ChangedFile;
+
+const rustPullRequestSnapshotFixture = {
+  ...validPullRequestSnapshotFixture,
+  changedFiles: [rustChangedFile],
+  changedFileCount: 1,
+} satisfies PullRequestSnapshot;
+
+const rustRequest = {
+  ...request,
+  snapshot: rustPullRequestSnapshotFixture,
+} satisfies StaticAnalysisRequest;
+
 describe("static analysis", () => {
   it("plans bounded changed-file tool runs", () => {
     const plan = planStaticAnalysis(request);
@@ -102,6 +174,13 @@ describe("static analysis", () => {
     const ruffPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["ruff"] });
     const semgrepPlan = planStaticAnalysis({ ...request, requestedTools: ["semgrep"] });
     const typeScriptPlan = planStaticAnalysis({ ...request, requestedTools: ["typescript"] });
+    const goVetPlan = planStaticAnalysis({ ...goRequest, requestedTools: ["go_vet"] });
+    const staticcheckPlan = planStaticAnalysis({ ...goRequest, requestedTools: ["staticcheck"] });
+    const cargoCheckPlan = planStaticAnalysis({ ...rustRequest, requestedTools: ["cargo_check"] });
+    const cargoClippyPlan = planStaticAnalysis({
+      ...rustRequest,
+      requestedTools: ["cargo_clippy"],
+    });
 
     expect(biomePlan.toolRuns[0]?.command).toMatchObject({
       args: ["check", "--reporter=json", "src/math.ts"],
@@ -141,6 +220,30 @@ describe("static analysis", () => {
       args: ["--noEmit", "--pretty", "false"],
       displayCommand: "tsc --noEmit --pretty false",
       executable: "tsc",
+    });
+    expect(goVetPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["vet", "-json", "./..."],
+      displayCommand: "go vet -json ./...",
+      env: { GOCACHE: "/tmp/heimdall-go-cache" },
+      executable: "go",
+    });
+    expect(staticcheckPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["-f", "json", "./..."],
+      displayCommand: "staticcheck -f json ./...",
+      env: { GOCACHE: "/tmp/heimdall-go-cache" },
+      executable: "staticcheck",
+    });
+    expect(cargoCheckPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["check", "--message-format=json", "--all-targets", "--locked"],
+      displayCommand: "cargo check --message-format=json --all-targets --locked",
+      env: { CARGO_TARGET_DIR: "/tmp/heimdall-cargo-target" },
+      executable: "cargo",
+    });
+    expect(cargoClippyPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["clippy", "--message-format=json", "--all-targets", "--locked"],
+      displayCommand: "cargo clippy --message-format=json --all-targets --locked",
+      env: { CARGO_TARGET_DIR: "/tmp/heimdall-cargo-target" },
+      executable: "cargo",
     });
   });
 
@@ -542,6 +645,196 @@ describe("static analysis", () => {
       severity: "error",
       sourceTrust: "tool_output",
       tool: "semgrep",
+    });
+  });
+
+  it("parses Go vet JSON output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: JSON.stringify({
+          "example.com/repo": {
+            printf: [
+              {
+                category: "printf",
+                end: "/workspace/repo/pkg/foo.go:10:19",
+                message: "fmt.Printf format %s reads arg #1, but call has 0 args",
+                posn: "/workspace/repo/pkg/foo.go:10:6",
+              },
+            ],
+          },
+        }),
+        stdoutBytes: 260,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: goPullRequestSnapshotFixture,
+      tool: "go_vet",
+      toolRunId: "str_go_vet",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 19,
+        endLine: 10,
+        filePath: "pkg/foo.go",
+        originalPath: "/workspace/repo/pkg/foo.go",
+        startColumn: 6,
+        startLine: 10,
+      },
+      metadata: {
+        analyzer: "printf",
+        category: "printf",
+        packageId: "example.com/repo",
+      },
+      ruleId: "printf",
+      ruleName: "printf",
+      severity: "warning",
+      sourceTrust: "tool_output",
+      tool: "go_vet",
+    });
+  });
+
+  it("parses Staticcheck JSONL output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: JSON.stringify({
+          code: "SA4006",
+          end: { column: 14, file: "/workspace/repo/pkg/foo.go", line: 10 },
+          location: { column: 6, file: "/workspace/repo/pkg/foo.go", line: 10 },
+          message: "this value of result is never used",
+          severity: "error",
+        }),
+        stdoutBytes: 220,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: goPullRequestSnapshotFixture,
+      tool: "staticcheck",
+      toolRunId: "str_staticcheck",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 14,
+        endLine: 10,
+        filePath: "pkg/foo.go",
+        originalPath: "/workspace/repo/pkg/foo.go",
+        startColumn: 6,
+        startLine: 10,
+      },
+      metadata: { code: "SA4006", severity: "error" },
+      ruleId: "SA4006",
+      ruleName: "SA4006",
+      severity: "error",
+      sourceTrust: "tool_output",
+      tool: "staticcheck",
+    });
+  });
+
+  it("parses Cargo JSONL compiler messages into normalized diagnostics", () => {
+    const cargoMessage = JSON.stringify({
+      manifest_path: "/workspace/repo/Cargo.toml",
+      message: {
+        children: [],
+        code: { code: "unused_variables", explanation: null },
+        level: "warning",
+        message: "unused variable: `value`",
+        rendered: "warning: unused variable: `value`",
+        spans: [
+          {
+            column_end: 14,
+            column_start: 5,
+            file_name: "/workspace/repo/src/lib.rs",
+            is_primary: true,
+            line_end: 3,
+            line_start: 3,
+            text: [
+              {
+                highlight_end: 14,
+                highlight_start: 5,
+                text: "let value = 1;",
+              },
+            ],
+          },
+        ],
+      },
+      package_id: "path+file:///workspace/repo#heimdall-test@0.1.0",
+      reason: "compiler-message",
+    });
+
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: cargoMessage,
+        stdoutBytes: cargoMessage.length,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: rustPullRequestSnapshotFixture,
+      tool: "cargo_check",
+      toolRunId: "str_cargo_check",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 14,
+        endLine: 3,
+        filePath: "src/lib.rs",
+        originalPath: "/workspace/repo/src/lib.rs",
+        startColumn: 5,
+        startLine: 3,
+      },
+      metadata: {
+        code: "unused_variables",
+        level: "warning",
+        packageId: "path+file:///workspace/repo#heimdall-test@0.1.0",
+      },
+      ruleId: "unused_variables",
+      ruleName: "unused_variables",
+      severity: "warning",
+      sourceTrust: "tool_output",
+      tool: "cargo_check",
     });
   });
 

@@ -542,14 +542,22 @@ function requiredSandboxValue(name: string, value: string | undefined): string {
 /** Maps a tool command executable to a sandbox execution category. */
 function categoryFromToolCommand(command: ToolCommandSpec): SandboxExecutionCategory {
   const executable = command.executable.split("/").at(-1) ?? command.executable;
-  if (executable === "eslint" || executable === "biome" || executable === "ruff") {
+  const firstArg = command.args[0];
+  if (
+    executable === "eslint" ||
+    executable === "biome" ||
+    executable === "ruff" ||
+    executable === "staticcheck" ||
+    (executable === "cargo" && firstArg === "clippy")
+  ) {
     return "lint";
   }
   if (
     executable === "tsc" ||
     executable === "typescript" ||
     executable === "pyright" ||
-    executable === "mypy"
+    executable === "mypy" ||
+    (executable === "cargo" && firstArg === "check")
   ) {
     return "type_check";
   }

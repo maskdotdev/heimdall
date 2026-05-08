@@ -265,6 +265,79 @@ describe("tool runner", () => {
     expect(capturedRequests[0]?.category).toBe("type_check");
   });
 
+  it("maps Go and Rust static-analysis commands to sandbox categories", async () => {
+    const capturedRequests: SandboxRunRequest[] = [];
+    const fakeRunner = createFakeSandboxRunner([{ executable: "cargo", stdout: "" }]);
+    const sandboxRunner: SandboxRunner = {
+      run: async (request) => {
+        capturedRequests.push(request);
+        return fakeRunner.run(request);
+      },
+    };
+    const runner = createSandboxToolRunner({
+      commitSha: "abc123",
+      orgId: "org_1",
+      repoId: "repo_1",
+      runner: sandboxRunner,
+    });
+
+    await runner.run({
+      command: {
+        ...command,
+        args: ["check", "--message-format=json"],
+        displayCommand: "cargo check --message-format=json",
+        executable: "cargo",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_cargo_check",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+    await runner.run({
+      command: {
+        ...command,
+        args: ["clippy", "--message-format=json"],
+        displayCommand: "cargo clippy --message-format=json",
+        executable: "cargo",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_cargo_clippy",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+    await runner.run({
+      command: {
+        ...command,
+        args: ["-f", "json", "./..."],
+        displayCommand: "staticcheck -f json ./...",
+        executable: "staticcheck",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_staticcheck",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+    await runner.run({
+      command: {
+        ...command,
+        args: ["vet", "-json", "./..."],
+        displayCommand: "go vet -json ./...",
+        executable: "go",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_go_vet",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(capturedRequests.map((request) => request.category)).toEqual([
+      "type_check",
+      "lint",
+      "lint",
+      "static_tool",
+    ]);
+  });
+
   it("enforces the shared tool output budget on sandbox streams", async () => {
     const runner = createSandboxToolRunner({
       commitSha: "abc123",
