@@ -37,11 +37,12 @@ import {
 import {
   BackgroundJobRepository,
   billingProviderRequests,
+  type CreateFeedbackEventInput,
+  type CreateFeedbackSignalInput,
   type CreateMemoryCandidateInput,
   createDatabaseClient,
+  FeedbackRepository,
   type FindingOutcomeRecord,
-  feedbackEvents,
-  feedbackSignals,
   findingOutcomes,
   type HeimdallDatabase,
   MemoryCandidateRepository,
@@ -2801,21 +2802,22 @@ async function persistFeedbackEventAndSignals(
   event: FeedbackEvent,
   command: FeedbackCommand | undefined,
 ): Promise<void> {
-  await db.insert(feedbackEvents).values(feedbackEventRow(event)).onConflictDoNothing();
+  const feedbackRepository = new FeedbackRepository(db);
+  await feedbackRepository.createFeedbackEventIfAbsent(feedbackEventInput(event));
 
   const signals = classifyFeedbackEvent({ command, event });
   for (const signal of signals) {
-    await db.insert(feedbackSignals).values(feedbackSignalRow(signal)).onConflictDoNothing();
+    await feedbackRepository.createFeedbackSignalIfAbsent(feedbackSignalInput(signal));
   }
 }
 
-/** Converts one memory feedback event into the database insert shape. */
-function feedbackEventRow(event: FeedbackEvent): typeof feedbackEvents.$inferInsert {
+/** Converts one memory feedback event into the repository insert shape. */
+function feedbackEventInput(event: FeedbackEvent): CreateFeedbackEventInput {
   return {
-    ...(event.actor?.association ? { actorAssociation: event.actor.association } : {}),
     actorIsBot: event.actor?.isBot ?? false,
-    ...(event.actor?.permission ? { actorPermission: event.actor.permission } : {}),
+    ...(event.actor?.association ? { actorAssociation: event.actor.association } : {}),
     ...(event.actor?.providerLogin ? { actorLogin: event.actor.providerLogin } : {}),
+    ...(event.actor?.permission ? { actorPermission: event.actor.permission } : {}),
     ...(event.actor?.providerUserId ? { actorProviderUserId: event.actor.providerUserId } : {}),
     eventKind: event.eventKind,
     ...(event.externalCommentId ? { externalCommentId: event.externalCommentId } : {}),
@@ -2835,8 +2837,8 @@ function feedbackEventRow(event: FeedbackEvent): typeof feedbackEvents.$inferIns
   };
 }
 
-/** Converts one memory feedback signal into the database insert shape. */
-function feedbackSignalRow(signal: FeedbackSignal): typeof feedbackSignals.$inferInsert {
+/** Converts one memory feedback signal into the repository insert shape. */
+function feedbackSignalInput(signal: FeedbackSignal): CreateFeedbackSignalInput {
   return {
     confidence: signal.confidence,
     createdAt: new Date(signal.createdAt),

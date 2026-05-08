@@ -95,9 +95,9 @@ import {
   type EvalRunRow,
   type EvalSuiteRow,
   EvaluationRepository,
+  FeedbackRepository,
+  type FeedbackTimelineRecord,
   type FindingOutcomeRecord,
-  feedbackEvents,
-  feedbackSignals,
   type HeimdallDatabase,
   invoices,
   type MemoryCandidateRecord,
@@ -1362,42 +1362,7 @@ type AdminReviewFindingOutcomeLookup = {
 };
 
 /** Joined feedback event and optional signal row selected for timelines. */
-type AdminReviewFindingFeedbackTimelineRow = {
-  /** Actor login when available. */
-  readonly actorLogin: string | null;
-  /** Feedback event kind. */
-  readonly eventKind: string;
-  /** External provider comment ID when available. */
-  readonly externalCommentId: string | null;
-  /** External provider event ID when available. */
-  readonly externalEventId: string | null;
-  /** Feedback event row ID. */
-  readonly feedbackEventId: string;
-  /** Feedback signal row ID when present. */
-  readonly feedbackSignalId: string | null;
-  /** Redacted provider payload. */
-  readonly payloadRedacted: unknown;
-  /** Signal polarity when present. */
-  readonly polarity: string | null;
-  /** Provider name. */
-  readonly provider: string;
-  /** Pull request number when available. */
-  readonly pullRequestNumber: number | null;
-  /** Signal reason when present. */
-  readonly reason: string | null;
-  /** Feedback receipt timestamp. */
-  readonly receivedAt: Date;
-  /** Signal confidence when present. */
-  readonly signalConfidence: number | null;
-  /** Signal creation timestamp when present. */
-  readonly signalCreatedAt: Date | null;
-  /** Signal kind when present. */
-  readonly signalKind: string | null;
-  /** Feedback source. */
-  readonly source: string;
-  /** Signal strength when present. */
-  readonly strength: number | null;
-};
+type AdminReviewFindingFeedbackTimelineRow = FeedbackTimelineRecord;
 
 /** Artifact metadata row returned by scoped review artifact APIs. */
 type AdminReviewArtifactSummary = {
@@ -9866,30 +9831,9 @@ async function listFindingFeedbackEvents(
     return [];
   }
 
-  const rows = await db
-    .select({
-      actorLogin: feedbackEvents.actorLogin,
-      eventKind: feedbackEvents.eventKind,
-      externalCommentId: feedbackEvents.externalCommentId,
-      externalEventId: feedbackEvents.externalEventId,
-      feedbackEventId: feedbackEvents.feedbackEventId,
-      feedbackSignalId: feedbackSignals.feedbackSignalId,
-      payloadRedacted: feedbackEvents.payloadRedacted,
-      polarity: feedbackSignals.polarity,
-      provider: feedbackEvents.provider,
-      pullRequestNumber: feedbackEvents.pullRequestNumber,
-      reason: feedbackSignals.reason,
-      receivedAt: feedbackEvents.receivedAt,
-      signalConfidence: feedbackSignals.confidence,
-      signalCreatedAt: feedbackSignals.createdAt,
-      signalKind: feedbackSignals.signalKind,
-      source: feedbackEvents.source,
-      strength: feedbackSignals.strength,
-    })
-    .from(feedbackEvents)
-    .leftJoin(feedbackSignals, eq(feedbackSignals.feedbackEventId, feedbackEvents.feedbackEventId))
-    .where(eq(feedbackEvents.publishedFindingId, finding.publishedFindingId))
-    .orderBy(desc(feedbackEvents.receivedAt), asc(feedbackSignals.createdAt));
+  const rows = await new FeedbackRepository(db).listFeedbackTimelineForPublishedFinding(
+    finding.publishedFindingId,
+  );
 
   return feedbackTimelineFromRows(rows);
 }

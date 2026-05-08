@@ -3,6 +3,7 @@ export * from "./repositories/background-job-repository";
 export * from "./repositories/code-intelligence-repository";
 export * from "./repositories/embedding-repository";
 export * from "./repositories/evaluation-repository";
+export * from "./repositories/feedback-repository";
 export * from "./repositories/index-version-repository";
 export * from "./repositories/memory-candidate-repository";
 export * from "./repositories/memory-fact-repository";

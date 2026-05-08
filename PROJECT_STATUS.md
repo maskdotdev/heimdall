@@ -118,6 +118,9 @@ tracked milestone.
   use repository boundaries for repository-scoped memory fact and candidate inspection reads, API
   single-row memory lookups, API memory fact mutation paths, worker memory candidate creation, and
   API memory candidate moderation writes.
+- Latest DB feedback milestone: `FeedbackRepository` now owns idempotent feedback event and signal
+  creation plus published-finding feedback timeline reads. The worker uses this boundary for
+  provider feedback persistence, and the API uses it for finding feedback timeline inspection.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,

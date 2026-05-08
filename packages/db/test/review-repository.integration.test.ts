@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { HeimdallDatabase } from "../src/client";
-import { ReviewRepository } from "../src/index";
+import { FeedbackRepository, ReviewRepository } from "../src/index";
 
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 const testDirectory = fileURLToPath(new URL(".", import.meta.url));
@@ -20,6 +20,7 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
   );
   const sql = postgres(integrationDatabaseUrl ?? "", { max: 1, onnotice: () => undefined });
   const db = drizzle(sql) as HeimdallDatabase;
+  const feedbackRepository = new FeedbackRepository(db);
   const reviewRepository = new ReviewRepository(db);
 
   beforeAll(async () => {
@@ -195,6 +196,74 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
     await expect(
       reviewRepository.getReviewFindingByAnyId("fnd_review_repository_missing"),
     ).resolves.toBeUndefined();
+
+    await feedbackRepository.createFeedbackEventIfAbsent({
+      actorIsBot: false,
+      actorLogin: "maintainer",
+      eventKind: "reaction_added",
+      externalCommentId: "comment-review-repository",
+      externalEventId: "feedback-review-repository",
+      feedbackEventId: "fevt_review_repository",
+      orgId: "org_review_repository_test",
+      payloadRedacted: { feedbackKind: "positive_reaction" },
+      provider: "github",
+      publishedFindingId: "pub_review_repository_validated",
+      pullRequestNumber: 7,
+      receivedAt: new Date("2026-05-08T00:04:30.000Z"),
+      repoId: "repo_review_repository_test",
+      reviewRunId: "rrn_review_repository",
+      source: "webhook",
+    });
+    await feedbackRepository.createFeedbackEventIfAbsent({
+      eventKind: "ignored_replay",
+      feedbackEventId: "fevt_review_repository",
+      orgId: "org_review_repository_test",
+      payloadRedacted: { feedbackKind: "ignored" },
+      provider: "github",
+      receivedAt: new Date("2026-05-08T00:04:31.000Z"),
+      repoId: "repo_review_repository_test",
+      source: "webhook",
+    });
+    await feedbackRepository.createFeedbackSignalIfAbsent({
+      confidence: 0.97,
+      createdAt: new Date("2026-05-08T00:04:31.000Z"),
+      feedbackEventId: "fevt_review_repository",
+      feedbackSignalId: "fsig_review_repository",
+      polarity: "positive",
+      publishedFindingId: "pub_review_repository_validated",
+      reason: "Maintainer reacted positively.",
+      signalKind: "positive_reaction",
+      strength: 1,
+    });
+    await feedbackRepository.createFeedbackSignalIfAbsent({
+      confidence: 0.5,
+      createdAt: new Date("2026-05-08T00:04:32.000Z"),
+      feedbackEventId: "fevt_review_repository",
+      feedbackSignalId: "fsig_review_repository",
+      polarity: "negative",
+      reason: "Replay should not replace the stored signal.",
+      signalKind: "negative_reaction",
+      strength: 0.25,
+    });
+    await expect(
+      feedbackRepository.listFeedbackTimelineForPublishedFinding("pub_review_repository_validated"),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        actorLogin: "maintainer",
+        eventKind: "reaction_added",
+        externalCommentId: "comment-review-repository",
+        feedbackEventId: "fevt_review_repository",
+        feedbackSignalId: "fsig_review_repository",
+        payloadRedacted: { feedbackKind: "positive_reaction" },
+        polarity: "positive",
+        provider: "github",
+        reason: "Maintainer reacted positively.",
+        signalConfidence: 0.97,
+        signalKind: "positive_reaction",
+        source: "webhook",
+        strength: 1,
+      }),
+    ]);
 
     const createdOutcome = await reviewRepository.createFindingOutcomeIfAbsent({
       candidateFindingId: "fnd_review_repository_candidate",
