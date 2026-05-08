@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   actorCanAccessRepo,
+  COMPLIANCE_CONTROL_IDS,
+  COMPLIANCE_EVIDENCE_TYPES,
   classifyArtifact,
   createAdminSessionManager,
+  createComplianceEvidenceDescriptor,
   createLocalEnvSecretsManager,
   createMemorySecurityEventSink,
   createNoopSecurityEventSink,
@@ -24,6 +27,7 @@ import {
   redactString,
   resolveArtifactRetention,
   retentionClassForArtifactType,
+  sanitizeComplianceEvidenceMetadata,
   shouldAlertSecurityEvent,
   signAdminIdentityAssertion,
   verifyAdminIdentityAssertion,
@@ -381,5 +385,68 @@ describe("admin security", () => {
         type: "admin_auth_denied",
       }),
     ).not.toThrow();
+  });
+
+  it("creates product-safe compliance evidence descriptors with stable controls", () => {
+    expect(COMPLIANCE_CONTROL_IDS).toEqual([
+      "soc2.cc6.1.access_review",
+      "soc2.cc7.2.audit_logging",
+      "soc2.cc8.1.change_management",
+      "gdpr.art15.data_export",
+      "gdpr.art17.data_deletion",
+      "nist.ssdf.po.5.security_events",
+    ]);
+    expect(COMPLIANCE_EVIDENCE_TYPES).toContain("audit_log_export");
+
+    const descriptor = createComplianceEvidenceDescriptor({
+      collectedAt: "2026-05-08T14:00:00.000Z",
+      collectedBy: "ci:compliance-evidence",
+      controlId: "soc2.cc7.2.audit_logging",
+      evidenceHash: "sha256:abc123",
+      evidenceType: "audit_log_export",
+      evidenceUri: "s3://heimdall-evidence/org_1/audit-log-export.jsonl",
+      id: "cmpev_audit_export",
+      metadata: {
+        "debug.raw_diff": "+ const leaked = true;",
+        exportedRows: 2,
+        note: "Authorization: Bearer ghp_1234567890",
+        "provider.token": "ghp_1234567890",
+      },
+      orgId: "org_1",
+      source: "ci",
+      summary: {
+        actorCount: 1,
+        "source.body": "export const leaked = true;",
+      },
+    });
+
+    expect(descriptor).toEqual({
+      collectedAt: "2026-05-08T14:00:00.000Z",
+      collectedBy: "ci:compliance-evidence",
+      controlId: "soc2.cc7.2.audit_logging",
+      evidenceHash: "sha256:abc123",
+      evidenceType: "audit_log_export",
+      evidenceUri: "s3://heimdall-evidence/org_1/audit-log-export.jsonl",
+      id: "cmpev_audit_export",
+      metadata: {
+        exportedRows: 2,
+        note: "Authorization: Bearer [redacted]",
+      },
+      orgId: "org_1",
+      source: "ci",
+      status: "collected",
+      summary: {
+        actorCount: 1,
+      },
+    });
+    expect(JSON.stringify(descriptor)).not.toContain("ghp_1234567890");
+    expect(JSON.stringify(descriptor)).not.toContain("export const leaked");
+    expect(
+      sanitizeComplianceEvidenceMetadata({
+        path: "docs/evidence/security.json",
+        secret: "should not persist",
+        total: 1,
+      }),
+    ).toEqual({ path: "docs/evidence/security.json", total: 1 });
   });
 });

@@ -684,6 +684,102 @@ export type MemorySecurityEventSink = SecurityEventSink & {
   readonly events: () => readonly SecurityEvent[];
 };
 
+/** Stable control IDs used when collecting security and compliance evidence. */
+export const COMPLIANCE_CONTROL_IDS = [
+  "soc2.cc6.1.access_review",
+  "soc2.cc7.2.audit_logging",
+  "soc2.cc8.1.change_management",
+  "gdpr.art15.data_export",
+  "gdpr.art17.data_deletion",
+  "nist.ssdf.po.5.security_events",
+] as const;
+
+/** Stable control ID used when collecting security and compliance evidence. */
+export type ComplianceControlId = (typeof COMPLIANCE_CONTROL_IDS)[number];
+
+/** Evidence artifact types supported by the MVP compliance evidence boundary. */
+export const COMPLIANCE_EVIDENCE_TYPES = [
+  "access_review_export",
+  "audit_log_export",
+  "config_snapshot",
+  "data_deletion_report",
+  "security_event_export",
+] as const;
+
+/** Evidence artifact type supported by the MVP compliance evidence boundary. */
+export type ComplianceEvidenceType = (typeof COMPLIANCE_EVIDENCE_TYPES)[number];
+
+/** Lifecycle state for a collected compliance evidence record. */
+export const COMPLIANCE_EVIDENCE_STATUSES = ["collected", "failed", "superseded"] as const;
+
+/** Lifecycle state for a collected compliance evidence record. */
+export type ComplianceEvidenceStatus = (typeof COMPLIANCE_EVIDENCE_STATUSES)[number];
+
+/** Service or automation source that collected compliance evidence. */
+export const COMPLIANCE_EVIDENCE_SOURCES = ["api", "worker", "admin_tool", "ci", "system"] as const;
+
+/** Service or automation source that collected compliance evidence. */
+export type ComplianceEvidenceSource = (typeof COMPLIANCE_EVIDENCE_SOURCES)[number];
+
+/** Product-safe primitive metadata allowed in compliance evidence records. */
+export type ComplianceEvidenceMetadata = Readonly<Record<string, string | number | boolean>>;
+
+/** Input accepted when creating a normalized compliance evidence descriptor. */
+export type ComplianceEvidenceInput = {
+  /** Optional stable evidence ID. Defaults to a generated ID. */
+  readonly id?: string | undefined;
+  /** Organization scope when the evidence is tenant-specific. */
+  readonly orgId?: string | undefined;
+  /** Stable control ID this evidence supports. */
+  readonly controlId: ComplianceControlId;
+  /** Type of evidence artifact collected. */
+  readonly evidenceType: ComplianceEvidenceType;
+  /** Durable URI for the generated evidence artifact or manifest. */
+  readonly evidenceUri: string;
+  /** Optional digest for the evidence artifact. */
+  readonly evidenceHash?: string | undefined;
+  /** Optional deterministic collection timestamp for tests. */
+  readonly collectedAt?: string | undefined;
+  /** Actor, service, or automation that collected the evidence. */
+  readonly collectedBy: string;
+  /** Service or automation source that collected the evidence. */
+  readonly source: ComplianceEvidenceSource;
+  /** Evidence lifecycle status. Defaults to collected. */
+  readonly status?: ComplianceEvidenceStatus | undefined;
+  /** Product-safe summary metadata. */
+  readonly summary?: Readonly<Record<string, unknown>> | undefined;
+  /** Product-safe extended metadata. */
+  readonly metadata?: Readonly<Record<string, unknown>> | undefined;
+};
+
+/** Normalized descriptor for one durable compliance evidence artifact. */
+export type ComplianceEvidenceDescriptor = {
+  /** Stable evidence ID. */
+  readonly id: string;
+  /** Organization scope when the evidence is tenant-specific. */
+  readonly orgId?: string | undefined;
+  /** Stable control ID this evidence supports. */
+  readonly controlId: ComplianceControlId;
+  /** Type of evidence artifact collected. */
+  readonly evidenceType: ComplianceEvidenceType;
+  /** Durable URI for the generated evidence artifact or manifest. */
+  readonly evidenceUri: string;
+  /** Optional digest for the evidence artifact. */
+  readonly evidenceHash?: string | undefined;
+  /** ISO timestamp when the evidence was collected. */
+  readonly collectedAt: string;
+  /** Actor, service, or automation that collected the evidence. */
+  readonly collectedBy: string;
+  /** Service or automation source that collected the evidence. */
+  readonly source: ComplianceEvidenceSource;
+  /** Evidence lifecycle status. */
+  readonly status: ComplianceEvidenceStatus;
+  /** Product-safe summary metadata. */
+  readonly summary: ComplianceEvidenceMetadata;
+  /** Product-safe extended metadata. */
+  readonly metadata: ComplianceEvidenceMetadata;
+};
+
 /** Conservative default retention policy for MVP deployments. */
 export const DEFAULT_RETENTION_POLICY = {
   auditLogDays: 365,
@@ -1384,6 +1480,66 @@ export function recordSecurityEvent(
   return event;
 }
 
+/** Returns whether a value is a known compliance control ID. */
+export function isComplianceControlId(value: unknown): value is ComplianceControlId {
+  return typeof value === "string" && COMPLIANCE_CONTROL_IDS.includes(value as ComplianceControlId);
+}
+
+/** Returns whether a value is a known compliance evidence type. */
+export function isComplianceEvidenceType(value: unknown): value is ComplianceEvidenceType {
+  return (
+    typeof value === "string" && COMPLIANCE_EVIDENCE_TYPES.includes(value as ComplianceEvidenceType)
+  );
+}
+
+/** Sanitizes compliance evidence metadata to keep exported records product-safe. */
+export function sanitizeComplianceEvidenceMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): ComplianceEvidenceMetadata {
+  return sanitizeProductSafeMetadata(metadata);
+}
+
+/** Creates a normalized product-safe compliance evidence descriptor. */
+export function createComplianceEvidenceDescriptor(
+  input: ComplianceEvidenceInput,
+): ComplianceEvidenceDescriptor {
+  const controlId = assertComplianceControlId(input.controlId);
+  const evidenceType = assertComplianceEvidenceType(input.evidenceType);
+  const evidenceUri = assertNonEmptyComplianceField(input.evidenceUri, "evidenceUri");
+  const collectedBy = assertNonEmptyComplianceField(input.collectedBy, "collectedBy");
+  const status = input.status ?? "collected";
+
+  if (!COMPLIANCE_EVIDENCE_STATUSES.includes(status)) {
+    throw new AdminSecurityError(
+      "security.invalid_compliance_evidence_status",
+      `Unsupported compliance evidence status: ${status}.`,
+      400,
+    );
+  }
+  if (!COMPLIANCE_EVIDENCE_SOURCES.includes(input.source)) {
+    throw new AdminSecurityError(
+      "security.invalid_compliance_evidence_source",
+      `Unsupported compliance evidence source: ${input.source}.`,
+      400,
+    );
+  }
+
+  return {
+    collectedAt: input.collectedAt ?? new Date().toISOString(),
+    collectedBy,
+    controlId,
+    evidenceType,
+    evidenceUri,
+    id: input.id ?? randomToken("cmpev"),
+    metadata: sanitizeComplianceEvidenceMetadata(input.metadata ?? {}),
+    source: input.source,
+    status,
+    summary: sanitizeComplianceEvidenceMetadata(input.summary ?? {}),
+    ...(input.evidenceHash ? { evidenceHash: input.evidenceHash } : {}),
+    ...(input.orgId ? { orgId: input.orgId } : {}),
+  };
+}
+
 /** Returns whether an HTTP method is safe from CSRF mutation checks. */
 export function isCsrfSafeMethod(method: string): boolean {
   return method === "GET" || method === "HEAD" || method === "OPTIONS";
@@ -1449,6 +1605,13 @@ function addDays(timestamp: string, days: number): string {
 function sanitizeSecurityEventMetadata(
   metadata: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, string | number | boolean>> {
+  return sanitizeProductSafeMetadata(metadata);
+}
+
+/** Sanitizes metadata to keep durable control records product-safe. */
+function sanitizeProductSafeMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, string | number | boolean>> {
   const sanitized: Record<string, string | number | boolean> = {};
 
   for (const [key, value] of Object.entries(metadata)) {
@@ -1465,6 +1628,45 @@ function sanitizeSecurityEventMetadata(
   }
 
   return sanitized;
+}
+
+/** Validates one compliance evidence control ID. */
+function assertComplianceControlId(controlId: string): ComplianceControlId {
+  if (!isComplianceControlId(controlId)) {
+    throw new AdminSecurityError(
+      "security.invalid_compliance_control_id",
+      `Unsupported compliance control ID: ${controlId}.`,
+      400,
+    );
+  }
+
+  return controlId;
+}
+
+/** Validates one compliance evidence type. */
+function assertComplianceEvidenceType(evidenceType: string): ComplianceEvidenceType {
+  if (!isComplianceEvidenceType(evidenceType)) {
+    throw new AdminSecurityError(
+      "security.invalid_compliance_evidence_type",
+      `Unsupported compliance evidence type: ${evidenceType}.`,
+      400,
+    );
+  }
+
+  return evidenceType;
+}
+
+/** Returns a non-empty compliance field or raises a structured security error. */
+function assertNonEmptyComplianceField(value: string, fieldName: string): string {
+  if (value.trim().length === 0) {
+    throw new AdminSecurityError(
+      "security.invalid_compliance_evidence_field",
+      `Compliance evidence ${fieldName} must not be empty.`,
+      400,
+    );
+  }
+
+  return value.trim();
 }
 
 /** Returns whether one security-event metadata key is safe to persist and alert on. */

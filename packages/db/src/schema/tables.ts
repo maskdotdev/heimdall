@@ -2203,6 +2203,35 @@ export const securityEvents = pgTable(
   ],
 );
 
+/** Durable evidence records for security and compliance controls. */
+export const complianceEvidence = pgTable(
+  "compliance_evidence",
+  {
+    complianceEvidenceId: text("compliance_evidence_id").primaryKey(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    controlId: text("control_id").notNull(),
+    evidenceType: text("evidence_type").notNull(),
+    evidenceUri: text("evidence_uri").notNull(),
+    evidenceHash: text("evidence_hash"),
+    collectedAt: timestamp("collected_at", { withTimezone: true }).notNull(),
+    collectedBy: text("collected_by").notNull(),
+    source: text("source").notNull(),
+    status: text("status").notNull().default("collected"),
+    summary: jsonb("summary").notNull().default(sql`'{}'::jsonb`),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (table) => [
+    index("compliance_evidence_org_control_idx").on(
+      table.orgId,
+      table.controlId,
+      table.collectedAt,
+    ),
+    index("compliance_evidence_type_idx").on(table.evidenceType, table.collectedAt),
+    index("compliance_evidence_status_idx").on(table.status, table.collectedAt),
+  ],
+);
+
 /** Security/compliance audit trail for sensitive operations. */
 export const auditLogs = pgTable("audit_logs", {
   auditLogId: text("audit_log_id").primaryKey(),
