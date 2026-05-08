@@ -36,6 +36,17 @@ export function isNormalizedRepoPath(path: string): path is RepoPath {
   return getRepoPathValidationError(path) === undefined;
 }
 
+/** Normalizes a repo path for artifact emission and rejects unsafe paths. */
+export function normalizeRepoPath(input: string): RepoPath {
+  const normalizedPath = input.replaceAll("\\", "/").normalize("NFC");
+  const validationError = getRepoPathValidationError(normalizedPath);
+  if (validationError) {
+    throw new Error(`Invalid repo path ${input}: ${validationError}.`);
+  }
+
+  return normalizedPath as RepoPath;
+}
+
 export const Sha256Schema = Type.String({
   pattern: "^sha256:[a-f0-9]{64}$",
 });

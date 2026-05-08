@@ -11,9 +11,11 @@ import {
   IndexArtifactSchema,
   type IndexRecord,
   IndexRecordSchema,
+  isNormalizedRepoPath,
   isSupportedIndexArtifactFeature,
   isSupportedIndexManifestVersion,
   isSupportedIndexRecordVersion,
+  normalizeRepoPath,
   parseIndexRecordsJsonl,
   stringifyIndexRecordsJsonl,
   validateIndexArtifact,
@@ -221,6 +223,22 @@ describe("IndexArtifactSchema", () => {
       expect.arrayContaining([
         "manifest.recordFiles[0].path must not contain parent-directory path segments: records/..",
       ]),
+    );
+  });
+
+  it("normalizes repo paths and rejects unsafe path segments", () => {
+    expect(normalizeRepoPath("src\\service.ts")).toBe("src/service.ts");
+    expect(isNormalizedRepoPath("src/service.ts")).toBe(true);
+    expect(isNormalizedRepoPath("src\\service.ts")).toBe(false);
+
+    expect(() => normalizeRepoPath("../secret.ts")).toThrow(
+      "Invalid repo path ../secret.ts: must not contain parent-directory path segments.",
+    );
+    expect(() => normalizeRepoPath("src//service.ts")).toThrow(
+      "Invalid repo path src//service.ts: must not contain empty path segments.",
+    );
+    expect(() => normalizeRepoPath("/src/service.ts")).toThrow(
+      "Invalid repo path /src/service.ts: must be repo-relative.",
     );
   });
 
