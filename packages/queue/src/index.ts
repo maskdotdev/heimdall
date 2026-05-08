@@ -8,7 +8,7 @@ import {
   type JobStatus,
   parseWithSchema,
 } from "@repo/contracts";
-import { backgroundJobs, type HeimdallDatabase } from "@repo/db";
+import { type BackgroundJobRecord, BackgroundJobRepository, type HeimdallDatabase } from "@repo/db";
 import {
   classifyTelemetryError,
   OBSERVABILITY_METRIC_NAMES,
@@ -17,7 +17,6 @@ import {
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import { type Job as BullMqJob, Queue } from "bullmq";
-import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Queue names used by Heimdall workers. */
@@ -367,147 +366,49 @@ export class InMemoryDurableJobStore implements DurableJobStore {
 
 /** Drizzle-backed durable job store for Postgres background job rows. */
 export class DrizzleDurableJobStore implements DurableJobStore {
+  private readonly backgroundJobs: BackgroundJobRepository;
+
   /** Creates a durable job store backed by a Heimdall database. */
-  public constructor(private readonly db: HeimdallDatabase) {}
+  public constructor(db: HeimdallDatabase) {
+    this.backgroundJobs = new BackgroundJobRepository(db);
+  }
 
   /** Returns pending jobs eligible for enqueue. */
   public async claimPending(options: ClaimPendingJobsOptions): Promise<readonly DurableJob[]> {
-    const rows = await this.db
-      .select()
-      .from(backgroundJobs)
-      .where(
-        and(
-          eq(backgroundJobs.status, "pending"),
-          or(isNull(backgroundJobs.scheduledAt), lte(backgroundJobs.scheduledAt, options.now)),
-        ),
-      )
-      .orderBy(asc(backgroundJobs.createdAt))
-      .limit(options.limit);
+    const rows = await this.backgroundJobs.claimPendingJobs(options);
 
-    return rows.map((row) => ({
-      backgroundJobId: row.backgroundJobId,
-      queueName: toQueueName(row.queueName),
-      envelope: parseJobEnvelope(row.payload),
-      status: row.status as JobStatus,
-      attempts: row.attempts,
-      maxAttempts: row.maxAttempts,
-      ...(row.startedAt ? { startedAt: row.startedAt } : {}),
-      ...(row.completedAt ? { completedAt: row.completedAt } : {}),
-      updatedAt: row.updatedAt,
-    }));
+    return rows.map(toDurableJob);
   }
 
   /** Repairs stale running jobs after worker crashes or lost BullMQ attempts. */
   public async recoverStaleRunningJobs(
     options: RecoverStaleRunningJobsOptions,
   ): Promise<RecoverStaleRunningJobsResult> {
-    const now = options.now ?? new Date();
-    const cutoff = staleRunningJobCutoff(now, options.staleAfterMs);
-    const limit = normalizeStaleRunningJobRecoveryLimit(options.limit);
-    const error = staleRunningJobError(cutoff);
-    const rows = await this.db
-      .select({
-        attempts: backgroundJobs.attempts,
-        backgroundJobId: backgroundJobs.backgroundJobId,
-        maxAttempts: backgroundJobs.maxAttempts,
-      })
-      .from(backgroundJobs)
-      .where(
-        and(
-          eq(backgroundJobs.status, "running"),
-          or(
-            lte(backgroundJobs.startedAt, cutoff),
-            and(isNull(backgroundJobs.startedAt), lte(backgroundJobs.updatedAt, cutoff)),
-          ),
-        ),
-      )
-      .orderBy(asc(backgroundJobs.updatedAt))
-      .limit(limit);
-    const retryableIds = rows
-      .filter((row) => row.attempts < row.maxAttempts)
-      .map((row) => row.backgroundJobId);
-    const exhaustedIds = rows
-      .filter((row) => row.attempts >= row.maxAttempts)
-      .map((row) => row.backgroundJobId);
-    const requeued = await this.requeueStaleRunningJobs(retryableIds, error, now);
-    const deadLettered = await this.deadLetterStaleRunningJobs(exhaustedIds, error, now);
-
-    return {
-      deadLettered: deadLettered.length,
-      inspected: rows.length,
-      jobIds: [...requeued, ...deadLettered],
-      requeued: requeued.length,
-    };
+    return this.backgroundJobs.recoverStaleRunningJobs(options);
   }
 
   /** Marks a pending durable job as queued. */
   public async markQueued(job: DurableJob): Promise<void> {
-    await this.db
-      .update(backgroundJobs)
-      .set({ status: "queued", updatedAt: new Date() })
-      .where(
-        and(
-          eq(backgroundJobs.queueName, job.queueName),
-          eq(backgroundJobs.jobKey, job.envelope.idempotencyKey),
-          eq(backgroundJobs.status, "pending"),
-        ),
-      );
+    await this.backgroundJobs.markQueued({
+      jobKey: job.envelope.idempotencyKey,
+      queueName: job.queueName,
+    });
   }
 
   /** Marks a queued durable job as running. */
   public async markRunning(envelope: JobEnvelope<JobPayload>): Promise<DurableJobRunState> {
-    const [updated] = await this.db
-      .update(backgroundJobs)
-      .set({
-        status: "running",
-        attempts: sql`${backgroundJobs.attempts} + 1`,
-        startedAt: new Date(),
-        error: null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(backgroundJobs.jobType, envelope.jobType),
-          eq(backgroundJobs.jobKey, envelope.idempotencyKey),
-          or(eq(backgroundJobs.status, "pending"), eq(backgroundJobs.status, "queued")),
-        ),
-      )
-      .returning({ status: backgroundJobs.status });
-
-    if (updated) {
-      return "running";
-    }
-
-    const [existing] = await this.db
-      .select({ status: backgroundJobs.status })
-      .from(backgroundJobs)
-      .where(
-        and(
-          eq(backgroundJobs.jobType, envelope.jobType),
-          eq(backgroundJobs.jobKey, envelope.idempotencyKey),
-        ),
-      )
-      .limit(1);
-
-    return existing?.status === "completed" ? "already_completed" : "missing";
+    return this.backgroundJobs.markRunning({
+      jobKey: envelope.idempotencyKey,
+      jobType: envelope.jobType,
+    });
   }
 
   /** Marks a durable job as completed. */
   public async markCompleted(envelope: JobEnvelope<JobPayload>): Promise<void> {
-    await this.db
-      .update(backgroundJobs)
-      .set({
-        status: "completed",
-        completedAt: new Date(),
-        error: null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(backgroundJobs.jobType, envelope.jobType),
-          eq(backgroundJobs.jobKey, envelope.idempotencyKey),
-        ),
-      );
+    await this.backgroundJobs.markCompleted({
+      jobKey: envelope.idempotencyKey,
+      jobType: envelope.jobType,
+    });
   }
 
   /** Marks a durable job as queued for retry. */
@@ -515,19 +416,10 @@ export class DrizzleDurableJobStore implements DurableJobStore {
     envelope: JobEnvelope<JobPayload>,
     error: SerializedJobError,
   ): Promise<void> {
-    await this.db
-      .update(backgroundJobs)
-      .set({
-        status: "queued",
-        error,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(backgroundJobs.jobType, envelope.jobType),
-          eq(backgroundJobs.jobKey, envelope.idempotencyKey),
-        ),
-      );
+    await this.backgroundJobs.markRetrying(
+      { jobKey: envelope.idempotencyKey, jobType: envelope.jobType },
+      error,
+    );
   }
 
   /** Marks a durable job as permanently failed. */
@@ -535,80 +427,27 @@ export class DrizzleDurableJobStore implements DurableJobStore {
     envelope: JobEnvelope<JobPayload>,
     error: SerializedJobError,
   ): Promise<void> {
-    await this.db
-      .update(backgroundJobs)
-      .set({
-        status: "failed",
-        completedAt: new Date(),
-        error,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(backgroundJobs.jobType, envelope.jobType),
-          eq(backgroundJobs.jobKey, envelope.idempotencyKey),
-        ),
-      );
+    await this.backgroundJobs.markFailed(
+      { jobKey: envelope.idempotencyKey, jobType: envelope.jobType },
+      error,
+    );
   }
+}
 
-  /** Moves retryable stale running rows back to queued. */
-  private async requeueStaleRunningJobs(
-    backgroundJobIds: readonly string[],
-    error: SerializedJobError,
-    now: Date,
-  ): Promise<readonly string[]> {
-    if (backgroundJobIds.length === 0) {
-      return [];
-    }
-
-    const rows = await this.db
-      .update(backgroundJobs)
-      .set({
-        completedAt: null,
-        error,
-        startedAt: null,
-        status: "queued",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(backgroundJobs.status, "running"),
-          inArray(backgroundJobs.backgroundJobId, backgroundJobIds),
-        ),
-      )
-      .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
-
-    return rows.map((row) => row.backgroundJobId);
-  }
-
-  /** Moves exhausted stale running rows to the dead-letter state. */
-  private async deadLetterStaleRunningJobs(
-    backgroundJobIds: readonly string[],
-    error: SerializedJobError,
-    now: Date,
-  ): Promise<readonly string[]> {
-    if (backgroundJobIds.length === 0) {
-      return [];
-    }
-
-    const rows = await this.db
-      .update(backgroundJobs)
-      .set({
-        completedAt: now,
-        error,
-        status: "dead_lettered",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(backgroundJobs.status, "running"),
-          inArray(backgroundJobs.backgroundJobId, backgroundJobIds),
-        ),
-      )
-      .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
-
-    return rows.map((row) => row.backgroundJobId);
-  }
+/** Converts a DB-owned background job row into the queue store contract. */
+function toDurableJob(row: BackgroundJobRecord): DurableJob {
+  return {
+    backgroundJobId: row.backgroundJobId,
+    queueName: toQueueName(row.queueName),
+    envelope: row.envelope,
+    status: row.status,
+    attempts: row.attempts,
+    maxAttempts: row.maxAttempts,
+    ...(row.startedAt ? { startedAt: row.startedAt } : {}),
+    ...(row.completedAt ? { completedAt: row.completedAt } : {}),
+    ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
+    ...(row.error ? { error: row.error } : {}),
+  };
 }
 
 /** BullMQ-backed queue producer. */
