@@ -25,8 +25,8 @@ import { getReviewArtifactRedactionLevel, JOB_TYPES } from "@repo/contracts";
 import {
   auditLogs,
   BackgroundJobRepository,
-  codeIndexVersions,
   type HeimdallDatabase,
+  IndexVersionRepository,
   llmCallArtifacts,
   llmCalls,
   memoryFacts,
@@ -2361,20 +2361,13 @@ async function findReadyIndexVersionId(
   repoId: string,
   commitSha: string,
 ): Promise<string | undefined> {
-  const [row] = await db
-    .select({ indexVersionId: codeIndexVersions.indexVersionId })
-    .from(codeIndexVersions)
-    .where(
-      and(
-        eq(codeIndexVersions.repoId, repoId),
-        eq(codeIndexVersions.commitSha, commitSha),
-        eq(codeIndexVersions.status, "ready"),
-      ),
-    )
-    .orderBy(desc(codeIndexVersions.completedAt))
-    .limit(1);
+  const indexVersionRepository = new IndexVersionRepository(db);
+  const indexVersion = await indexVersionRepository.getLatestReadyIndexForCommit({
+    commitSha,
+    repoId,
+  });
 
-  return row?.indexVersionId;
+  return indexVersion?.indexVersionId;
 }
 
 /** Resolves after the requested number of milliseconds. */
