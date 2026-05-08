@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildIndexVersionCountMismatches } from "../src";
 import { adminCliUsage, parseAdminCliCommand, runAdminCli } from "../src/cli";
 
 describe("parseAdminCliCommand", () => {
@@ -50,6 +51,12 @@ describe("parseAdminCliCommand", () => {
       kind: "usage_inspect",
       reviewRunId: "rrn_1",
     });
+
+    expect(parseAdminCliCommand(["index", "inspect", "idx_1", "--json"])).toEqual({
+      indexVersionId: "idx_1",
+      json: true,
+      kind: "index_inspect",
+    });
   });
 
   it("documents the supported command surface", () => {
@@ -58,6 +65,24 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin review replay <reviewRunId> --stage validation");
     expect(adminCliUsage()).toContain("admin publisher dry-run <reviewRunId>");
     expect(adminCliUsage()).toContain("admin usage inspect <reviewRunId>");
+    expect(adminCliUsage()).toContain("admin index inspect <indexVersionId>");
+  });
+});
+
+describe("buildIndexVersionCountMismatches", () => {
+  it("returns only imported count mismatches with signed deltas", () => {
+    expect(
+      buildIndexVersionCountMismatches({
+        chunks: { actual: 8, expected: 7 },
+        edges: { actual: 0, expected: 0 },
+        embeddings: { actual: 2, expected: 4 },
+        files: { actual: 3, expected: 3 },
+        symbols: { actual: 5, expected: 5 },
+      }),
+    ).toEqual([
+      { actual: 8, delta: 1, expected: 7, metric: "chunks" },
+      { actual: 2, delta: -2, expected: 4, metric: "embeddings" },
+    ]);
   });
 });
 

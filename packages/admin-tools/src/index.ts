@@ -16,11 +16,16 @@ import {
   auditLogs,
   backgroundJobs,
   candidateFindings,
+  codeChunkEmbeddings,
+  codeChunks,
+  codeEdges,
   codeIndexVersions,
   debugExports,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
+  indexedFiles,
+  indexImportBatches,
   llmCalls,
   memoryCandidates,
   memoryFacts,
@@ -46,6 +51,7 @@ import {
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
+  symbols,
   usageEvents,
   validatedFindings,
   webhookEvents,
@@ -69,12 +75,13 @@ import { parseJobEnvelope, QUEUE_NAMES, type QueueName } from "@repo/queue";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { validateAndRankCandidateFindings } from "@repo/review-engine";
 import { type EffectiveReviewPolicy, parseReviewPolicySnapshot } from "@repo/rules";
-import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 /** Resource type that an admin debug lookup can target. */
 export type AdminDebugResourceType =
   | "webhook_event"
   | "background_job"
+  | "index_version"
   | "review_run"
   | "repository";
 
@@ -258,6 +265,127 @@ export type AdminEmbeddingJobItemDebugSummary = {
   readonly finishedAt?: string;
   /** Structured item failure when available. */
   readonly failure?: AdminFailureDetail;
+};
+
+/** Count metric shown by the admin index-version inspector. */
+export type AdminIndexVersionCountMetric = "chunks" | "edges" | "embeddings" | "files" | "symbols";
+
+/** Expected and actual row counts for one imported index metric. */
+export type AdminIndexVersionCountSummary = {
+  /** Expected count stored on the code_index_versions row. */
+  readonly expected: number;
+  /** Actual count observed in normalized child tables. */
+  readonly actual: number;
+};
+
+/** Count mismatch emitted when stored metadata differs from normalized rows. */
+export type AdminIndexVersionCountMismatch = {
+  /** Count metric that did not match. */
+  readonly metric: AdminIndexVersionCountMetric;
+  /** Expected count stored on the code_index_versions row. */
+  readonly expected: number;
+  /** Actual count observed in normalized child tables. */
+  readonly actual: number;
+  /** Actual minus expected. */
+  readonly delta: number;
+};
+
+/** Count summaries for one imported index version. */
+export type AdminIndexVersionCountSummaries = {
+  /** Imported file count summary. */
+  readonly files: AdminIndexVersionCountSummary;
+  /** Imported symbol count summary. */
+  readonly symbols: AdminIndexVersionCountSummary;
+  /** Imported edge count summary. */
+  readonly edges: AdminIndexVersionCountSummary;
+  /** Imported chunk count summary. */
+  readonly chunks: AdminIndexVersionCountSummary;
+  /** Stored chunk embedding count summary. */
+  readonly embeddings: AdminIndexVersionCountSummary;
+};
+
+/** Debug summary for one durable index import batch row. */
+export type AdminIndexImportBatchDebugSummary = {
+  /** Durable index import batch ID. */
+  readonly indexImportBatchId: string;
+  /** Repository that owns the import batch. */
+  readonly repoId: string;
+  /** Commit SHA that the imported artifact indexes. */
+  readonly commitSha: string;
+  /** Indexer/chunker key used by this import. */
+  readonly indexKey: string;
+  /** Imported index version when one was created. */
+  readonly indexVersionId?: string;
+  /** Artifact URI used by the importer. */
+  readonly artifactUri: string;
+  /** Artifact content hash when available. */
+  readonly artifactHash?: string;
+  /** Durable import status. */
+  readonly status: string;
+  /** Last recorded import phase. */
+  readonly phase: string;
+  /** Records observed in the artifact manifest. */
+  readonly recordCount: number;
+  /** File records planned or imported by the batch. */
+  readonly fileCount: number;
+  /** Symbol records planned or imported by the batch. */
+  readonly symbolCount: number;
+  /** Edge records planned or imported by the batch. */
+  readonly edgeCount: number;
+  /** Chunk records planned or imported by the batch. */
+  readonly chunkCount: number;
+  /** Embedding jobs created by the batch. */
+  readonly embeddingJobCount: number;
+  /** Product-safe serialized import error when present. */
+  readonly error?: unknown;
+  /** Metadata keys present on the import batch without exposing raw metadata. */
+  readonly metadataKeys: readonly string[];
+  /** ISO timestamp when the import batch started. */
+  readonly startedAt?: string;
+  /** ISO timestamp when the import batch finished. */
+  readonly finishedAt?: string;
+  /** ISO timestamp when the row was created. */
+  readonly createdAt: string;
+  /** ISO timestamp when the row was last updated. */
+  readonly updatedAt: string;
+};
+
+/** Admin-facing inspection details for one imported index version. */
+export type AdminIndexVersionInspection = {
+  /** Imported index version ID. */
+  readonly indexVersionId: string;
+  /** Repository that owns the index version. */
+  readonly repoId: string;
+  /** Commit SHA indexed by this version. */
+  readonly commitSha: string;
+  /** Indexer/chunker key for this version. */
+  readonly indexKey: string;
+  /** Current index version status. */
+  readonly status: string;
+  /** Artifact URI persisted for replay. */
+  readonly artifactUri: string;
+  /** Artifact content hash when available. */
+  readonly artifactHash?: string;
+  /** Indexer implementation name. */
+  readonly indexerName: string;
+  /** Indexer implementation version. */
+  readonly indexerVersion: string;
+  /** Chunker implementation version. */
+  readonly chunkerVersion: string;
+  /** Expected and actual normalized row counts. */
+  readonly counts: AdminIndexVersionCountSummaries;
+  /** Count mismatches that require cleanup or investigation. */
+  readonly mismatches: readonly AdminIndexVersionCountMismatch[];
+  /** Related import batches ordered newest first. */
+  readonly importBatches: readonly AdminIndexImportBatchDebugSummary[];
+  /** Related embedding jobs ordered newest first. */
+  readonly embeddingJobs: readonly AdminEmbeddingJobDebugSummary[];
+  /** Product-safe serialized index error when present. */
+  readonly error?: unknown;
+  /** ISO timestamp when the index version completed. */
+  readonly completedAt?: string;
+  /** ISO timestamp when the index version row was created. */
+  readonly createdAt: string;
 };
 
 /** Debug summary for one webhook delivery row. */
@@ -1431,6 +1559,10 @@ export type AdminDebugService = {
   readonly getBackgroundJobDebugDetails: (
     backgroundJobId: string,
   ) => Promise<AdminBackgroundJobDebugDetails>;
+  /** Gets imported index version diagnostics and row-count comparison details. */
+  readonly getIndexVersionInspection: (
+    indexVersionId: string,
+  ) => Promise<AdminIndexVersionInspection>;
   /** Creates a gated replay plan for one failed durable background job. */
   readonly createBackgroundJobReplayPlan: (
     backgroundJobId: string,
@@ -1494,6 +1626,8 @@ export function createAdminDebugService(
       executeWebhookReplay(webhookEventId, confirmationToken, dependencies, actor),
     getBackgroundJobDebugDetails: (backgroundJobId) =>
       getBackgroundJobDebugDetails(backgroundJobId, dependencies),
+    getIndexVersionInspection: (indexVersionId) =>
+      getIndexVersionInspection(indexVersionId, dependencies),
     createBackgroundJobReplayPlan: (backgroundJobId) =>
       createBackgroundJobReplayPlan(backgroundJobId, dependencies),
     executeBackgroundJobReplay: (backgroundJobId, confirmationToken, actor) =>
@@ -1687,6 +1821,77 @@ export async function getBackgroundJobDebugDetails(
     replayAudits,
     failures: collectFailures([job.failure, embeddingJob?.failure, ...itemFailures]),
   };
+}
+
+/** Gets index version state, related import batches, embedding jobs, and count mismatches. */
+export async function getIndexVersionInspection(
+  indexVersionId: string,
+  dependencies: AdminDebugServiceDependencies,
+): Promise<AdminIndexVersionInspection> {
+  const row = await getIndexVersionRow(indexVersionId, dependencies.db);
+  const [
+    actualFileCount,
+    actualSymbolCount,
+    actualEdgeCount,
+    actualChunkCount,
+    actualEmbeddingCount,
+    importBatchRows,
+    embeddingJobRows,
+  ] = await Promise.all([
+    countIndexedFileRows(dependencies.db, indexVersionId),
+    countSymbolRows(dependencies.db, indexVersionId),
+    countCodeEdgeRows(dependencies.db, indexVersionId),
+    countCodeChunkRows(dependencies.db, indexVersionId),
+    countCodeChunkEmbeddingRows(dependencies.db, indexVersionId),
+    listIndexImportBatchRows(dependencies.db, indexVersionId),
+    listEmbeddingJobRowsForIndexVersion(dependencies.db, indexVersionId),
+  ]);
+  const counts = {
+    chunks: { actual: actualChunkCount, expected: row.chunkCount },
+    edges: { actual: actualEdgeCount, expected: row.edgeCount },
+    embeddings: { actual: actualEmbeddingCount, expected: row.embeddedChunkCount },
+    files: { actual: actualFileCount, expected: row.fileCount },
+    symbols: { actual: actualSymbolCount, expected: row.symbolCount },
+  } satisfies AdminIndexVersionCountSummaries;
+
+  return {
+    indexVersionId: row.indexVersionId,
+    repoId: row.repoId,
+    commitSha: row.commitSha,
+    indexKey: row.indexKey,
+    status: row.status,
+    artifactUri: row.artifactUri,
+    ...(row.artifactHash ? { artifactHash: row.artifactHash } : {}),
+    indexerName: row.indexerName,
+    indexerVersion: row.indexerVersion,
+    chunkerVersion: row.chunkerVersion,
+    counts,
+    mismatches: buildIndexVersionCountMismatches(counts),
+    importBatches: importBatchRows.map(toIndexImportBatchDebugSummary),
+    embeddingJobs: embeddingJobRows.map(toEmbeddingJobDebugSummary),
+    ...(row.error !== null ? { error: row.error } : {}),
+    ...(row.completedAt ? { completedAt: toIso(row.completedAt) } : {}),
+    createdAt: toIso(row.createdAt),
+  };
+}
+
+/** Builds count mismatches for an imported index version inspection. */
+export function buildIndexVersionCountMismatches(
+  counts: AdminIndexVersionCountSummaries,
+): readonly AdminIndexVersionCountMismatch[] {
+  const metrics = Object.entries(counts) as readonly [
+    AdminIndexVersionCountMetric,
+    AdminIndexVersionCountSummary,
+  ][];
+
+  return metrics
+    .filter(([, countSummary]) => countSummary.expected !== countSummary.actual)
+    .map(([metric, countSummary]) => ({
+      actual: countSummary.actual,
+      delta: countSummary.actual - countSummary.expected,
+      expected: countSummary.expected,
+      metric,
+    }));
 }
 
 /** Creates a replay plan for one failed or dead-lettered durable background job. */
@@ -3122,6 +3327,8 @@ type PublishedFindingRow = typeof publishedFindings.$inferSelect;
 type RepositoryRow = typeof repositories.$inferSelect;
 type MemoryFactRow = typeof memoryFacts.$inferSelect;
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
+type IndexVersionRow = typeof codeIndexVersions.$inferSelect;
+type IndexImportBatchRow = typeof indexImportBatches.$inferSelect;
 type EmbeddingJobRow = typeof embeddingJobs.$inferSelect;
 type EmbeddingJobItemRow = typeof embeddingJobItems.$inferSelect;
 type HeimdallTransaction = Parameters<Parameters<HeimdallDatabase["transaction"]>[0]>[0];
@@ -3202,6 +3409,101 @@ async function getBackgroundJobRow(
   }
 
   return row;
+}
+
+/** Gets one index version row or raises an admin debug not-found error. */
+async function getIndexVersionRow(
+  indexVersionId: string,
+  db: HeimdallDatabase,
+): Promise<IndexVersionRow> {
+  const [row] = await db
+    .select()
+    .from(codeIndexVersions)
+    .where(eq(codeIndexVersions.indexVersionId, indexVersionId))
+    .limit(1);
+
+  if (!row) {
+    throw new AdminDebugNotFoundError("index_version", indexVersionId);
+  }
+
+  return row;
+}
+
+/** Counts imported file rows for one index version. */
+async function countIndexedFileRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(indexedFiles)
+    .where(eq(indexedFiles.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts imported symbol rows for one index version. */
+async function countSymbolRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(symbols)
+    .where(eq(symbols.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts imported code edge rows for one index version. */
+async function countCodeEdgeRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeEdges)
+    .where(eq(codeEdges.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts imported code chunk rows for one index version. */
+async function countCodeChunkRows(db: HeimdallDatabase, indexVersionId: string): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeChunks)
+    .where(eq(codeChunks.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Counts stored code chunk embedding rows for one index version. */
+async function countCodeChunkEmbeddingRows(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ value: sql<number>`count(*)::int` })
+    .from(codeChunkEmbeddings)
+    .where(eq(codeChunkEmbeddings.indexVersionId, indexVersionId));
+
+  return Number(row?.value ?? 0);
+}
+
+/** Lists import batches attached to one index version, newest first. */
+async function listIndexImportBatchRows(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<readonly IndexImportBatchRow[]> {
+  return db
+    .select()
+    .from(indexImportBatches)
+    .where(eq(indexImportBatches.indexVersionId, indexVersionId))
+    .orderBy(desc(indexImportBatches.updatedAt));
+}
+
+/** Lists embedding jobs attached to one index version, newest first. */
+async function listEmbeddingJobRowsForIndexVersion(
+  db: HeimdallDatabase,
+  indexVersionId: string,
+): Promise<readonly EmbeddingJobRow[]> {
+  return db
+    .select()
+    .from(embeddingJobs)
+    .where(eq(embeddingJobs.indexVersionId, indexVersionId))
+    .orderBy(desc(embeddingJobs.createdAt));
 }
 
 /** Gets one embedding job summary for background-job debug details. */
@@ -3651,6 +3953,37 @@ function toBackgroundJobDebugSummary(row: BackgroundJobRow): AdminBackgroundJobD
     updatedAt: toIso(row.updatedAt),
     payload: row.payload,
     ...(row.status === "failed" || row.status === "dead_lettered" ? { failure } : {}),
+  };
+}
+
+/** Converts a durable index import batch row into an operator-facing summary. */
+function toIndexImportBatchDebugSummary(
+  row: IndexImportBatchRow,
+): AdminIndexImportBatchDebugSummary {
+  const metadata = asRecord(row.metadata);
+
+  return {
+    indexImportBatchId: row.indexImportBatchId,
+    repoId: row.repoId,
+    commitSha: row.commitSha,
+    indexKey: row.indexKey,
+    ...(row.indexVersionId ? { indexVersionId: row.indexVersionId } : {}),
+    artifactUri: row.artifactUri,
+    ...(row.artifactHash ? { artifactHash: row.artifactHash } : {}),
+    status: row.status,
+    phase: row.phase,
+    recordCount: row.recordCount,
+    fileCount: row.fileCount,
+    symbolCount: row.symbolCount,
+    edgeCount: row.edgeCount,
+    chunkCount: row.chunkCount,
+    embeddingJobCount: row.embeddingJobCount,
+    ...(row.error !== null ? { error: row.error } : {}),
+    metadataKeys: sortedRecordKeys(metadata),
+    ...(row.startedAt ? { startedAt: toIso(row.startedAt) } : {}),
+    ...(row.finishedAt ? { finishedAt: toIso(row.finishedAt) } : {}),
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
   };
 }
 

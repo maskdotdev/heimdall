@@ -5995,6 +5995,7 @@ function createMockAdminDebugService(overrides: Partial<AdminDebugService>): Adm
     createWebhookReplayPlan: unexpectedCall,
     executeWebhookReplay: unexpectedReplayCall,
     getBackgroundJobDebugDetails: unexpectedCall,
+    getIndexVersionInspection: unexpectedCall,
     createBackgroundJobReplayPlan: unexpectedCall,
     executeBackgroundJobReplay: unexpectedReplayCall,
     getReviewDebugDetails: unexpectedCall,

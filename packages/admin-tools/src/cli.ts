@@ -3,6 +3,7 @@
 import { createDatabaseClient } from "@repo/db";
 import {
   type AdminDebugService,
+  type AdminIndexVersionInspection,
   type AdminReplayAuditActor,
   type AdminReplayExecutionResult,
   type AdminReviewDebugDetails,
@@ -106,6 +107,16 @@ export type AdminCliCommand =
       readonly json: boolean;
       /** Optional direct database URL override. */
       readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "index_inspect";
+      /** Imported index version to inspect. */
+      readonly indexVersionId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
     };
 
 /** Result returned by CLI execution. */
@@ -173,6 +184,8 @@ export async function runAdminCli(
         return await runPublisherDryRunCommand(command, handle);
       case "usage_inspect":
         return await runUsageInspectCommand(command, handle.service);
+      case "index_inspect":
+        return await runIndexInspectCommand(command, handle.service);
     }
   } finally {
     await handle.close();
@@ -251,6 +264,15 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
     };
   }
 
+  if (domain === "index" && action === "inspect" && reviewRunId) {
+    return {
+      kind: "index_inspect",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      indexVersionId: reviewRunId,
+      json,
+    };
+  }
+
   throw new Error(`Unsupported admin command: ${args.join(" ")}`);
 }
 
@@ -265,6 +287,7 @@ export function adminCliUsage(): string {
     "  admin review replay <reviewRunId> --stage validation [--json] [--database-url <url>]",
     "  admin publisher dry-run <reviewRunId> [--json] [--database-url <url>]",
     "  admin usage inspect <reviewRunId> [--json] [--database-url <url>]",
+    "  admin index inspect <indexVersionId> [--json] [--database-url <url>]",
     "",
     "The CLI uses direct local database access for development and operational drills.",
     "It refuses production direct-DB mode unless HEIMDALL_ADMIN_CLI_ALLOW_PRODUCTION_DB=true.",
@@ -381,6 +404,18 @@ async function runUsageInspectCommand(
   return {
     exitCode: 0,
     stdout: command.json ? jsonOutput(inspection) : formatUsageInspection(inspection),
+  };
+}
+
+/** Runs index version inspection and formats the result. */
+async function runIndexInspectCommand(
+  command: Extract<AdminCliCommand, { kind: "index_inspect" }>,
+  service: AdminDebugService,
+): Promise<AdminCliResult> {
+  const inspection = await service.getIndexVersionInspection(command.indexVersionId);
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(inspection) : formatIndexVersionInspection(inspection),
   };
 }
 
@@ -644,6 +679,53 @@ function formatUsageInspection(inspection: AdminUsageCostInspection): string {
       ? ["Warnings:", ...inspection.warnings.map((warning) => `- ${warning}`)]
       : []),
   ].join("\n");
+}
+
+/** Formats an index version inspection result for terminal output. */
+function formatIndexVersionInspection(inspection: AdminIndexVersionInspection): string {
+  return [
+    `Index version: ${inspection.indexVersionId}`,
+    `Status: ${inspection.status}`,
+    `Repository: ${inspection.repoId}`,
+    `Commit: ${inspection.commitSha}`,
+    `Index key: ${inspection.indexKey}`,
+    `Artifact: ${inspection.artifactUri}`,
+    `Counts: ${formatIndexCountSummaries(inspection)}`,
+    `Mismatches: ${formatIndexCountMismatches(inspection)}`,
+    `Import batches: ${inspection.importBatches.length}`,
+    `Embedding jobs: ${inspection.embeddingJobs.length}`,
+    ...(inspection.completedAt ? [`Completed at: ${inspection.completedAt}`] : []),
+  ].join("\n");
+}
+
+/** Formats index count summaries as compact terminal text. */
+function formatIndexCountSummaries(inspection: AdminIndexVersionInspection): string {
+  return [
+    `files=${formatIndexCount(inspection.counts.files)}`,
+    `symbols=${formatIndexCount(inspection.counts.symbols)}`,
+    `edges=${formatIndexCount(inspection.counts.edges)}`,
+    `chunks=${formatIndexCount(inspection.counts.chunks)}`,
+    `embeddings=${formatIndexCount(inspection.counts.embeddings)}`,
+  ].join(", ");
+}
+
+/** Formats a single index count summary as actual/expected terminal text. */
+function formatIndexCount(count: { readonly actual: number; readonly expected: number }): string {
+  return `${count.actual}/${count.expected}`;
+}
+
+/** Formats index count mismatches as compact terminal text. */
+function formatIndexCountMismatches(inspection: AdminIndexVersionInspection): string {
+  if (inspection.mismatches.length === 0) {
+    return "none";
+  }
+
+  return inspection.mismatches
+    .map(
+      (mismatch) =>
+        `${mismatch.metric} actual=${mismatch.actual} expected=${mismatch.expected} delta=${mismatch.delta}`,
+    )
+    .join("; ");
 }
 
 /** Formats billable unit totals as compact terminal text. */
