@@ -28,6 +28,7 @@ export const packageName = "@repo/indexer-ts" as const;
 const INDEXER_NAME = "heimdall-typescript-indexer";
 const INDEXER_VERSION = "0.1.0";
 const CHUNKER_VERSION = "line-symbol-v1";
+const PYTHON_PARSER_VERSION = "heuristic-python-v1";
 const MAX_FILE_BYTES = 1_000_000;
 const BINARY_CONTENT_SAMPLE_BYTES = 8_192;
 const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
@@ -59,6 +60,32 @@ type PackageDependencySection = {
   readonly dependencyType: NonNullable<DependencyRecord["dependencyType"]>;
   /** package.json object field containing dependency names and version ranges. */
   readonly fieldName: string;
+};
+
+/** Python symbol candidate discovered from indentation-aware source scanning. */
+type PythonSymbolCandidate = {
+  /** Indentation level of the declaration line. */
+  readonly indent: number;
+  /** Symbol kind emitted for the declaration. */
+  readonly kind: SymbolKind;
+  /** Unqualified symbol name. */
+  readonly name: string;
+  /** Fully qualified symbol name within Python nesting. */
+  readonly qualifiedName: string;
+  /** One-line declaration signature. */
+  readonly signature: string;
+  /** 1-based declaration line. */
+  readonly startLine: number;
+};
+
+/** Stack entry used while building Python qualified names. */
+type PythonSymbolStackEntry = {
+  /** Indentation level where this declaration starts. */
+  readonly indent: number;
+  /** Symbol kind for this stack entry. */
+  readonly kind: SymbolKind;
+  /** Symbol name used in descendant qualified names. */
+  readonly name: string;
 };
 
 /** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
@@ -117,7 +144,7 @@ export function getTypeScriptIndexerCapabilities(): IndexerCapabilities {
     driverVersion: INDEXER_VERSION,
     maxFileBytes: MAX_FILE_BYTES,
     supportedArtifactSchemaVersions: [INDEX_ARTIFACT_SCHEMA_VERSION],
-    supportedLanguages: ["typescript", "javascript", "tsx", "jsx"],
+    supportedLanguages: ["typescript", "javascript", "tsx", "jsx", "python"],
     supportedRecordTypes: ["file", "symbol", "edge", "chunk", "dependency"],
     supportedRequestSchemaVersions: [INDEX_REQUEST_SCHEMA_VERSION],
     supportsCancellation: false,
@@ -167,6 +194,16 @@ export async function indexTypeScriptRepository(input: {
 
     const language = languageForPath(path);
     const file = fileRecord(input.repoId, input.commitSha, path, language, content);
+    if (language === "python") {
+      const symbols = collectPythonSymbols(file, content);
+
+      recordGroups.files.push(file);
+      recordGroups.symbols.push(...symbols);
+      recordGroups.chunks.push(...chunkRecordsForFile(file, content, symbols));
+      languages.add(language);
+      continue;
+    }
+
     const sourceFile = ts.createSourceFile(
       path,
       content,
@@ -209,11 +246,29 @@ export async function indexTypeScriptRepository(input: {
       symbolCount: records.filter((record) => record.type === "symbol").length,
       edgeCount: records.filter((record) => record.type === "edge").length,
       chunkCount: records.filter((record) => record.type === "chunk").length,
-      parserVersions: { typescript: ts.version },
+      parserVersions: parserVersionsFor(languages),
       ...(input.previousIndexVersionId ? { previousIndexId: input.previousIndexVersionId } : {}),
     },
     records,
   };
+}
+
+/** Builds parser version metadata for languages present in the emitted artifact. */
+function parserVersionsFor(languages: ReadonlySet<CodeLanguage>): Record<string, string> {
+  const parserVersions: Record<string, string> = {};
+  if (
+    languages.has("typescript") ||
+    languages.has("javascript") ||
+    languages.has("tsx") ||
+    languages.has("jsx")
+  ) {
+    parserVersions.typescript = ts.version;
+  }
+  if (languages.has("python")) {
+    parserVersions.python = PYTHON_PARSER_VERSION;
+  }
+
+  return parserVersions;
 }
 
 /** Returns records in the canonical artifact type order required by the schema spec. */
@@ -369,6 +424,130 @@ function collectSymbols(
   return symbols;
 }
 
+/** Extracts conservative class, function, and method symbols from Python source text. */
+function collectPythonSymbols(file: FileRecord, content: string): SymbolRecord[] {
+  const lines = content.split("\n");
+  const candidates = pythonSymbolCandidates(lines);
+
+  return candidates.map((candidate) => {
+    const range = {
+      endLine: pythonSymbolEndLine(lines, candidate),
+      startLine: candidate.startLine,
+    };
+
+    return {
+      commitSha: file.commitSha,
+      contentHash: sha256(textForLineRange(content, range)),
+      fileId: file.fileId,
+      kind: candidate.kind,
+      language: file.language,
+      name: candidate.name,
+      path: file.path,
+      qualifiedName: candidate.qualifiedName,
+      range,
+      repoId: file.repoId,
+      schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+      selectionRange: range,
+      signature: candidate.signature,
+      symbolId: createStableId("sym", [
+        file.repoId,
+        file.commitSha,
+        file.path,
+        candidate.qualifiedName,
+        range.startLine,
+      ]),
+      type: "symbol",
+      visibility: "unknown",
+    };
+  });
+}
+
+/** Finds Python declarations with enough structure to emit stable symbols. */
+function pythonSymbolCandidates(lines: readonly string[]): PythonSymbolCandidate[] {
+  const candidates: PythonSymbolCandidate[] = [];
+  const stack: PythonSymbolStackEntry[] = [];
+
+  lines.forEach((line, index) => {
+    const candidate = pythonDeclarationCandidate(line, index + 1, stack);
+    if (!candidate) {
+      return;
+    }
+
+    while (stack.length > 0 && (stack.at(-1)?.indent ?? -1) >= candidate.indent) {
+      stack.pop();
+    }
+
+    const qualifiedName = [...stack.map((entry) => entry.name), candidate.name].join(".");
+    const symbol = { ...candidate, qualifiedName };
+
+    candidates.push(symbol);
+    stack.push({
+      indent: candidate.indent,
+      kind: candidate.kind,
+      name: candidate.name,
+    });
+  });
+
+  return candidates;
+}
+
+/** Converts one Python declaration line into a symbol candidate when supported. */
+function pythonDeclarationCandidate(
+  line: string,
+  lineNumber: number,
+  stack: readonly PythonSymbolStackEntry[],
+): Omit<PythonSymbolCandidate, "qualifiedName"> | undefined {
+  const classMatch = line.match(/^(\s*)class\s+([A-Za-z_][A-Za-z0-9_]*)\b[^:]*:/);
+  if (classMatch?.[1] !== undefined && classMatch[2]) {
+    return {
+      indent: pythonIndent(classMatch[1]),
+      kind: "class",
+      name: classMatch[2],
+      signature: line.trim(),
+      startLine: lineNumber,
+    };
+  }
+
+  const functionMatch = line.match(/^(\s*)(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\b[^:]*:/);
+  if (functionMatch?.[1] === undefined || !functionMatch[2]) {
+    return undefined;
+  }
+
+  const indent = pythonIndent(functionMatch[1]);
+  const parent = [...stack].reverse().find((entry) => entry.indent < indent);
+
+  return {
+    indent,
+    kind: parent?.kind === "class" ? "method" : "function",
+    name: functionMatch[2],
+    signature: line.trim(),
+    startLine: lineNumber,
+  };
+}
+
+/** Computes a Python declaration end line from indentation boundaries. */
+function pythonSymbolEndLine(lines: readonly string[], candidate: PythonSymbolCandidate): number {
+  let lastContentLine = candidate.startLine;
+
+  for (let lineNumber = candidate.startLine + 1; lineNumber <= lines.length; lineNumber += 1) {
+    const line = lines[lineNumber - 1] ?? "";
+    if (line.trim().length === 0) {
+      continue;
+    }
+    if (pythonIndent(line.match(/^\s*/)?.[0] ?? "") <= candidate.indent) {
+      break;
+    }
+    lastContentLine = lineNumber;
+  }
+
+  return Math.max(candidate.startLine, lastContentLine);
+}
+
+/** Converts Python leading whitespace into a deterministic indentation value. */
+function pythonIndent(leadingWhitespace: string): number {
+  return leadingWhitespace.replaceAll("\t", "    ").length;
+}
+
 function chunkRecordsForFile(
   file: FileRecord,
   content: string,
@@ -390,10 +569,7 @@ function chunkForRange(
   symbolId?: string,
   kind: ChunkRecord["kind"] = "file",
 ): ChunkRecord {
-  const text = content
-    .split("\n")
-    .slice(range.startLine - 1, range.endLine)
-    .join("\n");
+  const text = textForLineRange(content, range);
   return {
     type: "chunk",
     schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
@@ -415,6 +591,17 @@ function chunkForRange(
     contentHash: sha256(text),
     tokenEstimate: estimateTokens(text),
   };
+}
+
+/** Returns source text covered by a 1-based line range. */
+function textForLineRange(
+  content: string,
+  range: { readonly startLine: number; readonly endLine: number },
+): string {
+  return content
+    .split("\n")
+    .slice(range.startLine - 1, range.endLine)
+    .join("\n");
 }
 
 /** Extracts dependency records from a package.json document. */
@@ -673,7 +860,7 @@ function lineRange(
 }
 
 function isSupportedSourcePath(path: string): boolean {
-  return /\.(cjs|cts|js|jsx|mjs|mts|ts|tsx)$/.test(path) && !/\.d\.[cm]?ts$/.test(path);
+  return /\.(cjs|cts|js|jsx|mjs|mts|py|ts|tsx)$/.test(path) && !/\.d\.[cm]?ts$/.test(path);
 }
 
 /** Returns whether a source or package manifest path should be considered for indexing. */
@@ -691,6 +878,7 @@ function isPackageJsonPath(path: string): boolean {
 }
 
 function languageForPath(path: string): CodeLanguage {
+  if (path.endsWith(".py")) return "python";
   if (path.endsWith(".tsx")) return "tsx";
   if (path.endsWith(".jsx")) return "jsx";
   if (/\.[cm]?js$/.test(path)) return "javascript";
@@ -709,7 +897,7 @@ function isGeneratedPath(path: string): boolean {
 
   return (
     hasPathSegment(path, generatedPathSegments) ||
-    /\.(generated|gen)\.[cm]?[jt]sx?$/.test(fileName) ||
+    /\.(generated|gen)\.(?:[cm]?[jt]sx?|py)$/.test(fileName) ||
     fileName.endsWith(".min.js") ||
     fileName.endsWith(".pb.ts") ||
     fileName.endsWith(".graphql.ts")
@@ -717,7 +905,12 @@ function isGeneratedPath(path: string): boolean {
 }
 
 function isTestPath(path: string): boolean {
-  return /(^|[/.])(test|spec)\.[cm]?[jt]sx?$/.test(path) || path.includes("__tests__/");
+  return (
+    /(^|[/.])(test|spec)\.[cm]?[jt]sx?$/.test(path) ||
+    /(^|\/)(test_.+|.+_test)\.py$/.test(path) ||
+    path.includes("__tests__/") ||
+    path.includes("tests/")
+  );
 }
 
 function isVendoredPath(path: string): boolean {

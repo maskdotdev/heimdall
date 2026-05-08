@@ -8,6 +8,7 @@ import { getTypeScriptIndexerCapabilities, indexTypeScriptRepository } from "../
 describe("getTypeScriptIndexerCapabilities", () => {
   it("does not advertise incremental indexing before previous-artifact reuse exists", () => {
     expect(getTypeScriptIndexerCapabilities()).toMatchObject({
+      supportedLanguages: expect.arrayContaining(["python"]),
       supportedRecordTypes: expect.arrayContaining(["dependency"]),
       supportsIncremental: false,
       supportsPreviousArtifact: false,
@@ -172,6 +173,73 @@ describe("indexTypeScriptRepository", () => {
       },
     ]);
     expect(artifact.manifest.recordCount).toBe(6);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("emits files, symbols, and chunks for Python sources", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await writeFile(
+      join(workspacePath, "service.py"),
+      [
+        "class UserService:",
+        "    def update_email(self, user_id: str, email: str) -> str:",
+        "        return email.lower()",
+        "",
+        "async def validate_session(token: str) -> bool:",
+        "    return token.startswith('session_')",
+        "",
+      ].join("\n"),
+    );
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const fileRecords = artifact.records.flatMap((record) =>
+      record.type === "file" ? [{ language: record.language, path: record.path }] : [],
+    );
+    const symbolRecords = artifact.records.flatMap((record) =>
+      record.type === "symbol"
+        ? [
+            {
+              kind: record.kind,
+              name: record.name,
+              qualifiedName: record.qualifiedName,
+              signature: record.signature,
+            },
+          ]
+        : [],
+    );
+    const chunkLanguages = artifact.records.flatMap((record) =>
+      record.type === "chunk" ? [record.language] : [],
+    );
+
+    expect(fileRecords).toEqual([{ language: "python", path: "service.py" }]);
+    expect(symbolRecords).toEqual([
+      {
+        kind: "class",
+        name: "UserService",
+        qualifiedName: "UserService",
+        signature: "class UserService:",
+      },
+      {
+        kind: "method",
+        name: "update_email",
+        qualifiedName: "UserService.update_email",
+        signature: "def update_email(self, user_id: str, email: str) -> str:",
+      },
+      {
+        kind: "function",
+        name: "validate_session",
+        qualifiedName: "validate_session",
+        signature: "async def validate_session(token: str) -> bool:",
+      },
+    ]);
+    expect(chunkLanguages).toEqual(["python", "python", "python"]);
+    expect(artifact.manifest.languages).toEqual(["python"]);
+    expect(artifact.manifest.parserVersions).toEqual({ python: "heuristic-python-v1" });
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
