@@ -2,6 +2,13 @@
 
 import { createDatabaseClient } from "@repo/db";
 import {
+  type CleanupIndexImportRowsResult,
+  cleanupIndexImportRows,
+  type ImportIndexArtifactResult,
+  importIndexArtifact,
+  readIndexArtifactFromUri,
+} from "@repo/index-importer";
+import {
   type AdminDebugService,
   type AdminIndexVersionInspection,
   type AdminReplayAuditActor,
@@ -117,6 +124,34 @@ export type AdminCliCommand =
       readonly json: boolean;
       /** Optional direct database URL override. */
       readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "index_import";
+      /** Artifact URI or local path to import. */
+      readonly artifactUri: string;
+      /** Repository ID expected in the artifact manifest. */
+      readonly repoId: string;
+      /** Commit SHA expected in the artifact manifest. */
+      readonly commitSha: string;
+      /** Whether durable embedding batch jobs should be enqueued. */
+      readonly enqueueEmbeddings: boolean;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "index_cleanup";
+      /** Index version whose failed import rows should be cleaned. */
+      readonly indexVersionId: string;
+      /** Allows cleanup of non-failed versions as a documented break-glass operation. */
+      readonly force: boolean;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
     };
 
 /** Result returned by CLI execution. */
@@ -186,6 +221,10 @@ export async function runAdminCli(
         return await runUsageInspectCommand(command, handle.service);
       case "index_inspect":
         return await runIndexInspectCommand(command, handle.service);
+      case "index_import":
+        return await runIndexImportCommand(command, handle);
+      case "index_cleanup":
+        return await runIndexCleanupCommand(command, handle);
     }
   } finally {
     await handle.close();
@@ -273,6 +312,34 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
     };
   }
 
+  if (domain === "index" && action === "import") {
+    const artifactUri = requiredStringFlag(parsed.flags, "artifact", "index import");
+    const repoId = requiredStringFlag(parsed.flags, "repo-id", "index import");
+    const commitSha = stringFlag(parsed.flags, "commit") ?? stringFlag(parsed.flags, "commit-sha");
+    if (!commitSha) {
+      throw new Error("index import requires --commit <value>.");
+    }
+    return {
+      kind: "index_import",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      artifactUri,
+      commitSha,
+      enqueueEmbeddings: parsed.flags.has("enqueue-embeddings"),
+      json,
+      repoId,
+    };
+  }
+
+  if (domain === "index" && (action === "cleanup" || action === "cleanup-import") && reviewRunId) {
+    return {
+      kind: "index_cleanup",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      force: parsed.flags.has("force"),
+      indexVersionId: reviewRunId,
+      json,
+    };
+  }
+
   throw new Error(`Unsupported admin command: ${args.join(" ")}`);
 }
 
@@ -288,6 +355,8 @@ export function adminCliUsage(): string {
     "  admin publisher dry-run <reviewRunId> [--json] [--database-url <url>]",
     "  admin usage inspect <reviewRunId> [--json] [--database-url <url>]",
     "  admin index inspect <indexVersionId> [--json] [--database-url <url>]",
+    "  admin index import --artifact <uri> --repo-id <repoId> --commit <sha> [--enqueue-embeddings] [--json] [--database-url <url>]",
+    "  admin index cleanup <indexVersionId> [--force] [--json] [--database-url <url>]",
     "",
     "The CLI uses direct local database access for development and operational drills.",
     "It refuses production direct-DB mode unless HEIMDALL_ADMIN_CLI_ALLOW_PRODUCTION_DB=true.",
@@ -419,6 +488,44 @@ async function runIndexInspectCommand(
   };
 }
 
+/** Runs a local index artifact import command and formats the result. */
+async function runIndexImportCommand(
+  command: Extract<AdminCliCommand, { kind: "index_import" }>,
+  serviceHandle: AdminCliServiceHandle,
+): Promise<AdminCliResult> {
+  const artifact = await readIndexArtifactFromUri(command.artifactUri);
+  const manifestError = indexArtifactManifestError(command, artifact.manifest);
+  if (manifestError) {
+    return { exitCode: 2, stderr: manifestError };
+  }
+
+  const result = await importIndexArtifact(artifact, {
+    artifactUri: command.artifactUri,
+    db: serviceHandle.db,
+    enqueueEmbeddings: command.enqueueEmbeddings,
+  });
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(result) : formatIndexImportResult(result),
+  };
+}
+
+/** Runs a guarded index import cleanup command and formats the result. */
+async function runIndexCleanupCommand(
+  command: Extract<AdminCliCommand, { kind: "index_cleanup" }>,
+  serviceHandle: AdminCliServiceHandle,
+): Promise<AdminCliResult> {
+  const result = await cleanupIndexImportRows({
+    db: serviceHandle.db,
+    force: command.force,
+    indexVersionId: command.indexVersionId,
+  });
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(result) : formatIndexCleanupResult(result),
+  };
+}
+
 /** Creates a local database-backed admin service handle. */
 function createLocalDatabaseService(
   databaseUrl: string | undefined,
@@ -496,6 +603,20 @@ function stringFlag(flags: ReadonlyMap<string, string | true>, name: string): st
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/** Returns a required string flag or raises a command parse error. */
+function requiredStringFlag(
+  flags: ReadonlyMap<string, string | true>,
+  name: string,
+  commandName: string,
+): string {
+  const value = stringFlag(flags, name);
+  if (!value) {
+    throw new Error(`${commandName} requires --${name} <value>.`);
+  }
+
+  return value;
+}
+
 /** Returns an error when direct database mode appears to target production. */
 function directDatabaseProductionGuard(env: AdminCliEnvironment): string | undefined {
   const environment = env.HEIMDALL_ENV ?? env.NODE_ENV;
@@ -510,6 +631,21 @@ function directDatabaseProductionGuard(env: AdminCliEnvironment): string | undef
     "Admin CLI direct database mode is disabled for production.",
     "Use the authenticated admin API path, or set HEIMDALL_ADMIN_CLI_ALLOW_PRODUCTION_DB=true for a documented break-glass operation.",
   ].join(" ");
+}
+
+/** Returns an error when the artifact manifest does not match the import command scope. */
+function indexArtifactManifestError(
+  command: Extract<AdminCliCommand, { kind: "index_import" }>,
+  manifest: Awaited<ReturnType<typeof readIndexArtifactFromUri>>["manifest"],
+): string | undefined {
+  if (manifest.repoId !== command.repoId) {
+    return `Index artifact repoId ${manifest.repoId} does not match --repo-id ${command.repoId}.`;
+  }
+  if (manifest.commitSha !== command.commitSha) {
+    return `Index artifact commitSha ${manifest.commitSha} does not match --commit ${command.commitSha}.`;
+  }
+
+  return undefined;
 }
 
 /** Builds the actor stored in CLI-triggered audit rows. */
@@ -695,6 +831,30 @@ function formatIndexVersionInspection(inspection: AdminIndexVersionInspection): 
     `Import batches: ${inspection.importBatches.length}`,
     `Embedding jobs: ${inspection.embeddingJobs.length}`,
     ...(inspection.completedAt ? [`Completed at: ${inspection.completedAt}`] : []),
+  ].join("\n");
+}
+
+/** Formats an index artifact import result for terminal output. */
+function formatIndexImportResult(result: ImportIndexArtifactResult): string {
+  return [
+    `Index import: ${result.indexVersionId}`,
+    `Import batch: ${result.importBatchId}`,
+    `Files: ${result.fileCount}`,
+    `Symbols: ${result.symbolCount}`,
+    `Edges: ${result.edgeCount}`,
+    `Chunks: ${result.chunkCount}`,
+    `Embedding jobs: ${result.embeddingJobCount}`,
+  ].join("\n");
+}
+
+/** Formats an index import cleanup result for terminal output. */
+function formatIndexCleanupResult(result: CleanupIndexImportRowsResult): string {
+  return [
+    `Index cleanup: ${result.indexVersionId}`,
+    `Original status: ${result.status}`,
+    `Force: ${result.force}`,
+    `Embedding jobs cleaned: ${result.embeddingJobIds.length}`,
+    `Cleaned: ${result.cleaned}`,
   ].join("\n");
 }
 

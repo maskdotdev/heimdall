@@ -216,6 +216,30 @@ export type ReconcileStaleIndexImportsResult = {
   readonly indexVersionIds: readonly string[];
 };
 
+/** Options for deleting partial child rows attached to one imported index version. */
+export type CleanupIndexImportRowsOptions = {
+  /** Database used to inspect and clean import rows. */
+  readonly db: HeimdallDatabase;
+  /** Index version whose partial child rows should be cleaned. */
+  readonly indexVersionId: string;
+  /** Allows cleanup for non-failed index versions during documented break-glass recovery. */
+  readonly force?: boolean;
+};
+
+/** Summary returned after cleaning partial child rows for one imported index version. */
+export type CleanupIndexImportRowsResult = {
+  /** Index version whose child rows were cleaned. */
+  readonly indexVersionId: string;
+  /** Status observed before cleanup ran. */
+  readonly status: string;
+  /** Whether force mode allowed cleanup of a non-failed version. */
+  readonly force: boolean;
+  /** Embedding job IDs that were cleaned with the index child rows. */
+  readonly embeddingJobIds: readonly string[];
+  /** Whether cleanup completed. */
+  readonly cleaned: boolean;
+};
+
 type IndexImporterTelemetryStatus = "failed" | "succeeded";
 
 type IndexImportBatchPhase =
@@ -721,6 +745,44 @@ export async function reconcileStaleIndexImports(
     importBatchCount: rows.length,
     importBatchIds,
     indexVersionIds,
+  };
+}
+
+/** Deletes partial child rows for a failed index version while preserving parent diagnostics. */
+export async function cleanupIndexImportRows(
+  options: CleanupIndexImportRowsOptions,
+): Promise<CleanupIndexImportRowsResult> {
+  const [row] = await options.db
+    .select({ status: codeIndexVersions.status })
+    .from(codeIndexVersions)
+    .where(eq(codeIndexVersions.indexVersionId, options.indexVersionId))
+    .limit(1);
+
+  if (!row) {
+    throw new Error(`Index version ${options.indexVersionId} was not found.`);
+  }
+
+  if (!options.force && row.status !== "failed") {
+    throw new Error(
+      `Refusing to cleanup index version ${options.indexVersionId} with status ${row.status}. Use --force only for a documented break-glass cleanup.`,
+    );
+  }
+
+  const embeddingJobIds = await loadEmbeddingJobIdsForIndexVersion(
+    options.db,
+    options.indexVersionId,
+  );
+  await cleanupFailedIndexVersionRows(options.db, {
+    embeddingJobIds,
+    indexVersionId: options.indexVersionId,
+  });
+
+  return {
+    cleaned: true,
+    embeddingJobIds,
+    force: options.force ?? false,
+    indexVersionId: options.indexVersionId,
+    status: row.status,
   };
 }
 

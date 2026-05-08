@@ -32,6 +32,7 @@
     "@repo/embedding": "workspace:*",
     "@repo/evaluation": "workspace:*",
     "@repo/github": "workspace:*",
+    "@repo/index-importer": "workspace:*",
     "@repo/llm-gateway": "workspace:*",
     "@repo/queue": "workspace:*",
     "@repo/publisher": "workspace:*",

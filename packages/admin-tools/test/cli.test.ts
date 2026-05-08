@@ -57,6 +57,35 @@ describe("parseAdminCliCommand", () => {
       json: true,
       kind: "index_inspect",
     });
+
+    expect(
+      parseAdminCliCommand([
+        "index",
+        "import",
+        "--artifact",
+        "/tmp/index-artifact",
+        "--repo-id",
+        "repo_1",
+        "--commit",
+        "abc123",
+        "--enqueue-embeddings",
+        "--json",
+      ]),
+    ).toEqual({
+      artifactUri: "/tmp/index-artifact",
+      commitSha: "abc123",
+      enqueueEmbeddings: true,
+      json: true,
+      kind: "index_import",
+      repoId: "repo_1",
+    });
+
+    expect(parseAdminCliCommand(["index", "cleanup", "idx_1", "--force", "--json"])).toEqual({
+      force: true,
+      indexVersionId: "idx_1",
+      json: true,
+      kind: "index_cleanup",
+    });
   });
 
   it("documents the supported command surface", () => {
@@ -66,6 +95,8 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin publisher dry-run <reviewRunId>");
     expect(adminCliUsage()).toContain("admin usage inspect <reviewRunId>");
     expect(adminCliUsage()).toContain("admin index inspect <indexVersionId>");
+    expect(adminCliUsage()).toContain("admin index import --artifact <uri>");
+    expect(adminCliUsage()).toContain("admin index cleanup <indexVersionId>");
   });
 });
 

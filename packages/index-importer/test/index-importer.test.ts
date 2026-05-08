@@ -27,6 +27,7 @@ import {
 } from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  cleanupIndexImportRows,
   createFileSystemIndexArtifactResolver,
   createIndexArtifactResolverFromEnvironment,
   createIndexImportLimitsFromEnvironment,
@@ -728,6 +729,53 @@ describe("importIndexArtifact telemetry", () => {
     ]);
   });
 
+  it("cleans failed index version rows through the public cleanup helper", async () => {
+    const deletedTables: unknown[] = [];
+
+    const result = await cleanupIndexImportRows({
+      db: createIndexImportCleanupDatabaseStub({
+        deletedTables,
+        embeddingJobIds: ["embjob_failed"],
+        indexVersionStatus: "failed",
+      }),
+      indexVersionId: "idx_failed",
+    });
+
+    expect(result).toEqual({
+      cleaned: true,
+      embeddingJobIds: ["embjob_failed"],
+      force: false,
+      indexVersionId: "idx_failed",
+      status: "failed",
+    });
+    expect(deletedTables).toEqual([
+      backgroundJobs,
+      embeddingJobItems,
+      codeChunkEmbeddings,
+      embeddingJobs,
+      codeEdges,
+      codeChunks,
+      symbols,
+      indexedFiles,
+    ]);
+  });
+
+  it("refuses to cleanup non-failed index versions without force", async () => {
+    const deletedTables: unknown[] = [];
+
+    await expect(
+      cleanupIndexImportRows({
+        db: createIndexImportCleanupDatabaseStub({
+          deletedTables,
+          embeddingJobIds: [],
+          indexVersionStatus: "ready",
+        }),
+        indexVersionId: "idx_ready",
+      }),
+    ).rejects.toThrow("Refusing to cleanup index version idx_ready with status ready.");
+    expect(deletedTables).toEqual([]);
+  });
+
   it("marks import batches failed when record writes fail", async () => {
     const insertedRows: unknown[] = [];
     const updatedRows: unknown[] = [];
@@ -1238,6 +1286,58 @@ function createStaleImportReconciliationDatabaseStub(options: {
   };
 
   return db as unknown as HeimdallDatabase;
+}
+
+/** Creates the DB surface needed by explicit index import cleanup tests. */
+function createIndexImportCleanupDatabaseStub(options: {
+  /** Tables passed to delete statements. */
+  readonly deletedTables: unknown[];
+  /** Embedding job IDs selected for the index version. */
+  readonly embeddingJobIds: readonly string[];
+  /** Status returned for the index version row. */
+  readonly indexVersionStatus?: string;
+}): HeimdallDatabase {
+  const tx = {
+    delete: (table: unknown) => ({
+      where: async (_input: unknown) => {
+        options.deletedTables.push(table);
+      },
+    }),
+  };
+  const db = {
+    select: (selection?: Readonly<Record<string, unknown>>) => ({
+      from: () => ({
+        where: () =>
+          Object.assign(Promise.resolve(selectRowsForIndexImportCleanupStub(selection, options)), {
+            limit: async (count: number) =>
+              selectRowsForIndexImportCleanupStub(selection, options).slice(0, count),
+          }),
+      }),
+    }),
+    transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback(tx),
+  };
+
+  return db as unknown as HeimdallDatabase;
+}
+
+/** Returns canned select rows for explicit index import cleanup tests. */
+function selectRowsForIndexImportCleanupStub(
+  selection: Readonly<Record<string, unknown>> | undefined,
+  options: {
+    /** Embedding job IDs selected for the index version. */
+    readonly embeddingJobIds: readonly string[];
+    /** Status returned for the index version row. */
+    readonly indexVersionStatus?: string;
+  },
+): readonly Readonly<Record<string, string>>[] {
+  if (selection && "embeddingJobId" in selection) {
+    return options.embeddingJobIds.map((embeddingJobId) => ({ embeddingJobId }));
+  }
+  if (selection && "status" in selection && options.indexVersionStatus) {
+    return [{ status: options.indexVersionStatus }];
+  }
+
+  return [];
 }
 
 /** Returns canned select rows for stale import reconciliation tests. */

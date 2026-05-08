@@ -392,6 +392,9 @@ importers:
       '@repo/github':
         specifier: workspace:*
         version: link:../github
+      '@repo/index-importer':
+        specifier: workspace:*
+        version: link:../index-importer
       '@repo/llm-gateway':
         specifier: workspace:*
         version: link:../llm-gateway
