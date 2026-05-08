@@ -792,6 +792,14 @@ describe("acquireReviewRepositoryWorkspace", () => {
             if (args[2] === "rev-parse") {
               return `${commitSha}\n`;
             }
+            if (args[2] === "worktree" && args[3] === "add") {
+              await mkdir(worktreePath, { recursive: true });
+              return "";
+            }
+            if (args[2] === "worktree" && args[3] === "remove") {
+              await rm(worktreePath, { force: true, recursive: true });
+              return "";
+            }
             return "";
           },
           leaseIdFactory: () => "lease_review",

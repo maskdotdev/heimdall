@@ -129,6 +129,12 @@ export type GitCommandRunnerOptions = {
   readonly timeoutMs?: number;
 };
 
+/** Filesystem usage boundary for quota checks. */
+export type DiskUsageProvider = {
+  /** Returns the total bytes used by a filesystem path without following symlink targets. */
+  readonly getUsageBytes: (path: string) => Promise<number>;
+};
+
 /** Options used when creating the default Git command runner. */
 export type CreateGitRunnerOptions = {
   /** Git binary path, or another binary in tests. */
@@ -299,6 +305,8 @@ export type CreateRepositoryWorktreeLeaseInput = {
 
 /** Dependencies for detached worktree lease creation. */
 export type CreateRepositoryWorktreeLeaseDependencies = {
+  /** Optional disk usage provider used to validate workspace quotas. */
+  readonly diskUsageProvider?: DiskUsageProvider;
   /** Optional Git command runner for tests or hosted runtimes. */
   readonly gitRunner?: GitCommandRunner;
   /** Optional lease ID factory for deterministic tests. */
@@ -325,6 +333,8 @@ export type RepositoryWorktreeLease = {
   readonly expiresAt: string;
   /** Purpose attached to the lease. */
   readonly purpose: RepositoryWorktreePurpose;
+  /** Total filesystem bytes measured before the lease was returned. */
+  readonly workspaceSizeBytes: number;
   /** Removes the worktree and prunes stale mirror metadata. */
   readonly release: () => Promise<void>;
 };
@@ -778,6 +788,7 @@ export async function createRepositoryWorktreeLease(
 
   const git = dependencies.gitRunner ?? runGit;
   let worktreeCreated = false;
+  let workspaceSizeBytes = 0;
   try {
     await withRepoSyncLock(
       {
@@ -802,6 +813,11 @@ export async function createRepositoryWorktreeLease(
       commitSha: input.commitSha,
       gitRunner: git,
       timeoutMs: input.config.defaultWorktreeTimeoutMs,
+      workspacePath,
+    });
+    workspaceSizeBytes = await validateRepositoryWorktreeSize({
+      diskUsageProvider: dependencies.diskUsageProvider ?? defaultDiskUsageProvider,
+      maxWorkspaceBytes: input.config.maxWorkspaceBytes,
       workspacePath,
     });
   } catch (error) {
@@ -856,6 +872,7 @@ export async function createRepositoryWorktreeLease(
       released = true;
     },
     repoId: input.repoId,
+    workspaceSizeBytes,
   };
 }
 
@@ -911,6 +928,50 @@ async function verifyRepositoryWorktreeHead(
   if (checkedOutSha !== input.commitSha) {
     throw new Error(`Repository worktree resolved ${checkedOutSha} instead of ${input.commitSha}.`);
   }
+}
+
+/** Input used to validate worktree disk usage. */
+type ValidateRepositoryWorktreeSizeInput = {
+  /** Disk usage boundary used to measure the worktree. */
+  readonly diskUsageProvider: DiskUsageProvider;
+  /** Maximum allowed worktree bytes. */
+  readonly maxWorkspaceBytes: number;
+  /** Worktree path that must stay under the configured quota. */
+  readonly workspacePath: string;
+};
+
+/** Measures a worktree and rejects it when it exceeds the configured quota. */
+async function validateRepositoryWorktreeSize(
+  input: ValidateRepositoryWorktreeSizeInput,
+): Promise<number> {
+  const workspaceSizeBytes = await input.diskUsageProvider.getUsageBytes(input.workspacePath);
+  if (workspaceSizeBytes > input.maxWorkspaceBytes) {
+    throw new Error(
+      `Repository worktree uses ${workspaceSizeBytes} bytes, exceeding configured max ${input.maxWorkspaceBytes} bytes.`,
+    );
+  }
+
+  return workspaceSizeBytes;
+}
+
+/** Default disk usage provider backed by safe filesystem traversal. */
+const defaultDiskUsageProvider: DiskUsageProvider = {
+  getUsageBytes: async (path) => getFilesystemUsageBytes(path),
+};
+
+/** Returns filesystem usage for a path without following symlink targets. */
+async function getFilesystemUsageBytes(path: string): Promise<number> {
+  const stats = await lstat(path);
+  if (!stats.isDirectory()) {
+    return stats.size;
+  }
+
+  const entries = await readdir(path, { withFileTypes: true });
+  const childUsageBytes = await Promise.all(
+    entries.map((entry) => getFilesystemUsageBytes(join(path, entry.name))),
+  );
+
+  return stats.size + childUsageBytes.reduce((total, bytes) => total + bytes, 0);
 }
 
 /** Input used when removing a worktree that failed validation. */

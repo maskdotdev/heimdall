@@ -646,6 +646,9 @@ describe("repo sync workspace", () => {
         repoId: "repo_123",
       },
       {
+        diskUsageProvider: {
+          getUsageBytes: async () => 256,
+        },
         gitRunner,
         now: () => new Date("2026-01-01T00:00:00.000Z"),
       },
@@ -660,6 +663,7 @@ describe("repo sync workspace", () => {
       path: worktreePath,
       purpose: "index",
       repoId: "repo_123",
+      workspaceSizeBytes: 256,
     });
     await expect(access(worktreePath)).resolves.toBeUndefined();
 
@@ -742,6 +746,56 @@ describe("repo sync workspace", () => {
         { gitRunner },
       ),
     ).rejects.toThrow(`Repository worktree resolved ${wrongCommitSha} instead of ${commitSha}.`);
+
+    await expect(access(worktreePath)).rejects.toThrow();
+    expect(mutableCommands).toEqual([
+      ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", worktreePath, "rev-parse", "HEAD"],
+      ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+      ["-C", mirrorPath, "worktree", "prune"],
+    ]);
+  });
+
+  it("removes worktree leases when workspace quota is exceeded", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-worktree-quota-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, maxWorkspaceBytes: 512 });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[2] === "worktree" && args[3] === "add") {
+        await mkdir(worktreePath, { recursive: true });
+        return "";
+      }
+      if (args[2] === "rev-parse") {
+        return `${commitSha}\n`;
+      }
+      if (args[2] === "worktree" && args[3] === "remove") {
+        await rm(worktreePath, { force: true, recursive: true });
+      }
+      return "";
+    };
+
+    await expect(
+      createRepositoryWorktreeLease(
+        {
+          commitSha,
+          config,
+          leaseId: "lease_123",
+          mirrorPath,
+          purpose: "review",
+          repoId: "repo_123",
+        },
+        {
+          diskUsageProvider: {
+            getUsageBytes: async () => 1_024,
+          },
+          gitRunner,
+        },
+      ),
+    ).rejects.toThrow("exceeding configured max 512 bytes");
 
     await expect(access(worktreePath)).rejects.toThrow();
     expect(mutableCommands).toEqual([
