@@ -29,12 +29,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   acquireWorkerRepositoryWorkspace,
   cleanupExpiredReviewArtifacts,
+  cleanupWorkerRepoSyncWorktrees,
   createRedisPublishThrottle,
   createWorkerEmbeddingProviderFromEnvironment,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
   createWorkerLlmBudgetFromEnvironment,
   createWorkerLlmGatewayFromEnvironment,
+  createWorkerRepoSyncCleanupLimitFromEnvironment,
   createWorkerReviewIndexDependencyModeFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
@@ -244,6 +246,53 @@ describe("acquireWorkerRepositoryWorkspace", () => {
     } finally {
       await rm(cacheRoot, { force: true, recursive: true });
     }
+  });
+});
+
+describe("cleanupWorkerRepoSyncWorktrees", () => {
+  it("passes startup cleanup limits into repo-sync expired worktree cleanup", async () => {
+    const config = createRepoSyncConfig({ cacheRoot: "/tmp/heimdall-worker-cleanup" });
+    const cleanupInputs: unknown[] = [];
+
+    const result = await cleanupWorkerRepoSyncWorktrees({
+      cleanupExpiredWorktrees: async (input) => {
+        cleanupInputs.push(input);
+        return {
+          cutoff: "2026-05-08T00:00:00.000Z",
+          dryRun: false,
+          expiredWorktreeCount: 2,
+          failures: [],
+          prunedMirrorCount: 1,
+          removedWorktreeCount: 2,
+          scannedWorktreeCount: 3,
+          skippedWorktreeCount: 1,
+        };
+      },
+      env: {
+        REPO_SYNC_EXPIRED_WORKTREE_CLEANUP_LIMIT: "25",
+      },
+      repoSyncConfig: config,
+    });
+
+    expect(result.removedWorktreeCount).toBe(2);
+    expect(cleanupInputs).toEqual([
+      {
+        config,
+        limit: 25,
+      },
+    ]);
+  });
+});
+
+describe("createWorkerRepoSyncCleanupLimitFromEnvironment", () => {
+  it("prefers the worker-specific expired worktree cleanup limit", () => {
+    expect(
+      createWorkerRepoSyncCleanupLimitFromEnvironment({
+        HEIMDALL_REPO_SYNC_EXPIRED_WORKTREE_CLEANUP_LIMIT: "9",
+        REPO_SYNC_CLEANUP_LIMIT: "3",
+        REPO_SYNC_EXPIRED_WORKTREE_CLEANUP_LIMIT: "5",
+      }),
+    ).toBe(9);
   });
 });
 

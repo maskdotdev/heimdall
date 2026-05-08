@@ -140,6 +140,9 @@ import {
 import {
   type AcquireRepositoryWorkspaceDependencies,
   acquireRepositoryWorkspace,
+  type CleanupExpiredRepositoryWorktreesInput,
+  type CleanupExpiredRepositoryWorktreesResult,
+  cleanupExpiredRepositoryWorktrees,
   createRepoSyncConfig,
   type RepoSyncConfig,
 } from "@repo/repo-sync";
@@ -220,6 +223,23 @@ export type WorkerRepositoryWorkspaceLease = {
 export type WorkerRepositoryWorkspaceAcquirer = (
   input: WorkerRepositoryWorkspaceAcquireInput,
 ) => Promise<WorkerRepositoryWorkspaceLease>;
+
+/** Worker-level repo-sync cleanup runner used by startup maintenance. */
+export type WorkerRepoSyncCleanupRunner = (
+  input: CleanupExpiredRepositoryWorktreesInput,
+) => Promise<CleanupExpiredRepositoryWorktreesResult>;
+
+/** Input used by worker startup repo-sync cleanup. */
+export type WorkerRepoSyncStartupCleanupInput = {
+  /** Environment values used to parse cleanup settings. */
+  readonly env: WorkerSecretEnvironment;
+  /** Optional structured logger for startup cleanup summaries. */
+  readonly logger?: StructuredTelemetryLogger;
+  /** Repo-sync cache/runtime configuration. */
+  readonly repoSyncConfig: RepoSyncConfig;
+  /** Optional cleanup runner for tests. */
+  readonly cleanupExpiredWorktrees?: WorkerRepoSyncCleanupRunner;
+};
 
 /** Options used to create worker job handlers. */
 export type CreateWorkerHandlersOptions = {
@@ -847,6 +867,49 @@ export async function acquireWorkerRepositoryWorkspace(
   };
 }
 
+/** Cleans expired repo-sync worktrees during worker startup. */
+export async function cleanupWorkerRepoSyncWorktrees(
+  input: WorkerRepoSyncStartupCleanupInput,
+): Promise<CleanupExpiredRepositoryWorktreesResult> {
+  const cleanupLimit = createWorkerRepoSyncCleanupLimitFromEnvironment(input.env);
+  const cleanupExpiredWorktrees =
+    input.cleanupExpiredWorktrees ??
+    ((cleanupInput: CleanupExpiredRepositoryWorktreesInput) =>
+      cleanupExpiredRepositoryWorktrees(cleanupInput));
+  const result = await cleanupExpiredWorktrees({
+    config: input.repoSyncConfig,
+    ...(cleanupLimit ? { limit: cleanupLimit } : {}),
+  });
+
+  if (result.removedWorktreeCount > 0 || result.failures.length > 0) {
+    input.logger?.warn("repo-sync expired worktree cleanup completed", {
+      attributes: {
+        "event.name": "worker.repo_sync.expired_worktree_cleanup",
+        "repo_sync.cleanup.dry_run": result.dryRun,
+        "repo_sync.cleanup.expired_worktree_count": result.expiredWorktreeCount,
+        "repo_sync.cleanup.failure_count": result.failures.length,
+        "repo_sync.cleanup.pruned_mirror_count": result.prunedMirrorCount,
+        "repo_sync.cleanup.removed_worktree_count": result.removedWorktreeCount,
+        "repo_sync.cleanup.scanned_worktree_count": result.scannedWorktreeCount,
+        "repo_sync.cleanup.skipped_worktree_count": result.skippedWorktreeCount,
+      },
+    });
+  }
+
+  return result;
+}
+
+/** Parses the optional worker startup repo-sync cleanup limit from environment. */
+export function createWorkerRepoSyncCleanupLimitFromEnvironment(
+  env: WorkerSecretEnvironment,
+): number | undefined {
+  return (
+    optionalPositiveInteger(env.HEIMDALL_REPO_SYNC_EXPIRED_WORKTREE_CLEANUP_LIMIT) ??
+    optionalPositiveInteger(env.REPO_SYNC_EXPIRED_WORKTREE_CLEANUP_LIMIT) ??
+    optionalPositiveInteger(env.REPO_SYNC_CLEANUP_LIMIT)
+  );
+}
+
 /** Result returned after requeueing reviews that were waiting for a completed index. */
 export type EnqueueWaitingReviewRunsForIndexResult = {
   /** Number of waiting review runs found for the completed index commit. */
@@ -1314,6 +1377,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const publishThrottle = createRedisPublishThrottle(workerConnection);
   const indexerTimeoutMs = optionalPositiveInteger(process.env.INDEXER_TIMEOUT_MS);
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
+  const repoSyncConfig = createRepoSyncConfig({
+    ...(workspaceRoot ? { cacheRoot: workspaceRoot } : {}),
+  });
   const indexArtifactRoot = process.env.INDEX_ARTIFACT_ROOT ?? DEFAULT_INDEX_ARTIFACT_ROOT;
   const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
   const reviewIndexDependencyMode = createWorkerReviewIndexDependencyModeFromEnvironment(
@@ -1326,6 +1392,11 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ...(workspaceRoot ? { workspaceRoot } : {}),
     }) ?? createTypeScriptIndexerDriver();
   await verifyWorkerIndexerCapabilities(indexerDriver);
+  await cleanupWorkerRepoSyncWorktrees({
+    env: process.env,
+    logger: observability.logger,
+    repoSyncConfig,
+  });
   const processor = createDurableJobProcessor({
     store,
     handlers: createWorkerHandlers({
@@ -1337,6 +1408,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       ...(reviewIndexDependencyMode ? { reviewIndexDependencyMode } : {}),
       ...(artifactPayloadStore ? { artifactPayloadStore } : {}),
       publishThrottle,
+      repoSyncConfig,
       ...(workspaceRoot ? { workspaceRoot } : {}),
       indexArtifactRoot,
       indexerDriver,
