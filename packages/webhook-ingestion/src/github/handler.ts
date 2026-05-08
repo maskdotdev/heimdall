@@ -10,9 +10,8 @@ import {
   backgroundJobs,
   orgSettings,
   orgs,
+  PullRequestRepository,
   providerInstallations,
-  pullRequestSnapshots,
-  pullRequests,
   repositories,
   repositorySettings,
   WebhookRepository,
@@ -491,54 +490,10 @@ async function persistPullRequest(
   tx: Transaction,
   normalizedPullRequest: NormalizedGitHubPullRequest,
 ): Promise<void> {
-  const { snapshot } = normalizedPullRequest;
-  const now = new Date();
-
-  await tx
-    .insert(pullRequestSnapshots)
-    .values({
-      ...snapshot,
-      fetchedAt: new Date(snapshot.fetchedAt),
-    })
-    .onConflictDoNothing();
-
-  await tx
-    .insert(pullRequests)
-    .values({
-      pullRequestId: normalizedPullRequest.pullRequestId,
-      repoId: snapshot.repoId,
-      provider: snapshot.provider,
-      providerPullRequestId: snapshot.providerPullRequestId,
-      pullRequestNumber: snapshot.pullRequestNumber,
-      title: snapshot.title,
-      authorLogin: snapshot.authorLogin,
-      state: snapshot.state,
-      isDraft: snapshot.isDraft,
-      baseRef: snapshot.baseRef,
-      baseSha: snapshot.baseSha,
-      headRef: snapshot.headRef,
-      headSha: snapshot.headSha,
-      latestSnapshotId: snapshot.snapshotId,
-      metadata: snapshot.providerMetadata,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [pullRequests.repoId, pullRequests.pullRequestNumber],
-      set: {
-        title: snapshot.title,
-        authorLogin: snapshot.authorLogin,
-        state: snapshot.state,
-        isDraft: snapshot.isDraft,
-        baseRef: snapshot.baseRef,
-        baseSha: snapshot.baseSha,
-        headRef: snapshot.headRef,
-        headSha: snapshot.headSha,
-        latestSnapshotId: snapshot.snapshotId,
-        metadata: snapshot.providerMetadata,
-        updatedAt: now,
-      },
-    });
+  await new PullRequestRepository(tx).upsertPullRequest({
+    pullRequestId: normalizedPullRequest.pullRequestId,
+    snapshot: normalizedPullRequest.snapshot,
+  });
 }
 
 async function persistJob(tx: Transaction, job: PlannedJob): Promise<void> {
