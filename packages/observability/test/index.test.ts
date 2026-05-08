@@ -334,6 +334,8 @@ describe("structured telemetry metrics", () => {
       reviewPassCandidatesTotal: "code_review_agent.review.pass_candidates_total",
       reviewPassDurationMs: "code_review_agent.review.pass_duration_ms",
       reviewPassFailuresTotal: "code_review_agent.review.pass_failures_total",
+      reviewStageDurationMs: "code_review_agent.review.stage_duration_ms",
+      reviewStagesTotal: "code_review_agent.review.stages_total",
       rulesDecisionsTotal: "code_review_agent.rules.decisions_total",
       rulesPolicyCompileDurationMs: "code_review_agent.rules.policy_compile_duration_ms",
       rulesPolicyCompilationsTotal: "code_review_agent.rules.policy_compilations_total",

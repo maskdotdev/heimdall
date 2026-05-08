@@ -43,6 +43,7 @@ import {
 } from "@repo/llm-gateway";
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import {
+  OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
   type StructuredTelemetryLogger,
   type TelemetryAttributeValue,
@@ -65,7 +66,12 @@ import {
   staticAnalysisReviewPass,
   validateCandidateFindings,
 } from "@repo/review-engine";
-import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
+import {
+  buildReviewPolicySnapshot,
+  type ReviewPolicySnapshot,
+  type ShouldReviewPrDecision,
+  shouldReviewPr,
+} from "@repo/rules";
 import {
   type RetentionDecision,
   redactPromptSecrets,
@@ -214,6 +220,20 @@ export type ReviewIndexDependencyMode = "fallback" | "pause";
 
 /** Product-safe reasons review orchestration can skip publisher handoff. */
 export type ReviewPublishSkipReason = "dry_run" | "no_planned_publish_operations";
+
+/** Review gate decision recorded before expensive review work starts. */
+export type ReviewGateDecision = {
+  /** Policy action used to evaluate the gate. */
+  readonly action: string;
+  /** Stable reason code explaining the gate result. */
+  readonly reasonCode: string;
+  /** Repository review policy active for this run. */
+  readonly reviewPolicy: ShouldReviewPrDecision["reviewPolicy"];
+  /** Whether the review pipeline should continue. */
+  readonly shouldReview: boolean;
+  /** Optional rules-engine trace for policy-driven gate decisions. */
+  readonly trace?: ShouldReviewPrDecision["trace"] | undefined;
+};
 
 /** PR snapshot fetch result used by review orchestration. */
 type ReviewSnapshotFetchResult = {
@@ -381,6 +401,7 @@ export type ReviewOrchestrationStage = "index" | "retrieval" | "review" | "valid
 export type ReviewTelemetryStage =
   | "quota"
   | "snapshot"
+  | "gate"
   | "workspace"
   | "static_analysis"
   | "index"
@@ -411,6 +432,9 @@ export type ReviewStageLogStatus =
   | "queued"
   | "paused"
   | "degraded";
+
+/** Terminal or decision status emitted on review stage metrics. */
+export type ReviewStageMetricStatus = Exclude<ReviewStageLogStatus, "started">;
 
 /** Product-safe context attached to every structured review stage log. */
 export type ReviewStageLogContext = {
@@ -579,6 +603,72 @@ export async function runPullRequestReview(
   });
 
   try {
+    currentStage = "gate";
+    const gateDecision = decideReviewGate({
+      dependencies,
+      input,
+      policySnapshot: policyResult.snapshot,
+      snapshot,
+    });
+    recordReviewTelemetryStage(
+      dependencies,
+      "gate",
+      {
+        "review.gate_reason": gateDecision.reasonCode,
+        "review.review_policy": gateDecision.reviewPolicy,
+        "review.stage_status": gateDecision.shouldReview ? "completed" : "skipped",
+      },
+      { logContext: reviewStageLogContext },
+    );
+    await reviewRepository.insertStageEvent({
+      reviewRunId,
+      stage: "gate",
+      status: gateDecision.shouldReview ? "completed" : "skipped",
+      metadata: {
+        action: gateDecision.action,
+        reasonCode: gateDecision.reasonCode,
+        reviewPolicy: gateDecision.reviewPolicy,
+        ...(gateDecision.trace ? { trace: gateDecision.trace } : {}),
+      },
+    });
+    if (!gateDecision.shouldReview) {
+      const skippedAt = now().toISOString();
+      reviewRun = await reviewRepository.upsertReviewRun({
+        ...reviewRun,
+        completedAt: skippedAt,
+        status: "skipped",
+        summary: reviewGateSkipSummary(gateDecision.reasonCode),
+        updatedAt: skippedAt,
+        metadata: {
+          ...reviewRun.metadata,
+          currentStage: "gate",
+          gate: {
+            action: gateDecision.action,
+            reasonCode: gateDecision.reasonCode,
+            reviewPolicy: gateDecision.reviewPolicy,
+            ...(gateDecision.trace ? { trace: gateDecision.trace } : {}),
+          },
+          planSnapshot: planSnapshotMetadata(planSnapshot),
+          policySnapshot: policySnapshotMetadata(policyResult.snapshot),
+        },
+      });
+      await reviewRepository.upsertReviewRunMetrics(reviewRunMetricsFromReviewRun(reviewRun));
+
+      const result = {
+        reviewRunId: reviewRun.reviewRunId,
+        snapshotId: snapshot.snapshotId,
+        candidateFindingCount: 0,
+        validatedFindingCount: 0,
+      };
+      endPullRequestReviewTelemetrySpan(reviewSpan, {
+        currentStage,
+        outcome: "skipped",
+        result,
+      });
+
+      return result;
+    }
+
     currentStage = "quota";
     quotaReservation = await runReviewTelemetryStage(
       dependencies,
@@ -1810,7 +1900,10 @@ export function startReviewTelemetryStageSpan(
 
 /** Records an instantaneous review stage span for skipped or decision-only stages. */
 function recordReviewTelemetryStage(
-  dependencies: Pick<ReviewOrchestratorDependencies, "logger" | "traceContext" | "traces">,
+  dependencies: Pick<
+    ReviewOrchestratorDependencies,
+    "logger" | "metrics" | "traceContext" | "traces"
+  >,
   stage: ReviewTelemetryStage,
   attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
   options: {
@@ -1826,6 +1919,7 @@ function recordReviewTelemetryStage(
   });
   const stageStatus = reviewStageLogStatusFromAttributes(attributes);
   logReviewStage(dependencies.logger, stage, stageStatus, options.logContext, attributes);
+  recordReviewStageMetrics(dependencies.metrics, stage, stageStatus, 0);
   span?.end({
     attributes: {
       "review.stage_status": "completed",
@@ -1836,11 +1930,15 @@ function recordReviewTelemetryStage(
 
 /** Runs one review stage operation and records success or failure as a telemetry span. */
 async function runReviewTelemetryStage<T>(
-  dependencies: Pick<ReviewOrchestratorDependencies, "logger" | "traceContext" | "traces">,
+  dependencies: Pick<
+    ReviewOrchestratorDependencies,
+    "logger" | "metrics" | "traceContext" | "traces"
+  >,
   stage: ReviewTelemetryStage,
   operation: () => Promise<T>,
   options: ReviewTelemetryStageOperationOptions<T> = {},
 ): Promise<T> {
+  const startedAtMs = Date.now();
   const span = startReviewTelemetryStageSpan({
     attributes: options.attributes,
     stage,
@@ -1853,6 +1951,7 @@ async function runReviewTelemetryStage<T>(
     const result = await operation();
     const endAttributes = options.endAttributes?.(result) ?? {};
     logReviewStage(dependencies.logger, stage, "completed", options.logContext, endAttributes);
+    recordReviewStageMetrics(dependencies.metrics, stage, "completed", Date.now() - startedAtMs);
     span?.end({
       attributes: {
         ...endAttributes,
@@ -1862,12 +1961,28 @@ async function runReviewTelemetryStage<T>(
     return result;
   } catch (error) {
     logReviewStage(dependencies.logger, stage, "failed", options.logContext, undefined, error);
+    recordReviewStageMetrics(dependencies.metrics, stage, "failed", Date.now() - startedAtMs);
     span?.end({
       attributes: { "review.stage_status": "failed" },
       error,
     });
     throw error;
   }
+}
+
+/** Records low-cardinality counter and duration metrics for one review pipeline stage. */
+export function recordReviewStageMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  stage: ReviewTelemetryStage,
+  status: ReviewStageMetricStatus,
+  durationMs: number,
+): void {
+  const labels = { stage, status };
+  metrics?.count(OBSERVABILITY_METRIC_NAMES.reviewStagesTotal, { labels });
+  metrics?.histogram(OBSERVABILITY_METRIC_NAMES.reviewStageDurationMs, Math.max(0, durationMs), {
+    labels,
+    unit: "ms",
+  });
 }
 
 /** Builds the product-safe stage log context for one review job. */
@@ -1946,7 +2061,7 @@ function logReviewStage(
 /** Normalizes stage status attributes into the structured log status vocabulary. */
 function reviewStageLogStatusFromAttributes(
   attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
-): ReviewStageLogStatus {
+): ReviewStageMetricStatus {
   const value = attributes["review.stage_status"];
   switch (value) {
     case "skipped":
@@ -2317,7 +2432,7 @@ async function stopReviewRunIfStale(input: {
   /** Review orchestration dependencies used for provider checks and telemetry. */
   readonly dependencies: Pick<
     ReviewOrchestratorDependencies,
-    "gitProvider" | "logger" | "traceContext" | "traces"
+    "gitProvider" | "logger" | "metrics" | "traceContext" | "traces"
   >;
   /** Product-safe context attached to structured staleness stage logs. */
   readonly logContext: ReviewStageLogContext;
@@ -2484,6 +2599,91 @@ async function loadGitHubRepositoryRef(
     repo: repository.repo,
     providerRepoId: repository.providerRepoId,
   };
+}
+
+/** Decides whether a fetched pull request snapshot can proceed to expensive review work. */
+export function decideReviewGate(input: {
+  /** Review job input that requested the run. */
+  readonly input: Pick<ReviewPullRequestInput, "trigger">;
+  /** Review orchestration dependencies used for rules telemetry. */
+  readonly dependencies: Pick<
+    ReviewOrchestratorDependencies,
+    "metrics" | "traceContext" | "traces"
+  >;
+  /** Immutable policy snapshot compiled for the run. */
+  readonly policySnapshot: ReviewPolicySnapshot;
+  /** Live provider snapshot fetched for the run. */
+  readonly snapshot: PullRequestSnapshot;
+}): ReviewGateDecision {
+  const action = reviewGateActionFromTrigger(input.input.trigger);
+  if (input.snapshot.state !== "open") {
+    return {
+      action,
+      reasonCode: "pull_request_not_open",
+      reviewPolicy: input.policySnapshot.effectivePolicy.reviewPolicy,
+      shouldReview: false,
+    };
+  }
+
+  if (input.snapshot.changedFileCount === 0 || input.snapshot.changedFiles.length === 0) {
+    return {
+      action,
+      reasonCode: "no_changed_files",
+      reviewPolicy: input.policySnapshot.effectivePolicy.reviewPolicy,
+      shouldReview: false,
+    };
+  }
+
+  const decision = shouldReviewPr({
+    action,
+    authorLogin: input.snapshot.authorLogin,
+    isDraft: input.snapshot.isDraft,
+    labels: input.snapshot.labels,
+    ...(input.dependencies.metrics ? { metrics: input.dependencies.metrics } : {}),
+    policy: input.policySnapshot.effectivePolicy,
+    ...(input.dependencies.traceContext ? { traceContext: input.dependencies.traceContext } : {}),
+    ...(input.dependencies.traces ? { traces: input.dependencies.traces } : {}),
+  });
+
+  return {
+    action,
+    reasonCode: decision.reasonCode,
+    reviewPolicy: decision.reviewPolicy,
+    shouldReview: decision.shouldReview,
+    trace: decision.trace,
+  };
+}
+
+/** Maps durable review triggers to the policy action used by the cheap review gate. */
+export function reviewGateActionFromTrigger(trigger: ReviewTrigger): string {
+  if (trigger === "webhook") {
+    return "synchronize";
+  }
+
+  return "manual";
+}
+
+/** Builds a clear terminal review summary for one gate skip reason. */
+export function reviewGateSkipSummary(reasonCode: string): string {
+  switch (reasonCode) {
+    case "pull_request_not_open":
+      return "Review skipped because the pull request is no longer open.";
+    case "no_changed_files":
+      return "Review skipped because the pull request has no changed files.";
+    case "draft_pr_skipped":
+      return "Review skipped because the pull request is a draft.";
+    case "missing_required_label":
+      return "Review skipped because the pull request is missing the required review label.";
+    case "blocked_label_present":
+      return "Review skipped because the pull request has a blocked label.";
+    case "author_excluded":
+      return "Review skipped because the pull request author is excluded by policy.";
+    case "repo_disabled":
+    case "review_policy_disabled":
+      return "Review skipped because repository review is disabled.";
+    default:
+      return `Review skipped by policy reason: ${reasonCode}.`;
+  }
 }
 
 /** Verifies that a live fetched snapshot still represents the queued review job. */

@@ -4,8 +4,11 @@ import {
   createMemoryTelemetrySpanSink,
   createTelemetrySpanRecorder,
   loadObservabilityConfig,
+  OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricRecorder,
 } from "@repo/observability";
+import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
 import { describe, expect, it } from "vitest";
 import {
   assertSnapshotMatchesJob,
@@ -14,10 +17,13 @@ import {
   createIndexDependencyJobEnvelope,
   createIndexDependencyJobKey,
   createStaticAnalysisRequestForReview,
+  decideReviewGate,
   ReviewIndexDependencyPendingError,
   ReviewInputSnapshotMismatchError,
   type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
+  recordReviewStageMetrics,
+  reviewGateSkipSummary,
   reviewMemoryFactFromRow,
   reviewPublishSkipReason,
   reviewRunStatusForStage,
@@ -131,6 +137,66 @@ describe("checkReviewRunCurrent", () => {
         currentCheckInput,
       ),
     ).resolves.toBe("unknown");
+  });
+});
+
+describe("decideReviewGate", () => {
+  it("allows an open reviewable pull request", () => {
+    expect(
+      decideReviewGate({
+        dependencies: {},
+        input: reviewInput,
+        policySnapshot: reviewPolicySnapshot(),
+        snapshot: reviewablePullRequestSnapshot(),
+      }),
+    ).toMatchObject({
+      action: "synchronize",
+      reasonCode: "allowed",
+      shouldReview: true,
+    });
+  });
+
+  it("skips draft pull requests with a clear policy reason", () => {
+    expect(
+      decideReviewGate({
+        dependencies: {},
+        input: reviewInput,
+        policySnapshot: reviewPolicySnapshot(),
+        snapshot: reviewablePullRequestSnapshot({ isDraft: true }),
+      }),
+    ).toMatchObject({
+      reasonCode: "draft_pr_skipped",
+      shouldReview: false,
+    });
+    expect(reviewGateSkipSummary("draft_pr_skipped")).toBe(
+      "Review skipped because the pull request is a draft.",
+    );
+  });
+
+  it("skips pull requests that are closed or have no changed files", () => {
+    expect(
+      decideReviewGate({
+        dependencies: {},
+        input: reviewInput,
+        policySnapshot: reviewPolicySnapshot(),
+        snapshot: reviewablePullRequestSnapshot({ state: "closed" }),
+      }),
+    ).toMatchObject({
+      reasonCode: "pull_request_not_open",
+      shouldReview: false,
+    });
+
+    expect(
+      decideReviewGate({
+        dependencies: {},
+        input: reviewInput,
+        policySnapshot: reviewPolicySnapshot(),
+        snapshot: pullRequestSnapshot,
+      }),
+    ).toMatchObject({
+      reasonCode: "no_changed_files",
+      shouldReview: false,
+    });
   });
 });
 
@@ -262,6 +328,31 @@ describe("reviewStageLogAttributes", () => {
       "review.stage": "retrieval",
       "review.stage_status": "completed",
     });
+  });
+});
+
+describe("recordReviewStageMetrics", () => {
+  it("records low-cardinality stage counters and durations", () => {
+    const records: RecordedMetric[] = [];
+    const metrics = createRecordingMetrics(records);
+
+    recordReviewStageMetrics(metrics, "retrieval", "completed", 42);
+
+    expect(records).toEqual([
+      {
+        kind: "counter",
+        labels: { stage: "retrieval", status: "completed" },
+        name: OBSERVABILITY_METRIC_NAMES.reviewStagesTotal,
+        value: 1,
+      },
+      {
+        kind: "histogram",
+        labels: { stage: "retrieval", status: "completed" },
+        name: OBSERVABILITY_METRIC_NAMES.reviewStageDurationMs,
+        unit: "ms",
+        value: 42,
+      },
+    ]);
   });
 });
 
@@ -422,6 +513,54 @@ function providerReturningSnapshot(snapshot: PullRequestSnapshot): {
   };
 }
 
+/** Builds a default review policy snapshot for gate tests. */
+function reviewPolicySnapshot(): ReviewPolicySnapshot {
+  return buildReviewPolicySnapshot({
+    repository: {
+      enabled: true,
+      orgId: "org_test",
+      repoId: "repo_test",
+    },
+    timestamp: "2026-05-07T12:00:00.000Z",
+  }).snapshot;
+}
+
+/** Builds a pull request snapshot with one reviewable changed file. */
+function reviewablePullRequestSnapshot(
+  overrides: Partial<PullRequestSnapshot> = {},
+): PullRequestSnapshot {
+  return {
+    ...pullRequestSnapshot,
+    additions: 1,
+    changedFileCount: 1,
+    changedFiles: [
+      {
+        additions: 1,
+        changes: 1,
+        deletions: 0,
+        hunks: [
+          {
+            header: "@@ -1,1 +1,1 @@",
+            hunkId: "hunk_1",
+            lines: [{ content: "export const value = 1;", kind: "addition", newLine: 1 }],
+            newLines: 1,
+            newStart: 1,
+            oldLines: 0,
+            oldStart: 0,
+          },
+        ],
+        isBinary: false,
+        isGenerated: false,
+        isTest: false,
+        language: "typescript",
+        path: "src/value.ts",
+        status: "modified",
+      },
+    ],
+    ...overrides,
+  };
+}
+
 /** Creates a durable memory fact row with suppression metadata. */
 function memoryFactRowFixture(overrides: Partial<ReviewMemoryFactRow> = {}): ReviewMemoryFactRow {
   const now = new Date("2026-05-07T12:00:00.000Z");
@@ -447,5 +586,50 @@ function memoryFactRowFixture(overrides: Partial<ReviewMemoryFactRow> = {}): Rev
     createdAt: now,
     updatedAt: now,
     ...overrides,
+  };
+}
+
+/** Product-safe metric record captured by review orchestrator unit tests. */
+type RecordedMetric = {
+  /** Metric kind emitted by the recorder. */
+  readonly kind: "counter" | "gauge" | "histogram";
+  /** Low-cardinality metric labels. */
+  readonly labels?: Readonly<Record<string, unknown>> | undefined;
+  /** Stable metric name. */
+  readonly name: string;
+  /** Optional metric unit. */
+  readonly unit?: string | undefined;
+  /** Numeric metric value. */
+  readonly value: number;
+};
+
+/** Creates a test metric recorder that captures all emitted metrics in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        kind: "counter",
+        labels: options?.labels,
+        name,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: (name, value, options) => {
+      records.push({
+        kind: "gauge",
+        labels: options?.labels,
+        name,
+        value,
+      });
+    },
+    histogram: (name, value, options) => {
+      records.push({
+        kind: "histogram",
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
   };
 }
