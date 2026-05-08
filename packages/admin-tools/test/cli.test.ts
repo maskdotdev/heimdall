@@ -46,6 +46,52 @@ describe("parseAdminCliCommand", () => {
       reviewRunId: "rrn_1",
     });
 
+    expect(parseAdminCliCommand(["webhook", "inspect", "wh_1", "--json"])).toEqual({
+      json: true,
+      kind: "webhook_inspect",
+      webhookEventId: "wh_1",
+    });
+
+    expect(
+      parseAdminCliCommand([
+        "webhook",
+        "retry",
+        "wh_1",
+        "--execute",
+        "--confirmation-token",
+        "sha256:webhook",
+      ]),
+    ).toEqual({
+      confirmationToken: "sha256:webhook",
+      execute: true,
+      json: false,
+      kind: "webhook_retry",
+      webhookEventId: "wh_1",
+    });
+
+    expect(parseAdminCliCommand(["job", "inspect", "job_1", "--json"])).toEqual({
+      backgroundJobId: "job_1",
+      json: true,
+      kind: "job_inspect",
+    });
+
+    expect(
+      parseAdminCliCommand([
+        "job",
+        "retry",
+        "job_1",
+        "--execute",
+        "--confirmation-token",
+        "sha256:job",
+      ]),
+    ).toEqual({
+      backgroundJobId: "job_1",
+      confirmationToken: "sha256:job",
+      execute: true,
+      json: false,
+      kind: "job_retry",
+    });
+
     expect(parseAdminCliCommand(["usage", "inspect", "rrn_1", "--json"])).toEqual({
       json: true,
       kind: "usage_inspect",
@@ -92,6 +138,10 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin review inspect <reviewRunId>");
     expect(adminCliUsage()).toContain("admin review replay <reviewRunId> --stage retrieval");
     expect(adminCliUsage()).toContain("admin review replay <reviewRunId> --stage validation");
+    expect(adminCliUsage()).toContain("admin webhook inspect <webhookEventId>");
+    expect(adminCliUsage()).toContain("admin webhook retry <webhookEventId>");
+    expect(adminCliUsage()).toContain("admin job inspect <backgroundJobId>");
+    expect(adminCliUsage()).toContain("admin job retry <backgroundJobId>");
     expect(adminCliUsage()).toContain("admin publisher dry-run <reviewRunId>");
     expect(adminCliUsage()).toContain("admin usage inspect <reviewRunId>");
     expect(adminCliUsage()).toContain("admin index inspect <indexVersionId>");

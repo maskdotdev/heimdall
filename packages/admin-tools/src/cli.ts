@@ -9,6 +9,7 @@ import {
   readIndexArtifactFromUri,
 } from "@repo/index-importer";
 import {
+  type AdminBackgroundJobDebugDetails,
   type AdminDebugService,
   type AdminIndexVersionInspection,
   type AdminReplayAuditActor,
@@ -16,10 +17,13 @@ import {
   type AdminReviewDebugDetails,
   type AdminReviewRunDebugBundle,
   type AdminUsageCostInspection,
+  type AdminWebhookDebugDetails,
+  type BackgroundJobReplayPlan,
   createAdminDebugService,
   type PublisherDryRunPlan,
   redactDebugBundleValue,
   renderPublisherDryRun,
+  type WebhookReplayPlan,
 } from "./index";
 
 /** Environment variables used by the admin CLI. */
@@ -91,6 +95,54 @@ export type AdminCliCommand =
       /** Whether the operator attempted to dispatch the dry-run. */
       readonly execute: boolean;
       /** Confirmation token supplied with an unsupported dispatch attempt. */
+      readonly confirmationToken?: string;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "webhook_inspect";
+      /** Webhook event to inspect. */
+      readonly webhookEventId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "webhook_retry";
+      /** Webhook event whose planned jobs should be retried. */
+      readonly webhookEventId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Whether to dispatch the replay jobs after token confirmation. */
+      readonly execute: boolean;
+      /** Confirmation token required when execute is true. */
+      readonly confirmationToken?: string;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "job_inspect";
+      /** Durable background job to inspect. */
+      readonly backgroundJobId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "job_retry";
+      /** Durable background job to retry. */
+      readonly backgroundJobId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Whether to dispatch the replay job after token confirmation. */
+      readonly execute: boolean;
+      /** Confirmation token required when execute is true. */
       readonly confirmationToken?: string;
       /** Optional direct database URL override. */
       readonly databaseUrl?: string;
@@ -215,6 +267,14 @@ export async function runAdminCli(
         return await runReviewRetrievalReplayCommand(command, handle.service);
       case "review_validation_replay":
         return await runReviewValidationReplayCommand(command, handle.service);
+      case "webhook_inspect":
+        return await runWebhookInspectCommand(command, handle.service);
+      case "webhook_retry":
+        return await runWebhookRetryCommand(command, handle.service, env);
+      case "job_inspect":
+        return await runJobInspectCommand(command, handle.service);
+      case "job_retry":
+        return await runJobRetryCommand(command, handle.service, env);
       case "publisher_dry_run":
         return await runPublisherDryRunCommand(command, handle);
       case "usage_inspect":
@@ -285,6 +345,48 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
     };
   }
 
+  if (domain === "webhook" && action === "inspect" && reviewRunId) {
+    return {
+      kind: "webhook_inspect",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      json,
+      webhookEventId: reviewRunId,
+    };
+  }
+
+  if (domain === "webhook" && action === "retry" && reviewRunId) {
+    const confirmationToken = stringFlag(parsed.flags, "confirmation-token");
+    return {
+      kind: "webhook_retry",
+      ...(confirmationToken ? { confirmationToken } : {}),
+      ...(databaseUrl ? { databaseUrl } : {}),
+      execute: parsed.flags.has("execute"),
+      json,
+      webhookEventId: reviewRunId,
+    };
+  }
+
+  if (domain === "job" && action === "inspect" && reviewRunId) {
+    return {
+      kind: "job_inspect",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      backgroundJobId: reviewRunId,
+      json,
+    };
+  }
+
+  if (domain === "job" && action === "retry" && reviewRunId) {
+    const confirmationToken = stringFlag(parsed.flags, "confirmation-token");
+    return {
+      kind: "job_retry",
+      ...(confirmationToken ? { confirmationToken } : {}),
+      ...(databaseUrl ? { databaseUrl } : {}),
+      backgroundJobId: reviewRunId,
+      execute: parsed.flags.has("execute"),
+      json,
+    };
+  }
+
   if (domain === "publisher" && action === "dry-run" && reviewRunId) {
     return {
       kind: "publisher_dry_run",
@@ -352,6 +454,10 @@ export function adminCliUsage(): string {
     "  admin review replay <reviewRunId> [--stage review] [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin review replay <reviewRunId> --stage retrieval [--json] [--database-url <url>]",
     "  admin review replay <reviewRunId> --stage validation [--json] [--database-url <url>]",
+    "  admin webhook inspect <webhookEventId> [--json] [--database-url <url>]",
+    "  admin webhook retry <webhookEventId> [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
+    "  admin job inspect <backgroundJobId> [--json] [--database-url <url>]",
+    "  admin job retry <backgroundJobId> [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin publisher dry-run <reviewRunId> [--json] [--database-url <url>]",
     "  admin usage inspect <reviewRunId> [--json] [--database-url <url>]",
     "  admin index inspect <indexVersionId> [--json] [--database-url <url>]",
@@ -449,6 +555,110 @@ async function runReviewValidationReplayCommand(
   return {
     exitCode: 0,
     stdout: command.json ? jsonOutput(dryRun) : formatValidationReplayDryRun(dryRun),
+  };
+}
+
+/** Runs webhook inspection and formats the result. */
+async function runWebhookInspectCommand(
+  command: Extract<AdminCliCommand, { kind: "webhook_inspect" }>,
+  service: AdminDebugService,
+): Promise<AdminCliResult> {
+  const details = await service.getWebhookDebugDetails(command.webhookEventId);
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(details) : formatWebhookInspection(details),
+  };
+}
+
+/** Runs webhook retry planning or confirmed dispatch and formats the result. */
+async function runWebhookRetryCommand(
+  command: Extract<AdminCliCommand, { kind: "webhook_retry" }>,
+  service: AdminDebugService,
+  env: AdminCliEnvironment,
+): Promise<AdminCliResult> {
+  if (command.execute && !command.confirmationToken) {
+    return {
+      exitCode: 2,
+      stderr: "Webhook retry dispatch requires --confirmation-token when --execute is set.",
+    };
+  }
+
+  const plan = await service.createWebhookReplayPlan(command.webhookEventId);
+  if (!command.execute) {
+    return {
+      exitCode: 0,
+      stdout: command.json ? jsonOutput(plan) : formatWebhookReplayPlan(plan),
+    };
+  }
+
+  const confirmationToken = command.confirmationToken;
+  if (!confirmationToken) {
+    return {
+      exitCode: 2,
+      stderr: "Webhook retry dispatch requires --confirmation-token when --execute is set.",
+    };
+  }
+
+  const result = await service.executeWebhookReplay(
+    command.webhookEventId,
+    confirmationToken,
+    cliActor(env),
+  );
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(result) : formatReplayExecution(result),
+  };
+}
+
+/** Runs durable background job inspection and formats the result. */
+async function runJobInspectCommand(
+  command: Extract<AdminCliCommand, { kind: "job_inspect" }>,
+  service: AdminDebugService,
+): Promise<AdminCliResult> {
+  const details = await service.getBackgroundJobDebugDetails(command.backgroundJobId);
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(details) : formatJobInspection(details),
+  };
+}
+
+/** Runs durable background job retry planning or confirmed dispatch and formats the result. */
+async function runJobRetryCommand(
+  command: Extract<AdminCliCommand, { kind: "job_retry" }>,
+  service: AdminDebugService,
+  env: AdminCliEnvironment,
+): Promise<AdminCliResult> {
+  if (command.execute && !command.confirmationToken) {
+    return {
+      exitCode: 2,
+      stderr: "Job retry dispatch requires --confirmation-token when --execute is set.",
+    };
+  }
+
+  const plan = await service.createBackgroundJobReplayPlan(command.backgroundJobId);
+  if (!command.execute) {
+    return {
+      exitCode: 0,
+      stdout: command.json ? jsonOutput(plan) : formatBackgroundJobReplayPlan(plan),
+    };
+  }
+
+  const confirmationToken = command.confirmationToken;
+  if (!confirmationToken) {
+    return {
+      exitCode: 2,
+      stderr: "Job retry dispatch requires --confirmation-token when --execute is set.",
+    };
+  }
+
+  const result = await service.executeBackgroundJobReplay(
+    command.backgroundJobId,
+    confirmationToken,
+    cliActor(env),
+  );
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(result) : formatReplayExecution(result),
   };
 }
 
@@ -682,6 +892,37 @@ function formatReviewInspection(details: AdminReviewDebugDetails): string {
   ].join("\n");
 }
 
+/** Formats webhook inspection details for terminal output. */
+function formatWebhookInspection(details: AdminWebhookDebugDetails): string {
+  return [
+    `Webhook event: ${details.webhookEvent.webhookEventId}`,
+    `Provider: ${details.webhookEvent.provider}`,
+    `Delivery: ${details.webhookEvent.deliveryId}`,
+    `Event: ${details.webhookEvent.eventName}`,
+    `Status: ${details.webhookEvent.status}`,
+    `Expected jobs: ${details.expectedJobKeys.length}`,
+    `Related jobs: ${details.relatedJobs.length}`,
+    `Replay audits: ${details.replayAudits.length}`,
+    `Failures: ${details.failures.length}`,
+  ].join("\n");
+}
+
+/** Formats durable background job inspection details for terminal output. */
+function formatJobInspection(details: AdminBackgroundJobDebugDetails): string {
+  return [
+    `Background job: ${details.job.backgroundJobId}`,
+    `Queue: ${details.job.queueName}`,
+    `Type: ${details.job.jobType}`,
+    `Status: ${details.job.status}`,
+    `Attempts: ${details.job.attempts}/${details.job.maxAttempts}`,
+    `Job key: ${details.job.jobKey}`,
+    `Embedding job: ${details.embeddingJob?.embeddingJobId ?? "none"}`,
+    `Embedding items: ${details.embeddingJobItems?.length ?? 0}`,
+    `Replay audits: ${details.replayAudits.length}`,
+    `Failures: ${details.failures.length}`,
+  ].join("\n");
+}
+
 /** Formats a debug bundle export summary for terminal output. */
 function formatDebugBundleExport(bundle: AdminReviewRunDebugBundle): string {
   return [
@@ -709,6 +950,39 @@ function formatReviewReplayPlan(
     `Failures: ${plan.failures.length}`,
     "",
     `Dispatch with: pnpm admin:replay-review ${plan.reviewRunId} --execute --confirmation-token ${plan.confirmationToken}`,
+  ].join("\n");
+}
+
+/** Formats a webhook replay plan for terminal output. */
+function formatWebhookReplayPlan(plan: WebhookReplayPlan): string {
+  return [
+    `Webhook retry action: ${plan.action}`,
+    `Webhook event: ${plan.webhookEventId}`,
+    `Delivery: ${plan.deliveryId}`,
+    `Replay jobs: ${plan.jobs.length}`,
+    `Eligible jobs: ${plan.eligibleJobIds.length}`,
+    `Blocked jobs: ${plan.blockedJobIds.length}`,
+    `Missing job keys: ${plan.missingJobKeys.length}`,
+    `Failures: ${plan.failures.length}`,
+    `Confirmation token: ${plan.confirmationToken}`,
+    "",
+    `Dispatch with: pnpm admin webhook retry ${plan.webhookEventId} --execute --confirmation-token ${plan.confirmationToken}`,
+  ].join("\n");
+}
+
+/** Formats a background job replay plan for terminal output. */
+function formatBackgroundJobReplayPlan(plan: BackgroundJobReplayPlan): string {
+  return [
+    `Job retry action: ${plan.action}`,
+    `Background job: ${plan.backgroundJobId}`,
+    `Current status: ${plan.currentStatus}`,
+    `Queue: ${plan.queueName}`,
+    `Type: ${plan.jobType}`,
+    `Replay job key: ${plan.job.replayJobKey}`,
+    `Failures: ${plan.failures.length}`,
+    `Confirmation token: ${plan.confirmationToken}`,
+    "",
+    `Dispatch with: pnpm admin job retry ${plan.backgroundJobId} --execute --confirmation-token ${plan.confirmationToken}`,
   ].join("\n");
 }
 
