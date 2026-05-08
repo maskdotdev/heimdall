@@ -37,16 +37,19 @@ import {
 import {
   BackgroundJobRepository,
   billingProviderRequests,
+  type CreateMemoryCandidateInput,
   createDatabaseClient,
+  type FindingOutcomeRecord,
   feedbackEvents,
   feedbackSignals,
   findingOutcomes,
   type HeimdallDatabase,
-  memoryCandidates,
+  MemoryCandidateRepository,
   ProviderInstallationRepository,
   publishedFindings,
   publishedSummaryComments,
   RepositoryRepository,
+  ReviewRepository,
   reviewArtifacts,
   reviewRuns,
   sandboxArtifacts,
@@ -2315,47 +2318,24 @@ async function updateMemoryFromFindingOutcome(
     return;
   }
 
-  const [outcome] = await db
-    .select()
-    .from(findingOutcomes)
-    .where(eq(findingOutcomes.findingOutcomeId, payload.outcomeId))
-    .limit(1);
+  const reviewRepository = new ReviewRepository(db);
+  const outcome = await reviewRepository.getFindingOutcome(payload.outcomeId);
   if (!outcome || outcome.outcome !== "rejected") {
     return;
   }
 
-  const [finding] = await db
-    .select({
-      body: validatedFindings.body,
-      category: validatedFindings.category,
-      confidence: validatedFindings.confidence,
-      findingId: validatedFindings.findingId,
-      fingerprint: validatedFindings.fingerprint,
-      location: validatedFindings.location,
-      reviewRunId: validatedFindings.reviewRunId,
-      severity: validatedFindings.severity,
-      title: validatedFindings.title,
-    })
-    .from(validatedFindings)
-    .where(eq(validatedFindings.findingId, payload.findingId))
-    .limit(1);
+  const finding = await reviewRepository.getReviewFindingByAnyId(payload.findingId);
   if (!finding) {
     return;
   }
 
-  const publishedFindingId =
-    outcome.publishedFindingId ??
-    (await findPublishedFindingIdForValidatedFinding(db, finding.findingId));
-  await db
-    .insert(memoryCandidates)
-    .values(
-      memoryCandidateFromRejectedFindingOutcome({
-        finding,
-        outcome,
-        publishedFindingId,
-      }),
-    )
-    .onConflictDoNothing();
+  await new MemoryCandidateRepository(db).createMemoryCandidateIfAbsent(
+    memoryCandidateFromRejectedFindingOutcome({
+      finding,
+      outcome,
+      publishedFindingId: outcome.publishedFindingId ?? finding.publishedFindingId ?? undefined,
+    }),
+  );
 }
 
 /** Reconciles recent provider thread state when a scheduled memory job requests it. */
@@ -2486,20 +2466,6 @@ async function recordReconciledReviewThreadStates(
   }
 }
 
-/** Finds the provider-published finding row for one validated finding when it exists. */
-async function findPublishedFindingIdForValidatedFinding(
-  db: HeimdallDatabase,
-  findingId: string,
-): Promise<string | undefined> {
-  const [published] = await db
-    .select({ findingId: publishedFindings.findingId })
-    .from(publishedFindings)
-    .where(eq(publishedFindings.validatedFindingId, findingId))
-    .limit(1);
-
-  return published?.findingId;
-}
-
 /** Records a provider-webhook outcome after feedback has been correlated by provider comment ID. */
 async function recordOutcomeFromProviderFeedback(
   db: HeimdallDatabase,
@@ -2609,10 +2575,9 @@ async function recordSummaryFeedbackCommand(
   });
 
   for (const candidate of candidates) {
-    await db
-      .insert(memoryCandidates)
-      .values(memoryCandidateFromSummaryCommandCandidate({ candidate, payload, summary }))
-      .onConflictDoNothing();
+    await new MemoryCandidateRepository(db).createMemoryCandidateIfAbsent(
+      memoryCandidateFromSummaryCommandCandidate({ candidate, payload, summary }),
+    );
   }
 }
 
@@ -3004,10 +2969,9 @@ async function createMemoryCandidatesFromProviderCommand(
   }
 
   if (command.commandKind === "mark_false_positive") {
-    await db
-      .insert(memoryCandidates)
-      .values(memoryCandidateFromProviderFalsePositiveCommand({ command, payload, published }))
-      .onConflictDoNothing();
+    await new MemoryCandidateRepository(db).createMemoryCandidateIfAbsent(
+      memoryCandidateFromProviderFalsePositiveCommand({ command, payload, published }),
+    );
     return;
   }
 
@@ -3024,10 +2988,9 @@ async function createMemoryCandidatesFromProviderCommand(
   });
 
   for (const candidate of candidates) {
-    await db
-      .insert(memoryCandidates)
-      .values(memoryCandidateFromCommandCandidate({ candidate, payload, published }))
-      .onConflictDoNothing();
+    await new MemoryCandidateRepository(db).createMemoryCandidateIfAbsent(
+      memoryCandidateFromCommandCandidate({ candidate, payload, published }),
+    );
   }
 }
 
@@ -3074,7 +3037,7 @@ function memoryCandidateFromCommandCandidate(input: {
   readonly published: {
     readonly publishedFindingId: string;
   };
-}): typeof memoryCandidates.$inferInsert {
+}): CreateMemoryCandidateInput {
   return {
     candidateKind: input.candidate.candidateKind,
     confidence: input.candidate.confidence,
@@ -3105,7 +3068,7 @@ function memoryCandidateFromSummaryCommandCandidate(input: {
     readonly publishedSummaryCommentId: string;
     readonly reviewRunId: string;
   };
-}): typeof memoryCandidates.$inferInsert {
+}): CreateMemoryCandidateInput {
   return {
     candidateKind: input.candidate.candidateKind,
     confidence: input.candidate.confidence,
@@ -3156,7 +3119,7 @@ function memoryCandidateFromProviderFalsePositiveCommand(input: {
     readonly publishedFindingId: string;
     readonly repoId: string;
   };
-}): typeof memoryCandidates.$inferInsert {
+}): CreateMemoryCandidateInput {
   const path = pathFromFindingLocation(input.published.finding.location);
   return {
     candidateKind: "suppress_similar_finding",
@@ -3258,10 +3221,10 @@ function memoryCandidateFromRejectedFindingOutcome(input: {
     readonly title: string;
   };
   /** Outcome row that triggered the memory update. */
-  readonly outcome: typeof findingOutcomes.$inferSelect;
+  readonly outcome: FindingOutcomeRecord;
   /** Published finding row ID when available. */
   readonly publishedFindingId?: string | undefined;
-}): typeof memoryCandidates.$inferInsert {
+}): CreateMemoryCandidateInput {
   const path = pathFromFindingLocation(input.finding.location);
   return {
     candidateKind: "suppress_similar_finding",

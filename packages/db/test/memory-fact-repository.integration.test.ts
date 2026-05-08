@@ -262,6 +262,51 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
     ]);
   });
 
+  it("creates memory candidates idempotently", async () => {
+    await memoryCandidateRepository.createMemoryCandidateIfAbsent({
+      candidateKind: "suppress_similar_finding",
+      confidence: 0.89,
+      createdByLogin: "maintainer",
+      memoryCandidateId: "memcand_memory_fact_created",
+      metadata: { source: "worker" },
+      orgId: "org_memory_fact_other",
+      proposedAppliesTo: { titlePatterns: ["Generated client docs"] },
+      proposedContent: "Suppress generated client documentation noise.",
+      proposedScope: { level: "repo", repoId: "repo_memory_fact_other" },
+      repoId: "repo_memory_fact_other",
+      sourceFeedbackEventId: "fevt_memory_fact_created",
+      sourceKind: "command",
+      status: "pending",
+      trustLevel: "explicit_maintainer",
+    });
+    await memoryCandidateRepository.createMemoryCandidateIfAbsent({
+      candidateKind: "repo_fact",
+      confidence: 0.5,
+      memoryCandidateId: "memcand_memory_fact_created",
+      metadata: { source: "ignored" },
+      orgId: "org_memory_fact_other",
+      proposedAppliesTo: {},
+      proposedContent: "This replay should not replace the stored candidate.",
+      proposedScope: { level: "repo", repoId: "repo_memory_fact_other" },
+      repoId: "repo_memory_fact_other",
+      sourceKind: "command",
+      status: "pending",
+      trustLevel: "system",
+    });
+
+    await expect(
+      memoryCandidateRepository.getMemoryCandidate("memcand_memory_fact_created"),
+    ).resolves.toMatchObject({
+      candidateKind: "suppress_similar_finding",
+      confidence: 0.89,
+      createdByLogin: "maintainer",
+      metadata: { source: "worker" },
+      proposedContent: "Suppress generated client documentation noise.",
+      sourceFeedbackEventId: "fevt_memory_fact_created",
+      trustLevel: "explicit_maintainer",
+    });
+  });
+
   it("approves and rejects memory candidates", async () => {
     const approvedAt = new Date("2026-05-08T14:00:00.000Z");
     const approved = await memoryCandidateRepository.approveMemoryCandidate({

@@ -112,11 +112,12 @@ tracked milestone.
   conflict-safe fact creation, fact updates, and fact disabling, including status, expiration,
   scope, order, and limit handling. `MemoryCandidateRepository` now owns repository and
   organization memory candidate inspection reads, single-row candidate lookups, and candidate
-  approval/rejection writes. Review orchestration now uses the memory fact repository boundary
-  instead of importing the raw `memory_facts` table for validation suppression inputs, while the
-  API and admin tooling use repository boundaries for repository-scoped memory fact and candidate
-  inspection reads, API single-row memory lookups, API memory fact mutation paths, and API memory
-  candidate moderation writes.
+  approval/rejection writes plus idempotent candidate creation for worker-proposed memory updates.
+  Review orchestration now uses the memory fact repository boundary instead of importing the raw
+  `memory_facts` table for validation suppression inputs, while the API, worker, and admin tooling
+  use repository boundaries for repository-scoped memory fact and candidate inspection reads, API
+  single-row memory lookups, API memory fact mutation paths, worker memory candidate creation, and
+  API memory candidate moderation writes.
 - Latest DB code-intelligence milestone: `CodeIntelligenceRepository` now maps imported symbol,
   chunk, edge, dependency, and route rows back to index-record contracts and supports
   symbol-at-line, file symbol, file chunk, outgoing edge, incoming edge, graph-related chunk,

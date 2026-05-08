@@ -305,6 +305,10 @@ export type ListReviewFindingsInput = {
 export type FindingOutcomeRecord = {
   /** Finding outcome row ID. */
   readonly findingOutcomeId: string;
+  /** Organization that owns the finding outcome. */
+  readonly orgId: string;
+  /** Repository that owns the finding outcome. */
+  readonly repoId: string;
   /** Candidate finding ID when the outcome is attached before publication. */
   readonly candidateFindingId: string | null;
   /** Published finding ID when the outcome is attached after publication. */
@@ -919,7 +923,9 @@ function findingOutcomeRecordSelect() {
     metadata: findingOutcomes.metadata,
     occurredAt: findingOutcomes.occurredAt,
     outcome: findingOutcomes.outcome,
+    orgId: findingOutcomes.orgId,
     publishedFindingId: findingOutcomes.publishedFindingId,
+    repoId: findingOutcomes.repoId,
     source: findingOutcomes.source,
   };
 }

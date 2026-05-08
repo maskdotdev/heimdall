@@ -868,6 +868,20 @@ describe("createWorkerHandlers", () => {
       ],
     ];
     const insertedCandidates: unknown[] = [];
+    type SelectChain = {
+      readonly innerJoin: () => SelectChain;
+      readonly leftJoin: () => SelectChain;
+      readonly where: () => {
+        readonly limit: () => Promise<unknown[]>;
+      };
+    };
+    const selectChain: SelectChain = {
+      innerJoin: () => selectChain,
+      leftJoin: () => selectChain,
+      where: () => ({
+        limit: async () => selectRows.shift() ?? [],
+      }),
+    };
     const db = {
       insert: () => ({
         values: (value: unknown) => {
@@ -878,11 +892,7 @@ describe("createWorkerHandlers", () => {
         },
       }),
       select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => selectRows.shift() ?? [],
-          }),
-        }),
+        from: () => selectChain,
       }),
     };
     const handlers = createWorkerHandlers({

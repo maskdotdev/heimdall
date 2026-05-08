@@ -66,6 +66,42 @@ export type ListRepositoryMemoryCandidatesInput = {
   readonly limit?: number | undefined;
 };
 
+/** Input used to insert one durable memory candidate when absent. */
+export type CreateMemoryCandidateInput = {
+  /** Stable memory candidate ID. */
+  readonly memoryCandidateId: string;
+  /** Organization that owns the candidate. */
+  readonly orgId: string;
+  /** Optional repository scope for repository-specific candidates. */
+  readonly repoId?: string | null | undefined;
+  /** Source that proposed the candidate. */
+  readonly sourceKind: string;
+  /** Durable candidate kind stored by the memory system. */
+  readonly candidateKind: string;
+  /** Proposed memory content. */
+  readonly proposedContent: string;
+  /** Proposed memory scope payload. */
+  readonly proposedScope: unknown;
+  /** Proposed applies-to payload. */
+  readonly proposedAppliesTo: unknown;
+  /** Confidence score assigned to the candidate. */
+  readonly confidence: number;
+  /** Trust level assigned to the proposing actor or source. */
+  readonly trustLevel: string;
+  /** Durable candidate lifecycle status. */
+  readonly status: string;
+  /** User login that created the candidate when present. */
+  readonly createdByLogin?: string | null | undefined;
+  /** Feedback event that produced the candidate when present. */
+  readonly sourceFeedbackEventId?: string | null | undefined;
+  /** Published finding that produced the candidate when present. */
+  readonly sourceFindingId?: string | null | undefined;
+  /** Optional expiration timestamp for temporary candidates. */
+  readonly expiresAt?: Date | null | undefined;
+  /** Product metadata used by callers to derive source details. */
+  readonly metadata: unknown;
+};
+
 /** Input used to approve one durable memory candidate. */
 export type ApproveMemoryCandidateInput = {
   /** Stable memory candidate ID. */
@@ -108,6 +144,33 @@ export class MemoryCandidateRepository {
       .limit(1);
 
     return row ? toMemoryCandidateRecord(row) : undefined;
+  }
+
+  /** Inserts one durable memory candidate and preserves existing idempotent rows. */
+  public async createMemoryCandidateIfAbsent(input: CreateMemoryCandidateInput): Promise<void> {
+    await this.db
+      .insert(memoryCandidates)
+      .values({
+        candidateKind: input.candidateKind,
+        confidence: input.confidence,
+        ...(input.createdByLogin ? { createdByLogin: input.createdByLogin } : {}),
+        ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+        memoryCandidateId: input.memoryCandidateId,
+        metadata: input.metadata,
+        orgId: input.orgId,
+        proposedAppliesTo: input.proposedAppliesTo,
+        proposedContent: input.proposedContent,
+        proposedScope: input.proposedScope,
+        ...(input.repoId ? { repoId: input.repoId } : {}),
+        ...(input.sourceFeedbackEventId
+          ? { sourceFeedbackEventId: input.sourceFeedbackEventId }
+          : {}),
+        ...(input.sourceFindingId ? { sourceFindingId: input.sourceFindingId } : {}),
+        sourceKind: input.sourceKind,
+        status: input.status,
+        trustLevel: input.trustLevel,
+      })
+      .onConflictDoNothing();
   }
 
   /** Marks one durable memory candidate approved and returns the stored row when it exists. */
