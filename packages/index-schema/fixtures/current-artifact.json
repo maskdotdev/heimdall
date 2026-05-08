@@ -17,7 +17,19 @@
     "chunkCount": 0,
     "parserVersions": {
       "typescript": "5.0.0"
-    }
+    },
+    "recordFiles": [
+      {
+        "path": "records.jsonl",
+        "mediaType": "application/jsonl",
+        "encoding": "utf-8",
+        "compression": "none",
+        "recordKind": "mixed",
+        "recordCount": 1,
+        "byteLength": 371,
+        "sha256": "sha256:e6367aba27ec245272ac3ef9ef93c88b60ddbc368b86e2b9ef49fd560b601ad2"
+      }
+    ]
   },
   "records": [
     {

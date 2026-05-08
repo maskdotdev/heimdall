@@ -31,6 +31,11 @@ export const RepoPathSchema = Type.String({
 });
 export type RepoPath = Static<typeof RepoPathSchema>;
 
+/** Returns whether a path is repo-relative, POSIX-normalized, and traversal-safe. */
+export function isNormalizedRepoPath(path: string): path is RepoPath {
+  return getRepoPathValidationError(path) === undefined;
+}
+
 export const Sha256Schema = Type.String({
   pattern: "^sha256:[a-f0-9]{64}$",
 });
@@ -136,6 +141,50 @@ export const CodeEdgeKindSchema = Type.Union([
 ]);
 export type CodeEdgeKind = Static<typeof CodeEdgeKindSchema>;
 
+/** Runtime schema for supported record-file compression declarations. */
+export const IndexRecordFileCompressionSchema = Type.Union([
+  Type.Literal("none"),
+  Type.Literal("gzip"),
+]);
+
+/** Supported record-file compression declaration. */
+export type IndexRecordFileCompression = Static<typeof IndexRecordFileCompressionSchema>;
+
+/** Runtime schema for the dominant record kind contained in one JSONL file. */
+export const IndexRecordFileKindSchema = Type.Union([
+  Type.Literal("mixed"),
+  Type.Literal("file"),
+  Type.Literal("symbol"),
+  Type.Literal("chunk"),
+  Type.Literal("edge"),
+  Type.Literal("diagnostic"),
+  Type.Literal("dependency"),
+  Type.Literal("route"),
+  Type.Literal("test_mapping"),
+]);
+
+/** Dominant record kind contained in one JSONL file. */
+export type IndexRecordFileKind = Static<typeof IndexRecordFileKindSchema>;
+
+/** Runtime schema for a manifest-declared JSONL record file. */
+export const IndexRecordFileSchema = Type.Object(
+  {
+    path: RepoPathSchema,
+    mediaType: Type.Literal("application/jsonl"),
+    encoding: Type.Literal("utf-8"),
+    compression: IndexRecordFileCompressionSchema,
+    recordKind: IndexRecordFileKindSchema,
+    recordCount: Type.Integer({ minimum: 0 }),
+    byteLength: Type.Integer({ minimum: 0 }),
+    sha256: Sha256Schema,
+    metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
+
+/** Manifest-declared JSONL record file metadata. */
+export type IndexRecordFile = Static<typeof IndexRecordFileSchema>;
+
 export const IndexManifestSchema = Type.Object(
   {
     schemaVersion: Type.Literal(INDEX_ARTIFACT_SCHEMA_VERSION),
@@ -158,6 +207,7 @@ export const IndexManifestSchema = Type.Object(
     artifactHash: Type.Optional(Sha256Schema),
     requiredFeatures: Type.Optional(Type.Array(Type.String())),
     optionalFeatures: Type.Optional(Type.Array(Type.String())),
+    recordFiles: Type.Optional(Type.Array(IndexRecordFileSchema)),
     metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   },
   { additionalProperties: false },
@@ -543,6 +593,7 @@ export function validateIndexArtifact(value: unknown): readonly string[] {
     );
   }
   validateManifestRequiredFeatures(errors, artifact.manifest);
+  validateManifestRecordFiles(errors, artifact.manifest);
   errors.push(...validateIndexArtifactRecordSemantics(artifact));
 
   return errors;
@@ -707,6 +758,7 @@ function validateIndexArtifactRecordSemantics(artifact: IndexArtifact): string[]
       symbolIds,
     });
     validateRecordProvenance(errors, artifact.manifest, record, index);
+    validateRecordPaths(errors, record, index);
     validateRecordRanges(errors, record, index);
   });
 
@@ -749,6 +801,56 @@ function collectDuplicateFeatureError(errors: string[], seen: Set<string>, featu
   }
 
   seen.add(feature);
+}
+
+/** Validates record-file manifest declarations against the in-memory artifact. */
+function validateManifestRecordFiles(errors: string[], manifest: IndexManifest): void {
+  if (!manifest.recordFiles) {
+    return;
+  }
+
+  const seenPaths = new Set<string>();
+  let recordCount = 0;
+
+  manifest.recordFiles.forEach((recordFile, index) => {
+    collectDuplicateRecordFilePathError(errors, seenPaths, recordFile.path, index);
+    collectRecordFilePathError(errors, recordFile.path, index);
+    if (recordFile.compression !== "none") {
+      errors.push(
+        `manifest.recordFiles[${index}].compression ${recordFile.compression} is unsupported`,
+      );
+    }
+    recordCount += recordFile.recordCount;
+  });
+
+  if (recordCount !== manifest.recordCount) {
+    errors.push(
+      `manifest.recordFiles recordCount ${recordCount} does not match manifest.recordCount ${manifest.recordCount}`,
+    );
+  }
+}
+
+/** Records a duplicate record-file path error when a manifest path repeats. */
+function collectDuplicateRecordFilePathError(
+  errors: string[],
+  seen: Set<string>,
+  path: string,
+  index: number,
+): void {
+  if (seen.has(path)) {
+    errors.push(`manifest.recordFiles[${index}].path duplicates ${path}`);
+    return;
+  }
+
+  seen.add(path);
+}
+
+/** Records a normalized path error for a manifest record file when present. */
+function collectRecordFilePathError(errors: string[], path: string, index: number): void {
+  const validationError = getRepoPathValidationError(path);
+  if (validationError) {
+    errors.push(`manifest.recordFiles[${index}].path ${validationError}: ${path}`);
+  }
 }
 
 /** Mutable state used while validating canonical record type ordering. */
@@ -858,6 +960,25 @@ function validateRecordProvenance(
     errors.push(
       `records[${index}].commitSha ${record.commitSha} does not match ${manifest.commitSha}`,
     );
+  }
+}
+
+/** Validates every repo path field carried by one artifact record. */
+function validateRecordPaths(errors: string[], record: IndexRecord, index: number): void {
+  if ("path" in record && record.path) {
+    collectRecordPathError(errors, record.path, `records[${index}].path`);
+  }
+
+  if (record.type === "dependency") {
+    collectRecordPathError(errors, record.manifestPath, `records[${index}].manifestPath`);
+  }
+}
+
+/** Records a normalized path error for one record path field when present. */
+function collectRecordPathError(errors: string[], path: string, label: string): void {
+  const validationError = getRepoPathValidationError(path);
+  if (validationError) {
+    errors.push(`${label} ${validationError}: ${path}`);
   }
 }
 
@@ -1029,6 +1150,43 @@ function collectEdgeEndpointError(
 /** Returns UTF-8 byte length without depending on Node-only globals. */
 function byteLength(value: string): number {
   return utf8Encoder.encode(value).byteLength;
+}
+
+/** Returns a human-readable validation error for unsafe repo paths. */
+function getRepoPathValidationError(path: string): string | undefined {
+  if (path.length === 0) {
+    return "must not be empty";
+  }
+  if (path.length > 4096) {
+    return "must not exceed 4096 characters";
+  }
+  if (path.startsWith("/")) {
+    return "must be repo-relative";
+  }
+  if (path.includes("\\")) {
+    return "must use POSIX separators";
+  }
+  if (path.includes("\0")) {
+    return "must not contain null bytes";
+  }
+  if (path !== path.normalize("NFC")) {
+    return "must use NFC Unicode normalization";
+  }
+
+  const segments = path.split("/");
+  for (const segment of segments) {
+    if (segment.length === 0) {
+      return "must not contain empty path segments";
+    }
+    if (segment === ".") {
+      return "must not contain current-directory path segments";
+    }
+    if (segment === "..") {
+      return "must not contain parent-directory path segments";
+    }
+  }
+
+  return undefined;
 }
 
 /** Returns whether a value is a non-array JSON object. */

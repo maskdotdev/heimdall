@@ -175,6 +175,55 @@ describe("IndexArtifactSchema", () => {
     expect(validateIndexArtifact(optionalFeatureArtifact)).toEqual([]);
   });
 
+  it("validates declared record files and rejects unsupported compression", () => {
+    const artifact = readArtifactFixture("current-artifact.json");
+    const duplicateRecordFilesArtifact = {
+      ...asRecord(artifact),
+      manifest: {
+        ...asRecord(asRecord(artifact).manifest),
+        recordFiles: [recordFileFixture("records.jsonl", 1), recordFileFixture("records.jsonl", 1)],
+      },
+    };
+    const unsupportedCompressionArtifact = {
+      ...asRecord(artifact),
+      manifest: {
+        ...asRecord(asRecord(artifact).manifest),
+        recordFiles: [recordFileFixture("records.jsonl.gz", 1, "gzip")],
+      },
+    };
+    const countMismatchArtifact = {
+      ...asRecord(artifact),
+      manifest: {
+        ...asRecord(asRecord(artifact).manifest),
+        recordFiles: [recordFileFixture("records.jsonl", 2)],
+      },
+    };
+    const unsafePathArtifact = {
+      ...asRecord(artifact),
+      manifest: {
+        ...asRecord(asRecord(artifact).manifest),
+        recordFiles: [recordFileFixture("records/..", 1)],
+      },
+    };
+
+    expect(validateIndexArtifact(duplicateRecordFilesArtifact)).toEqual(
+      expect.arrayContaining(["manifest.recordFiles[1].path duplicates records.jsonl"]),
+    );
+    expect(validateIndexArtifact(unsupportedCompressionArtifact)).toEqual(
+      expect.arrayContaining(["manifest.recordFiles[0].compression gzip is unsupported"]),
+    );
+    expect(validateIndexArtifact(countMismatchArtifact)).toEqual(
+      expect.arrayContaining([
+        "manifest.recordFiles recordCount 2 does not match manifest.recordCount 1",
+      ]),
+    );
+    expect(validateIndexArtifact(unsafePathArtifact)).toEqual(
+      expect.arrayContaining([
+        "manifest.recordFiles[0].path must not contain parent-directory path segments: records/..",
+      ]),
+    );
+  });
+
   it("round-trips compact JSONL records and reports bounded parse failures", () => {
     const artifact = canonicalIndexArtifactFixture();
     const jsonl = stringifyIndexRecordsJsonl(artifact.records);
@@ -429,4 +478,22 @@ function canonicalIndexArtifactFixture(): IndexArtifact {
 /** Returns a syntactically valid SHA-256 fixture hash for schema tests. */
 function sha256Fixture(hexCharacter: string): `sha256:${string}` {
   return `sha256:${hexCharacter.repeat(64)}`;
+}
+
+/** Creates a syntactically valid record-file manifest fixture. */
+function recordFileFixture(
+  path: string,
+  recordCount: number,
+  compression: "gzip" | "none" = "none",
+): Readonly<Record<string, unknown>> {
+  return {
+    byteLength: 1,
+    compression,
+    encoding: "utf-8",
+    mediaType: "application/jsonl",
+    path,
+    recordCount,
+    recordKind: "mixed",
+    sha256: sha256Fixture("d"),
+  };
 }

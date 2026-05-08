@@ -19,6 +19,18 @@
       "typescript": "5.0.0"
     },
     "optionalFeatures": ["parser_diagnostics.v1"],
+    "recordFiles": [
+      {
+        "path": "records.jsonl",
+        "mediaType": "application/jsonl",
+        "encoding": "utf-8",
+        "compression": "none",
+        "recordKind": "mixed",
+        "recordCount": 1,
+        "byteLength": 438,
+        "sha256": "sha256:87da2b54287e51a33655b7c30955be1bed20faff72f1ad60206a58f5cc81e329"
+      }
+    ],
     "metadata": {
       "optionalFeatures": ["parser_diagnostics.v1"]
     }
