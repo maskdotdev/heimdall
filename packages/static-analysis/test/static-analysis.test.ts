@@ -269,6 +269,66 @@ describe("static analysis", () => {
     expect(report.toolRuns[0]?.diagnosticCount).toBe(1);
   });
 
+  it("parses Biome JSON output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: JSON.stringify({
+          command: "check",
+          diagnostics: [
+            {
+              category: "lint/correctness/noUnusedVariables",
+              location: {
+                end: { column: 13, line: 2 },
+                path: "/workspace/repo/src/math.ts",
+                start: { column: 7, line: 2 },
+              },
+              message: "This variable total is unused.",
+              severity: "error",
+            },
+          ],
+          summary: { errors: 1, warnings: 0 },
+        }),
+        stdoutBytes: 356,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: validPullRequestSnapshotFixture,
+      tool: "biome",
+      toolRunId: "str_biome",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 13,
+        endLine: 2,
+        filePath: "src/math.ts",
+        originalPath: "/workspace/repo/src/math.ts",
+        startColumn: 7,
+        startLine: 2,
+      },
+      metadata: { category: "lint/correctness/noUnusedVariables" },
+      ruleId: "lint/correctness/noUnusedVariables",
+      ruleName: "noUnusedVariables",
+      severity: "error",
+      sourceTrust: "tool_output",
+      tool: "biome",
+    });
+  });
+
   it("parses TypeScript text output into normalized diagnostics", () => {
     const parsed = parseToolOutputDiagnostics({
       maxDiagnostics: 10,

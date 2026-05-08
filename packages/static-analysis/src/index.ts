@@ -513,6 +513,47 @@ type EslintJsonMessage = Static<typeof EslintJsonMessageSchema>;
 /** ESLint JSON formatter file result. */
 type EslintJsonFileResult = Static<typeof EslintJsonFileResultSchema>;
 
+/** Biome JSON reporter location point. */
+const BiomeJsonLocationPointSchema = Type.Object(
+  {
+    column: Type.Optional(Type.Integer({ minimum: 0 })),
+    line: Type.Optional(Type.Integer({ minimum: 0 })),
+  },
+  { additionalProperties: true },
+);
+
+/** Biome JSON reporter diagnostic location. */
+const BiomeJsonLocationSchema = Type.Object(
+  {
+    end: Type.Optional(BiomeJsonLocationPointSchema),
+    path: Type.Optional(Type.String()),
+    start: Type.Optional(BiomeJsonLocationPointSchema),
+  },
+  { additionalProperties: true },
+);
+
+/** Biome JSON reporter diagnostic. */
+const BiomeJsonDiagnosticSchema = Type.Object(
+  {
+    category: Type.Optional(Type.String()),
+    location: Type.Optional(BiomeJsonLocationSchema),
+    message: Type.String(),
+    severity: Type.String(),
+  },
+  { additionalProperties: true },
+);
+
+/** Biome JSON reporter output. */
+const BiomeJsonOutputSchema = Type.Object(
+  {
+    diagnostics: Type.Array(BiomeJsonDiagnosticSchema),
+  },
+  { additionalProperties: true },
+);
+
+/** Biome JSON reporter diagnostic. */
+type BiomeJsonDiagnostic = Static<typeof BiomeJsonDiagnosticSchema>;
+
 type TypeScriptTextDiagnostic = {
   /** TypeScript diagnostic code without the `TS` prefix. */
   readonly code: string;
@@ -651,6 +692,9 @@ export function parseToolOutputDiagnostics(
 
   if (input.tool === "eslint") {
     return parseEslintJsonDiagnostics(input);
+  }
+  if (input.tool === "biome") {
+    return parseBiomeJsonDiagnostics(input);
   }
   if (input.tool === "typescript") {
     return parseTypeScriptTextDiagnostics(input);
@@ -1186,6 +1230,70 @@ function parseEslintJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses Biome JSON reporter output into normalized diagnostics. */
+function parseBiomeJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = input.result.stdout.trim();
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedOutput = parseJson(rawOutput);
+  if (!parsedOutput.ok) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+          format: "biome_json",
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ],
+    };
+  }
+  if (!Value.Check(BiomeJsonOutputSchema, parsedOutput.value)) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning(
+          "tool_output_schema_mismatch",
+          "Static analysis tool output did not match the expected schema.",
+          {
+            format: "biome_json",
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          },
+        ),
+      ],
+    };
+  }
+
+  const parsedDiagnostics = (
+    parsedOutput.value as { diagnostics: readonly BiomeJsonDiagnostic[] }
+  ).diagnostics
+    .map((diagnostic) => biomeDiagnosticToNormalizedDiagnostic({ diagnostic, input }))
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings =
+    parsedDiagnostics.length > diagnostics.length
+      ? [
+          warning(
+            "tool_output_diagnostic_budget_truncated",
+            "Static analysis tool output diagnostics were truncated.",
+            {
+              diagnosticCount: parsedDiagnostics.length,
+              maxDiagnostics: input.maxDiagnostics,
+              tool: input.tool,
+              toolRunId: input.toolRunId,
+            },
+          ),
+        ]
+      : [];
+
+  return { diagnostics, warnings };
+}
+
 /** Parses `tsc --pretty false` output into normalized diagnostics. */
 function parseTypeScriptTextDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
@@ -1324,6 +1432,52 @@ function eslintMessageToDiagnostic(input: {
   });
 }
 
+/** Converts one Biome JSON diagnostic into the normalized report shape. */
+function biomeDiagnosticToNormalizedDiagnostic(input: {
+  /** Biome diagnostic emitted by the JSON reporter. */
+  readonly diagnostic: BiomeJsonDiagnostic;
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.diagnostic.message.trim();
+  const location = input.diagnostic.location;
+  const startLine = location?.start?.line ?? 0;
+  if (!location?.path || message.length === 0 || startLine < 1) {
+    return undefined;
+  }
+
+  const filePath = normalizeToolFilePath(location.path, input.input.workspacePath);
+  const severity = biomeSeverity(input.diagnostic.severity);
+  const ruleId = input.diagnostic.category?.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: categoryForBiomeDiagnostic(ruleId, severity),
+    location: {
+      filePath,
+      ...(location.start?.column !== undefined
+        ? { startColumn: Math.max(1, location.start.column) }
+        : {}),
+      startLine,
+      ...(location.end?.column !== undefined
+        ? { endColumn: Math.max(1, location.end.column) }
+        : {}),
+      ...(location.end?.line !== undefined && location.end.line > 0
+        ? { endLine: location.end.line }
+        : {}),
+      ...(filePath === location.path ? {} : { originalPath: location.path }),
+    },
+    message,
+    metadata: biomeDiagnosticMetadata(input.diagnostic),
+    rawMessage: input.diagnostic.message,
+    ...(ruleId ? { ruleId, ruleName: biomeRuleName(ruleId) } : {}),
+    severity,
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "biome",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
 /** Parses JSON without throwing into the report builder. */
 function parseJson(
   value: string,
@@ -1339,6 +1493,15 @@ function parseJson(
 function eslintSeverity(message: EslintJsonMessage): ToolDiagnosticSeverity {
   if (message.fatal || message.severity === 2) return "error";
   if (message.severity === 1) return "warning";
+  return "info";
+}
+
+/** Maps Biome severity strings to normalized diagnostic severities. */
+function biomeSeverity(severity: string): ToolDiagnosticSeverity {
+  const normalizedSeverity = severity.toLowerCase();
+  if (normalizedSeverity === "fatal") return "critical";
+  if (normalizedSeverity === "error") return "error";
+  if (normalizedSeverity === "warning" || normalizedSeverity === "warn") return "warning";
   return "info";
 }
 
@@ -1367,6 +1530,31 @@ function categoryForEslintRule(
   return categoryForSeverity(severity);
 }
 
+/** Returns a product category for a Biome diagnostic category. */
+function categoryForBiomeDiagnostic(
+  category: string | undefined,
+  severity: ToolDiagnosticSeverity,
+): FindingCategory {
+  const normalizedCategory = category?.toLowerCase() ?? "";
+  if (normalizedCategory.includes("security")) return "security";
+  if (normalizedCategory.includes("performance")) return "performance";
+  if (normalizedCategory.startsWith("format") || normalizedCategory.includes("style")) {
+    return "style";
+  }
+  if (
+    normalizedCategory.includes("correctness") ||
+    normalizedCategory.includes("suspicious") ||
+    normalizedCategory.includes("a11y")
+  ) {
+    return "correctness";
+  }
+  if (normalizedCategory.includes("nursery") || normalizedCategory.includes("complexity")) {
+    return "maintainability";
+  }
+
+  return categoryForSeverity(severity);
+}
+
 /** Builds a documentation URL for core ESLint rules. */
 function eslintRuleUrl(ruleId: string | undefined): string | undefined {
   if (!ruleId || ruleId.includes("/") || ruleId.startsWith("@")) {
@@ -1382,6 +1570,21 @@ function eslintMessageMetadata(message: EslintJsonMessage): Readonly<Record<stri
     ...(message.fatal !== undefined ? { fatal: message.fatal } : {}),
     ...(message.messageId ? { messageId: message.messageId } : {}),
   };
+}
+
+/** Returns product-safe metadata for a Biome diagnostic. */
+function biomeDiagnosticMetadata(
+  diagnostic: BiomeJsonDiagnostic,
+): Readonly<Record<string, unknown>> {
+  return {
+    ...(diagnostic.category ? { category: diagnostic.category } : {}),
+  };
+}
+
+/** Returns a compact Biome rule name from a diagnostic category. */
+function biomeRuleName(category: string): string {
+  const parts = category.split("/").filter((part) => part.length > 0);
+  return parts.at(-1) ?? category;
 }
 
 /** Normalizes a tool-emitted file path to a repository-relative path when possible. */
