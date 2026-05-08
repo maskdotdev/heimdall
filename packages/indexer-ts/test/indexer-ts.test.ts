@@ -280,6 +280,116 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("resolves simple calls through tsconfig path aliases", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await mkdir(join(workspacePath, "src", "lib"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(workspacePath, "tsconfig.json"),
+        JSON.stringify(
+          {
+            compilerOptions: {
+              baseUrl: ".",
+              paths: {
+                "@lib/*": ["src/lib/*"],
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      ),
+      writeFile(
+        join(workspacePath, "src", "lib", "math.ts"),
+        ["export function add(left: number, right: number) {", "  return left + right;", "}"].join(
+          "\n",
+        ),
+      ),
+      writeFile(
+        join(workspacePath, "src", "service.ts"),
+        [
+          'import { add } from "@lib/math";',
+          "",
+          "export function total() {",
+          "  return add(1, 2);",
+          "}",
+          "",
+        ].join("\n"),
+      ),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const fileIdsByPath = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "file" ? [[record.path, record.fileId] as const] : [],
+      ),
+    );
+    const symbolIdsByPathAndName = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "symbol"
+          ? [[`${record.path}:${record.name}`, record.symbolId] as const]
+          : [],
+      ),
+    );
+    const aliasImportEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" &&
+      record.kind === "imports" &&
+      record.metadata?.importPath === "@lib/math"
+        ? [
+            {
+              aliasPattern: record.metadata.aliasPattern,
+              fromId: record.fromId,
+              resolution: record.metadata.resolution,
+              resolvedPath: record.metadata.resolvedPath,
+              toId: record.toId,
+              toKind: record.toKind,
+            },
+          ]
+        : [],
+    );
+    const aliasCallEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" &&
+      record.kind === "calls" &&
+      record.metadata?.importPath === "@lib/math"
+        ? [
+            {
+              aliasPattern: record.metadata.aliasPattern,
+              fromId: record.fromId,
+              resolution: record.metadata.resolution,
+              resolvedPath: record.metadata.resolvedPath,
+              toId: record.toId,
+            },
+          ]
+        : [],
+    );
+
+    expect(aliasImportEdges).toEqual([
+      {
+        aliasPattern: "@lib/*",
+        fromId: fileIdsByPath.get("src/service.ts"),
+        resolution: "alias",
+        resolvedPath: "src/lib/math.ts",
+        toId: fileIdsByPath.get("src/lib/math.ts"),
+        toKind: "file",
+      },
+    ]);
+    expect(aliasCallEdges).toEqual([
+      {
+        aliasPattern: "@lib/*",
+        fromId: symbolIdsByPathAndName.get("src/service.ts:total"),
+        resolution: "alias",
+        resolvedPath: "src/lib/math.ts",
+        toId: symbolIdsByPathAndName.get("src/lib/math.ts:add"),
+      },
+    ]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("emits files, symbols, and chunks for Python sources", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await writeFile(

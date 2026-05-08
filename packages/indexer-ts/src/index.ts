@@ -36,6 +36,7 @@ const BINARY_CONTENT_SAMPLE_BYTES = 8_192;
 const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
 const GENERATED_CONTENT_HEADER_BYTES = 8_192;
 const PACKAGE_JSON_FILE_NAME = "package.json";
+const TYPESCRIPT_CONFIG_FILE_NAMES = ["tsconfig.json", "jsconfig.json"] as const;
 const httpRouteMethods = new Set(["delete", "get", "head", "options", "patch", "post", "put"]);
 const moduleResolutionExtensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
 const nextJsRouteMethods = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
@@ -188,6 +189,32 @@ type TypeScriptCallFact = {
   readonly lineNumber: number;
 };
 
+/** Simple TS/JS path alias derived from tsconfig or jsconfig paths. */
+type ModuleResolutionAlias = {
+  /** Original import pattern, such as @/* or @lib/*. */
+  readonly pattern: string;
+  /** Prefix before the optional wildcard in the import pattern. */
+  readonly patternPrefix: string;
+  /** Suffix after the optional wildcard in the import pattern. */
+  readonly patternSuffix: string;
+  /** Original target pattern, such as src/*. */
+  readonly target: string;
+  /** Prefix before the optional wildcard in the target pattern. */
+  readonly targetPrefix: string;
+  /** Suffix after the optional wildcard in the target pattern. */
+  readonly targetSuffix: string;
+};
+
+/** Indexed module file resolved from a module specifier. */
+type ResolvedModuleFile = {
+  /** Resolved indexed file. */
+  readonly file: FileRecord;
+  /** Resolution strategy that found the file. */
+  readonly resolution: "alias" | "relative";
+  /** Matched alias pattern when resolution used tsconfig/jsconfig paths. */
+  readonly aliasPattern?: string;
+};
+
 /** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
 type TypeScriptIndexRecordGroups = {
   /** Chunk records discovered from indexed files. */
@@ -275,6 +302,7 @@ export async function indexTypeScriptRepository(input: {
   readonly previousIndexVersionId?: string;
 }): Promise<IndexArtifact> {
   await validateWorkspacePath(input.workspacePath);
+  const moduleAliases = await loadTypeScriptModuleAliases(input.workspacePath);
   const paths = await findIndexablePaths(input.workspacePath);
   const recordGroups: TypeScriptIndexRecordGroups = {
     chunks: [],
@@ -337,7 +365,15 @@ export async function indexTypeScriptRepository(input: {
     recordGroups.chunks.push(...chunkRecordsForFile(file, content, symbols));
     recordGroups.routes.push(...routeRecordsForFile(file, sourceFile, symbols));
     recordGroups.edges.push(
-      ...edgeRecordsForFile(input.repoId, input.commitSha, file.fileId, path, sourceFile, symbols),
+      ...edgeRecordsForFile(
+        input.repoId,
+        input.commitSha,
+        file.fileId,
+        path,
+        sourceFile,
+        symbols,
+        moduleAliases,
+      ),
     );
     typeScriptSources.push({ file, sourceFile, symbols });
     languages.add(language);
@@ -345,8 +381,20 @@ export async function indexTypeScriptRepository(input: {
 
   const filesByPath = new Map(recordGroups.files.map((file) => [file.path, file]));
   recordGroups.edges.push(
-    ...resolvedImportEdgesForSources(input.repoId, input.commitSha, typeScriptSources, filesByPath),
-    ...importedCallEdgesForSources(input.repoId, input.commitSha, typeScriptSources, filesByPath),
+    ...resolvedImportEdgesForSources(
+      input.repoId,
+      input.commitSha,
+      typeScriptSources,
+      filesByPath,
+      moduleAliases,
+    ),
+    ...importedCallEdgesForSources(
+      input.repoId,
+      input.commitSha,
+      typeScriptSources,
+      filesByPath,
+      moduleAliases,
+    ),
   );
   recordGroups.testMappings.push(
     ...testMappingRecordsForFiles(input.repoId, input.commitSha, recordGroups.files),
@@ -824,22 +872,148 @@ function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Loads simple module-resolution aliases from root tsconfig/jsconfig files. */
+async function loadTypeScriptModuleAliases(
+  workspacePath: string,
+): Promise<ModuleResolutionAlias[]> {
+  const aliases = await Promise.all(
+    TYPESCRIPT_CONFIG_FILE_NAMES.map(async (fileName) => {
+      try {
+        const content = await readFile(join(workspacePath, fileName), "utf8");
+        return moduleAliasesFromTypeScriptConfig(content);
+      } catch {
+        return [];
+      }
+    }),
+  );
+
+  return uniqueModuleResolutionAliases(aliases.flat());
+}
+
+/** Extracts simple paths aliases from one tsconfig/jsconfig document. */
+function moduleAliasesFromTypeScriptConfig(content: string): ModuleResolutionAlias[] {
+  const config = parseJsonObject(content);
+  const compilerOptions = isJsonObject(config?.compilerOptions)
+    ? config.compilerOptions
+    : undefined;
+  const paths = isJsonObject(compilerOptions?.paths) ? compilerOptions.paths : undefined;
+  if (!paths) {
+    return [];
+  }
+
+  const baseUrl = typeof compilerOptions?.baseUrl === "string" ? compilerOptions.baseUrl : "";
+  if (isAbsoluteLikeConfigPath(baseUrl)) {
+    return [];
+  }
+  const normalizedBaseUrl = normalizeRepoPath(baseUrl) ?? "";
+
+  return Object.entries(paths)
+    .sort(([leftPattern], [rightPattern]) => leftPattern.localeCompare(rightPattern))
+    .flatMap(([pattern, targets]) =>
+      stringArray(targets).flatMap((target) =>
+        moduleResolutionAliasFromPathsEntry(pattern, target, normalizedBaseUrl),
+      ),
+    );
+}
+
+/** Converts one paths entry into a supported simple alias. */
+function moduleResolutionAliasFromPathsEntry(
+  pattern: string,
+  target: string,
+  baseUrl: string,
+): ModuleResolutionAlias[] {
+  if (isAbsoluteLikeConfigPath(target)) {
+    return [];
+  }
+
+  const splitPattern = splitSingleWildcardPattern(pattern);
+  const normalizedTarget = normalizeRepoPath(joinRepoPath(baseUrl, target));
+  const splitTarget = normalizedTarget ? splitSingleWildcardPattern(normalizedTarget) : undefined;
+  if (!splitPattern || !splitTarget) {
+    return [];
+  }
+
+  return [
+    {
+      pattern,
+      patternPrefix: splitPattern.prefix,
+      patternSuffix: splitPattern.suffix,
+      target,
+      targetPrefix: splitTarget.prefix,
+      targetSuffix: splitTarget.suffix,
+    },
+  ];
+}
+
+/** Returns whether a config path is absolute or drive-qualified. */
+function isAbsoluteLikeConfigPath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:[/\\]/u.test(path);
+}
+
+/** Splits an exact or single-wildcard path mapping pattern. */
+function splitSingleWildcardPattern(
+  pattern: string,
+): { readonly prefix: string; readonly suffix: string } | undefined {
+  const wildcardIndex = pattern.indexOf("*");
+  if (wildcardIndex < 0) {
+    return { prefix: pattern, suffix: "" };
+  }
+  if (pattern.indexOf("*", wildcardIndex + 1) >= 0) {
+    return undefined;
+  }
+
+  return {
+    prefix: pattern.slice(0, wildcardIndex),
+    suffix: pattern.slice(wildcardIndex + 1),
+  };
+}
+
+/** Reads a JSON value as a sorted array of non-empty strings. */
+function stringArray(value: unknown): readonly string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+        .sort()
+    : [];
+}
+
+/** Drops duplicate aliases while preserving deterministic priority order. */
+function uniqueModuleResolutionAliases(
+  aliases: readonly ModuleResolutionAlias[],
+): ModuleResolutionAlias[] {
+  const seen = new Set<string>();
+
+  return aliases.filter((alias) => {
+    const key = [alias.pattern, alias.target].join("\0");
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
 /** Emits file-to-file import edges for relative imports that resolve to indexed files. */
 function resolvedImportEdgesForSources(
   repoId: string,
   commitSha: string,
   sources: readonly TypeScriptSourceExtraction[],
   filesByPath: ReadonlyMap<string, FileRecord>,
+  moduleAliases: readonly ModuleResolutionAlias[],
 ): EdgeRecord[] {
   return uniqueEdges(
     sources.flatMap((source) =>
       typeScriptImportModuleFacts(source.sourceFile).flatMap((fact) => {
-        const targetFile = resolveRelativeModuleFile(
+        const resolvedModule = resolveModuleFile(
           source.file.path,
           fact.moduleSpecifier,
           filesByPath,
+          moduleAliases,
         );
-        if (!targetFile) {
+        if (!resolvedModule) {
           return [];
         }
 
@@ -852,21 +1026,23 @@ function resolvedImportEdgesForSources(
               commitSha,
               source.file.fileId,
               "imports",
-              targetFile.fileId,
+              resolvedModule.file.fileId,
               fact.lineNumber,
             ]),
             repoId,
             commitSha,
             fromId: source.file.fileId,
-            toId: targetFile.fileId,
+            toId: resolvedModule.file.fileId,
             fromKind: "file" as const,
             toKind: "file" as const,
             kind: "imports" as const,
             confidence: 0.9,
             metadata: {
+              ...(resolvedModule.aliasPattern ? { aliasPattern: resolvedModule.aliasPattern } : {}),
               importPath: fact.moduleSpecifier,
               lineNumber: fact.lineNumber,
-              resolvedPath: targetFile.path,
+              resolution: resolvedModule.resolution,
+              resolvedPath: resolvedModule.file.path,
             },
           },
         ];
@@ -881,6 +1057,7 @@ function importedCallEdgesForSources(
   commitSha: string,
   sources: readonly TypeScriptSourceExtraction[],
   filesByPath: ReadonlyMap<string, FileRecord>,
+  moduleAliases: readonly ModuleResolutionAlias[],
 ): EdgeRecord[] {
   const symbolsByPathAndName = symbolsByFilePathAndName(
     sources.flatMap((source) => source.symbols),
@@ -898,16 +1075,19 @@ function importedCallEdgesForSources(
           return [];
         }
 
-        const targetFile = resolveRelativeModuleFile(
+        const resolvedModule = resolveModuleFile(
           source.file.path,
           importFact.moduleSpecifier,
           filesByPath,
+          moduleAliases,
         );
-        if (!targetFile) {
+        if (!resolvedModule) {
           return [];
         }
 
-        const callee = symbolsByPathAndName.get(targetFile.path)?.get(importFact.importedName);
+        const callee = symbolsByPathAndName
+          .get(resolvedModule.file.path)
+          ?.get(importFact.importedName);
         const caller = symbolContainingLine(source.symbols, fact.lineNumber);
         if (!caller || !callee || caller.symbolId === callee.symbolId) {
           return [];
@@ -935,11 +1115,13 @@ function importedCallEdgesForSources(
             kind: "calls" as const,
             confidence: 0.9,
             metadata: {
+              ...(resolvedModule.aliasPattern ? { aliasPattern: resolvedModule.aliasPattern } : {}),
               importedName: importFact.importedName,
               importPath: importFact.moduleSpecifier,
               lineNumber: fact.lineNumber,
               localName: importFact.localName,
-              resolvedPath: targetFile.path,
+              resolution: resolvedModule.resolution,
+              resolvedPath: resolvedModule.file.path,
             },
           },
         ];
@@ -1036,17 +1218,46 @@ function symbolsByFilePathAndName(
   return symbolsByPath;
 }
 
-/** Resolves a relative TS/JS module specifier to an indexed source file. */
-function resolveRelativeModuleFile(
+/** Resolves a TS/JS module specifier to an indexed source file when it is local. */
+function resolveModuleFile(
   importerPath: string,
   moduleSpecifier: string,
   filesByPath: ReadonlyMap<string, FileRecord>,
-): FileRecord | undefined {
-  const resolvedPath = resolveRelativeModulePath(importerPath, moduleSpecifier);
-  if (!resolvedPath) {
-    return undefined;
+  moduleAliases: readonly ModuleResolutionAlias[],
+): ResolvedModuleFile | undefined {
+  const relativePath = resolveRelativeModulePath(importerPath, moduleSpecifier);
+  const relativeFile = relativePath
+    ? indexedSourceFileForModulePath(relativePath, filesByPath)
+    : undefined;
+  if (relativeFile) {
+    return { file: relativeFile, resolution: "relative" };
   }
 
+  return resolveAliasModuleFile(moduleSpecifier, filesByPath, moduleAliases);
+}
+
+/** Resolves a module specifier through tsconfig/jsconfig path aliases. */
+function resolveAliasModuleFile(
+  moduleSpecifier: string,
+  filesByPath: ReadonlyMap<string, FileRecord>,
+  moduleAliases: readonly ModuleResolutionAlias[],
+): ResolvedModuleFile | undefined {
+  for (const alias of moduleAliases) {
+    const aliasPath = resolveAliasModulePath(moduleSpecifier, alias);
+    const file = aliasPath ? indexedSourceFileForModulePath(aliasPath, filesByPath) : undefined;
+    if (file) {
+      return { aliasPattern: alias.pattern, file, resolution: "alias" };
+    }
+  }
+
+  return undefined;
+}
+
+/** Finds an indexed source file for a resolved module path candidate. */
+function indexedSourceFileForModulePath(
+  resolvedPath: string,
+  filesByPath: ReadonlyMap<string, FileRecord>,
+): FileRecord | undefined {
   for (const candidate of relativeModulePathCandidates(resolvedPath)) {
     const file = filesByPath.get(candidate);
     if (file && isSupportedSourcePath(file.path)) {
@@ -1055,6 +1266,32 @@ function resolveRelativeModuleFile(
   }
 
   return undefined;
+}
+
+/** Resolves a non-relative module specifier through one paths alias. */
+function resolveAliasModulePath(
+  moduleSpecifier: string,
+  alias: ModuleResolutionAlias,
+): string | undefined {
+  if (!alias.pattern.includes("*")) {
+    return moduleSpecifier === alias.pattern
+      ? normalizeRepoPath(`${alias.targetPrefix}${alias.targetSuffix}`)
+      : undefined;
+  }
+
+  if (
+    !moduleSpecifier.startsWith(alias.patternPrefix) ||
+    !moduleSpecifier.endsWith(alias.patternSuffix)
+  ) {
+    return undefined;
+  }
+
+  const wildcard = moduleSpecifier.slice(
+    alias.patternPrefix.length,
+    moduleSpecifier.length - alias.patternSuffix.length,
+  );
+
+  return normalizeRepoPath(`${alias.targetPrefix}${wildcard}${alias.targetSuffix}`);
 }
 
 /** Resolves a relative import path against a POSIX repository path. */
@@ -1087,6 +1324,20 @@ function relativeModulePathCandidates(path: string): readonly string[] {
 /** Returns whether a module specifier points to a relative module path. */
 function isRelativeModuleSpecifier(moduleSpecifier: string): boolean {
   return moduleSpecifier.startsWith("./") || moduleSpecifier.startsWith("../");
+}
+
+/** Returns whether a module specifier matches any configured local alias pattern. */
+function moduleSpecifierMatchesAlias(
+  moduleSpecifier: string,
+  moduleAliases: readonly ModuleResolutionAlias[],
+): boolean {
+  return moduleAliases.some(
+    (alias) =>
+      (!alias.pattern.includes("*") && moduleSpecifier === alias.pattern) ||
+      (alias.pattern.includes("*") &&
+        moduleSpecifier.startsWith(alias.patternPrefix) &&
+        moduleSpecifier.endsWith(alias.patternSuffix)),
+  );
 }
 
 /** Normalizes a POSIX repository path without allowing an absolute result. */
@@ -1575,6 +1826,7 @@ function edgeRecordsForFile(
   path: string,
   sourceFile: ts.SourceFile,
   symbols: readonly SymbolRecord[],
+  moduleAliases: readonly ModuleResolutionAlias[],
 ): EdgeRecord[] {
   const edges: EdgeRecord[] = [];
 
@@ -1582,7 +1834,8 @@ function edgeRecordsForFile(
     if (
       ts.isImportDeclaration(statement) &&
       ts.isStringLiteral(statement.moduleSpecifier) &&
-      !isRelativeModuleSpecifier(statement.moduleSpecifier.text)
+      !isRelativeModuleSpecifier(statement.moduleSpecifier.text) &&
+      !moduleSpecifierMatchesAlias(statement.moduleSpecifier.text, moduleAliases)
     ) {
       const toId = `external:${statement.moduleSpecifier.text}`;
       edges.push({
