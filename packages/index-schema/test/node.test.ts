@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ import {
   stringifyIndexRecordsJsonl,
 } from "../src";
 import {
+  createIndexRecordWriter,
   openIndexArtifact,
   readSplitIndexArtifactDirectory,
   writeSplitIndexArtifactDirectory,
@@ -40,6 +41,38 @@ describe("index artifact Node helpers", () => {
       },
       records: artifact.records,
     });
+  });
+
+  it("streams compact record writes with integrity metadata", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithTwoFiles();
+    const recordsPath = join(root, "records.jsonl");
+    const writer = createIndexRecordWriter({ filePath: recordsPath });
+
+    for (const record of artifact.records) {
+      await writer.write(record);
+    }
+
+    const metadata = await writer.close();
+    const text = stringifyIndexRecordsJsonl(artifact.records);
+
+    await expect(readFile(recordsPath, "utf8")).resolves.toBe(text);
+    expect(metadata).toEqual({
+      byteLength: Buffer.byteLength(text, "utf8"),
+      recordCount: artifact.records.length,
+      sha256: `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`,
+    });
+  });
+
+  it("rejects unsupported record writer compression", async () => {
+    const root = await createTempRoot();
+
+    expect(() =>
+      createIndexRecordWriter({
+        compression: "gzip",
+        filePath: join(root, "records.jsonl.gz"),
+      }),
+    ).toThrow("Unsupported index artifact record writer compression gzip.");
   });
 
   it("reads manifest-declared partitioned record files in order", async () => {

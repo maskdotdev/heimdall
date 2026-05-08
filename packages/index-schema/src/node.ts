@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { once } from "node:events";
+import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -12,12 +13,12 @@ import {
   type IndexManifest,
   type IndexRecord,
   type IndexRecordFile,
+  type IndexRecordFileCompression,
   isNormalizedRepoPath,
   parseIndexArtifactJson,
   parseIndexManifestJson,
   parseIndexRecordJsonlLine,
   stringifyIndexManifestJson,
-  stringifyIndexRecordsJsonl,
 } from "./index";
 
 /** Byte-level integrity metadata for one parsed JSONL record file. */
@@ -54,6 +55,32 @@ export type IndexArtifactReader = {
   readonly manifest: IndexManifest;
   /** Streams artifact records in manifest-declared order. */
   records(): AsyncGenerator<IndexRecord>;
+};
+
+/** Metadata returned after streaming a JSONL record file to disk. */
+export type IndexRecordWriterCloseResult = {
+  /** UTF-8 byte length written to disk. */
+  readonly byteLength: number;
+  /** Number of records written. */
+  readonly recordCount: number;
+  /** SHA-256 digest for the exact written bytes. */
+  readonly sha256: `sha256:${string}`;
+};
+
+/** Streaming writer for one compact JSONL index record file. */
+export type IndexRecordWriter = {
+  /** Writes one record as compact JSON plus a final line break. */
+  write(record: IndexRecord): Promise<void>;
+  /** Finishes the file and returns integrity metadata for the written bytes. */
+  close(): Promise<IndexRecordWriterCloseResult>;
+};
+
+/** Input for creating a compact JSONL index record writer. */
+export type CreateIndexRecordWriterInput = {
+  /** Destination JSONL file path. */
+  readonly filePath: string;
+  /** Optional compression mode. MVP writers support only uncompressed JSONL. */
+  readonly compression?: IndexRecordFileCompression;
 };
 
 /** Reads either a whole-artifact JSON file or a split artifact directory. */
@@ -104,6 +131,60 @@ export async function readIndexRecordsJsonlFile(
   options: ReadIndexArtifactPathOptions = {},
 ): Promise<IndexRecord[]> {
   return [...(await readIndexRecordsJsonlFileWithMetadata(recordsPath, options)).records];
+}
+
+/** Creates a streaming compact JSONL record writer with byte and hash tracking. */
+export function createIndexRecordWriter(input: CreateIndexRecordWriterInput): IndexRecordWriter {
+  const compression = input.compression ?? "none";
+  if (compression !== "none") {
+    throw new Error(`Unsupported index artifact record writer compression ${compression}.`);
+  }
+
+  const stream = createWriteStream(input.filePath, { flags: "w" });
+  const hash = createHash("sha256");
+  let byteLength = 0;
+  let closed = false;
+  let recordCount = 0;
+  let streamError: unknown;
+
+  stream.on("error", (error) => {
+    streamError = error;
+  });
+
+  return {
+    close: async () => {
+      if (closed) {
+        throw new Error("Index record writer is already closed.");
+      }
+
+      closed = true;
+      throwStreamError(streamError);
+      await finishWriteStream(stream);
+      throwStreamError(streamError);
+
+      return {
+        byteLength,
+        recordCount,
+        sha256: `sha256:${hash.digest("hex")}`,
+      };
+    },
+    write: async (record) => {
+      if (closed) {
+        throw new Error("Cannot write to a closed index record writer.");
+      }
+
+      const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+      hash.update(bytes);
+      byteLength += bytes.byteLength;
+      recordCount += 1;
+
+      throwStreamError(streamError);
+      if (!stream.write(bytes)) {
+        await waitForDrain(stream);
+      }
+      throwStreamError(streamError);
+    },
+  };
 }
 
 /** Reads a compact JSONL records file and returns integrity metadata. */
@@ -175,21 +256,15 @@ export async function writeSplitIndexArtifactDirectory(
   directoryPath: string,
   artifact: IndexArtifactInput,
 ): Promise<void> {
-  const manifest = withCanonicalRecordFile(artifact);
-
   await mkdir(directoryPath, { recursive: true });
-  await Promise.all([
-    writeFile(
-      join(directoryPath, INDEX_MANIFEST_FILE_NAME),
-      stringifyIndexManifestJson(manifest),
-      "utf8",
-    ),
-    writeFile(
-      join(directoryPath, INDEX_RECORDS_FILE_NAME),
-      stringifyIndexRecordsJsonl(artifact.records),
-      "utf8",
-    ),
-  ]);
+  const recordFile = await writeCanonicalRecordsFile(directoryPath, artifact.records);
+  const manifest = withCanonicalRecordFile(artifact.manifest, recordFile);
+
+  await writeFile(
+    join(directoryPath, INDEX_MANIFEST_FILE_NAME),
+    stringifyIndexManifestJson(manifest),
+    "utf8",
+  );
 }
 
 /** Streams all record files declared by the manifest, or the canonical MVP record file. */
@@ -264,29 +339,67 @@ function validateRecordFileMetadata(
 }
 
 /** Returns a manifest that declares the canonical single records.jsonl file. */
-function withCanonicalRecordFile(artifact: IndexArtifactInput): IndexManifest {
-  const recordsJsonl = stringifyIndexRecordsJsonl(artifact.records);
-
+function withCanonicalRecordFile(
+  manifest: IndexManifest,
+  recordFile: IndexRecordFile,
+): IndexManifest {
   return {
-    ...artifact.manifest,
-    recordFiles: [
-      {
-        byteLength: Buffer.byteLength(recordsJsonl, "utf8"),
-        compression: "none",
-        encoding: "utf-8",
-        mediaType: "application/jsonl",
-        path: INDEX_RECORDS_FILE_NAME,
-        recordKind: "mixed",
-        recordCount: artifact.records.length,
-        sha256: sha256Text(recordsJsonl),
-      },
-    ] satisfies readonly IndexRecordFile[],
+    ...manifest,
+    recordFiles: [recordFile],
   };
 }
 
-/** Returns a canonical SHA-256 digest for UTF-8 text. */
-function sha256Text(text: string): `sha256:${string}` {
-  return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
+/** Writes the canonical single records.jsonl file and returns manifest metadata. */
+async function writeCanonicalRecordsFile(
+  directoryPath: string,
+  records: readonly IndexRecord[],
+): Promise<IndexRecordFile> {
+  const writer = createIndexRecordWriter({
+    filePath: join(directoryPath, INDEX_RECORDS_FILE_NAME),
+  });
+
+  for (const record of records) {
+    await writer.write(record);
+  }
+
+  const metadata = await writer.close();
+
+  return {
+    ...metadata,
+    compression: "none",
+    encoding: "utf-8",
+    mediaType: "application/jsonl",
+    path: INDEX_RECORDS_FILE_NAME,
+    recordKind: "mixed",
+  };
+}
+
+/** Waits for a writable stream to drain or throw its write error. */
+async function waitForDrain(stream: WriteStream): Promise<void> {
+  await Promise.race([
+    once(stream, "drain").then(() => undefined),
+    once(stream, "error").then(([error]) => {
+      throw error;
+    }),
+  ]);
+}
+
+/** Ends a writable stream and waits for its final flush or write error. */
+async function finishWriteStream(stream: WriteStream): Promise<void> {
+  stream.end();
+  await Promise.race([
+    once(stream, "finish").then(() => undefined),
+    once(stream, "error").then(([error]) => {
+      throw error;
+    }),
+  ]);
+}
+
+/** Throws a captured write-stream error when one has occurred. */
+function throwStreamError(error: unknown): void {
+  if (error) {
+    throw error;
+  }
 }
 
 /** Returns a record-limit option object without writing exact-optional undefined fields. */
