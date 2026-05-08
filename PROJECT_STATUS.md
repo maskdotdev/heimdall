@@ -133,14 +133,15 @@ tracked milestone.
   OAuth login/session flows and FK-backed decision user lookup, with Postgres-backed integration
   coverage for one-time state consumption, identity-link preservation, and session revocation.
 - Latest DB security-audit milestone: `SecurityAuditRepository` now owns artifact access event
-  writes, idempotent normalized security event writes, audit log insertion, filtered audit log
-  listing, resource/action replay audit listing, and filtered security event listing. The API uses
-  this repository boundary for sensitive review-artifact access logging, security event sink writes,
-  admin audit writes, and admin audit/security inspection reads; admin-tools replay, cancel,
-  debug-export, and eval-import audit paths now use the same boundary instead of raw `audit_logs`
-  writes. Postgres-backed integration coverage verifies duplicate security-event handling,
-  inserted artifact/audit rows, filtered searches, replay audit ordering, and bounded list
-  validation.
+  writes, idempotent normalized security event writes, regular and idempotent audit log insertion,
+  filtered audit log listing, resource/action replay audit listing, and filtered security event
+  listing. The API uses this repository boundary for sensitive review-artifact access logging,
+  security event sink writes, admin audit writes, and admin audit/security inspection reads;
+  admin-tools replay, cancel, debug-export, and eval-import audit paths plus review-orchestrator
+  repo-local config-change audits now use the same boundary instead of raw `audit_logs` writes.
+  Postgres-backed integration coverage verifies duplicate security-event handling, duplicate
+  audit-log suppression, inserted artifact/audit rows, filtered searches, replay audit ordering,
+  and bounded list validation.
 - Latest DB repository milestone: `RepositoryRepository` now supports provider-native repository
   lookup, owning-org lookup, provider-ref lookup with installation metadata, deterministic
   enabled-repository cursor pagination, batch repository/settings/org-default reads, provider

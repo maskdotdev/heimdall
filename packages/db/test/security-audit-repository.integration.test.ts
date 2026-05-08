@@ -97,13 +97,39 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
       resourceId: "repo_security_audit",
       resourceType: "repository",
     });
+    await expect(
+      securityAuditRepository.recordAuditLogIfAbsent({
+        action: "repo_local_config.change_detected",
+        actorType: "system",
+        auditLogId: "audit_security_audit_repo_config",
+        metadata: { reviewRunId: "review_run_security_audit" },
+        occurredAt: new Date("2026-05-08T00:06:00.000Z"),
+        orgId: "org_security_audit",
+        resourceId: "review_run_security_audit",
+        resourceType: "review_run",
+      }),
+    ).resolves.toMatchObject({
+      auditLogId: "audit_security_audit_repo_config",
+    });
+    await expect(
+      securityAuditRepository.recordAuditLogIfAbsent({
+        action: "repo_local_config.change_detected",
+        actorType: "system",
+        auditLogId: "audit_security_audit_repo_config",
+        metadata: { reviewRunId: "review_run_security_audit_duplicate" },
+        occurredAt: new Date("2026-05-08T00:06:30.000Z"),
+        orgId: "org_security_audit",
+        resourceId: "review_run_security_audit",
+        resourceType: "review_run",
+      }),
+    ).resolves.toBeUndefined();
     await securityAuditRepository.recordAuditLog({
       action: "job.replay.dispatch",
       actorType: "admin",
       actorUserId: "admin_security_audit",
       auditLogId: "audit_security_audit_replay",
       metadata: { replayRunId: "replay_security_audit" },
-      occurredAt: new Date("2026-05-08T00:06:00.000Z"),
+      occurredAt: new Date("2026-05-08T00:07:00.000Z"),
       resourceId: "job_security_audit",
       resourceType: "background_job",
     });
@@ -113,13 +139,13 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
       actorUserId: "admin_security_audit",
       auditLogId: "audit_security_audit_cancel",
       metadata: { previousStatus: "queued" },
-      occurredAt: new Date("2026-05-08T00:07:00.000Z"),
+      occurredAt: new Date("2026-05-08T00:08:00.000Z"),
       resourceId: "job_security_audit",
       resourceType: "background_job",
     });
     await securityAuditRepository.recordSecurityEvent({
       actorId: "admin_security_audit",
-      createdAt: new Date("2026-05-08T00:08:00.000Z"),
+      createdAt: new Date("2026-05-08T00:09:00.000Z"),
       metadata: { marker: "security-list-target" },
       resourceId: "repo_security_audit",
       resourceType: "repository",
@@ -138,7 +164,7 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
     `;
     expect(counts).toEqual({
       artifact_access_events: 1,
-      audit_logs: 4,
+      audit_logs: 5,
       security_events: 2,
     });
 
@@ -156,6 +182,7 @@ describe.runIf(integrationDatabaseUrl)("SecurityAuditRepository integration", ()
     await expect(securityAuditRepository.listAuditLogs({ limit: 10 })).resolves.toMatchObject([
       { auditLogId: "audit_security_audit_cancel" },
       { auditLogId: "audit_security_audit_replay" },
+      { auditLogId: "audit_security_audit_repo_config" },
       { auditLogId: "audit_security_audit_settings" },
       { auditLogId: "audit_security_audit" },
     ]);
