@@ -3,15 +3,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  auditLogs,
   type ComplianceEvidenceRecord,
   ComplianceEvidenceRepository,
   type HeimdallDatabase,
-  orgMemberships,
-  orgSettings,
-  repositories,
-  repositorySettings,
-  securityEvents,
 } from "@repo/db";
 import {
   type ComplianceControlId,
@@ -19,7 +13,6 @@ import {
   type ComplianceEvidenceType,
   createComplianceEvidenceDescriptor,
 } from "@repo/security";
-import { asc, eq } from "drizzle-orm";
 
 /** Maximum rows one compliance evidence collector can export in one artifact. */
 const MAX_COMPLIANCE_EVIDENCE_EXPORT_ROWS = 1_000;
@@ -183,12 +176,10 @@ export async function collectAccessReviewEvidence(
 ): Promise<CollectedComplianceEvidence> {
   const collectedAt = collectorTimestamp(options);
   const limit = collectorLimit(options.limit);
-  const rows = await options.db
-    .select()
-    .from(orgMemberships)
-    .where(options.orgId ? eq(orgMemberships.orgId, options.orgId) : undefined)
-    .orderBy(asc(orgMemberships.orgId), asc(orgMemberships.userId))
-    .limit(limit);
+  const rows = await new ComplianceEvidenceRepository(options.db).listAccessReviewEvidenceRows({
+    limit,
+    orgId: options.orgId,
+  });
 
   const records = rows.map((row) => ({
     createdAt: row.createdAt.toISOString(),
@@ -216,12 +207,10 @@ export async function collectAuditLogEvidence(
 ): Promise<CollectedComplianceEvidence> {
   const collectedAt = collectorTimestamp(options);
   const limit = collectorLimit(options.limit);
-  const rows = await options.db
-    .select()
-    .from(auditLogs)
-    .where(options.orgId ? eq(auditLogs.orgId, options.orgId) : undefined)
-    .orderBy(asc(auditLogs.occurredAt), asc(auditLogs.auditLogId))
-    .limit(limit);
+  const rows = await new ComplianceEvidenceRepository(options.db).listAuditLogEvidenceRows({
+    limit,
+    orgId: options.orgId,
+  });
 
   const records = rows.map((row) => ({
     action: row.action,
@@ -253,12 +242,10 @@ export async function collectSecurityEventEvidence(
 ): Promise<CollectedComplianceEvidence> {
   const collectedAt = collectorTimestamp(options);
   const limit = collectorLimit(options.limit);
-  const rows = await options.db
-    .select()
-    .from(securityEvents)
-    .where(options.orgId ? eq(securityEvents.orgId, options.orgId) : undefined)
-    .orderBy(asc(securityEvents.createdAt), asc(securityEvents.securityEventId))
-    .limit(limit);
+  const rows = await new ComplianceEvidenceRepository(options.db).listSecurityEventEvidenceRows({
+    limit,
+    orgId: options.orgId,
+  });
 
   const records = rows.map((row) => ({
     actorId: row.actorId ?? undefined,
@@ -293,23 +280,11 @@ export async function collectConfigSnapshotEvidence(
 ): Promise<CollectedComplianceEvidence> {
   const collectedAt = collectorTimestamp(options);
   const limit = collectorLimit(options.limit);
-  const orgSettingsRows = await options.db
-    .select()
-    .from(orgSettings)
-    .where(options.orgId ? eq(orgSettings.orgId, options.orgId) : undefined)
-    .orderBy(asc(orgSettings.orgId))
-    .limit(limit);
-  const repositoryRows = await options.db
-    .select()
-    .from(repositories)
-    .where(options.orgId ? eq(repositories.orgId, options.orgId) : undefined)
-    .orderBy(asc(repositories.repoId))
-    .limit(limit);
-  const repositorySettingsRows = await options.db
-    .select()
-    .from(repositorySettings)
-    .orderBy(asc(repositorySettings.repoId))
-    .limit(limit);
+  const { orgSettingsRows, repositoryRows, repositorySettingsRows } =
+    await new ComplianceEvidenceRepository(options.db).listConfigSnapshotEvidenceRows({
+      limit,
+      orgId: options.orgId,
+    });
   const scopedRepoIds = new Set(repositoryRows.map((row) => row.repoId));
   const repoOrgById = new Map(repositoryRows.map((row) => [row.repoId, row.orgId]));
 

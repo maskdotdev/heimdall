@@ -235,6 +235,11 @@ tracked milestone.
   boundary for organization list and detail routes instead of importing raw `orgs` and
   `provider_installations` tables, and repository integration coverage verifies scoped summary
   filters and counts.
+- Latest DB compliance-evidence milestone: `ComplianceEvidenceRepository` now owns source reads
+  for access-review, audit-log, security-event, and configuration-snapshot evidence collectors.
+  `@repo/admin-tools` uses this repository boundary for compliance collection instead of importing
+  raw membership, audit, security, repository, or settings tables, while keeping product-safe
+  evidence mapping and redaction in the admin-tools package.
 - Latest DB review milestone: `ReviewRepository` now returns the stored candidate row when an
   idempotent insert conflicts on review/fingerprint uniqueness, instead of echoing the rejected
   input, owns validated finding inspection reads joined with repository and publication display
@@ -1291,11 +1296,12 @@ tracked milestone.
   IDs, evidence types, sources, statuses, product-safe descriptor creation, and metadata
   sanitization for access review, audit export, config snapshot, data deletion, and security-event
   evidence. `@repo/db` now includes the generated `compliance_evidence` table plus a
-  `ComplianceEvidenceRepository` with scoped filters for control, type, status, source, and search.
-  `@repo/admin-tools` now collects access-review membership exports, audit-log exports,
+  `ComplianceEvidenceRepository` with scoped filters for control, type, status, source, search, and
+  collector source-row reads for access reviews, audit logs, security events, and configuration
+  snapshots. `@repo/admin-tools` now collects access-review membership exports, audit-log exports,
   security-event exports, and configuration snapshots into product-safe JSON artifacts backed by
-  memory or filesystem stores, then records durable evidence rows with artifact URIs and SHA-256
-  digests. The admin CLI now exposes the collectors as
+  memory or filesystem stores through that repository boundary, then records durable evidence rows
+  with artifact URIs and SHA-256 digests. The admin CLI now exposes the collectors as
   `admin compliance collect <all|access-review|audit-log|security-events|config-snapshot>` with
   explicit filesystem artifact output, optional org scoping, row limits, and JSON summaries.
   `@repo/contracts` now defines `compliance_evidence.collect.v1` payloads, and security-role

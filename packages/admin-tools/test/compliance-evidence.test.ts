@@ -6,12 +6,14 @@ import {
   orgSettings,
   repositories,
   repositorySettings,
+  securityEvents,
 } from "@repo/db";
 import { describe, expect, it } from "vitest";
 import {
   collectAccessReviewEvidence,
   collectAuditLogEvidence,
   collectConfigSnapshotEvidence,
+  collectSecurityEventEvidence,
   createMemoryComplianceEvidenceArtifactStore,
 } from "../src";
 
@@ -112,6 +114,54 @@ describe("compliance evidence collectors", () => {
     ]);
     expect(JSON.stringify(result.payload)).not.toContain("github_pat_secret_value");
     expect(result.record.evidenceHash).toMatch(/^sha256:/u);
+  });
+
+  it("exports security events without raw metadata values", async () => {
+    const artifactStore = createMemoryComplianceEvidenceArtifactStore();
+    const db = createComplianceEvidenceDatabaseStub(
+      new Map<unknown, readonly unknown[]>([
+        [
+          securityEvents,
+          [
+            {
+              actorId: "user_admin",
+              createdAt: now,
+              metadata: {
+                providerToken: "github_pat_secret_value",
+                requestId: "request_1",
+              },
+              orgId: "org_1",
+              repoId: "repo_1",
+              resourceId: "repo_1",
+              resourceType: "repository",
+              securityEventId: "secevt_1",
+              severity: "high",
+              source: "github",
+              status: "open",
+              type: "provider_permission_denied",
+              updatedAt: now,
+            } satisfies typeof securityEvents.$inferSelect,
+          ],
+        ],
+      ]),
+    );
+
+    const result = await collectSecurityEventEvidence({
+      artifactStore,
+      collectedBy: "admin_tool:test",
+      db,
+      orgId: "org_1",
+      now: () => now,
+    });
+
+    expect(result.payload.records).toEqual([
+      expect.objectContaining({
+        metadataKeys: ["providerToken", "requestId"],
+        securityEventId: "secevt_1",
+        type: "provider_permission_denied",
+      }),
+    ]);
+    expect(JSON.stringify(result.payload)).not.toContain("github_pat_secret_value");
   });
 
   it("exports config snapshots without raw custom instructions", async () => {
