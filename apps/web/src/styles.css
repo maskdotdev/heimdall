@@ -981,6 +981,19 @@ button.small {
   border-top: 1px solid var(--border-subtle);
 }
 
+.product-org-settings-panel {
+  margin: 1rem 0;
+  padding: 1rem 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.org-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(18rem, 1fr) minmax(18rem, 1fr);
+  gap: 1rem;
+}
+
 .settings-inline-panel {
   display: flex;
   flex-direction: column;
@@ -2003,6 +2016,7 @@ tbody tr:hover {
 
   .overview-grid,
   .product-grid,
+  .org-settings-grid,
   .product-resource-grid,
   .product-review-grid,
   .product-hero,

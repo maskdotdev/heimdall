@@ -1931,6 +1931,110 @@ type ControlPlaneSettingsResponse = {
   readonly settings: ControlPlaneSettings;
 };
 
+/** Organization default trigger policy returned by the product API. */
+type ProductOrgTriggerPolicy = {
+  /** Enabled pull request actions. */
+  readonly enabledActions: readonly string[];
+  /** Ignored pull request authors. */
+  readonly ignoredAuthors: readonly string[];
+  /** Ignored pull request labels. */
+  readonly ignoredLabels: readonly string[];
+  /** Required pull request label. */
+  readonly requireLabel?: string | undefined;
+  /** Whether draft pull requests are skipped. */
+  readonly skipDraftPullRequests: boolean;
+};
+
+/** Organization default finding policy returned by the product API. */
+type ProductOrgFindingPolicy = {
+  /** Whether style findings can be published. */
+  readonly allowStyleFindings: boolean;
+  /** Enabled finding categories. */
+  readonly enabledCategories: readonly string[];
+  /** Maximum findings published per review. */
+  readonly maxCommentsPerReview: number;
+  /** Minimum confidence needed for publishing. */
+  readonly minimumConfidence: number;
+  /** Minimum severity threshold. */
+  readonly severityThreshold: string;
+  /** Whether generated-file findings are suppressed. */
+  readonly suppressGeneratedFileFindings: boolean;
+};
+
+/** Organization default publishing policy returned by the product API. */
+type ProductOrgPublishingPolicy = {
+  /** Maximum comments published per review. */
+  readonly maxCommentsPerReview: number;
+  /** Whether check runs are published. */
+  readonly publishCheckRun: boolean;
+  /** Whether inline comments are published. */
+  readonly publishInlineComments: boolean;
+  /** Whether summary comments are published. */
+  readonly publishSummaryComment: boolean;
+};
+
+/** Organization default memory policy returned by the product API. */
+type ProductOrgMemoryPolicy = {
+  /** Whether exact finding suppression is allowed. */
+  readonly allowExactFindingSuppression: boolean;
+  /** Whether natural-language memory instructions are allowed. */
+  readonly allowNaturalLanguageInstructions: boolean;
+  /** Whether path/category suppression is allowed. */
+  readonly allowPathCategorySuppression: boolean;
+  /** Whether memory facts are added to context. */
+  readonly enableMemoryContext: boolean;
+  /** Whether memory can suppress repeated findings. */
+  readonly enableMemorySuppression: boolean;
+  /** Maximum memory facts included in context. */
+  readonly maxMemoryFactsInContext: number;
+  /** Memory TTL in days when configured. */
+  readonly memoryTtlDays?: number | undefined;
+  /** Whether memory facts require approval. */
+  readonly requireApprovalForMemoryFacts: boolean;
+  /** Trusted roles for feedback-derived memory. */
+  readonly trustedFeedbackRoles: readonly string[];
+};
+
+/** Organization-wide policy defaults returned by the product API. */
+type ProductOrgSettings = {
+  /** Settings schema version. */
+  readonly schemaVersion: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Default review publication policy. */
+  readonly defaultReviewPolicy: string;
+  /** Default trigger policy. */
+  readonly defaultTriggerPolicy: ProductOrgTriggerPolicy;
+  /** Default finding policy. */
+  readonly defaultFindingPolicy: ProductOrgFindingPolicy;
+  /** Default publishing policy. */
+  readonly defaultPublishingPolicy: ProductOrgPublishingPolicy;
+  /** Default memory policy. */
+  readonly defaultMemoryPolicy: ProductOrgMemoryPolicy;
+  /** Allowed model routing profiles. */
+  readonly allowedModelProfiles?: readonly string[] | undefined;
+  /** Whether repo-local config is allowed. */
+  readonly allowRepoLocalConfig: boolean;
+  /** Whether memory suppression is allowed. */
+  readonly allowMemorySuppression: boolean;
+  /** Whether user-defined repository rules are allowed. */
+  readonly allowUserDefinedRules: boolean;
+  /** Settings creation timestamp. */
+  readonly createdAt: string;
+  /** Settings update timestamp. */
+  readonly updatedAt: string;
+  /** Last updating product user ID. */
+  readonly updatedByUserId: string | null;
+  /** Monotonic settings version. */
+  readonly version: number;
+};
+
+/** Organization settings response returned by the product API. */
+type ProductOrgSettingsResponse = {
+  /** Organization policy defaults and guardrails. */
+  readonly settings: ProductOrgSettings;
+};
+
 /** Repository or organization rule row shown by repository settings UX. */
 type AdminRepoRuleSummary = {
   /** Rule ID used by typed policy snapshots. */
@@ -2166,6 +2270,76 @@ type RuleFormState = {
   titleRegex: string;
   /** Rule instruction. */
   instruction: string;
+};
+
+/** Mutable organization settings form state. */
+type ProductOrgSettingsFormState = {
+  /** Default review publication policy. */
+  defaultReviewPolicy: string;
+  /** Enabled pull request actions, one per line. */
+  enabledActions: string;
+  /** Ignored pull request authors, one per line. */
+  ignoredAuthors: string;
+  /** Ignored pull request labels, one per line. */
+  ignoredLabels: string;
+  /** Required pull request label. */
+  requireLabel: string;
+  /** Whether draft pull requests are skipped. */
+  skipDraftPullRequests: boolean;
+  /** Whether style findings are allowed. */
+  allowStyleFindings: boolean;
+  /** Enabled finding categories, one per line. */
+  enabledCategories: string;
+  /** Finding and publishing comment budget. */
+  maxCommentsPerReview: string;
+  /** Minimum confidence. */
+  minimumConfidence: string;
+  /** Minimum severity threshold. */
+  severityThreshold: string;
+  /** Whether generated-file findings are suppressed. */
+  suppressGeneratedFileFindings: boolean;
+  /** Whether check runs are published. */
+  publishCheckRun: boolean;
+  /** Whether inline comments are published. */
+  publishInlineComments: boolean;
+  /** Whether summary comments are published. */
+  publishSummaryComment: boolean;
+  /** Whether memory facts are added to context. */
+  enableMemoryContext: boolean;
+  /** Whether memory can suppress findings. */
+  enableMemorySuppression: boolean;
+  /** Maximum memory facts included in context. */
+  maxMemoryFactsInContext: string;
+  /** Memory TTL in days. */
+  memoryTtlDays: string;
+  /** Whether memory facts require approval. */
+  requireApprovalForMemoryFacts: boolean;
+  /** Trusted feedback roles, one per line. */
+  trustedFeedbackRoles: string;
+  /** Allowed model profiles, one per line. */
+  allowedModelProfiles: string;
+  /** Whether repo-local config is allowed. */
+  allowRepoLocalConfig: boolean;
+  /** Whether memory suppression is allowed at the org level. */
+  allowMemorySuppression: boolean;
+  /** Whether user-defined repository rules are allowed. */
+  allowUserDefinedRules: boolean;
+};
+
+/** Product-facing organization settings panel state. */
+type ProductOrgSettingsState = {
+  /** Selected organization ID. */
+  orgId: string;
+  /** Loaded organization settings payload. */
+  data?: ProductOrgSettings | undefined;
+  /** Editable form state. */
+  form?: ProductOrgSettingsFormState | undefined;
+  /** Loading label. */
+  loading?: string | undefined;
+  /** Error message. */
+  error?: string | undefined;
+  /** Save confirmation message. */
+  saved?: string | undefined;
 };
 
 /** Product-facing repository settings panel state. */
@@ -2865,6 +3039,8 @@ type ProductViewState = {
   session?: ProductMeResponse | undefined;
   /** Authenticated product workspace resources. */
   resources?: ProductResourcesState | undefined;
+  /** Selected product organization settings. */
+  orgSettings?: ProductOrgSettingsState | undefined;
   /** Selected product repository settings and rules. */
   repositorySettings?: ProductRepositorySettingsState | undefined;
   /** Selected product review run and finding details. */
@@ -3363,6 +3539,16 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "refresh-product-org-settings") {
+    await loadProductOrgSettings(requiredDatasetValue(element, "orgId"));
+    return;
+  }
+
+  if (action === "save-product-org-settings") {
+    await saveProductOrgSettings();
+    return;
+  }
+
   if (action === "toggle-product-repository") {
     await setProductRepositoryEnabled(
       requiredDatasetValue(element, "repoId"),
@@ -3783,6 +3969,11 @@ function handleInput(event: Event): void {
     return;
   }
 
+  if (field?.startsWith("productOrgSettings.")) {
+    updateProductOrgSettingsFormField(field.slice("productOrgSettings.".length), target);
+    return;
+  }
+
   if (field?.startsWith("productSettings.")) {
     updateProductSettingsFormField(field.slice("productSettings.".length), target);
     return;
@@ -3990,6 +4181,7 @@ async function loadProductSession(): Promise<void> {
   } catch (error) {
     state.product.session = undefined;
     state.product.resources = undefined;
+    state.product.orgSettings = undefined;
     state.product.repositorySettings = undefined;
     state.product.reviewDetail = undefined;
     if (!isUnauthorizedError(error)) {
@@ -4017,6 +4209,7 @@ async function logoutProductSession(): Promise<void> {
   } finally {
     state.product.session = undefined;
     state.product.resources = undefined;
+    state.product.orgSettings = undefined;
     state.product.repositorySettings = undefined;
     state.product.reviewDetail = undefined;
     state.product.sessionLoading = undefined;
@@ -4051,11 +4244,17 @@ async function loadProductResources(
         reviews: [],
         loaded: true,
       };
+      state.product.orgSettings = undefined;
       replaceDashboardRouteFromState(historyMode);
       return;
     }
 
-    const [repositoriesResponse, reviewsResponse, usage] = await Promise.all([
+    state.product.orgSettings = {
+      orgId: selectedOrgId,
+      loading: "Loading organization settings",
+    };
+
+    const [repositoriesResponse, reviewsResponse, usage, orgSettings] = await Promise.all([
       requestProductData<{ readonly repositories: readonly AdminRepositorySummary[] }>(
         `/api/v1/orgs/${encodeURIComponent(selectedOrgId)}/repositories?limit=50`,
       ),
@@ -4064,6 +4263,9 @@ async function loadProductResources(
       ),
       requestProductData<ProductUsageSummary>(
         `/api/v1/orgs/${encodeURIComponent(selectedOrgId)}/usage/summary?groupBy=repo`,
+      ),
+      requestProductData<ProductOrgSettingsResponse>(
+        `/api/v1/orgs/${encodeURIComponent(selectedOrgId)}/settings`,
       ),
     ]);
 
@@ -4075,12 +4277,24 @@ async function loadProductResources(
       usage,
       loaded: true,
     };
+    state.product.orgSettings = {
+      data: orgSettings.settings,
+      form: productOrgSettingsFormFromSettings(orgSettings.settings),
+      orgId: selectedOrgId,
+    };
     replaceDashboardRouteFromState(historyMode);
   } catch (error) {
     state.product.resources = {
       ...defaultProductResources(state.product.resources),
       error: errorMessage(error),
     };
+    if (state.product.orgSettings) {
+      state.product.orgSettings = {
+        ...state.product.orgSettings,
+        error: errorMessage(error),
+        loading: undefined,
+      };
+    }
   } finally {
     render();
   }
@@ -4106,6 +4320,65 @@ async function setProductRepositoryEnabled(repoId: string, enabled: boolean): Pr
       ...resources,
       error: errorMessage(error),
     };
+    render();
+  }
+}
+
+/** Refreshes organization policy defaults for the selected product organization. */
+async function loadProductOrgSettings(orgId: string): Promise<void> {
+  state.product.orgSettings = {
+    orgId,
+    loading: "Loading organization settings",
+  };
+  render();
+
+  try {
+    const data = await requestProductData<ProductOrgSettingsResponse>(
+      `/api/v1/orgs/${encodeURIComponent(orgId)}/settings`,
+    );
+    state.product.orgSettings = {
+      data: data.settings,
+      form: productOrgSettingsFormFromSettings(data.settings),
+      orgId,
+    };
+  } catch (error) {
+    state.product.orgSettings = {
+      orgId,
+      error: errorMessage(error),
+    };
+  } finally {
+    render();
+  }
+}
+
+/** Saves organization policy defaults for the selected product organization. */
+async function saveProductOrgSettings(): Promise<void> {
+  const settings = state.product.orgSettings;
+  const form = settings?.form;
+  if (!settings || !form) {
+    return;
+  }
+
+  settings.loading = "Saving organization settings";
+  settings.error = undefined;
+  settings.saved = undefined;
+  render();
+
+  try {
+    const data = await requestProductData<ProductOrgSettingsResponse>(
+      `/api/v1/orgs/${encodeURIComponent(settings.orgId)}/settings`,
+      {
+        body: JSON.stringify(productOrgSettingsPatchFromForm(form)),
+        method: "PATCH",
+      },
+    );
+    settings.data = data.settings;
+    settings.form = productOrgSettingsFormFromSettings(data.settings);
+    settings.saved = "Organization settings saved.";
+  } catch (error) {
+    settings.error = errorMessage(error);
+  } finally {
+    settings.loading = undefined;
     render();
   }
 }
@@ -5775,6 +6048,7 @@ async function requestProductData<T>(path: string, init: RequestInit = {}): Prom
     if (response.status === 401) {
       state.product.session = undefined;
       state.product.resources = undefined;
+      state.product.orgSettings = undefined;
       state.product.repositorySettings = undefined;
       state.product.reviewDetail = undefined;
     }
@@ -5800,6 +6074,7 @@ async function requestProductBlob(path: string): Promise<Blob> {
     if (response.status === 401) {
       state.product.session = undefined;
       state.product.resources = undefined;
+      state.product.orgSettings = undefined;
       state.product.repositorySettings = undefined;
       state.product.reviewDetail = undefined;
     }
@@ -6534,6 +6809,9 @@ function renderProductWorkspace(): string {
     (row) => row.orgId === resources.selectedOrgId,
   );
   const canManageRepositories = Boolean(membership?.capabilities.canManageRepositorySettings);
+  const canManageOrgSettings = Boolean(
+    membership?.capabilities.canManageOrgSettings || membership?.permissions.includes("org:manage"),
+  );
   const canManageRules = Boolean(membership?.permissions.includes("rule:write"));
   const canManageMemory = Boolean(membership?.permissions.includes("memory:write"));
   const canReadMemory = Boolean(membership?.permissions.includes("memory:read"));
@@ -6560,6 +6838,7 @@ function renderProductWorkspace(): string {
         resources.selectedOrgId
           ? `
             ${renderProductUsageCards(resources.usage)}
+            ${renderProductOrgSettingsPanel(canManageOrgSettings)}
             <div class="product-resource-grid">
               ${renderAuthenticatedProductRepositories(resources.repositories, canManageRepositories)}
             ${renderAuthenticatedProductReviews(resources.reviews)}
@@ -6623,6 +6902,282 @@ function renderProductUsageCards(usage: ProductUsageSummary | undefined): string
       ${renderMetric("LLM tokens", formatCompactNumber(usage.reviewInputTokens + usage.reviewOutputTokens))}
       ${renderMetric("Estimated cost", `$${usage.estimatedCostUsd}`)}
     </section>
+  `;
+}
+
+/** Renders organization-level policy default controls for the product workspace. */
+function renderProductOrgSettingsPanel(canManageSettings: boolean): string {
+  const settings = state.product.orgSettings;
+  if (!settings) {
+    return "";
+  }
+
+  const form = settings.form;
+  const disabled = !canManageSettings || !form;
+
+  return `
+    <section class="settings-inline-panel product-org-settings-panel">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="eyebrow">Organization Settings</p>
+          <h3>Policy defaults</h3>
+        </div>
+        <div class="row-actions">
+          <button
+            class="ghost small"
+            data-action="refresh-product-org-settings"
+            data-org-id="${escapeAttribute(settings.orgId)}"
+            type="button"
+          >
+            Refresh
+          </button>
+          <button
+            data-action="save-product-org-settings"
+            type="button"
+            ${disabled ? "disabled" : ""}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+      ${renderProductOrgSettingsNotice(settings)}
+      ${
+        form && settings.data
+          ? renderProductOrgSettingsForm(settings.data, form, disabled)
+          : `<p class="inline-empty">Organization policy defaults are not loaded.</p>`
+      }
+    </section>
+  `;
+}
+
+/** Renders product organization settings loading, error, or saved state. */
+function renderProductOrgSettingsNotice(settings: ProductOrgSettingsState): string {
+  if (settings.loading) {
+    return `<p class="notice compact">${escapeHtml(settings.loading)}...</p>`;
+  }
+  if (settings.error) {
+    return `<p class="error-line">${escapeHtml(settings.error)}</p>`;
+  }
+  if (settings.saved) {
+    return `<p class="notice success compact">${escapeHtml(settings.saved)}</p>`;
+  }
+
+  return "";
+}
+
+/** Renders editable organization policy defaults. */
+function renderProductOrgSettingsForm(
+  settings: ProductOrgSettings,
+  form: ProductOrgSettingsFormState,
+  disabled: boolean,
+): string {
+  return `
+    <div class="summary-grid compact-summary">
+      ${renderMetric("Version", String(settings.version))}
+      ${renderMetric("Updated", formatTime(settings.updatedAt))}
+      ${renderMetric("Rules", form.allowUserDefinedRules ? "enabled" : "locked")}
+      ${renderMetric("Memory", form.allowMemorySuppression ? "suppression on" : "context only")}
+    </div>
+    <div class="org-settings-grid">
+      <section class="settings-subsection">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">Review</p>
+            <h4>Triggers and findings</h4>
+          </div>
+        </div>
+        <div class="form-grid">
+          ${renderSelect(
+            "productOrgSettings.defaultReviewPolicy",
+            "Review policy",
+            form.defaultReviewPolicy,
+            [
+              "disabled",
+              "summary_only",
+              "inline_comments",
+              "inline_comments_and_summary",
+              "check_run_only",
+              "inline_comments_summary_and_check_run",
+            ],
+            disabled,
+          )}
+          ${renderSelect(
+            "productOrgSettings.severityThreshold",
+            "Severity threshold",
+            form.severityThreshold,
+            ["low", "medium", "high", "critical"],
+            disabled,
+          )}
+          ${renderNumberInput(
+            "productOrgSettings.maxCommentsPerReview",
+            "Max comments",
+            form.maxCommentsPerReview,
+            "0",
+            "50",
+            disabled,
+          )}
+          <label>
+            <span>Minimum confidence</span>
+            <input
+              data-field="productOrgSettings.minimumConfidence"
+              min="0"
+              max="1"
+              step="0.01"
+              type="number"
+              value="${escapeAttribute(form.minimumConfidence)}"
+              ${disabled ? "disabled" : ""}
+            />
+          </label>
+          <label>
+            <span>Required label</span>
+            <input
+              data-field="productOrgSettings.requireLabel"
+              placeholder="security-review"
+              value="${escapeAttribute(form.requireLabel)}"
+              ${disabled ? "disabled" : ""}
+            />
+          </label>
+          ${renderCheckbox(
+            "productOrgSettings.skipDraftPullRequests",
+            "Skip draft pull requests",
+            form.skipDraftPullRequests,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.allowStyleFindings",
+            "Allow style findings",
+            form.allowStyleFindings,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.suppressGeneratedFileFindings",
+            "Suppress generated-file findings",
+            form.suppressGeneratedFileFindings,
+            disabled,
+          )}
+        </div>
+        <div class="form-grid textareas">
+          ${renderTextarea(
+            "productOrgSettings.enabledActions",
+            "Enabled actions",
+            form.enabledActions,
+            disabled,
+          )}
+          ${renderTextarea(
+            "productOrgSettings.enabledCategories",
+            "Finding categories",
+            form.enabledCategories,
+            disabled,
+          )}
+          ${renderTextarea(
+            "productOrgSettings.ignoredAuthors",
+            "Ignored authors",
+            form.ignoredAuthors,
+            disabled,
+          )}
+          ${renderTextarea(
+            "productOrgSettings.ignoredLabels",
+            "Ignored labels",
+            form.ignoredLabels,
+            disabled,
+          )}
+        </div>
+      </section>
+      <section class="settings-subsection">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">Publishing and Memory</p>
+            <h4>Organization guardrails</h4>
+          </div>
+        </div>
+        <div class="form-grid">
+          ${renderCheckbox(
+            "productOrgSettings.publishInlineComments",
+            "Publish inline comments",
+            form.publishInlineComments,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.publishSummaryComment",
+            "Publish summary comments",
+            form.publishSummaryComment,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.publishCheckRun",
+            "Publish check runs",
+            form.publishCheckRun,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.enableMemoryContext",
+            "Use memory context",
+            form.enableMemoryContext,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.enableMemorySuppression",
+            "Use memory suppression",
+            form.enableMemorySuppression,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.requireApprovalForMemoryFacts",
+            "Require memory approval",
+            form.requireApprovalForMemoryFacts,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.allowRepoLocalConfig",
+            "Allow repo-local config",
+            form.allowRepoLocalConfig,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.allowUserDefinedRules",
+            "Allow repository rules",
+            form.allowUserDefinedRules,
+            disabled,
+          )}
+          ${renderCheckbox(
+            "productOrgSettings.allowMemorySuppression",
+            "Allow org memory suppression",
+            form.allowMemorySuppression,
+            disabled,
+          )}
+          ${renderNumberInput(
+            "productOrgSettings.maxMemoryFactsInContext",
+            "Memory facts in context",
+            form.maxMemoryFactsInContext,
+            "0",
+            "20",
+            disabled,
+          )}
+          ${renderNumberInput(
+            "productOrgSettings.memoryTtlDays",
+            "Memory TTL days",
+            form.memoryTtlDays,
+            "1",
+            "3650",
+            disabled,
+          )}
+        </div>
+        <div class="form-grid textareas">
+          ${renderTextarea(
+            "productOrgSettings.trustedFeedbackRoles",
+            "Trusted feedback roles",
+            form.trustedFeedbackRoles,
+            disabled,
+          )}
+          ${renderTextarea(
+            "productOrgSettings.allowedModelProfiles",
+            "Allowed model profiles",
+            form.allowedModelProfiles,
+            disabled,
+          )}
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -12294,6 +12849,96 @@ function updateRuleFormField(
   }
 }
 
+/** Updates one product organization settings form field from an input element. */
+function updateProductOrgSettingsFormField(
+  field: string,
+  target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+): void {
+  const form = state.product.orgSettings?.form;
+  if (!form) {
+    return;
+  }
+
+  if (isProductOrgSettingsBooleanField(field) && target instanceof HTMLInputElement) {
+    form[field] = target.checked;
+    return;
+  }
+
+  if (isProductOrgSettingsTextField(field)) {
+    form[field] = target.value;
+  }
+}
+
+/** Returns whether one organization settings field is checkbox-backed. */
+function isProductOrgSettingsBooleanField(
+  field: string,
+): field is keyof Pick<
+  ProductOrgSettingsFormState,
+  | "allowMemorySuppression"
+  | "allowRepoLocalConfig"
+  | "allowStyleFindings"
+  | "allowUserDefinedRules"
+  | "enableMemoryContext"
+  | "enableMemorySuppression"
+  | "publishCheckRun"
+  | "publishInlineComments"
+  | "publishSummaryComment"
+  | "requireApprovalForMemoryFacts"
+  | "skipDraftPullRequests"
+  | "suppressGeneratedFileFindings"
+> {
+  return [
+    "allowMemorySuppression",
+    "allowRepoLocalConfig",
+    "allowStyleFindings",
+    "allowUserDefinedRules",
+    "enableMemoryContext",
+    "enableMemorySuppression",
+    "publishCheckRun",
+    "publishInlineComments",
+    "publishSummaryComment",
+    "requireApprovalForMemoryFacts",
+    "skipDraftPullRequests",
+    "suppressGeneratedFileFindings",
+  ].includes(field);
+}
+
+/** Returns whether one organization settings field is text/select-backed. */
+function isProductOrgSettingsTextField(
+  field: string,
+): field is keyof Pick<
+  ProductOrgSettingsFormState,
+  | "allowedModelProfiles"
+  | "defaultReviewPolicy"
+  | "enabledActions"
+  | "enabledCategories"
+  | "ignoredAuthors"
+  | "ignoredLabels"
+  | "maxCommentsPerReview"
+  | "maxMemoryFactsInContext"
+  | "memoryTtlDays"
+  | "minimumConfidence"
+  | "requireLabel"
+  | "severityThreshold"
+  | "trustedFeedbackRoles"
+> {
+  return [
+    "allowedModelProfiles",
+    "defaultReviewPolicy",
+    "enabledActions",
+    "enabledCategories",
+    "ignoredAuthors",
+    "ignoredLabels",
+    "maxCommentsPerReview",
+    "maxMemoryFactsInContext",
+    "memoryTtlDays",
+    "minimumConfidence",
+    "requireLabel",
+    "severityThreshold",
+    "trustedFeedbackRoles",
+  ].includes(field);
+}
+
 /** Updates one product settings form field from an input element. */
 function updateProductSettingsFormField(
   field: string,
@@ -12504,6 +13149,90 @@ function settingsPatchFromForm(form: SettingsFormState): Record<string, unknown>
   };
 }
 
+/** Converts loaded organization settings into editable form values. */
+function productOrgSettingsFormFromSettings(
+  settings: ProductOrgSettings,
+): ProductOrgSettingsFormState {
+  return {
+    allowedModelProfiles: (settings.allowedModelProfiles ?? []).join("\n"),
+    allowMemorySuppression: settings.allowMemorySuppression,
+    allowRepoLocalConfig: settings.allowRepoLocalConfig,
+    allowStyleFindings: settings.defaultFindingPolicy.allowStyleFindings,
+    allowUserDefinedRules: settings.allowUserDefinedRules,
+    defaultReviewPolicy: settings.defaultReviewPolicy,
+    enableMemoryContext: settings.defaultMemoryPolicy.enableMemoryContext,
+    enableMemorySuppression: settings.defaultMemoryPolicy.enableMemorySuppression,
+    enabledActions: settings.defaultTriggerPolicy.enabledActions.join("\n"),
+    enabledCategories: settings.defaultFindingPolicy.enabledCategories.join("\n"),
+    ignoredAuthors: settings.defaultTriggerPolicy.ignoredAuthors.join("\n"),
+    ignoredLabels: settings.defaultTriggerPolicy.ignoredLabels.join("\n"),
+    maxCommentsPerReview: String(settings.defaultFindingPolicy.maxCommentsPerReview),
+    maxMemoryFactsInContext: String(settings.defaultMemoryPolicy.maxMemoryFactsInContext),
+    memoryTtlDays:
+      settings.defaultMemoryPolicy.memoryTtlDays === undefined
+        ? ""
+        : String(settings.defaultMemoryPolicy.memoryTtlDays),
+    minimumConfidence: String(settings.defaultFindingPolicy.minimumConfidence),
+    publishCheckRun: settings.defaultPublishingPolicy.publishCheckRun,
+    publishInlineComments: settings.defaultPublishingPolicy.publishInlineComments,
+    publishSummaryComment: settings.defaultPublishingPolicy.publishSummaryComment,
+    requireApprovalForMemoryFacts: settings.defaultMemoryPolicy.requireApprovalForMemoryFacts,
+    requireLabel: settings.defaultTriggerPolicy.requireLabel ?? "",
+    severityThreshold: settings.defaultFindingPolicy.severityThreshold,
+    skipDraftPullRequests: settings.defaultTriggerPolicy.skipDraftPullRequests,
+    suppressGeneratedFileFindings: settings.defaultFindingPolicy.suppressGeneratedFileFindings,
+    trustedFeedbackRoles: settings.defaultMemoryPolicy.trustedFeedbackRoles.join("\n"),
+  };
+}
+
+/** Converts the organization settings form into an API patch payload. */
+function productOrgSettingsPatchFromForm(
+  form: ProductOrgSettingsFormState,
+): Record<string, unknown> {
+  const memoryPolicy: Record<string, unknown> = {
+    enableMemoryContext: form.enableMemoryContext,
+    enableMemorySuppression: form.enableMemorySuppression,
+    maxMemoryFactsInContext: boundedNumber(form.maxMemoryFactsInContext, 0, 20),
+    requireApprovalForMemoryFacts: form.requireApprovalForMemoryFacts,
+    trustedFeedbackRoles: linesFromText(form.trustedFeedbackRoles),
+  };
+  const memoryTtlDays = optionalBoundedNumber(form.memoryTtlDays, 1, 3650);
+  if (memoryTtlDays !== undefined) {
+    memoryPolicy.memoryTtlDays = memoryTtlDays;
+  }
+
+  const maxCommentsPerReview = boundedNumber(form.maxCommentsPerReview, 0, 50);
+  return {
+    allowedModelProfiles: linesFromText(form.allowedModelProfiles),
+    allowMemorySuppression: form.allowMemorySuppression,
+    allowRepoLocalConfig: form.allowRepoLocalConfig,
+    allowUserDefinedRules: form.allowUserDefinedRules,
+    defaultFindingPolicy: {
+      allowStyleFindings: form.allowStyleFindings,
+      enabledCategories: linesFromText(form.enabledCategories),
+      maxCommentsPerReview,
+      minimumConfidence: boundedDecimal(form.minimumConfidence, 0, 1),
+      severityThreshold: form.severityThreshold,
+      suppressGeneratedFileFindings: form.suppressGeneratedFileFindings,
+    },
+    defaultMemoryPolicy: memoryPolicy,
+    defaultPublishingPolicy: {
+      maxCommentsPerReview,
+      publishCheckRun: form.publishCheckRun,
+      publishInlineComments: form.publishInlineComments,
+      publishSummaryComment: form.publishSummaryComment,
+    },
+    defaultReviewPolicy: form.defaultReviewPolicy,
+    defaultTriggerPolicy: {
+      enabledActions: linesFromText(form.enabledActions),
+      ignoredAuthors: linesFromText(form.ignoredAuthors),
+      ignoredLabels: linesFromText(form.ignoredLabels),
+      ...(form.requireLabel.trim() ? { requireLabel: form.requireLabel.trim() } : {}),
+      skipDraftPullRequests: form.skipDraftPullRequests,
+    },
+  };
+}
+
 /** Converts optional sandbox settings into editable form values. */
 function sandboxPolicyFormFromSettings(
   settings: SandboxPolicySettings | undefined,
@@ -12632,6 +13361,29 @@ function linesFromText(value: string): readonly string[] {
 function boundedNumber(value: string, minimum: number, maximum: number): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed)) {
+    return minimum;
+  }
+
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+/** Parses an optional bounded integer from a form field. */
+function optionalBoundedNumber(
+  value: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+
+  return boundedNumber(value, minimum, maximum);
+}
+
+/** Parses a bounded decimal number. */
+function boundedDecimal(value: string, minimum: number, maximum: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
     return minimum;
   }
 
