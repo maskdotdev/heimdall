@@ -1322,6 +1322,12 @@ tracked milestone.
   product-safe events for OAuth-state, GitHub org/login, CORS, and scoped assertion denials through
   an injectable sink. Its production entrypoint wires that sink to structured telemetry logs, while
   focused gateway tests verify event shape and token redaction for login and scope denials.
+- Latest review/provider security-event milestone: review orchestration now accepts the worker
+  security-event sink and records product-safe GitHub-sourced security events for provider
+  permission, installation-suspended, token, rate-limit, unavailable, and validation failures that
+  block PR review snapshots or later current-state/provider checks. Worker review jobs pass through
+  the durable Postgres-backed sink, and focused review-orchestrator tests verify permission-denial
+  event shape, safe rate-limit metadata, and not-found suppression for stale PR state.
 - Latest publisher security-event milestone: `@repo/publisher` now accepts the worker
   security-event sink and records product-safe GitHub-sourced security events for provider
   permission, installation-suspended, token, and rate-limit failures during review publishing.

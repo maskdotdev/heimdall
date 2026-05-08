@@ -1069,6 +1069,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
           ...(options.logger ? { logger: options.logger } : {}),
           ...(options.metrics ? { metrics: options.metrics } : {}),
+          ...(options.securityEventSink ? { securityEventSink: options.securityEventSink } : {}),
           ...(options.traces ? { traces: options.traces } : {}),
           ...(options.usageLedger ? { usageLedger: options.usageLedger } : {}),
           ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
