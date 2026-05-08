@@ -8,6 +8,7 @@ export * from "./repositories/embedding-repository";
 export * from "./repositories/evaluation-repository";
 export * from "./repositories/feedback-repository";
 export * from "./repositories/index-version-repository";
+export * from "./repositories/llm-call-repository";
 export * from "./repositories/memory-candidate-repository";
 export * from "./repositories/memory-fact-repository";
 export * from "./repositories/product-auth-repository";

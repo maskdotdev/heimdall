@@ -27,8 +27,7 @@ import {
   BackgroundJobRepository,
   type HeimdallDatabase,
   IndexVersionRepository,
-  llmCallArtifacts,
-  llmCalls,
+  LlmCallRepository,
   type MemoryFactRecord,
   MemoryFactRepository,
   PullRequestRepository,
@@ -4482,24 +4481,17 @@ async function recordLlmUsage(input: {
     task: input.task,
   });
 
-  await input.db
-    .insert(llmCalls)
-    .values({
+  await new LlmCallRepository(input.db).insertLlmCall({
+    artifactLinks: artifactRefs.map((artifact) => ({
+      artifactRole: artifact.kind === "llm_prompt" ? "prompt" : "response",
       llmCallId,
-      orgId: input.orgId,
-      repoId: input.repoId,
-      reviewRunId: input.reviewRunId,
-      provider: estimate.provider,
-      model: estimate.model,
-      purpose: input.task,
-      status: "succeeded",
-      promptHash,
-      responseHash,
-      inputTokens: estimate.inputTokens,
-      outputTokens: estimate.outputTokens,
+      reviewArtifactId: artifact.artifactId,
+    })),
+    call: {
+      completedAt: input.completedAt,
       costMicros: estimate.costMicros,
-      startedAt: new Date(input.startedAt),
-      completedAt: new Date(input.completedAt),
+      inputTokens: estimate.inputTokens,
+      llmCallId,
       metadata: {
         artifactIds: artifactRefs.map((artifact) => artifact.artifactId),
         cachedInputTokens: estimate.cachedInputTokens,
@@ -4510,8 +4502,19 @@ async function recordLlmUsage(input: {
         task: input.task,
         ...(input.metadata ? { requestMetadata: input.metadata } : {}),
       },
-    })
-    .onConflictDoNothing();
+      model: estimate.model,
+      orgId: input.orgId,
+      outputTokens: estimate.outputTokens,
+      promptHash,
+      provider: estimate.provider,
+      purpose: input.task,
+      repoId: input.repoId,
+      responseHash,
+      reviewRunId: input.reviewRunId,
+      startedAt: input.startedAt,
+      status: "succeeded",
+    },
+  });
 
   await input.usageLedger.record({
     idempotencyKey: `llm.token:${llmCallId}`,
@@ -4537,17 +4540,6 @@ async function recordLlmUsage(input: {
       task: input.task,
     },
   });
-
-  await input.db
-    .insert(llmCallArtifacts)
-    .values(
-      artifactRefs.map((artifact) => ({
-        artifactRole: artifact.kind === "llm_prompt" ? "prompt" : "response",
-        llmCallId,
-        reviewArtifactId: artifact.artifactId,
-      })),
-    )
-    .onConflictDoNothing();
 }
 
 /** Persists redacted prompt and response artifacts for a successful LLM call. */
