@@ -151,6 +151,14 @@ export type ReviewPassId =
   | "static_tool_synthesis"
   | "finding_judge";
 
+/** Pairing of a stable pass ID with its executable implementation. */
+export type ReviewPassRegistryEntry = {
+  /** Stable pass ID used by pass selection and mode policies. */
+  readonly passId: ReviewPassId;
+  /** Executable review pass registered for the pass ID. */
+  readonly pass: ReviewPass;
+};
+
 /** Budget controls used by pass selection and future pass runners. */
 export type ReviewBudgets = {
   /** Maximum number of passes to select. */
@@ -186,6 +194,74 @@ export const DEFAULT_REVIEW_BUDGETS: ReviewBudgets = {
   maxWallClockMs: 120_000,
 };
 
+/** Input accepted by the high-level review engine facade. */
+export type ReviewEngineInput = ReviewEngineTelemetryOptions & {
+  /** Review pass context shared across selected passes. */
+  readonly context: ReviewPassContext;
+  /** Review pass mode. Defaults to `normal`. */
+  readonly mode?: ReviewPassMode;
+  /** Optional pass budget. Defaults to `DEFAULT_REVIEW_BUDGETS`. */
+  readonly budgets?: ReviewBudgets;
+  /** Optional pass registry. Defaults to the built-in MVP registry. */
+  readonly registry?: ReviewPassRegistry;
+};
+
+/** Result returned by the high-level review engine facade. */
+export type ReviewEngineResult = {
+  /** Pass IDs selected for this review run. */
+  readonly selectedPassIds: readonly ReviewPassId[];
+  /** Candidate findings emitted by selected passes. */
+  readonly findings: readonly CandidateFinding[];
+};
+
+/** High-level review engine facade used by orchestration code. */
+export interface ReviewEngine {
+  /** Runs selected review passes and returns candidate findings. */
+  run(input: ReviewEngineInput): Promise<ReviewEngineResult>;
+}
+
+/** Registry that maps selected pass IDs to executable review passes. */
+export class ReviewPassRegistry {
+  private readonly passes = new Map<ReviewPassId, ReviewPass>();
+
+  /** Creates a registry from the provided pass entries. */
+  public constructor(entries: readonly ReviewPassRegistryEntry[] = []) {
+    for (const entry of entries) {
+      this.register(entry);
+    }
+  }
+
+  /** Registers or replaces one pass implementation. */
+  public register(entry: ReviewPassRegistryEntry): void {
+    this.passes.set(entry.passId, entry.pass);
+  }
+
+  /** Returns a registered pass by ID. */
+  public get(passId: ReviewPassId): ReviewPass | undefined {
+    return this.passes.get(passId);
+  }
+
+  /** Returns a registered pass or throws a clear configuration error. */
+  public require(passId: ReviewPassId): ReviewPass {
+    const pass = this.get(passId);
+    if (!pass) {
+      throw new Error(`Review pass ${passId} is not registered.`);
+    }
+
+    return pass;
+  }
+
+  /** Lists registered pass IDs in deterministic order. */
+  public listPassIds(): readonly ReviewPassId[] {
+    return [...this.passes.keys()].sort();
+  }
+
+  /** Selects executable passes for the given review input. */
+  public select(input: SelectReviewPassesInput): readonly ReviewPass[] {
+    return selectReviewPasses(input).map((passId) => this.require(passId));
+  }
+}
+
 /** Deterministic pass that emits one reviewable-boundary finding for pipeline handoff tests. */
 export const deterministicBoundaryPass: ReviewPass = {
   name: "deterministic-boundary",
@@ -194,27 +270,64 @@ export const deterministicBoundaryPass: ReviewPass = {
 };
 
 /** LLM-backed review pass that converts structured model output into candidate findings. */
-export const llmReviewPass: ReviewPass = {
+export const llmReviewPass: ReviewPass = createLLMReviewPass({
+  allowedCategories: [
+    "architecture",
+    "correctness",
+    "dependency",
+    "documentation",
+    "maintainability",
+    "performance",
+    "security",
+    "test_coverage",
+  ],
+  instructions:
+    "Find concrete correctness, security, performance, test coverage, or maintainability issues.",
   name: "llm-review",
+  passId: "correctness",
   version: "1.0.0",
-  run: async (context) => {
-    if (!context.llmGateway) {
-      return [];
-    }
+});
 
-    const output = await context.llmGateway.generateReviewFindings({
-      prompt: renderReviewPrompt(context),
-      metadata: {
-        reviewRunId: context.reviewRunId,
-        snapshotId: context.snapshot.snapshotId,
-        contextBundleId: context.contextBundle?.contextBundleId,
-        modelProfile: REVIEW_FINDINGS_MODEL_PROFILE,
-      },
-    });
+/** Summary pass included in MVP pass plans; it does not emit inline candidate findings. */
+export const prSummaryPass: ReviewPass = createNoCandidateReviewPass("pr_summary", "1.0.0");
 
-    return findingsFromLLMOutput(context, output);
-  },
-};
+/** Behavior-change pass included in MVP pass plans before candidate generation. */
+export const behaviorChangePass: ReviewPass = createNoCandidateReviewPass(
+  "behavior_change",
+  "1.0.0",
+);
+
+/** Correctness-focused LLM pass that emits candidate findings for concrete behavior bugs. */
+export const correctnessReviewPass: ReviewPass = createLLMReviewPass({
+  allowedCategories: ["correctness"],
+  instructions: "Review for concrete correctness bugs introduced by the changed lines.",
+  name: "correctness",
+  passId: "correctness",
+  version: "1.0.0",
+});
+
+/** Security-focused LLM pass that emits candidate findings for exploitable regressions. */
+export const securityReviewPass: ReviewPass = createLLMReviewPass({
+  allowedCategories: ["security"],
+  instructions:
+    "Review only for security vulnerabilities or clearly weakened security controls introduced by the diff.",
+  name: "security",
+  passId: "security",
+  version: "1.0.0",
+});
+
+/** Test-coverage LLM pass that emits candidate findings for meaningful missing tests. */
+export const testCoverageReviewPass: ReviewPass = createLLMReviewPass({
+  allowedCategories: ["test_coverage"],
+  instructions:
+    "Review only for important behavior changes that lack meaningful related test coverage.",
+  name: "test_coverage",
+  passId: "test_coverage",
+  version: "1.0.0",
+});
+
+/** Candidate judge pass included in MVP pass plans; validation owns final judging for now. */
+export const findingJudgePass: ReviewPass = createNoCandidateReviewPass("finding_judge", "1.0.0");
 
 /** Review pass that converts static-analysis diagnostics into candidate findings. */
 export const staticAnalysisReviewPass: ReviewPass = {
@@ -222,6 +335,99 @@ export const staticAnalysisReviewPass: ReviewPass = {
   version: "1.0.0",
   run: async (context) => staticAnalysisFindingsFromReport(context),
 };
+
+/** Options used to create one focused LLM-backed review pass. */
+type CreateLLMReviewPassOptions = {
+  /** Candidate categories accepted from the model output. */
+  readonly allowedCategories: readonly FindingCategory[];
+  /** Trusted focus instructions included in the prompt. */
+  readonly instructions: string;
+  /** Stable pass name used in telemetry and candidate metadata. */
+  readonly name: string;
+  /** Stable pass ID used by routing metadata. */
+  readonly passId: ReviewPassId;
+  /** Pass implementation version. */
+  readonly version: string;
+};
+
+/** Creates a focused LLM-backed review pass from shared gateway plumbing. */
+function createLLMReviewPass(options: CreateLLMReviewPassOptions): ReviewPass {
+  const pass: ReviewPass = {
+    name: options.name,
+    version: options.version,
+    run: async (context) => {
+      if (!context.llmGateway) {
+        return [];
+      }
+
+      const output = await context.llmGateway.generateReviewFindings({
+        prompt: renderReviewPrompt(context, {
+          allowedCategories: options.allowedCategories,
+          instructions: options.instructions,
+          passId: options.passId,
+        }),
+        metadata: {
+          contextBundleId: context.contextBundle?.contextBundleId,
+          modelProfile: REVIEW_FINDINGS_MODEL_PROFILE,
+          passId: options.passId,
+          reviewRunId: context.reviewRunId,
+          snapshotId: context.snapshot.snapshotId,
+        },
+      });
+
+      return findingsFromLLMOutput(context, output, pass, options.allowedCategories);
+    },
+  };
+
+  return pass;
+}
+
+/** Creates a pass that participates in planning but emits no inline candidate findings. */
+function createNoCandidateReviewPass(name: string, version: string): ReviewPass {
+  return {
+    name,
+    version,
+    run: async () => [],
+  };
+}
+
+/** Creates the built-in MVP review pass registry. */
+export function createDefaultReviewPassRegistry(): ReviewPassRegistry {
+  return new ReviewPassRegistry([
+    { passId: "pr_summary", pass: prSummaryPass },
+    { passId: "behavior_change", pass: behaviorChangePass },
+    { passId: "correctness", pass: correctnessReviewPass },
+    { passId: "security", pass: securityReviewPass },
+    { passId: "test_coverage", pass: testCoverageReviewPass },
+    { passId: "static_tool_synthesis", pass: staticAnalysisReviewPass },
+    { passId: "finding_judge", pass: findingJudgePass },
+  ]);
+}
+
+/** Creates the high-level review engine facade using the default pass registry. */
+export function createReviewEngine(): ReviewEngine {
+  return {
+    run: async (input) => {
+      const registry = input.registry ?? createDefaultReviewPassRegistry();
+      const selectedPassIds = selectReviewPasses({
+        ...(input.budgets ? { budgets: input.budgets } : {}),
+        ...(input.context.contextBundle ? { contextBundle: input.context.contextBundle } : {}),
+        ...(input.mode ? { mode: input.mode } : {}),
+        snapshot: input.context.snapshot,
+      });
+      const passes = selectedPassIds.map((passId) => registry.require(passId));
+      const findings = await runReviewPasses({
+        context: input.context,
+        ...(input.metrics ? { metrics: input.metrics } : {}),
+        passes,
+        ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+        ...(input.traces ? { traces: input.traces } : {}),
+      });
+
+      return { findings, selectedPassIds };
+    },
+  };
+}
 
 /** Input for executing selected review passes with optional telemetry. */
 export type RunReviewPassesInput = ReviewEngineTelemetryOptions & {
@@ -1442,57 +1648,62 @@ function createDeterministicBoundaryFindings(
 function findingsFromLLMOutput(
   context: ReviewPassContext,
   output: LLMFindingOutput,
+  pass: ReviewPass,
+  allowedCategories: readonly FindingCategory[],
 ): readonly CandidateFinding[] {
-  return output.findings.map((finding, index) => {
-    const fingerprint = sha256(
-      [
-        context.reviewRunId,
-        finding.path,
-        finding.line,
-        finding.category,
-        finding.title,
-        finding.body,
-      ].join(":"),
-    );
+  const acceptedCategories = new Set(allowedCategories);
+  return output.findings
+    .filter((finding) => acceptedCategories.has(finding.category))
+    .map((finding, index) => {
+      const fingerprint = sha256(
+        [
+          context.reviewRunId,
+          finding.path,
+          finding.line,
+          finding.category,
+          finding.title,
+          finding.body,
+        ].join(":"),
+      );
 
-    return {
-      findingId: stableId("fnd", [context.reviewRunId, llmReviewPass.name, index, fingerprint]),
-      schemaVersion: "candidate_finding.v1",
-      reviewRunId: context.reviewRunId,
-      source: "llm",
-      sourceName: llmReviewPass.name,
-      category: finding.category,
-      severity: finding.severity,
-      title: finding.title,
-      body: finding.body,
-      location: {
-        path: finding.path,
-        line: finding.line,
-        side: "RIGHT",
-        isInDiff: true,
-      },
-      evidence: finding.evidence.map(
-        (summary, evidenceIndex): Evidence => ({
-          evidenceId: stableId("ev", [
-            context.reviewRunId,
-            finding.path,
-            finding.line,
-            evidenceIndex,
-          ]),
-          kind: "llm_reasoning",
-          summary,
+      return {
+        findingId: stableId("fnd", [context.reviewRunId, pass.name, index, fingerprint]),
+        schemaVersion: "candidate_finding.v1",
+        reviewRunId: context.reviewRunId,
+        source: "llm",
+        sourceName: pass.name,
+        category: finding.category,
+        severity: finding.severity,
+        title: finding.title,
+        body: finding.body,
+        location: {
           path: finding.path,
-          range: { startLine: finding.line, endLine: finding.line },
-          confidence: finding.confidence,
-        }),
-      ),
-      ...(finding.suggestedFix ? { suggestedFix: finding.suggestedFix } : {}),
-      confidence: finding.confidence,
-      fingerprint,
-      createdAt: context.timestamp,
-      metadata: { passVersion: llmReviewPass.version },
-    };
-  });
+          line: finding.line,
+          side: "RIGHT",
+          isInDiff: true,
+        },
+        evidence: finding.evidence.map(
+          (summary, evidenceIndex): Evidence => ({
+            evidenceId: stableId("ev", [
+              context.reviewRunId,
+              finding.path,
+              finding.line,
+              evidenceIndex,
+            ]),
+            kind: "llm_reasoning",
+            summary,
+            path: finding.path,
+            range: { startLine: finding.line, endLine: finding.line },
+            confidence: finding.confidence,
+          }),
+        ),
+        ...(finding.suggestedFix ? { suggestedFix: finding.suggestedFix } : {}),
+        confidence: finding.confidence,
+        fingerprint,
+        createdAt: context.timestamp,
+        metadata: { passVersion: pass.version },
+      };
+    });
 }
 
 /** Converts a static-analysis report into candidate findings anchored to changed lines. */
@@ -1624,7 +1835,17 @@ function boundedText(value: string, maxLength: number): string {
   return trimmed.slice(0, Math.max(1, maxLength - 1)).trimEnd();
 }
 
-function renderReviewPrompt(context: ReviewPassContext): string {
+function renderReviewPrompt(
+  context: ReviewPassContext,
+  options: {
+    /** Candidate categories accepted from the model output. */
+    readonly allowedCategories: readonly FindingCategory[];
+    /** Trusted focus instructions for this pass. */
+    readonly instructions: string;
+    /** Stable pass ID requesting model output. */
+    readonly passId: ReviewPassId;
+  },
+): string {
   const files = context.snapshot.changedFiles.map((file) => ({
     path: file.path,
     status: file.status,
@@ -1654,7 +1875,9 @@ function renderReviewPrompt(context: ReviewPassContext): string {
     })) ?? [];
 
   return JSON.stringify({
-    task: "Find concrete correctness, security, performance, test coverage, or maintainability issues.",
+    task: options.instructions,
+    passId: options.passId,
+    allowedCategories: options.allowedCategories,
     trustBoundary: {
       instructions: "trusted",
       pullRequest: "untrusted_customer_input",

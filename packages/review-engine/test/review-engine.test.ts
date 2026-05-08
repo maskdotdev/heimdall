@@ -20,6 +20,8 @@ import { createPolicyFixture } from "@repo/rules";
 import type { StaticAnalysisReport } from "@repo/static-analysis";
 import { describe, expect, it } from "vitest";
 import {
+  createDefaultReviewPassRegistry,
+  createReviewEngine,
   llmReviewPass,
   runReviewPasses,
   selectReviewPasses,
@@ -58,6 +60,67 @@ describe("llmReviewPass", () => {
       source: "llm",
       sourceName: "llm-review",
       location: { path: "src/math.ts", line: 2, side: "RIGHT", isInDiff: true },
+    });
+  });
+});
+
+describe("ReviewPassRegistry", () => {
+  it("registers the MVP pass implementations selected by mode", () => {
+    const registry = createDefaultReviewPassRegistry();
+
+    expect(registry.listPassIds()).toEqual([
+      "behavior_change",
+      "correctness",
+      "finding_judge",
+      "pr_summary",
+      "security",
+      "static_tool_synthesis",
+      "test_coverage",
+    ]);
+    expect(
+      registry.select({ snapshot: validPullRequestSnapshotFixture }).map((pass) => pass.name),
+    ).toEqual(["pr_summary", "behavior_change", "correctness", "test_coverage", "finding_judge"]);
+  });
+});
+
+describe("createReviewEngine", () => {
+  it("runs selected named passes and returns candidate findings", async () => {
+    const engine = createReviewEngine();
+
+    const result = await engine.run({
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        timestamp: validCandidateFindingFixture.createdAt,
+        llmGateway: createStaticLLMGateway({
+          findings: [
+            {
+              path: "src/math.ts",
+              line: 2,
+              severity: "medium",
+              category: "correctness",
+              title: "Handle non-finite values",
+              body: "The changed coercion accepts NaN and Infinity.",
+              evidence: ["The added line calls Number() without a finite check."],
+              confidence: 0.82,
+            },
+          ],
+        }),
+      },
+    });
+
+    expect(result.selectedPassIds).toEqual([
+      "pr_summary",
+      "behavior_change",
+      "correctness",
+      "test_coverage",
+      "finding_judge",
+    ]);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      category: "correctness",
+      source: "llm",
+      sourceName: "correctness",
     });
   });
 });
