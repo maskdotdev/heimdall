@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { access, chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -181,6 +181,65 @@ export type BuildMirrorWorktreeArgsInput = {
   readonly mirrorPath: string;
 };
 
+/** Provider-neutral Git credential accepted by repo-sync mirror operations. */
+export type GitCredential =
+  | {
+      /** HTTPS basic auth token credential. */
+      readonly kind: "https-basic-token";
+      /** Username supplied to Git through askpass. */
+      readonly username: string;
+      /** Token supplied to Git through askpass. */
+      readonly token: string;
+    }
+  | {
+      /** Bearer token credential reserved for future provider adapters. */
+      readonly kind: "bearer-token";
+      /** Token value that must never be logged. */
+      readonly token: string;
+    }
+  | {
+      /** SSH private key credential reserved for future provider adapters. */
+      readonly kind: "ssh-key";
+      /** Secret reference for the SSH private key. */
+      readonly privateKeyRef: string;
+    };
+
+/** Input required to create or reuse a cached bare repository mirror. */
+export type EnsureRepositoryMirrorInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Stable product repository ID used in cache paths. */
+  readonly repoId: string;
+  /** Clone URL for the repository. Credentials, query strings, and fragments are stripped. */
+  readonly cloneUrl: string;
+  /** Optional credential used for private HTTPS clone operations. */
+  readonly credential?: GitCredential;
+  /** Overrides partial clone command construction for this mirror. */
+  readonly enablePartialClone?: boolean;
+  /** Fetches tags during the initial clone when true. */
+  readonly fetchTags?: boolean;
+};
+
+/** Dependencies for repository mirror creation. */
+export type EnsureRepositoryMirrorDependencies = {
+  /** Optional Git command runner for tests or hosted runtimes. */
+  readonly gitRunner?: GitCommandRunner;
+  /** Optional temp ID factory for deterministic tests. */
+  readonly tempIdFactory?: () => string;
+};
+
+/** Reference to a cached bare repository mirror. */
+export type RepositoryMirrorRef = {
+  /** Stable product repository ID. */
+  readonly repoId: string;
+  /** Bare mirror path on the local cache volume. */
+  readonly mirrorPath: string;
+  /** SHA-256 hash of the sanitized clone URL. */
+  readonly cloneUrlHash: string;
+  /** True when this call created the mirror. */
+  readonly created: boolean;
+};
+
 /** Product-safe captured Git command output attached to failures. */
 export type CapturedGitOutput = {
   /** Redacted captured text, truncated when needed. */
@@ -335,6 +394,76 @@ export function getRepoSyncLockPath(input: RepoSyncCachePathInput, lockId: strin
     getRepoSyncCacheLayout(input).locksRoot,
     `${safeCachePathSegment("lockId", lockId)}.lock`,
   );
+}
+
+/** Creates a cached bare repository mirror when it does not already exist. */
+export async function ensureRepositoryMirror(
+  input: EnsureRepositoryMirrorInput,
+  dependencies: EnsureRepositoryMirrorDependencies = {},
+): Promise<RepositoryMirrorRef> {
+  const sanitizedCloneUrl = sanitizeGitUrl(input.cloneUrl);
+  assertAllowedGitUrl(sanitizedCloneUrl, { allowedHosts: input.config.allowedGitHosts });
+
+  const layout = getRepoSyncCacheLayout(input.config);
+  const mirrorPath = getRepoSyncMirrorPath(input.config, input.repoId);
+  const cloneUrlHash = hashGitUrl(sanitizedCloneUrl);
+  if (await pathExists(mirrorPath)) {
+    return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
+  }
+
+  await mkdir(layout.mirrorsRoot, { recursive: true });
+  await mkdir(layout.tmpRoot, { recursive: true });
+
+  const tempMirrorPath = getRepoSyncTempMirrorPath(
+    input.config,
+    input.repoId,
+    dependencies.tempIdFactory?.() ?? randomUUID(),
+  );
+  await rm(tempMirrorPath, { force: true, recursive: true });
+
+  const git = dependencies.gitRunner ?? runGit;
+  let askPassRoot: string | undefined;
+
+  try {
+    const commandOptions = await createMirrorCloneCommandOptions(input, layout.tmpRoot);
+    askPassRoot = commandOptions.askPassRoot;
+    const gitOptions: GitCommandRunnerOptions = {
+      ...(commandOptions.env ? { env: commandOptions.env } : {}),
+      ...(commandOptions.redact ? { redact: commandOptions.redact } : {}),
+      timeoutMs: input.config.defaultFetchTimeoutMs,
+    };
+    const bareCloneInput: BuildBareCloneArgsInput = {
+      cloneUrl: sanitizedCloneUrl,
+      enablePartialClone: input.enablePartialClone ?? input.config.enablePartialClone,
+      ...(input.fetchTags === undefined ? {} : { fetchTags: input.fetchTags }),
+      mirrorPath: tempMirrorPath,
+    };
+    await git(buildBareCloneArgs(bareCloneInput), gitOptions);
+
+    if (await pathExists(mirrorPath)) {
+      await rm(tempMirrorPath, { force: true, recursive: true });
+      return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
+    }
+
+    try {
+      await rename(tempMirrorPath, mirrorPath);
+    } catch (error) {
+      if (await pathExists(mirrorPath)) {
+        await rm(tempMirrorPath, { force: true, recursive: true });
+        return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
+      }
+      throw error;
+    }
+
+    return { cloneUrlHash, created: true, mirrorPath, repoId: input.repoId };
+  } catch (error) {
+    await rm(tempMirrorPath, { force: true, recursive: true });
+    throw error;
+  } finally {
+    if (askPassRoot) {
+      await rm(askPassRoot, { force: true, recursive: true });
+    }
+  }
 }
 
 /** Input required to sync one repository workspace. */
@@ -889,6 +1018,51 @@ function assertSafeGitCommandArgument(label: string, value: string): void {
   }
 }
 
+/** Returns true when a filesystem path exists. */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Git clone command options derived from an optional repo credential. */
+type MirrorCloneCommandOptions = {
+  /** Private askpass directory that must be removed after the clone attempt. */
+  readonly askPassRoot?: string | undefined;
+  /** Environment overrides supplied to the Git command. */
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+  /** Secrets that must be redacted from command failures. */
+  readonly redact?: readonly string[] | undefined;
+};
+
+/** Creates askpass options for an authenticated mirror clone command. */
+async function createMirrorCloneCommandOptions(
+  input: Pick<EnsureRepositoryMirrorInput, "credential">,
+  tmpRoot: string,
+): Promise<MirrorCloneCommandOptions> {
+  if (!input.credential) {
+    return {};
+  }
+
+  if (input.credential.kind !== "https-basic-token") {
+    throw new Error(
+      `Git credential kind "${input.credential.kind}" is not supported for mirror clones.`,
+    );
+  }
+
+  const askPassRoot = await mkdtemp(join(tmpRoot, "askpass_"));
+  const askPassPath = await createGitAskPassScript(askPassRoot);
+
+  return {
+    askPassRoot,
+    env: gitBasicCredentialAskPassEnvironment(input.credential, askPassPath),
+    redact: [input.credential.token],
+  };
+}
+
 /** Returns an optional string config property when an environment value is present. */
 function optionalString(key: keyof CreateRepoSyncConfigInput, value: string | undefined) {
   if (!value || value.trim().length === 0) {
@@ -1096,6 +1270,19 @@ function gitAskPassEnvironment(
     GIT_PASSWORD: cloneAuth.password,
     GIT_TERMINAL_PROMPT: "0",
     GIT_USERNAME: cloneAuth.username,
+  };
+}
+
+/** Builds askpass environment overrides for a basic HTTPS Git credential. */
+function gitBasicCredentialAskPassEnvironment(
+  credential: Extract<GitCredential, { readonly kind: "https-basic-token" }>,
+  askPassPath: string,
+): Readonly<Record<string, string>> {
+  return {
+    GIT_ASKPASS: askPassPath,
+    GIT_PASSWORD: credential.token,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_USERNAME: credential.username,
   };
 }
 

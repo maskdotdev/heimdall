@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,6 +26,7 @@ import {
   createAuthenticatedCloneUrl,
   createGitRunner,
   createRepoSyncConfig,
+  ensureRepositoryMirror,
   type GitCommandRunner,
   getRepoSyncCacheLayout,
   getRepoSyncLockPath,
@@ -241,6 +242,123 @@ describe("repo sync workspace", () => {
     expect(() =>
       buildWorktreeAddArgs({ commitSha: "main", mirrorPath, workspacePath: worktreePath }),
     ).toThrow("40-character commit SHA");
+  });
+
+  it("creates and reuses an atomic bare repository mirror", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-mirror-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    const mutableCommands: string[][] = [];
+    const mutableEnvironments: Readonly<Record<string, string | undefined>>[] = [];
+    const gitRunner: GitCommandRunner = async (args, options) => {
+      mutableCommands.push([...args]);
+      mutableEnvironments.push(options.env ?? {});
+      await mkdir(args[args.length - 1] ?? "", { recursive: true });
+      return "";
+    };
+
+    const result = await ensureRepositoryMirror(
+      {
+        cloneUrl: "https://x-access-token:embedded-secret@github.com/acme/api.git?token=1",
+        config,
+        credential: {
+          kind: "https-basic-token",
+          token: "token-123",
+          username: "x-access-token",
+        },
+        repoId: "repo_123",
+      },
+      { gitRunner, tempIdFactory: () => "tmp_456" },
+    );
+
+    expect(result).toEqual({
+      cloneUrlHash: hashGitUrl("https://github.com/acme/api.git"),
+      created: true,
+      mirrorPath,
+      repoId: "repo_123",
+    });
+    expect(mutableCommands).toEqual([
+      [
+        "clone",
+        "--bare",
+        "--filter=blob:none",
+        "--no-tags",
+        "https://github.com/acme/api.git",
+        tempMirrorPath,
+      ],
+    ]);
+    expect(mutableEnvironments).toEqual([
+      expect.objectContaining({
+        GIT_PASSWORD: "token-123",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_USERNAME: "x-access-token",
+      }),
+    ]);
+    expect(JSON.stringify(mutableCommands)).not.toContain("token-123");
+    expect(JSON.stringify(mutableCommands)).not.toContain("embedded-secret");
+    await expect(access(mirrorPath)).resolves.toBeUndefined();
+    await expect(access(tempMirrorPath)).rejects.toThrow();
+    const askPassPath = mutableEnvironments[0]?.GIT_ASKPASS;
+    if (!askPassPath) {
+      throw new Error("Expected mirror creation to use a temporary Git askpass helper.");
+    }
+    await expect(access(askPassPath)).rejects.toThrow();
+
+    const reused = await ensureRepositoryMirror(
+      {
+        cloneUrl: "https://github.com/acme/api.git",
+        config,
+        repoId: "repo_123",
+      },
+      { gitRunner, tempIdFactory: () => "tmp_789" },
+    );
+
+    expect(reused).toEqual({
+      cloneUrlHash: hashGitUrl("https://github.com/acme/api.git"),
+      created: false,
+      mirrorPath,
+      repoId: "repo_123",
+    });
+    expect(mutableCommands).toHaveLength(1);
+  });
+
+  it("cleans temporary mirror clone paths after clone failures", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-mirror-failure-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    let askPassPath: string | undefined;
+    const gitRunner: GitCommandRunner = async (args, options) => {
+      askPassPath = options.env?.GIT_ASKPASS;
+      await mkdir(args[args.length - 1] ?? "", { recursive: true });
+      throw new Error("clone failed");
+    };
+
+    await expect(
+      ensureRepositoryMirror(
+        {
+          cloneUrl: "https://github.com/acme/api.git",
+          config,
+          credential: {
+            kind: "https-basic-token",
+            token: "token-123",
+            username: "x-access-token",
+          },
+          repoId: "repo_123",
+        },
+        { gitRunner, tempIdFactory: () => "tmp_456" },
+      ),
+    ).rejects.toThrow("clone failed");
+
+    await expect(access(mirrorPath)).rejects.toThrow();
+    await expect(access(tempMirrorPath)).rejects.toThrow();
+    if (!askPassPath) {
+      throw new Error("Expected mirror creation to create an askpass helper before cloning.");
+    }
+    await expect(access(askPassPath)).rejects.toThrow();
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {
