@@ -29,7 +29,6 @@ const app = createApiApp({
   port: Number(process.env.PORT ?? 3000),
 });
 
-console.log(`api listening on ${app.server?.hostname}:${app.server?.port}`);
 observability.logger.info("api service started", {
   attributes: {
     "event.name": "api.service.started",
@@ -56,13 +55,19 @@ const shutdown = async (): Promise<void> => {
 
 process.on("SIGTERM", () => {
   shutdown().catch((error: unknown) => {
-    console.error("api shutdown failed", error);
+    observability.logger.error("api shutdown failed", {
+      error,
+      target: "api.shutdown",
+    });
     process.exit(1);
   });
 });
 process.on("SIGINT", () => {
   shutdown().catch((error: unknown) => {
-    console.error("api shutdown failed", error);
+    observability.logger.error("api shutdown failed", {
+      error,
+      target: "api.shutdown",
+    });
     process.exit(1);
   });
 });
