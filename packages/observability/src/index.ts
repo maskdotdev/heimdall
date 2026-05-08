@@ -656,6 +656,8 @@ export const OBSERVABILITY_METRIC_NAMES = {
   githubRateLimitedTotal: "code_review_agent.github.rate_limited_total",
   githubRequestDurationMs: "code_review_agent.github.request_duration_ms",
   githubRequestsTotal: "code_review_agent.github.requests_total",
+  indexerDriverArtifactIndexedBytes: "code_review_agent.indexer_driver.artifact_indexed_bytes",
+  indexerDriverArtifactResourceCount: "code_review_agent.indexer_driver.artifact_resource_count",
   indexerDriverDurationMs: "code_review_agent.indexer_driver.duration_ms",
   indexerDriverOutputBytes: "code_review_agent.indexer_driver.output_bytes",
   indexerDriverProcessExitNonzeroTotal:

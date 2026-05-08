@@ -584,11 +584,14 @@ describe("withIndexerTelemetry", () => {
   it("records successful run metrics and spans without workspace paths", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];
-    const driver = withIndexerTelemetry(createFakeIndexerDriver({ name: "Fake Driver" }), {
-      metrics: createRecordingMetrics(metrics),
-      traceContext: { requestId: "req_indexer_success" },
-      traces: createRecordingTraces(spans),
-    });
+    const driver = withIndexerTelemetry(
+      createFakeIndexerDriver({ artifact: validSemanticArtifact(), name: "Fake Driver" }),
+      {
+        metrics: createRecordingMetrics(metrics),
+        traceContext: { requestId: "req_indexer_success" },
+        traces: createRecordingTraces(spans),
+      },
+    );
 
     await expect(
       driver.indexRepository({
@@ -611,12 +614,27 @@ describe("withIndexerTelemetry", () => {
           name: OBSERVABILITY_METRIC_NAMES.indexerDriverDurationMs,
           unit: "ms",
         }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { artifact_remote: "false", driver: "fake_driver" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverArtifactIndexedBytes,
+          unit: "bytes",
+          value: 128,
+        }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { artifact_remote: "false", driver: "fake_driver", resource: "records" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverArtifactResourceCount,
+          unit: "1",
+          value: 4,
+        }),
       ]),
     );
     expect(spans).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           endAttributes: expect.objectContaining({
+            "indexer_driver.indexed_file_bytes": 128,
             "indexer_driver.status": "succeeded",
           }),
           name: OBSERVABILITY_SPAN_NAMES.indexerDriverRun,

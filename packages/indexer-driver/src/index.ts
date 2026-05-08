@@ -1554,6 +1554,13 @@ export function withIndexerTelemetry(
           ...(result.ok ? {} : { failureCode: result.error.code }),
           status,
         });
+        if (result.ok) {
+          recordIndexerArtifactResourceMetrics(telemetry.metrics, {
+            artifact: result.artifact,
+            artifactRemote: result.artifactUri !== undefined,
+            driverName: driver.name,
+          });
+        }
         span?.end({
           attributes: {
             ...indexerRunResultAttributes(result),
@@ -1665,6 +1672,25 @@ type RecordIndexerRunMetricsInput = {
   readonly status: IndexerRunTelemetryStatus;
 };
 
+/** Bounded resource dimensions emitted for successful index artifacts. */
+type IndexArtifactResourceName = "chunks" | "edges" | "files" | "records" | "symbols";
+
+/** Product-safe footprint summary for one index artifact. */
+type IndexArtifactResourceSummary = {
+  /** Chunk records declared by the artifact manifest. */
+  readonly chunks: number;
+  /** Edge records declared by the artifact manifest. */
+  readonly edges: number;
+  /** File records declared by the artifact manifest. */
+  readonly files: number;
+  /** Total indexed source-file bytes declared by file records. */
+  readonly indexedFileBytes: number;
+  /** Total records declared by the artifact manifest. */
+  readonly records: number;
+  /** Symbol records declared by the artifact manifest. */
+  readonly symbols: number;
+};
+
 /** Merges wrapper-level telemetry with telemetry already present on an index request. */
 function mergeIndexerTelemetry(
   inputTelemetry: IndexerTelemetryOptions | undefined,
@@ -1711,6 +1737,78 @@ function recordIndexerRunMetrics(
       unit: "1",
     });
   }
+}
+
+/** Records product-safe artifact footprint metrics for one successful indexer run. */
+function recordIndexerArtifactResourceMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  input: {
+    /** Indexed artifact returned by the driver. */
+    readonly artifact: IndexArtifact;
+    /** Whether the driver returned a durable remote artifact URI. */
+    readonly artifactRemote: boolean;
+    /** Stable driver name. */
+    readonly driverName: string;
+  },
+): void {
+  if (!metrics) {
+    return;
+  }
+
+  const summary = summarizeIndexArtifactResources(input.artifact);
+  const labels = {
+    artifact_remote: input.artifactRemote ? "true" : "false",
+    driver: normalizeTelemetryLabel(input.driverName),
+  };
+  metrics.histogram(
+    OBSERVABILITY_METRIC_NAMES.indexerDriverArtifactIndexedBytes,
+    summary.indexedFileBytes,
+    {
+      labels,
+      unit: "bytes",
+    },
+  );
+
+  for (const [resource, value] of indexArtifactResourceMetricValues(summary)) {
+    metrics.histogram(OBSERVABILITY_METRIC_NAMES.indexerDriverArtifactResourceCount, value, {
+      labels: {
+        ...labels,
+        resource,
+      },
+      unit: "1",
+    });
+  }
+}
+
+/** Returns bounded artifact resource count samples for metrics. */
+function indexArtifactResourceMetricValues(
+  summary: IndexArtifactResourceSummary,
+): readonly (readonly [IndexArtifactResourceName, number])[] {
+  return [
+    ["records", summary.records],
+    ["files", summary.files],
+    ["symbols", summary.symbols],
+    ["edges", summary.edges],
+    ["chunks", summary.chunks],
+  ];
+}
+
+/** Builds a product-safe summary of one index artifact's footprint. */
+function summarizeIndexArtifactResources(artifact: IndexArtifact): IndexArtifactResourceSummary {
+  return {
+    chunks: artifact.manifest.chunkCount,
+    edges: artifact.manifest.edgeCount,
+    files: artifact.manifest.fileCount,
+    indexedFileBytes: artifact.records.reduce(
+      (total, record) =>
+        record.type === "file"
+          ? Math.min(Number.MAX_SAFE_INTEGER, total + Math.max(0, record.sizeBytes))
+          : total,
+      0,
+    ),
+    records: artifact.manifest.recordCount,
+    symbols: artifact.manifest.symbolCount,
+  };
 }
 
 /** Records low-cardinality metrics for one artifact validation attempt. */
@@ -1775,14 +1873,16 @@ function indexerRunResultAttributes(
     };
   }
 
+  const summary = summarizeIndexArtifactResources(result.artifact);
   return {
     "indexer_driver.artifact_remote": result.artifactUri !== undefined,
-    "indexer_driver.chunk_count": result.artifact.manifest.chunkCount,
+    "indexer_driver.chunk_count": summary.chunks,
     "indexer_driver.diagnostic_count": result.diagnostics.length,
-    "indexer_driver.edge_count": result.artifact.manifest.edgeCount,
-    "indexer_driver.file_count": result.artifact.manifest.fileCount,
-    "indexer_driver.record_count": result.artifact.manifest.recordCount,
-    "indexer_driver.symbol_count": result.artifact.manifest.symbolCount,
+    "indexer_driver.edge_count": summary.edges,
+    "indexer_driver.file_count": summary.files,
+    "indexer_driver.indexed_file_bytes": summary.indexedFileBytes,
+    "indexer_driver.record_count": summary.records,
+    "indexer_driver.symbol_count": summary.symbols,
   };
 }
 
