@@ -12,11 +12,18 @@ import {
 } from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertAllowedGitUrl,
+  assertInsideRoot,
   assertSafeRepositoryWorkspaceCleanupPath,
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   type GitCommandRunner,
+  hashGitUrl,
+  normalizeRepoPath,
   redactGitRemoteUrl,
+  redactSecrets,
+  safeJoin,
+  sanitizeGitUrl,
   syncRepositoryWorkspace,
 } from "../src";
 
@@ -88,7 +95,7 @@ describe("repo sync workspace", () => {
       {
         gitProvider: {
           getCloneAuth: async () => ({
-            cloneUrl: "https://github.com/acme/api.git",
+            cloneUrl: "https://x-access-token:embedded-secret@github.com/acme/api.git",
             username: "x-access-token",
             password: "token-123",
             expiresAt: "2026-01-01T01:00:00.000Z",
@@ -119,6 +126,7 @@ describe("repo sync workspace", () => {
       }),
     ]);
     expect(JSON.stringify(mutableCommands)).not.toContain("token-123");
+    expect(JSON.stringify(mutableCommands)).not.toContain("embedded-secret");
     await expect(access(result.workspacePath)).rejects.toThrow();
     expect(metrics).toEqual(
       expect.arrayContaining([
@@ -280,10 +288,102 @@ describe("repo sync workspace", () => {
     ).toBe("https://x-access-token:token%3Awith%40chars@github.com/acme/api.git");
   });
 
+  it("sanitizes and allowlists Git clone URLs", () => {
+    const credentialedUrl = "https://x-access-token:secret@github.com/acme/api.git?token=1#main";
+
+    expect(sanitizeGitUrl(credentialedUrl)).toBe("https://github.com/acme/api.git");
+    expect(hashGitUrl(credentialedUrl)).toBe(hashGitUrl("https://github.com/acme/api.git"));
+    expect(() => assertAllowedGitUrl("https://github.com/acme/api.git")).not.toThrow();
+    expect(() =>
+      assertAllowedGitUrl("https://github.example/acme/api.git", {
+        allowedHosts: ["github.example"],
+      }),
+    ).not.toThrow();
+    expect(() => assertAllowedGitUrl("file:///tmp/repo.git")).toThrow(
+      'Git URL scheme "file" is not allowed.',
+    );
+    expect(() => assertAllowedGitUrl("https://example.com/acme/api.git")).toThrow(
+      'Git URL host "example.com" is not allowed.',
+    );
+  });
+
+  it("rejects disallowed sync clone URLs before adding the remote", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-url-test-"));
+    workspaceRoots.push(workspaceRoot);
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      return "";
+    };
+
+    await expect(
+      syncRepositoryWorkspace(
+        {
+          provider: "github",
+          installationId: "inst_test",
+          providerInstallationId: "99",
+          owner: "acme",
+          repo: "api",
+          commitSha,
+          repoId: "repo_sync_test",
+          workspaceRoot,
+        },
+        {
+          gitProvider: {
+            getCloneAuth: async () => ({
+              cloneUrl: "file:///tmp/repo.git",
+              username: "x-access-token",
+              password: "token-123",
+              expiresAt: "2026-01-01T01:00:00.000Z",
+            }),
+          },
+          gitRunner,
+        },
+      ),
+    ).rejects.toThrow('Git URL scheme "file" is not allowed.');
+    expect(mutableCommands).toEqual([]);
+  });
+
   it("redacts credentialed Git remote URLs for product-safe display", () => {
     expect(redactGitRemoteUrl("https://x-access-token:token-123@github.com/acme/api.git")).toBe(
       "https://x-access-token:***@github.com/acme/api.git",
     );
+  });
+
+  it("redacts exact secrets and common provider token shapes", () => {
+    expect(
+      redactSecrets(
+        [
+          "Authorization: Bearer ghs_provider_token",
+          "Bearer github_pat_1234567890",
+          "https://x-access-token:ghp_exampleToken@github.com/acme/api.git",
+          "manual-secret",
+        ].join("\n"),
+        ["manual-secret"],
+      ),
+    ).toBe(
+      [
+        "Authorization: ***",
+        "Bearer ***",
+        "https://x-access-token:***@github.com/acme/api.git",
+        "***",
+      ].join("\n"),
+    );
+  });
+
+  it("normalizes repository paths and prevents root escape", () => {
+    const rootPath = join(tmpdir(), "heimdall-repo-path-test");
+
+    expect(normalizeRepoPath("src//app/./index.ts")).toBe("src/app/index.ts");
+    expect(normalizeRepoPath("src\\app\\index.ts")).toBe("src/app/index.ts");
+    expect(safeJoin(rootPath, "src/index.ts")).toBe(join(rootPath, "src/index.ts"));
+    expect(() => assertInsideRoot(rootPath, rootPath)).toThrow(
+      "Path resolves outside the configured root.",
+    );
+    expect(() => normalizeRepoPath("../secrets")).toThrow("traversal segments");
+    expect(() => normalizeRepoPath("/etc/passwd")).toThrow("relative");
+    expect(() => normalizeRepoPath("C:\\temp\\repo")).toThrow("Windows drive prefix");
+    expect(() => safeJoin(rootPath, "src/../../secrets")).toThrow("traversal segments");
   });
 
   it("removes a retained workspace", async () => {

@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import {
@@ -15,7 +16,20 @@ import {
 } from "@repo/observability";
 
 const execFileAsync = promisify(execFile);
+const defaultAllowedGitHosts = ["github.com", "www.github.com"] as const;
 const managedWorkspacePrefix = "heimdall-repo-";
+const redactedSecret = "***";
+const githubTokenPattern = /\bgh[opsu]_[A-Za-z0-9_]+\b/gu;
+const githubPatPattern = /\bgithub_pat_[A-Za-z0-9_]+\b/gu;
+const bearerTokenPattern = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu;
+const authorizationHeaderPattern = /\bAuthorization:\s*[^\r\n]+/giu;
+const xAccessTokenPattern = /(x-access-token:)[^@\s/]+/giu;
+const windowsDrivePathPattern = /^[A-Za-z]:($|[\\/])/u;
+
+declare const repoPathBrand: unique symbol;
+
+/** Repository-relative path normalized to forward slashes. */
+export type RepoPath = string & { readonly [repoPathBrand]: "RepoPath" };
 
 /** Git command runner used by repo sync and tests. */
 export type GitCommandRunner = (
@@ -45,6 +59,8 @@ export type SyncRepositoryWorkspaceInput = GitHubRepositoryRef & {
 
 /** Dependencies used by repository workspace sync. */
 export type SyncRepositoryWorkspaceDependencies = {
+  /** Optional clone host allowlist for repository sync. */
+  readonly allowedGitHosts?: readonly string[];
   /** Provider that supplies clone credentials. */
   readonly gitProvider: Pick<GitProvider, "getCloneAuth">;
   /** Optional Git command runner for tests. */
@@ -61,6 +77,16 @@ export type SyncRepositoryWorkspaceDependencies = {
 export type CleanupRepositoryWorkspaceOptions = {
   /** Optional root that must contain the workspace path. */
   readonly workspaceRoot?: string;
+};
+
+/** Options used when validating a Git clone URL allowlist. */
+export type AssertAllowedGitUrlOptions = {
+  /** Additional or replacement hostnames that may be cloned from. */
+  readonly allowedHosts?: readonly string[];
+  /** Allows plain HTTP clone URLs when explicitly enabled. */
+  readonly allowHttp?: boolean;
+  /** Allows SSH clone URLs when explicitly enabled. */
+  readonly allowSsh?: boolean;
 };
 
 /** Result returned after a repository workspace sync finishes. */
@@ -101,9 +127,13 @@ export async function syncRepositoryWorkspace(
 
   try {
     const cloneAuth = await dependencies.gitProvider.getCloneAuth(input);
+    const cloneUrl = sanitizeGitUrl(cloneAuth.cloneUrl);
+    assertAllowedGitUrl(cloneUrl, {
+      ...(dependencies.allowedGitHosts ? { allowedHosts: dependencies.allowedGitHosts } : {}),
+    });
 
     await git(["init"], { cwd: workspacePath });
-    await git(["remote", "add", "origin", cloneAuth.cloneUrl], { cwd: workspacePath });
+    await git(["remote", "add", "origin", cloneUrl], { cwd: workspacePath });
     askPassPath = await createGitAskPassScript(workspacePath);
     await git(["fetch", "--depth=1", "origin", input.commitSha], {
       cwd: workspacePath,
@@ -271,6 +301,68 @@ export function createAuthenticatedCloneUrl(input: {
   return url.toString();
 }
 
+/** Returns a clone URL with credentials, query strings, and fragments removed. */
+export function sanitizeGitUrl(input: string): string {
+  const url = new URL(input);
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+/** Returns a stable SHA-256 hash for a sanitized Git clone URL. */
+export function hashGitUrl(input: string): string {
+  return createHash("sha256").update(sanitizeGitUrl(input)).digest("hex");
+}
+
+/** Throws when a Git clone URL uses an unsupported scheme or host. */
+export function assertAllowedGitUrl(input: string, options: AssertAllowedGitUrlOptions = {}): void {
+  const url = new URL(input);
+  const protocol = url.protocol.toLowerCase();
+  const allowedProtocols = new Set(["https:"]);
+  if (options.allowHttp) {
+    allowedProtocols.add("http:");
+  }
+  if (options.allowSsh) {
+    allowedProtocols.add("ssh:");
+  }
+
+  if (!allowedProtocols.has(protocol)) {
+    throw new Error(`Git URL scheme "${protocol.replace(/:$/u, "")}" is not allowed.`);
+  }
+
+  if (!url.hostname || url.pathname === "/" || url.pathname.length === 0) {
+    throw new Error("Git URL must include a host and repository path.");
+  }
+
+  const host = normalizeGitHost(url.hostname);
+  const allowedHosts = options.allowedHosts ?? defaultAllowedGitHosts;
+  const normalizedAllowedHosts = new Set(allowedHosts.map(normalizeGitHost));
+  if (!normalizedAllowedHosts.has(host)) {
+    throw new Error(`Git URL host "${host}" is not allowed.`);
+  }
+}
+
+/** Redacts exact secrets and common provider token formats from text. */
+export function redactSecrets(input: string, secrets: readonly string[] = []): string {
+  let output = input;
+  const uniqueSecrets = [...new Set(secrets.filter((secret) => secret.length > 0))].sort(
+    (left, right) => right.length - left.length,
+  );
+
+  for (const secret of uniqueSecrets) {
+    output = output.split(secret).join(redactedSecret);
+  }
+
+  return output
+    .replace(githubTokenPattern, redactedSecret)
+    .replace(githubPatPattern, redactedSecret)
+    .replace(bearerTokenPattern, `Bearer ${redactedSecret}`)
+    .replace(authorizationHeaderPattern, `Authorization: ${redactedSecret}`)
+    .replace(xAccessTokenPattern, `$1${redactedSecret}`);
+}
+
 /** Returns a product-safe display form for a potentially credentialed Git remote URL. */
 export function redactGitRemoteUrl(input: string): string {
   try {
@@ -283,6 +375,66 @@ export function redactGitRemoteUrl(input: string): string {
   } catch {
     return input.replace(/(https?:\/\/[^:\s/]+:)[^@\s/]+(@)/giu, "$1***$2");
   }
+}
+
+/** Normalizes a repository-relative path and rejects traversal or absolute paths. */
+export function normalizeRepoPath(input: string): RepoPath {
+  if (input.length === 0) {
+    throw new Error("Repository path must not be empty.");
+  }
+  if (input.includes("\0")) {
+    throw new Error("Repository path must not contain null bytes.");
+  }
+  if (windowsDrivePathPattern.test(input)) {
+    throw new Error("Repository path must not use a Windows drive prefix.");
+  }
+
+  const normalizedSeparators = input.replaceAll("\\", "/");
+  if (windowsDrivePathPattern.test(normalizedSeparators)) {
+    throw new Error("Repository path must not use a Windows drive prefix.");
+  }
+  if (normalizedSeparators.startsWith("/")) {
+    throw new Error("Repository path must be relative.");
+  }
+  if (normalizedSeparators.split("/").some((segment) => segment === "..")) {
+    throw new Error("Repository path must not contain traversal segments.");
+  }
+
+  const normalizedPath = posix.normalize(normalizedSeparators);
+  if (normalizedPath === "." || normalizedPath.length === 0) {
+    throw new Error("Repository path must not be empty.");
+  }
+  if (
+    normalizedPath.startsWith("../") ||
+    normalizedPath === ".." ||
+    normalizedPath.startsWith("/")
+  ) {
+    throw new Error("Repository path must stay inside the repository root.");
+  }
+
+  return normalizedPath as RepoPath;
+}
+
+/** Returns a path under root after validating a repository-relative path. */
+export function safeJoin(root: string, relativePath: string): string {
+  const targetPath = resolve(root, normalizeRepoPath(relativePath));
+  assertInsideRoot(root, targetPath);
+  return targetPath;
+}
+
+/** Throws when targetPath does not resolve under root. */
+export function assertInsideRoot(root: string, targetPath: string): void {
+  const resolvedRoot = resolve(root);
+  const resolvedTarget = resolve(targetPath);
+  const relativePath = relative(resolvedRoot, resolvedTarget);
+  if (relativePath.length === 0 || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    throw new Error("Path resolves outside the configured root.");
+  }
+}
+
+/** Normalizes a Git hostname for allowlist comparisons. */
+function normalizeGitHost(host: string): string {
+  return host.toLowerCase().replace(/\.$/u, "");
 }
 
 /** Creates a temporary Git askpass helper that reads credentials from process environment. */
