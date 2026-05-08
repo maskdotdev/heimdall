@@ -40,6 +40,18 @@ groups:
           runbook_url: docs/runbooks/observability-alerts.md#review-queue-backlog
           summary: Review queue retry volume is elevated.
 
+      - alert: HeimdallEmbeddingBacklog
+        expr: |
+          max(code_review_agent_queue_oldest_job_age_ms{queue_name="embedding"}) > 900000
+        for: 15m
+        labels:
+          owner: indexing
+          severity: ticket
+        annotations:
+          dashboard_url: /admin/debug/jobs
+          runbook_url: docs/runbooks/observability-alerts.md#embedding-backlog
+          summary: Embedding queue oldest pending job age is above 15 minutes.
+
       - alert: HeimdallReviewFailureRate
         expr: |
           sum(rate(code_review_agent_review_stages_total{status="failed"}[15m]))
@@ -88,6 +100,22 @@ groups:
           dashboard_url: /admin/overview
           runbook_url: docs/runbooks/observability-alerts.md#llm-provider-outage
           summary: LLM rate-limit and structured-output failure ratio is above 20%.
+
+      - alert: HeimdallCostAnomaly
+        expr: |
+          (
+            sum(rate(code_review_agent_llm_estimated_cost_micros_total[60m]))
+            * 3600
+            / 1000000
+          ) > 5
+        for: 15m
+        labels:
+          owner: platform
+          severity: ticket
+        annotations:
+          dashboard_url: /admin/usage
+          runbook_url: docs/runbooks/observability-alerts.md#cost-anomaly
+          summary: Estimated LLM cost is above 5 USD per hour.
 
       - alert: HeimdallIndexingFailures
         expr: |

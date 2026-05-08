@@ -39,6 +39,7 @@ import {
   ReviewInputSnapshotMismatchError,
   type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
+  recordLlmUsageTelemetry,
   recordReviewStageMetrics,
   reviewGateSkipSummary,
   reviewMemoryFactFromRow,
@@ -602,6 +603,57 @@ describe("recordReviewStageMetrics", () => {
         name: OBSERVABILITY_METRIC_NAMES.reviewStageDurationMs,
         unit: "ms",
         value: 42,
+      },
+    ]);
+  });
+});
+
+describe("recordLlmUsageTelemetry", () => {
+  it("records product-safe token and cost counters", () => {
+    const records: RecordedMetric[] = [];
+    const metrics = createRecordingMetrics(records);
+
+    recordLlmUsageTelemetry(metrics, {
+      costMicros: 250,
+      inputTokens: 1200,
+      modelProfile: "Review Premium",
+      outputTokens: 80,
+      provider: "OpenAI",
+      task: "review.findings",
+    });
+
+    expect(records).toEqual([
+      {
+        kind: "counter",
+        labels: {
+          model_profile: "review_premium",
+          provider: "openai",
+          task: "review.findings",
+          token_type: "input",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.llmTokensTotal,
+        value: 1200,
+      },
+      {
+        kind: "counter",
+        labels: {
+          model_profile: "review_premium",
+          provider: "openai",
+          task: "review.findings",
+          token_type: "output",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.llmTokensTotal,
+        value: 80,
+      },
+      {
+        kind: "counter",
+        labels: {
+          model_profile: "review_premium",
+          provider: "openai",
+          task: "review.findings",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.llmEstimatedCostMicrosTotal,
+        value: 250,
       },
     ]);
   });
