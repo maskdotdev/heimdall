@@ -1,3 +1,5 @@
+import type { RepoRule } from "@repo/contracts";
+import { ids } from "@repo/contracts/fixtures/common";
 import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
 import { createStaticRelevantMemoryRetriever, type MemoryFact } from "@repo/memory";
 import {
@@ -228,6 +230,63 @@ describe("retrieveContext", () => {
     });
   });
 
+  it("adds matching repository rules as explicit context items", async () => {
+    const matchingRule = createRepoRuleFixture({
+      ruleId: "rule_math_context",
+      matcher: {
+        labels: ["ready-for-review"],
+        languages: ["typescript"],
+        paths: ["src/**/*.ts"],
+      },
+      name: "Numeric changes need edge-case review",
+      instruction: "Check numeric coercion changes for NaN, Infinity, and negative zero behavior.",
+    });
+    const unmatchedRule = createRepoRuleFixture({
+      ruleId: "rule_docs_context",
+      matcher: { paths: ["docs/**"] },
+      name: "Documentation rule",
+      instruction: "Documentation updates need examples.",
+    });
+
+    const bundle = await retrieveContext({
+      reviewRunId: "rrn_01HREVIEW",
+      snapshot: validPullRequestSnapshotFixture,
+      indexAvailable: false,
+      rules: { rules: [matchingRule, unmatchedRule] },
+      timestamp: "2026-05-05T00:00:00.000Z",
+    });
+
+    expect(bundle.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "repo_rule",
+          source: "repo_rule",
+          text: expect.stringContaining("NaN, Infinity, and negative zero"),
+        }),
+      ]),
+    );
+    expect(bundle.metadata).toMatchObject({
+      rules: {
+        includedRuleIds: ["rule_math_context"],
+        trace: expect.arrayContaining([
+          expect.objectContaining({
+            included: true,
+            matchedLabels: ["ready-for-review"],
+            matchedLanguages: ["typescript"],
+            matchedPaths: ["src/math.ts"],
+            reason: "path_matched",
+            ruleId: "rule_math_context",
+          }),
+          expect.objectContaining({
+            included: false,
+            reason: "path_not_matched",
+            ruleId: "rule_docs_context",
+          }),
+        ]),
+      },
+    });
+  });
+
   it("adds index-backed same-file, symbol, test, full-text, and similar context", async () => {
     const index: RetrievalIndex = {
       indexVersionId: "idx_123",
@@ -423,6 +482,24 @@ describe("retrieveContext", () => {
     });
   });
 });
+
+/** Creates a repository rule fixture for retrieval tests. */
+function createRepoRuleFixture(overrides: Partial<RepoRule> = {}): RepoRule {
+  return {
+    ruleId: ids.ruleId,
+    orgId: ids.orgId,
+    repoId: validPullRequestSnapshotFixture.repoId,
+    name: "Review rule",
+    effect: "context",
+    matcher: {},
+    instruction: "Use repository-specific context.",
+    priority: 500,
+    enabled: true,
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
   return {

@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { ContextBundleSchema, type FindingCategory, parseWithSchema } from "@repo/contracts";
+import {
+  ContextBundleSchema,
+  type FindingCategory,
+  parseWithSchema,
+  type RepoRule,
+} from "@repo/contracts";
 import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import type { CodeSnippet, ContextBundle, ContextItem } from "@repo/contracts/review/context";
@@ -28,6 +33,7 @@ import {
   type TelemetrySpanHandle,
   type TelemetrySpanRecorder,
 } from "@repo/observability";
+import { matchesAnyPathPattern } from "@repo/rules";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 
 /** Indexed chunk shape consumed by retrieval. */
@@ -162,6 +168,8 @@ export type RetrieveContextInput = {
   readonly maxTokens?: number;
   /** Optional relevant-memory retrieval for team facts and preferences. */
   readonly memory?: RetrieveMemoryContextOptions | undefined;
+  /** Optional repository rules to expose as review context. */
+  readonly rules?: RetrieveRepoRuleContextOptions | undefined;
   /** Optional metric recorder for product-safe aggregate retrieval telemetry. */
   readonly metrics?: TelemetryMetricRecorder | undefined;
   /** Low-cardinality review mode label for aggregate retrieval metrics. */
@@ -184,6 +192,14 @@ export type RetrieveMemoryContextOptions = {
   readonly maxTokens?: number | undefined;
   /** Optional expected finding categories used to rank relevant memory. */
   readonly findingCategories?: readonly FindingCategory[] | undefined;
+};
+
+/** Optional repository-rule retrieval configuration for a context bundle. */
+export type RetrieveRepoRuleContextOptions = {
+  /** Active or candidate repository rules to evaluate for context inclusion. */
+  readonly rules: readonly RepoRule[];
+  /** Maximum matching rules to add to the context bundle. */
+  readonly maxRules?: number | undefined;
 };
 
 /** Non-fatal retrieval issue recorded on the context bundle metadata. */
@@ -214,6 +230,32 @@ type MemoryRetrievalResult = {
   readonly trace: readonly RelevantMemoryTraceEntry[];
 };
 
+/** Product-safe trace entry for repository rule context selection. */
+export type RepoRuleRetrievalTraceEntry = {
+  /** Repository rule evaluated by retrieval. */
+  readonly ruleId: string;
+  /** Whether the rule was selected before final context packing. */
+  readonly included: boolean;
+  /** Stable reason for the rule selection result. */
+  readonly reason: string;
+  /** Changed paths that matched the rule, when applicable. */
+  readonly matchedPaths?: readonly string[] | undefined;
+  /** Changed languages that matched the rule, when applicable. */
+  readonly matchedLanguages?: readonly string[] | undefined;
+  /** Pull request labels that matched the rule, when applicable. */
+  readonly matchedLabels?: readonly string[] | undefined;
+};
+
+/** Items and trace produced by repository rule retrieval. */
+type RepoRuleRetrievalResult = {
+  /** Context items produced from relevant repository rules. */
+  readonly items: readonly ContextItem[];
+  /** Rule IDs selected before final bundle packing. */
+  readonly ruleIds: readonly string[];
+  /** Product-safe rule relevance trace. */
+  readonly trace: readonly RepoRuleRetrievalTraceEntry[];
+};
+
 type RetrievalTelemetryStatus = "failed" | "succeeded";
 
 type RetrievalTelemetryState = {
@@ -241,10 +283,13 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
     const memoryResult = input.memory
       ? await retrieveMemoryItems({ ...input, memory: input.memory }, timestamp)
       : { factIds: [], items: [], trace: [] };
+    const ruleResult = input.rules
+      ? retrieveRepoRuleItems({ ...input, rules: input.rules }, timestamp)
+      : { items: [], ruleIds: [], trace: [] };
     const candidateItems =
       input.indexAvailable === false || !input.index
-        ? [...memoryResult.items, ...withFallbackRule(diffItems)]
-        : [...memoryResult.items, ...indexedResult.items, ...diffItems];
+        ? [...ruleResult.items, ...memoryResult.items, ...withFallbackRule(diffItems)]
+        : [...ruleResult.items, ...memoryResult.items, ...indexedResult.items, ...diffItems];
     const items = packItems(candidateItems, maxTokens);
 
     const bundle = parseWithSchema("ContextBundle", ContextBundleSchema, {
@@ -253,6 +298,7 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
         input.reviewRunId,
         input.snapshot.snapshotId,
         input.indexAvailable === false ? "diff-fallback" : "indexed",
+        ruleResult.ruleIds.join(","),
         memoryResult.factIds.join(","),
       ]),
       reviewRunId: input.reviewRunId,
@@ -277,6 +323,14 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
               memory: {
                 includedFactIds: memoryResult.factIds,
                 trace: memoryResult.trace,
+              },
+            }
+          : {}),
+        ...(ruleResult.trace.length > 0
+          ? {
+              rules: {
+                includedRuleIds: ruleResult.ruleIds,
+                trace: ruleResult.trace,
               },
             }
           : {}),
@@ -785,6 +839,37 @@ async function retrieveMemoryItems(
   };
 }
 
+/** Selects repository rules that should be visible as review context. */
+function retrieveRepoRuleItems(
+  input: RetrieveContextInput & { readonly rules: RetrieveRepoRuleContextOptions },
+  timestamp: string,
+): RepoRuleRetrievalResult {
+  const maxRules = Math.max(0, input.rules.maxRules ?? 12);
+  const evaluations = input.rules.rules.map((rule) =>
+    evaluateRepoRuleForContext(rule, input.snapshot, timestamp),
+  );
+  const selected = evaluations
+    .filter((evaluation) => evaluation.trace.included)
+    .sort(
+      (left, right) =>
+        left.rule.priority - right.rule.priority ||
+        left.rule.ruleId.localeCompare(right.rule.ruleId),
+    )
+    .slice(0, maxRules);
+  const selectedRuleIds = new Set(selected.map((evaluation) => evaluation.rule.ruleId));
+  const trace = evaluations.map((evaluation) =>
+    evaluation.trace.included && !selectedRuleIds.has(evaluation.rule.ruleId)
+      ? { ...evaluation.trace, included: false, reason: "rule_limit_exceeded" }
+      : evaluation.trace,
+  );
+
+  return {
+    items: selected.map((evaluation) => repoRuleItem(evaluation.rule, evaluation.trace)),
+    ruleIds: selected.map((evaluation) => evaluation.rule.ruleId),
+    trace,
+  };
+}
+
 /** Runs an optional indexed retriever and records a warning instead of failing retrieval. */
 async function retrieveOptionalIndexItems<TItem>(
   retriever: string,
@@ -805,6 +890,140 @@ async function retrieveOptionalIndexItems<TItem>(
       ],
     };
   }
+}
+
+/** Internal rule evaluation result used before applying retrieval limits. */
+type RepoRuleContextEvaluation = {
+  /** Repository rule that was evaluated. */
+  readonly rule: RepoRule;
+  /** Product-safe selection trace for the rule. */
+  readonly trace: RepoRuleRetrievalTraceEntry;
+};
+
+/** Evaluates whether one repository rule applies to the pull request snapshot. */
+function evaluateRepoRuleForContext(
+  rule: RepoRule,
+  snapshot: PullRequestSnapshot,
+  timestamp: string,
+): RepoRuleContextEvaluation {
+  if (!rule.enabled) {
+    return skippedRepoRuleEvaluation(rule, "disabled_rule");
+  }
+  if (repoRuleExpired(rule, timestamp)) {
+    return skippedRepoRuleEvaluation(rule, "expired_rule");
+  }
+  if (rule.repoId && rule.repoId !== snapshot.repoId) {
+    return skippedRepoRuleEvaluation(rule, "repo_mismatch");
+  }
+
+  const pathPatterns = nonEmptyValues(rule.matcher.paths);
+  const languageMatchers = nonEmptyValues(rule.matcher.languages);
+  const labelMatchers = nonEmptyValues(rule.matcher.labels);
+  const authorMatchers = nonEmptyValues(rule.matcher.authors);
+  const titleRegex = rule.matcher.titleRegex?.trim();
+
+  const pathMatch = pathPatterns
+    ? matchingChangedPaths(snapshot.changedFiles, pathPatterns)
+    : { paths: [] };
+  if (pathMatch.error) {
+    return skippedRepoRuleEvaluation(rule, "invalid_path_matcher");
+  }
+  if (pathPatterns && pathMatch.paths.length === 0) {
+    return skippedRepoRuleEvaluation(rule, "path_not_matched");
+  }
+
+  const matchedLanguages = languageMatchers
+    ? matchingChangedLanguages(snapshot.changedFiles, languageMatchers)
+    : [];
+  if (languageMatchers && matchedLanguages.length === 0) {
+    return skippedRepoRuleEvaluation(rule, "language_not_matched");
+  }
+
+  const matchedLabels = labelMatchers
+    ? matchingComparableValues(snapshot.labels, labelMatchers)
+    : [];
+  if (labelMatchers && matchedLabels.length === 0) {
+    return skippedRepoRuleEvaluation(rule, "label_not_matched");
+  }
+
+  if (authorMatchers && !matchesComparableValue(snapshot.authorLogin, authorMatchers)) {
+    return skippedRepoRuleEvaluation(rule, "author_not_matched");
+  }
+
+  if (titleRegex) {
+    const titleMatches = matchesRuleTitle(snapshot.title, titleRegex);
+    if (titleMatches === "invalid") {
+      return skippedRepoRuleEvaluation(rule, "invalid_title_regex");
+    }
+    if (!titleMatches) {
+      return skippedRepoRuleEvaluation(rule, "title_not_matched");
+    }
+  }
+
+  const trace = {
+    ruleId: rule.ruleId,
+    included: true,
+    reason: repoRuleMatchReason(rule, {
+      labels: matchedLabels,
+      languages: matchedLanguages,
+      paths: pathMatch.paths,
+    }),
+    ...(pathMatch.paths.length > 0 ? { matchedPaths: pathMatch.paths } : {}),
+    ...(matchedLanguages.length > 0 ? { matchedLanguages } : {}),
+    ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
+  } satisfies RepoRuleRetrievalTraceEntry;
+
+  return { rule, trace };
+}
+
+/** Creates a skipped rule evaluation with a stable product-safe reason. */
+function skippedRepoRuleEvaluation(
+  rule: RepoRule,
+  reason: RepoRuleRetrievalTraceEntry["reason"],
+): RepoRuleContextEvaluation {
+  return {
+    rule,
+    trace: {
+      ruleId: rule.ruleId,
+      included: false,
+      reason,
+    },
+  };
+}
+
+/** Converts one selected repository rule to a context item. */
+function repoRuleItem(rule: RepoRule, trace: RepoRuleRetrievalTraceEntry): ContextItem {
+  const matcherSummary = repoRuleMatcherSummary(rule);
+  const text = [
+    `Repository rule: ${rule.name}`,
+    `Effect: ${rule.effect}`,
+    ...(rule.description ? [`Description: ${rule.description}`] : []),
+    `Instruction: ${rule.instruction}`,
+    ...(matcherSummary ? [`Matcher: ${matcherSummary}`] : []),
+  ].join("\n");
+
+  return {
+    contextItemId: stableId("ctxitem", ["repo-rule", rule.ruleId]),
+    kind: "repo_rule",
+    source: "repo_rule",
+    title: rule.name,
+    text,
+    priority: repoRulePriority(rule),
+    tokenEstimate: estimateTokens(text),
+    provenance: {
+      retriever: "repo-rule-context",
+      reason: repoRuleReasonText(trace.reason),
+    },
+    metadata: {
+      ruleId: rule.ruleId,
+      effect: rule.effect,
+      priority: rule.priority,
+      matcher: rule.matcher,
+      ...(trace.matchedPaths ? { matchedPaths: trace.matchedPaths } : {}),
+      ...(trace.matchedLanguages ? { matchedLanguages: trace.matchedLanguages } : {}),
+      ...(trace.matchedLabels ? { matchedLabels: trace.matchedLabels } : {}),
+    },
+  };
 }
 
 function memoryFactItem(
@@ -1106,6 +1325,149 @@ function routeItem(route: RetrievalRoute): ContextItem {
   };
 }
 
+/** Rule matcher dimensions that matched the current pull request. */
+type RepoRuleMatchSignals = {
+  /** Pull request labels that matched the rule matcher. */
+  readonly labels: readonly string[];
+  /** Changed file languages that matched the rule matcher. */
+  readonly languages: readonly string[];
+  /** Changed paths that matched the rule matcher. */
+  readonly paths: readonly string[];
+};
+
+/** Converts rule effect and explicit priority into context packing priority. */
+function repoRulePriority(rule: RepoRule): number {
+  const effectPriority =
+    rule.effect === "require"
+      ? 94
+      : rule.effect === "promote"
+        ? 88
+        : rule.effect === "context" || rule.effect === "style_preference"
+          ? 84
+          : 78;
+  const explicitPriorityBoost = Math.round((1000 - rule.priority) / 100);
+
+  return Math.max(70, Math.min(99, effectPriority + explicitPriorityBoost));
+}
+
+/** Builds a compact matcher summary for context text. */
+function repoRuleMatcherSummary(rule: RepoRule): string | undefined {
+  const matcher = rule.matcher;
+  const parts = [
+    ...(matcher.paths?.length ? [`paths=${matcher.paths.join(",")}`] : []),
+    ...(matcher.languages?.length ? [`languages=${matcher.languages.join(",")}`] : []),
+    ...(matcher.categories?.length ? [`categories=${matcher.categories.join(",")}`] : []),
+    ...(matcher.severities?.length ? [`severities=${matcher.severities.join(",")}`] : []),
+    ...(matcher.authors?.length ? [`authors=${matcher.authors.join(",")}`] : []),
+    ...(matcher.labels?.length ? [`labels=${matcher.labels.join(",")}`] : []),
+    ...(matcher.titleRegex ? [`titleRegex=${matcher.titleRegex}`] : []),
+  ];
+
+  return parts.length > 0 ? parts.join("; ") : undefined;
+}
+
+/** Converts a stable rule match reason into review-facing provenance text. */
+function repoRuleReasonText(reason: string): string {
+  if (reason === "path_matched") return "Repository rule matched a changed path.";
+  if (reason === "language_matched") return "Repository rule matched a changed file language.";
+  if (reason === "label_matched") return "Repository rule matched a pull request label.";
+  if (reason === "author_matched") return "Repository rule matched the pull request author.";
+  if (reason === "title_matched") return "Repository rule matched the pull request title.";
+  if (reason === "finding_policy_rule") {
+    return "Repository rule affects review finding policy and is visible as context.";
+  }
+
+  return "Repository rule applies globally to this review.";
+}
+
+/** Chooses the most specific stable reason for a matched rule. */
+function repoRuleMatchReason(rule: RepoRule, signals: RepoRuleMatchSignals): string {
+  if (signals.paths.length > 0) return "path_matched";
+  if (signals.languages.length > 0) return "language_matched";
+  if (signals.labels.length > 0) return "label_matched";
+  if (nonEmptyValues(rule.matcher.authors)) return "author_matched";
+  if (rule.matcher.titleRegex?.trim()) return "title_matched";
+  if (nonEmptyValues(rule.matcher.categories) || nonEmptyValues(rule.matcher.severities)) {
+    return "finding_policy_rule";
+  }
+
+  return "global_rule";
+}
+
+/** Returns whether a repository rule has expired before retrieval time. */
+function repoRuleExpired(rule: RepoRule, timestamp: string): boolean {
+  const expiresAt =
+    rule.metadata && typeof rule.metadata.expiresAt === "string" ? rule.metadata.expiresAt : "";
+
+  return expiresAt.length > 0 && Date.parse(expiresAt) <= Date.parse(timestamp);
+}
+
+/** Returns changed paths that match at least one rule glob. */
+function matchingChangedPaths(
+  files: readonly ChangedFile[],
+  patterns: readonly string[],
+): { readonly error?: true; readonly paths: readonly string[] } {
+  const matchedPaths: string[] = [];
+
+  try {
+    for (const file of files) {
+      const paths = [file.path, ...(file.oldPath ? [file.oldPath] : [])];
+      if (paths.some((path) => matchesAnyPathPattern(path, patterns))) {
+        matchedPaths.push(file.path);
+      }
+    }
+  } catch {
+    return { error: true, paths: [] };
+  }
+
+  return { paths: uniqueStrings(matchedPaths) };
+}
+
+/** Returns changed file languages that match the rule language matcher. */
+function matchingChangedLanguages(
+  files: readonly ChangedFile[],
+  languages: readonly string[],
+): readonly string[] {
+  const languageSet = new Set(languages);
+
+  return uniqueStrings(
+    files.map((file) => file.language).filter((language) => languageSet.has(language)),
+  );
+}
+
+/** Returns exact normalized PR metadata values that match expected values. */
+function matchingComparableValues(
+  values: readonly string[],
+  expectedValues: readonly string[],
+): readonly string[] {
+  const expected = new Set(expectedValues.map(normalizeComparable));
+
+  return uniqueStrings(values.filter((value) => expected.has(normalizeComparable(value))));
+}
+
+/** Returns whether one normalized PR metadata value is listed in expected values. */
+function matchesComparableValue(value: string, expectedValues: readonly string[]): boolean {
+  const normalized = normalizeComparable(value);
+
+  return expectedValues.some((expectedValue) => normalizeComparable(expectedValue) === normalized);
+}
+
+/** Evaluates a rule title regular expression without throwing on invalid input. */
+function matchesRuleTitle(title: string, titleRegex: string): boolean | "invalid" {
+  try {
+    return new RegExp(titleRegex, "iu").test(title);
+  } catch {
+    return "invalid";
+  }
+}
+
+/** Returns a non-empty array or undefined when a matcher dimension is absent. */
+function nonEmptyValues<TValue>(
+  values: readonly TValue[] | undefined,
+): readonly TValue[] | undefined {
+  return values && values.length > 0 ? values : undefined;
+}
+
 function dedupeContextItems(items: readonly ContextItem[]): readonly ContextItem[] {
   const seen = new Set<string>();
   const deduped: ContextItem[] = [];
@@ -1133,6 +1495,11 @@ function jsonStringArray(value: unknown): readonly string[] {
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+/** Normalizes labels, authors, and similar exact-match strings. */
+function normalizeComparable(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function priorityForKind(kind: ContextItem["kind"]): number {

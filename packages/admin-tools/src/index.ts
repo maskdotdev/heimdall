@@ -2541,12 +2541,14 @@ export async function replayRetrievalDryRun(
   if (!retrievalIndex) {
     warnings.push("Retrieval replay used diff fallback because no ready index version was found.");
   }
+  const activeRules = await loadRetrievalReplayRules(dependencies.db, snapshot.repoId, warnings);
 
   const replayedBundle = await retrieveContext({
     reviewRunId,
     snapshot,
     indexAvailable: Boolean(retrievalIndex),
     ...(retrievalIndex ? { index: retrievalIndex } : {}),
+    rules: { rules: activeRules },
     timestamp: generatedAt,
   });
 
@@ -2561,6 +2563,27 @@ export async function replayRetrievalDryRun(
     reviewRunId,
     warnings,
   };
+}
+
+/** Loads active rules for deterministic retrieval replay context. */
+async function loadRetrievalReplayRules(
+  db: HeimdallDatabase,
+  repoId: string,
+  warnings: string[],
+): Promise<readonly RepoRule[]> {
+  const [repository] = await db
+    .select({ orgId: repositories.orgId })
+    .from(repositories)
+    .where(eq(repositories.repoId, repoId));
+  if (!repository) {
+    warnings.push("Retrieval replay could not load repository rules because the repo row is gone.");
+    return [];
+  }
+
+  return new RepoRuleRepository(db).listEffectiveRules({
+    orgId: repository.orgId,
+    repoId,
+  });
 }
 
 /** Replays deterministic finding validation without mutating production review state. */

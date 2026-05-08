@@ -749,6 +749,7 @@ export async function runPullRequestReview(
           snapshot,
           indexAvailable: Boolean(retrievalIndex) || (dependencies.indexAvailable ?? false),
           ...(retrievalIndex ? { index: retrievalIndex } : {}),
+          rules: { rules: activeRules },
           ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
           timestamp: now().toISOString(),
           ...(dependencies.traces ? { traces: dependencies.traces } : {}),
