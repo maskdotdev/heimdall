@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "postgres": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

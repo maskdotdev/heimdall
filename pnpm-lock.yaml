@@ -641,6 +641,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 25.6.0
+      postgres:
+        specifier: 'catalog:'
+        version: 3.4.9
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
