@@ -11,12 +11,12 @@ import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import type { CodeSnippet, ContextBundle, ContextItem } from "@repo/contracts/review/context";
 import {
-  codeChunkEmbeddings,
   codeChunks,
   codeDependencies,
   codeEdges,
   codeRoutes,
   codeTestMappings,
+  EmbeddingRepository,
   type HeimdallDatabase,
   indexedFiles,
   symbols,
@@ -621,6 +621,8 @@ export function createDatabaseRetrievalIndex(options: {
   /** Embedding model to use for vector search rows. */
   readonly embeddingModel?: string;
 }): RetrievalIndex {
+  const embeddingRepository = new EmbeddingRepository(options.db);
+
   return {
     indexVersionId: options.indexVersionId,
     getSameFileChunks: async (paths) => chunksForPaths(options.db, options.indexVersionId, paths),
@@ -796,25 +798,12 @@ export function createDatabaseRetrievalIndex(options: {
     searchSimilarChunks: async (query, limit) => {
       if (options.embedQuery) {
         const queryVector = await options.embedQuery(query);
-        const vectorText = `[${queryVector.join(",")}]`;
-        const rows = await options.db
-          .select({
-            chunk: codeChunks,
-            score: sql<number>`1 - (${codeChunkEmbeddings.embedding} <=> ${vectorText}::vector)`,
-          })
-          .from(codeChunkEmbeddings)
-          .innerJoin(codeChunks, eq(codeChunkEmbeddings.chunkId, codeChunks.chunkId))
-          .where(
-            and(
-              eq(codeChunkEmbeddings.indexVersionId, options.indexVersionId),
-              eq(
-                codeChunkEmbeddings.embeddingModel,
-                options.embeddingModel ?? "text-embedding-3-small",
-              ),
-            ),
-          )
-          .orderBy(sql`${codeChunkEmbeddings.embedding} <=> ${vectorText}::vector`)
-          .limit(limit);
+        const rows = await embeddingRepository.vectorSearchChunks({
+          embeddingModel: options.embeddingModel ?? "text-embedding-3-small",
+          indexVersionId: options.indexVersionId,
+          limit,
+          queryVector,
+        });
 
         return rows.map((row) => ({
           ...toRetrievalChunk(row.chunk),
