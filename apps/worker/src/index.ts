@@ -88,8 +88,10 @@ import {
 import {
   createGitHubProvider,
   type ExistingReviewThreadState,
+  type GitHubErrorCode,
   type GitHubInstallationRef,
   GitHubNotFoundError,
+  GitHubProviderError,
   type GitHubRepositoryRef,
   type GitProvider,
 } from "@repo/github";
@@ -195,6 +197,7 @@ import {
   recordSecurityEvent,
   type SecretsManager,
   type SecurityEvent,
+  type SecurityEventSeverity,
   type SecurityEventSink,
 } from "@repo/security";
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
@@ -1144,6 +1147,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
           new Date(),
           options.gitProvider,
+          options.securityEventSink,
         );
         recordWorkerDataDeletionSecurityEvent({
           payload,
@@ -1812,6 +1816,22 @@ type RecordSandboxPolicyDeniedSecurityEventInput = {
   readonly securityEventSink: SecurityEventSink;
 };
 
+/** Input used to record one provider-side data-deletion cleanup failure. */
+type RecordDataDeletionProviderCleanupSecurityEventInput = {
+  /** Data-deletion request that triggered provider cleanup. */
+  readonly dataDeletionRequestId: string;
+  /** Provider error raised while deleting or redacting the artifact. */
+  readonly error: unknown;
+  /** Organization scope when present. */
+  readonly orgId?: string | undefined;
+  /** Data-deletion reason from the durable job payload. */
+  readonly reason: DataDeletionPlanJobPayload["reason"];
+  /** Optional sink configured by the worker runtime. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+  /** Provider-visible artifact selected for cleanup. */
+  readonly target: DataDeletionProviderPublicationTargetRecord;
+};
+
 /** Executes a planned data-deletion request and records product-safe verification metadata. */
 export async function executeDataDeletionRequest(
   db: HeimdallDatabase,
@@ -1819,6 +1839,7 @@ export async function executeDataDeletionRequest(
   artifactPayloadStore: ReviewArtifactPayloadStore = new InlineReviewArtifactPayloadStore(),
   now: Date = new Date(),
   gitProvider?: GitProvider,
+  securityEventSink?: SecurityEventSink,
 ): Promise<DataDeletionExecutionSummary> {
   const repository = new DataDeletionRepository(db);
   const request = await repository.getDataDeletionRequest(dataDeletionRequestId);
@@ -1878,10 +1899,13 @@ export async function executeDataDeletionRequest(
   const deletedEmbeddingCount = await repository.deleteCodeChunkEmbeddingsForRepositories(repoIds);
   const providerSummary = await cleanupProviderArtifactsForDataDeletion({
     dataDeletionRepository: repository,
+    dataDeletionRequestId,
     db,
     gitProvider,
+    orgId: request.orgId ?? undefined,
     reason: request.reason,
     repoIds,
+    securityEventSink,
   });
   const verificationArtifactUri = dataDeletionVerificationArtifactUri(dataDeletionRequestId);
   const summary: DataDeletionExecutionSummary = {
@@ -2125,14 +2149,20 @@ type MutableDataDeletionProviderCleanupSummary = {
 type CleanupProviderArtifactsForDataDeletionInput = {
   /** Data-deletion query helper. */
   readonly dataDeletionRepository: DataDeletionRepository;
+  /** Data-deletion request that triggered provider cleanup. */
+  readonly dataDeletionRequestId: string;
   /** Database used to load provider repository references. */
   readonly db: HeimdallDatabase;
   /** Optional Git provider with remote cleanup methods. */
   readonly gitProvider?: GitProvider | undefined;
+  /** Organization scope when present. */
+  readonly orgId?: string | undefined;
   /** Data-deletion reason. */
   readonly reason: DataDeletionPlanJobPayload["reason"];
   /** Repository IDs covered by the deletion request. */
   readonly repoIds: readonly string[];
+  /** Optional sink configured by the worker runtime. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
 };
 
 /** Deletes or redacts provider-visible artifacts for scoped repositories. */
@@ -2175,10 +2205,93 @@ async function cleanupProviderArtifactsForDataDeletion(
       }
 
       summary.failedArtifactCount += 1;
+      recordDataDeletionProviderCleanupSecurityEvent({
+        dataDeletionRequestId: input.dataDeletionRequestId,
+        error,
+        orgId: input.orgId,
+        reason: input.reason,
+        securityEventSink: input.securityEventSink,
+        target,
+      });
     }
   }
 
   return summary;
+}
+
+/** Records a product-safe security event for provider-side data-deletion cleanup failures. */
+export function recordDataDeletionProviderCleanupSecurityEvent(
+  input: RecordDataDeletionProviderCleanupSecurityEventInput,
+): void {
+  if (!input.securityEventSink || !(input.error instanceof GitHubProviderError)) {
+    return;
+  }
+
+  const eventType = dataDeletionProviderCleanupSecurityEventType(input.error.code);
+  if (!eventType) {
+    return;
+  }
+
+  recordSecurityEvent(input.securityEventSink, {
+    metadata: withoutUndefinedValues({
+      dataDeletionRequestId: input.dataDeletionRequestId,
+      githubRequestId: input.error.requestId,
+      githubStatus: input.error.status,
+      providerArtifactKind: input.target.kind,
+      providerArtifactRowId: input.target.sourceRowId,
+      providerArtifactTable: input.target.sourceTable,
+      rateLimitRemaining: input.error.rateLimit?.remaining,
+      rateLimitBucket: input.error.rateLimit?.resource,
+      reason: input.reason,
+      retryAfterSeconds: input.error.retryAfterSeconds,
+      reviewRunId: input.target.reviewRunId,
+    }),
+    orgId: input.orgId,
+    repoId: input.target.repoId,
+    resourceId: input.dataDeletionRequestId,
+    resourceType: "data_deletion_request",
+    severity: dataDeletionProviderCleanupSecurityEventSeverity(input.error.code),
+    source: "github",
+    type: eventType,
+  });
+}
+
+/** Maps GitHub data-deletion cleanup failures to security-event types worth triaging. */
+function dataDeletionProviderCleanupSecurityEventType(code: GitHubErrorCode): string | undefined {
+  switch (code) {
+    case "github_installation_suspended":
+      return "github_data_deletion_installation_suspended";
+    case "github_permission":
+      return "github_data_deletion_permission_denied";
+    case "github_rate_limit":
+      return "github_data_deletion_rate_limited";
+    case "github_secondary_rate_limit":
+      return "github_data_deletion_secondary_rate_limited";
+    case "github_token":
+      return "github_data_deletion_token_failed";
+    case "github_unavailable":
+      return "github_data_deletion_unavailable";
+    case "github_unknown":
+    case "github_validation":
+      return "github_data_deletion_provider_failed";
+    default:
+      return undefined;
+  }
+}
+
+/** Returns the security-event severity for one provider data-deletion cleanup failure. */
+function dataDeletionProviderCleanupSecurityEventSeverity(
+  code: GitHubErrorCode,
+): SecurityEventSeverity {
+  if (
+    code === "github_installation_suspended" ||
+    code === "github_permission" ||
+    code === "github_token"
+  ) {
+    return "high";
+  }
+
+  return "medium";
 }
 
 /** Cleanup result for one provider-visible artifact. */
@@ -2367,6 +2480,11 @@ function dataDeletionMetadataRecord(metadata: unknown): Record<string, unknown> 
   }
 
   return { ...(metadata as Record<string, unknown>) };
+}
+
+/** Removes undefined values from a product-safe metadata record. */
+function withoutUndefinedValues(input: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }
 
 /** Returns the durable verification evidence URI for a completed data-deletion request. */

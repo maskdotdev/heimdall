@@ -1311,8 +1311,10 @@ tracked milestone.
 - Latest worker security-event milestone: the worker runtime now creates a Postgres-backed
   security-event sink and records product-safe `data_deletion_completed` and
   `data_deletion_failed` events for security-role deletion workflows, including scoped request ID,
-  reason, scope, and deletion counters without raw payload data. Worker tests cover failed
-  deletion planning event emission through the sink boundary.
+  reason, scope, and deletion counters without raw payload data. Provider-side GitHub cleanup
+  failures during data deletion now emit product-safe security events with request, artifact-row,
+  status, and rate-limit metadata while excluding remote provider resource IDs. Worker tests cover
+  failed deletion planning and provider-cleanup event emission through the sink boundary.
 - Latest admin-gateway security-event milestone: `@repo/security` now recognizes
   `admin_gateway` as a security-event source, and the standalone GitHub admin gateway records
   product-safe events for OAuth-state, GitHub org/login, CORS, and scoped assertion denials through
