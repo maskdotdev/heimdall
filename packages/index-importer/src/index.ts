@@ -69,7 +69,16 @@ export const DEFAULT_INDEX_IMPORT_LIMITS = {
 /** Resolver that loads an index artifact from a durable URI or local path. */
 export type IndexArtifactResolver = {
   /** Reads and parses an index artifact from the provided URI. */
-  readonly readArtifact: (artifactUri: string) => Promise<IndexArtifact>;
+  readonly readArtifact: (
+    artifactUri: string,
+    options?: IndexArtifactReadOptions,
+  ) => Promise<IndexArtifact>;
+};
+
+/** Optional controls used while reading artifact bytes from durable storage. */
+export type IndexArtifactReadOptions = {
+  /** Optional safety limits that readers can enforce before a full artifact is assembled. */
+  readonly importLimits?: Partial<IndexImportLimits>;
 };
 
 /** Options for the default filesystem-backed artifact resolver. */
@@ -77,6 +86,10 @@ export type FileSystemIndexArtifactResolverOptions = {
   /** Optional root directory that resolved local paths must stay inside. */
   readonly rootPath?: string;
 };
+
+/** Options for direct filesystem artifact reads. */
+export type ReadIndexArtifactFromUriOptions = FileSystemIndexArtifactResolverOptions &
+  IndexArtifactReadOptions;
 
 /** Options for S3/R2-compatible whole-artifact JSON resolution. */
 export type S3CompatibleIndexArtifactResolverOptions = {
@@ -230,10 +243,10 @@ export function createFileSystemIndexArtifactResolver(
   const rootPath = options.rootPath ? resolve(options.rootPath) : undefined;
 
   return {
-    readArtifact: async (artifactUri) => {
+    readArtifact: async (artifactUri, readOptions) => {
       const artifactPath = resolveLocalArtifactPath(artifactUri, rootPath);
 
-      return readFilesystemIndexArtifact(artifactPath);
+      return readFilesystemIndexArtifact(artifactPath, readOptions);
     },
   };
 }
@@ -315,9 +328,12 @@ export function createIndexImportLimitsFromEnvironment(
 /** Reads a filesystem-backed index artifact from a file URL or local path. */
 export async function readIndexArtifactFromUri(
   artifactUri: string,
-  options: FileSystemIndexArtifactResolverOptions = {},
+  options: ReadIndexArtifactFromUriOptions = {},
 ): Promise<IndexArtifact> {
-  return createFileSystemIndexArtifactResolver(options).readArtifact(artifactUri);
+  return createFileSystemIndexArtifactResolver(options).readArtifact(
+    artifactUri,
+    artifactReadOptions(options.importLimits),
+  );
 }
 
 /** Resolves an artifact URI and imports the loaded artifact into normalized DB tables. */
@@ -325,7 +341,10 @@ export async function importIndexArtifactFromUri(
   options: ImportIndexArtifactFromUriOptions,
 ): Promise<ImportIndexArtifactResult> {
   const resolver = options.artifactResolver ?? createFileSystemIndexArtifactResolver();
-  const artifact = await resolver.readArtifact(options.artifactUri);
+  const artifact = await resolver.readArtifact(
+    options.artifactUri,
+    artifactReadOptions(options.importLimits),
+  );
 
   return importIndexArtifact(artifact, options);
 }
@@ -838,6 +857,13 @@ function assignOptionalLimit<K extends keyof IndexImportLimits>(
   }
 }
 
+/** Builds read options only when caller-provided limits exist. */
+function artifactReadOptions(
+  importLimits: Partial<IndexImportLimits> | undefined,
+): IndexArtifactReadOptions | undefined {
+  return importLimits === undefined ? undefined : { importLimits };
+}
+
 /** Parses an optional positive integer from an environment variable. */
 function parseOptionalPositiveInteger(value: string | undefined): number | undefined {
   if (value === undefined || value.trim().length === 0) {
@@ -1208,20 +1234,26 @@ function resolveLocalArtifactPath(artifactUri: string, rootPath: string | undefi
 }
 
 /** Reads either a whole-artifact JSON file or a split artifact directory. */
-async function readFilesystemIndexArtifact(artifactPath: string): Promise<IndexArtifact> {
+async function readFilesystemIndexArtifact(
+  artifactPath: string,
+  options: IndexArtifactReadOptions | undefined,
+): Promise<IndexArtifact> {
   const info = await stat(artifactPath);
   if (info.isDirectory()) {
-    return readSplitIndexArtifactDirectory(artifactPath);
+    return readSplitIndexArtifactDirectory(artifactPath, options);
   }
 
   return JSON.parse(await readFile(artifactPath, "utf8")) as IndexArtifact;
 }
 
 /** Reads an artifact directory containing manifest.json and records.jsonl files. */
-async function readSplitIndexArtifactDirectory(directoryPath: string): Promise<IndexArtifact> {
+async function readSplitIndexArtifactDirectory(
+  directoryPath: string,
+  options: IndexArtifactReadOptions | undefined,
+): Promise<IndexArtifact> {
   const [manifestJson, records] = await Promise.all([
     readFile(resolve(directoryPath, "manifest.json"), "utf8"),
-    readJsonlIndexRecords(resolve(directoryPath, "records.jsonl")),
+    readJsonlIndexRecords(resolve(directoryPath, "records.jsonl"), options),
   ]);
 
   return {
@@ -1231,7 +1263,11 @@ async function readSplitIndexArtifactDirectory(directoryPath: string): Promise<I
 }
 
 /** Streams newline-delimited index records from a split artifact records file. */
-async function readJsonlIndexRecords(recordsPath: string): Promise<IndexArtifact["records"]> {
+async function readJsonlIndexRecords(
+  recordsPath: string,
+  options: IndexArtifactReadOptions | undefined,
+): Promise<IndexArtifact["records"]> {
+  const limits = resolveIndexImportLimits(options?.importLimits);
   const records: Array<IndexArtifact["records"][number]> = [];
   const lines = createInterface({
     crlfDelay: Number.POSITIVE_INFINITY,
@@ -1241,9 +1277,21 @@ async function readJsonlIndexRecords(recordsPath: string): Promise<IndexArtifact
 
   for await (const line of lines) {
     lineNumber += 1;
+    const lineBytes = byteLength(line);
+    if (lineBytes > limits.maxRecordBytes) {
+      throw new Error(
+        `Index artifact JSONL record at line ${lineNumber} exceeds configured maximum ${limits.maxRecordBytes} bytes.`,
+      );
+    }
+
     const trimmed = line.trim();
     if (trimmed.length === 0) {
       continue;
+    }
+    if (records.length + 1 > limits.maxRecords) {
+      throw new Error(
+        `Index artifact JSONL record count exceeds configured maximum ${limits.maxRecords}.`,
+      );
     }
 
     try {

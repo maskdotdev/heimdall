@@ -107,6 +107,41 @@ describe("createFileSystemIndexArtifactResolver", () => {
     );
   });
 
+  it("enforces split artifact JSONL record count limits while reading", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithFiles(2);
+    const artifactPath = join(root, "repo_1", "index-artifact");
+    await writeSplitArtifact(artifactPath, artifact);
+    const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
+
+    await expect(
+      resolver.readArtifact("repo_1/index-artifact", {
+        importLimits: { maxRecords: 1 },
+      }),
+    ).rejects.toThrow("Index artifact JSONL record count exceeds configured maximum 1.");
+  });
+
+  it("enforces split artifact JSONL line byte limits without echoing record text", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithChunk();
+    const artifactPath = join(root, "repo_1", "index-artifact");
+    await writeSplitArtifact(artifactPath, artifact);
+
+    let caughtError: unknown;
+    try {
+      await readIndexArtifactFromUri(pathToFileURL(artifactPath).toString(), {
+        importLimits: { maxRecordBytes: 12 },
+      });
+    } catch (error) {
+      caughtError = error;
+    }
+
+    expect(caughtError).toBeInstanceOf(Error);
+    const message = caughtError instanceof Error ? caughtError.message : "";
+    expect(message).toContain("line 1 exceeds configured maximum 12 bytes");
+    expect(message).not.toContain("src/index.ts");
+  });
+
   it("rejects paths outside a configured artifact root", async () => {
     const root = await createTempRoot();
     const resolver = createFileSystemIndexArtifactResolver({ rootPath: root });
