@@ -22,6 +22,8 @@ import {
   buildCommitExistsArgs,
   buildFetchRefArgs,
   buildWorkspaceHeadArgs,
+  buildWorkspaceRootArgs,
+  buildWorkspaceStatusArgs,
   buildWorktreeAddArgs,
   buildWorktreePruneArgs,
   buildWorktreeRemoveArgs,
@@ -80,6 +82,27 @@ type RecordedSpan = {
   /** Span status attached when the span ended. */
   readonly status?: TelemetrySpanEndOptions["status"] | undefined;
 };
+
+/** Returns fake Git output for worktree validation commands. */
+function fakeWorktreeValidationOutput(
+  args: readonly string[],
+  headSha = commitSha,
+): string | undefined {
+  if (args[0] !== "-C") {
+    return undefined;
+  }
+  if (args[2] === "rev-parse" && args[3] === "HEAD") {
+    return `${headSha}\n`;
+  }
+  if (args[2] === "rev-parse" && args[3] === "--show-toplevel") {
+    return `${args[1]}\n`;
+  }
+  if (args[2] === "status" && args[3] === "--porcelain=v1") {
+    return "";
+  }
+
+  return undefined;
+}
 
 describe("repo sync workspace", () => {
   afterEach(async () => {
@@ -245,6 +268,18 @@ describe("repo sync workspace", () => {
       worktreePath,
       "rev-parse",
       "HEAD",
+    ]);
+    expect(buildWorkspaceRootArgs({ workspacePath: worktreePath })).toEqual([
+      "-C",
+      worktreePath,
+      "rev-parse",
+      "--show-toplevel",
+    ]);
+    expect(buildWorkspaceStatusArgs({ workspacePath: worktreePath })).toEqual([
+      "-C",
+      worktreePath,
+      "status",
+      "--porcelain=v1",
     ]);
     expect(buildWorktreeRemoveArgs({ mirrorPath, workspacePath: worktreePath })).toEqual([
       "-C",
@@ -638,8 +673,9 @@ describe("repo sync workspace", () => {
       if (args[2] === "worktree" && args[3] === "remove") {
         await rm(worktreePath, { force: true, recursive: true });
       }
-      if (args[2] === "rev-parse") {
-        return `${commitSha}\n`;
+      const validationOutput = fakeWorktreeValidationOutput(args);
+      if (validationOutput !== undefined) {
+        return validationOutput;
       }
       return "";
     };
@@ -684,6 +720,8 @@ describe("repo sync workspace", () => {
     expect(mutableCommands).toEqual([
       ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
       ["-C", worktreePath, "rev-parse", "HEAD"],
+      ["-C", worktreePath, "rev-parse", "--show-toplevel"],
+      ["-C", worktreePath, "status", "--porcelain=v1"],
       ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
       ["-C", mirrorPath, "worktree", "prune"],
     ]);
@@ -734,8 +772,9 @@ describe("repo sync workspace", () => {
         await mkdir(worktreePath, { recursive: true });
         return "";
       }
-      if (args[2] === "rev-parse") {
-        return `${wrongCommitSha}\n`;
+      const validationOutput = fakeWorktreeValidationOutput(args, wrongCommitSha);
+      if (validationOutput !== undefined) {
+        return validationOutput;
       }
       if (args[2] === "worktree" && args[3] === "remove") {
         await rm(worktreePath, { force: true, recursive: true });
@@ -766,6 +805,59 @@ describe("repo sync workspace", () => {
     ]);
   });
 
+  it("removes worktree leases when clean-status validation fails", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-worktree-status-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[2] === "worktree" && args[3] === "add") {
+        await mkdir(worktreePath, { recursive: true });
+        return "";
+      }
+      if (args[2] === "rev-parse" && args[3] === "HEAD") {
+        return `${commitSha}\n`;
+      }
+      if (args[2] === "rev-parse" && args[3] === "--show-toplevel") {
+        return `${worktreePath}\n`;
+      }
+      if (args[2] === "status" && args[3] === "--porcelain=v1") {
+        return "?? generated.txt\n";
+      }
+      if (args[2] === "worktree" && args[3] === "remove") {
+        await rm(worktreePath, { force: true, recursive: true });
+      }
+      return "";
+    };
+
+    await expect(
+      createRepositoryWorktreeLease(
+        {
+          commitSha,
+          config,
+          leaseId: "lease_123",
+          mirrorPath,
+          purpose: "review",
+          repoId: "repo_123",
+        },
+        { gitRunner },
+      ),
+    ).rejects.toThrow("Repository worktree has uncommitted changes.");
+
+    await expect(access(worktreePath)).rejects.toThrow();
+    expect(mutableCommands).toEqual([
+      ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", worktreePath, "rev-parse", "HEAD"],
+      ["-C", worktreePath, "rev-parse", "--show-toplevel"],
+      ["-C", worktreePath, "status", "--porcelain=v1"],
+      ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+      ["-C", mirrorPath, "worktree", "prune"],
+    ]);
+  });
+
   it("removes worktree leases when workspace quota is exceeded", async () => {
     const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-worktree-quota-test-"));
     workspaceRoots.push(cacheRoot);
@@ -779,8 +871,9 @@ describe("repo sync workspace", () => {
         await mkdir(worktreePath, { recursive: true });
         return "";
       }
-      if (args[2] === "rev-parse") {
-        return `${commitSha}\n`;
+      const validationOutput = fakeWorktreeValidationOutput(args);
+      if (validationOutput !== undefined) {
+        return validationOutput;
       }
       if (args[2] === "worktree" && args[3] === "remove") {
         await rm(worktreePath, { force: true, recursive: true });
@@ -811,6 +904,8 @@ describe("repo sync workspace", () => {
     expect(mutableCommands).toEqual([
       ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
       ["-C", worktreePath, "rev-parse", "HEAD"],
+      ["-C", worktreePath, "rev-parse", "--show-toplevel"],
+      ["-C", worktreePath, "status", "--porcelain=v1"],
       ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
       ["-C", mirrorPath, "worktree", "prune"],
     ]);
@@ -849,8 +944,9 @@ describe("repo sync workspace", () => {
         await rm(worktreePath, { force: true, recursive: true });
         return "";
       }
-      if (args[2] === "rev-parse") {
-        return `${commitSha}\n`;
+      const validationOutput = fakeWorktreeValidationOutput(args);
+      if (validationOutput !== undefined) {
+        return validationOutput;
       }
       return "";
     };
@@ -905,6 +1001,8 @@ describe("repo sync workspace", () => {
       ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
       ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
       ["-C", worktreePath, "rev-parse", "HEAD"],
+      ["-C", worktreePath, "rev-parse", "--show-toplevel"],
+      ["-C", worktreePath, "status", "--porcelain=v1"],
       ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
       ["-C", mirrorPath, "worktree", "prune"],
     ]);
@@ -1016,8 +1114,9 @@ describe("repo sync workspace", () => {
           "utf8",
         );
       }
-      if (args[2] === "rev-parse") {
-        return `${commitSha}\n`;
+      const validationOutput = fakeWorktreeValidationOutput(args);
+      if (validationOutput !== undefined) {
+        return validationOutput;
       }
       return "";
     };

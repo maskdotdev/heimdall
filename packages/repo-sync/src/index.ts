@@ -206,6 +206,18 @@ export type BuildWorkspaceHeadArgsInput = {
   readonly workspacePath: string;
 };
 
+/** Input for constructing a workspace root verification command. */
+export type BuildWorkspaceRootArgsInput = {
+  /** Workspace path that should resolve to the repository root. */
+  readonly workspacePath: string;
+};
+
+/** Input for constructing a workspace clean-status command. */
+export type BuildWorkspaceStatusArgsInput = {
+  /** Workspace path whose working tree status should be inspected. */
+  readonly workspacePath: string;
+};
+
 /** Input for constructing a mirror-only worktree command. */
 export type BuildMirrorWorktreeArgsInput = {
   /** Bare mirror path. */
@@ -903,6 +915,7 @@ export async function createRepositoryWorktreeLease(
   const leaseId = input.leaseId ?? dependencies.leaseIdFactory?.() ?? `lease_${randomUUID()}`;
   const workspacePath = getRepoSyncWorktreePath(input.config, leaseId);
   const layout = getRepoSyncCacheLayout(input.config);
+  assertInsideRoot(layout.worktreesRoot, workspacePath);
   await mkdir(layout.worktreesRoot, { recursive: true });
 
   const git = dependencies.gitRunner ?? runGit;
@@ -931,7 +944,7 @@ export async function createRepositoryWorktreeLease(
       },
     );
     worktreeCreated = true;
-    await verifyRepositoryWorktreeHead({
+    await validateRepositoryWorktreeState({
       commitSha: input.commitSha,
       gitRunner: git,
       timeoutMs: input.config.defaultWorktreeTimeoutMs,
@@ -1085,8 +1098,8 @@ export async function getRepoSyncCacheStats(
   };
 }
 
-/** Input used to verify the exact commit checked out in a worktree. */
-type VerifyRepositoryWorktreeHeadInput = {
+/** Input used to validate a checked-out worktree before returning it to callers. */
+type ValidateRepositoryWorktreeStateInput = {
   /** Expected exact commit SHA. */
   readonly commitSha: string;
   /** Git runner used to inspect the workspace. */
@@ -1097,9 +1110,9 @@ type VerifyRepositoryWorktreeHeadInput = {
   readonly workspacePath: string;
 };
 
-/** Verifies that a checked-out worktree resolves to the requested commit SHA. */
-async function verifyRepositoryWorktreeHead(
-  input: VerifyRepositoryWorktreeHeadInput,
+/** Validates commit pinning, repository root, and clean status for a checked-out worktree. */
+async function validateRepositoryWorktreeState(
+  input: ValidateRepositoryWorktreeStateInput,
 ): Promise<void> {
   const checkedOutSha = (
     await input.gitRunner(buildWorkspaceHeadArgs({ workspacePath: input.workspacePath }), {
@@ -1109,6 +1122,26 @@ async function verifyRepositoryWorktreeHead(
 
   if (checkedOutSha !== input.commitSha) {
     throw new Error(`Repository worktree resolved ${checkedOutSha} instead of ${input.commitSha}.`);
+  }
+
+  const rootPath = (
+    await input.gitRunner(buildWorkspaceRootArgs({ workspacePath: input.workspacePath }), {
+      timeoutMs: input.timeoutMs,
+    })
+  ).trim();
+  if (resolve(rootPath) !== resolve(input.workspacePath)) {
+    throw new Error(
+      `Repository worktree root resolved ${rootPath} instead of ${input.workspacePath}.`,
+    );
+  }
+
+  const statusOutput = (
+    await input.gitRunner(buildWorkspaceStatusArgs({ workspacePath: input.workspacePath }), {
+      timeoutMs: input.timeoutMs,
+    })
+  ).trim();
+  if (statusOutput.length > 0) {
+    throw new Error("Repository worktree has uncommitted changes.");
   }
 }
 
@@ -2021,6 +2054,20 @@ export function buildWorkspaceHeadArgs(input: BuildWorkspaceHeadArgsInput): read
   assertSafeGitCommandArgument("workspacePath", input.workspacePath);
 
   return ["-C", input.workspacePath, "rev-parse", "HEAD"];
+}
+
+/** Builds argv for reading the repository root from a workspace. */
+export function buildWorkspaceRootArgs(input: BuildWorkspaceRootArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("workspacePath", input.workspacePath);
+
+  return ["-C", input.workspacePath, "rev-parse", "--show-toplevel"];
+}
+
+/** Builds argv for reading clean/dirty status from a workspace. */
+export function buildWorkspaceStatusArgs(input: BuildWorkspaceStatusArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("workspacePath", input.workspacePath);
+
+  return ["-C", input.workspacePath, "status", "--porcelain=v1"];
 }
 
 /** Builds argv for removing a worktree from a mirror. */

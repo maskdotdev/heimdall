@@ -198,8 +198,14 @@ describe("acquireWorkerRepositoryWorkspace", () => {
               commitExists = true;
               return "";
             }
-            if (args[2] === "rev-parse") {
+            if (args[2] === "rev-parse" && args[3] === "HEAD") {
               return `${commitSha}\n`;
+            }
+            if (args[2] === "rev-parse" && args[3] === "--show-toplevel") {
+              return `${worktreePath}\n`;
+            }
+            if (args[2] === "status" && args[3] === "--porcelain=v1") {
+              return "";
             }
             if (args[2] === "worktree" && args[3] === "add") {
               await mkdir(worktreePath, { recursive: true });
@@ -244,6 +250,8 @@ describe("acquireWorkerRepositoryWorkspace", () => {
         ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
         ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
         ["-C", worktreePath, "rev-parse", "HEAD"],
+        ["-C", worktreePath, "rev-parse", "--show-toplevel"],
+        ["-C", worktreePath, "status", "--porcelain=v1"],
         ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
         ["-C", mirrorPath, "worktree", "prune"],
       ]);
