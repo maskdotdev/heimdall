@@ -97,6 +97,7 @@ describe("static analysis", () => {
 
   it("plans runnable commands for supported local tools", () => {
     const biomePlan = planStaticAnalysis({ ...request, requestedTools: ["biome"] });
+    const pyrightPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["pyright"] });
     const ruffPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["ruff"] });
     const typeScriptPlan = planStaticAnalysis({ ...request, requestedTools: ["typescript"] });
 
@@ -104,6 +105,11 @@ describe("static analysis", () => {
       args: ["check", "--reporter=json", "src/math.ts"],
       displayCommand: "biome check --reporter=json src/math.ts",
       executable: "biome",
+    });
+    expect(pyrightPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["--outputjson", "src/app.py"],
+      displayCommand: "pyright --outputjson src/app.py",
+      executable: "pyright",
     });
     expect(ruffPlan.toolRuns[0]?.command).toMatchObject({
       args: ["check", "--output-format", "json", "src/app.py"],
@@ -406,6 +412,73 @@ describe("static analysis", () => {
       severity: "error",
       sourceTrust: "tool_output",
       tool: "biome",
+    });
+  });
+
+  it("parses Pyright JSON output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: JSON.stringify({
+          generalDiagnostics: [
+            {
+              file: "/workspace/repo/src/app.py",
+              message: 'Type "str" is not assignable to type "int".',
+              range: {
+                end: { character: 10, line: 1 },
+                start: { character: 6, line: 1 },
+              },
+              rule: "reportAssignmentType",
+              severity: "error",
+            },
+          ],
+          summary: {
+            errorCount: 1,
+            filesAnalyzed: 1,
+            informationCount: 0,
+            timeInSec: 0.11,
+            warningCount: 0,
+          },
+          time: "2026-05-06T00:00:00.001Z",
+          version: "1.1.409",
+        }),
+        stdoutBytes: 360,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "pyright",
+      toolRunId: "str_pyright",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 11,
+        endLine: 2,
+        filePath: "src/app.py",
+        originalPath: "/workspace/repo/src/app.py",
+        startColumn: 7,
+        startLine: 2,
+      },
+      metadata: { rule: "reportAssignmentType" },
+      ruleId: "reportAssignmentType",
+      ruleName: "reportAssignmentType",
+      severity: "error",
+      sourceTrust: "tool_output",
+      tool: "pyright",
     });
   });
 

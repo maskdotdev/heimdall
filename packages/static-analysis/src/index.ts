@@ -617,6 +617,55 @@ const RuffJsonOutputSchema = Type.Array(RuffJsonDiagnosticSchema);
 /** Ruff JSON formatter diagnostic. */
 type RuffJsonDiagnostic = Static<typeof RuffJsonDiagnosticSchema>;
 
+/** Pyright JSON position. */
+const PyrightJsonPositionSchema = Type.Object(
+  {
+    character: Type.Integer({ minimum: 0 }),
+    line: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: true },
+);
+
+/** Pyright JSON diagnostic range. */
+const PyrightJsonRangeSchema = Type.Object(
+  {
+    end: PyrightJsonPositionSchema,
+    start: PyrightJsonPositionSchema,
+  },
+  { additionalProperties: true },
+);
+
+/** Pyright JSON diagnostic severity. */
+const PyrightJsonSeveritySchema = Type.Union([
+  Type.Literal("error"),
+  Type.Literal("warning"),
+  Type.Literal("information"),
+]);
+
+/** Pyright JSON diagnostic. */
+const PyrightJsonDiagnosticSchema = Type.Object(
+  {
+    file: Type.Optional(Type.String()),
+    message: Type.String(),
+    range: PyrightJsonRangeSchema,
+    rule: Type.Optional(Type.String()),
+    severity: PyrightJsonSeveritySchema,
+    uri: Type.Optional(Type.String()),
+  },
+  { additionalProperties: true },
+);
+
+/** Pyright JSON output. */
+const PyrightJsonOutputSchema = Type.Object(
+  {
+    generalDiagnostics: Type.Array(PyrightJsonDiagnosticSchema),
+  },
+  { additionalProperties: true },
+);
+
+/** Pyright JSON diagnostic. */
+type PyrightJsonDiagnostic = Static<typeof PyrightJsonDiagnosticSchema>;
+
 type TypeScriptTextDiagnostic = {
   /** TypeScript diagnostic code without the `TS` prefix. */
   readonly code: string;
@@ -761,6 +810,9 @@ export function parseToolOutputDiagnostics(
   }
   if (input.tool === "ruff") {
     return parseRuffJsonDiagnostics(input);
+  }
+  if (input.tool === "pyright") {
+    return parsePyrightJsonDiagnostics(input);
   }
   if (input.tool === "typescript") {
     return parseTypeScriptTextDiagnostics(input);
@@ -1422,6 +1474,70 @@ function parseRuffJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses Pyright JSON output into normalized diagnostics. */
+function parsePyrightJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = input.result.stdout.trim();
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedOutput = parseJson(rawOutput);
+  if (!parsedOutput.ok) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+          format: "pyright_json",
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ],
+    };
+  }
+  if (!Value.Check(PyrightJsonOutputSchema, parsedOutput.value)) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning(
+          "tool_output_schema_mismatch",
+          "Static analysis tool output did not match the expected schema.",
+          {
+            format: "pyright_json",
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          },
+        ),
+      ],
+    };
+  }
+
+  const parsedDiagnostics = (
+    parsedOutput.value as { generalDiagnostics: readonly PyrightJsonDiagnostic[] }
+  ).generalDiagnostics
+    .map((diagnostic) => pyrightDiagnosticToNormalizedDiagnostic({ diagnostic, input }))
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings =
+    parsedDiagnostics.length > diagnostics.length
+      ? [
+          warning(
+            "tool_output_diagnostic_budget_truncated",
+            "Static analysis tool output diagnostics were truncated.",
+            {
+              diagnosticCount: parsedDiagnostics.length,
+              maxDiagnostics: input.maxDiagnostics,
+              tool: input.tool,
+              toolRunId: input.toolRunId,
+            },
+          ),
+        ]
+      : [];
+
+  return { diagnostics, warnings };
+}
+
 /** Parses `tsc --pretty false` output into normalized diagnostics. */
 function parseTypeScriptTextDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
@@ -1653,6 +1769,44 @@ function ruffDiagnosticToNormalizedDiagnostic(input: {
   });
 }
 
+/** Converts one Pyright JSON diagnostic into the normalized report shape. */
+function pyrightDiagnosticToNormalizedDiagnostic(input: {
+  /** Pyright diagnostic emitted by JSON output. */
+  readonly diagnostic: PyrightJsonDiagnostic;
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.diagnostic.message.trim();
+  const originalPath = pyrightDiagnosticPath(input.diagnostic);
+  if (!originalPath || message.length === 0) {
+    return undefined;
+  }
+
+  const filePath = normalizeToolFilePath(originalPath, input.input.workspacePath);
+  const ruleId = input.diagnostic.rule?.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: categoryForPyrightRule(ruleId),
+    location: {
+      endColumn: input.diagnostic.range.end.character + 1,
+      endLine: input.diagnostic.range.end.line + 1,
+      filePath,
+      ...(filePath === originalPath ? {} : { originalPath }),
+      startColumn: input.diagnostic.range.start.character + 1,
+      startLine: input.diagnostic.range.start.line + 1,
+    },
+    message,
+    metadata: pyrightDiagnosticMetadata(input.diagnostic),
+    rawMessage: input.diagnostic.message,
+    ...(ruleId ? { ruleId, ruleName: ruleId } : {}),
+    severity: pyrightSeverity(input.diagnostic.severity),
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "pyright",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
 /** Parses JSON without throwing into the report builder. */
 function parseJson(
   value: string,
@@ -1677,6 +1831,13 @@ function biomeSeverity(severity: string): ToolDiagnosticSeverity {
   if (normalizedSeverity === "fatal") return "critical";
   if (normalizedSeverity === "error") return "error";
   if (normalizedSeverity === "warning" || normalizedSeverity === "warn") return "warning";
+  return "info";
+}
+
+/** Maps Pyright severity strings to normalized diagnostic severities. */
+function pyrightSeverity(severity: PyrightJsonDiagnostic["severity"]): ToolDiagnosticSeverity {
+  if (severity === "error") return "error";
+  if (severity === "warning") return "warning";
   return "info";
 }
 
@@ -1733,6 +1894,20 @@ function categoryForRuffRule(ruleId: string | undefined): FindingCategory {
   }
 
   return "maintainability";
+}
+
+/** Returns a product category for a Pyright diagnostic rule. */
+function categoryForPyrightRule(ruleId: string | undefined): FindingCategory {
+  const normalizedRule = ruleId?.toLowerCase() ?? "";
+  if (
+    normalizedRule.includes("missingimport") ||
+    normalizedRule.includes("missingmodule") ||
+    normalizedRule.includes("missingtypestub")
+  ) {
+    return "dependency";
+  }
+
+  return "correctness";
 }
 
 /** Returns a product category for a Biome diagnostic category. */
@@ -1794,6 +1969,16 @@ function ruffDiagnosticMetadata(diagnostic: RuffJsonDiagnostic): Readonly<Record
   };
 }
 
+/** Returns product-safe metadata for a Pyright diagnostic. */
+function pyrightDiagnosticMetadata(
+  diagnostic: PyrightJsonDiagnostic,
+): Readonly<Record<string, unknown>> {
+  const rule = diagnostic.rule?.trim();
+  return {
+    ...(rule ? { rule } : {}),
+  };
+}
+
 /** Returns a compact Biome rule name from a diagnostic category. */
 function biomeRuleName(category: string): string {
   const parts = category.split("/").filter((part) => part.length > 0);
@@ -1812,6 +1997,29 @@ function normalizeToolFilePath(filePath: string, workspacePath: string): string 
   }
 
   return normalizedFilePath.replace(/^\/+/u, "");
+}
+
+/** Returns a path for a Pyright diagnostic from the documented file field or URI fallback. */
+function pyrightDiagnosticPath(diagnostic: PyrightJsonDiagnostic): string | undefined {
+  const file = diagnostic.file?.trim();
+  if (file) {
+    return file;
+  }
+
+  const uri = diagnostic.uri?.trim();
+  if (!uri) {
+    return undefined;
+  }
+  if (!uri.startsWith("file://")) {
+    return uri;
+  }
+
+  try {
+    const pathname = decodeURIComponent(new URL(uri).pathname);
+    return /^\/[A-Za-z]:\//u.test(pathname) ? pathname.slice(1) : pathname;
+  } catch {
+    return uri;
+  }
 }
 
 /** Returns true when a value is not undefined. */
@@ -1936,6 +2144,9 @@ function toolCommandArgs(tool: StaticToolName, paths: readonly string[]): readon
   }
   if (tool === "ruff") {
     return ["check", "--output-format", "json", ...paths];
+  }
+  if (tool === "pyright") {
+    return ["--outputjson", ...paths];
   }
   if (tool === "typescript") {
     return ["--noEmit", "--pretty", "false"];
