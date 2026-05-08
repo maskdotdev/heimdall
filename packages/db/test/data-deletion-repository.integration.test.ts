@@ -159,6 +159,32 @@ describe.runIf(integrationDatabaseUrl)("DataDeletionRepository integration", () 
         uri: "db://review_artifacts/rrn_data_deletion_exec/context/context.json",
       },
     ]);
+    await expect(
+      dataDeletionRepository.listProviderPublicationDeletionTargets({
+        limit: 10,
+        provider: "github",
+        repoIds: ["repo_data_deletion"],
+      }),
+    ).resolves.toMatchObject([
+      {
+        kind: "review_comment",
+        providerResourceId: "provider_review_comment_data_deletion",
+        repoId: "repo_data_deletion",
+        sourceTable: "published_findings",
+      },
+      {
+        kind: "issue_comment",
+        providerResourceId: "provider_summary_comment_data_deletion",
+        repoId: "repo_data_deletion",
+        sourceTable: "published_summary_comments",
+      },
+      {
+        kind: "check_run",
+        providerResourceId: "provider_check_run_data_deletion",
+        repoId: "repo_data_deletion",
+        sourceTable: "published_check_runs",
+      },
+    ]);
 
     await expect(
       dataDeletionRepository.deleteCodeChunkEmbeddingsForRepositories(["repo_data_deletion"]),
@@ -372,6 +398,164 @@ async function seedDeletionExecutionRows(sql: postgres.Sql): Promise<void> {
       'sha256:context',
       128,
       '{"payload": {"sensitive": true}}'::jsonb
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO candidate_findings (
+      finding_id,
+      schema_version,
+      review_run_id,
+      source,
+      source_name,
+      category,
+      severity,
+      title,
+      body,
+      location,
+      evidence,
+      confidence,
+      fingerprint
+    )
+    VALUES (
+      'cfnd_data_deletion_exec',
+      'candidate_finding.v1',
+      'rrn_data_deletion_exec',
+      'llm',
+      'test',
+      'correctness',
+      'medium',
+      'Deletion finding',
+      'Finding body',
+      '{"path": "src/index.ts", "startLine": 1, "endLine": 1}'::jsonb,
+      '{}'::jsonb,
+      0.9,
+      'sha256:deletion-finding'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO validated_findings (
+      finding_id,
+      candidate_finding_id,
+      review_run_id,
+      decision,
+      category,
+      severity,
+      title,
+      body,
+      location,
+      evidence,
+      confidence,
+      validation,
+      rank,
+      fingerprint
+    )
+    VALUES (
+      'vfnd_data_deletion_exec',
+      'cfnd_data_deletion_exec',
+      'rrn_data_deletion_exec',
+      'publish',
+      'correctness',
+      'medium',
+      'Deletion finding',
+      'Finding body',
+      '{"path": "src/index.ts", "startLine": 1, "endLine": 1}'::jsonb,
+      '{}'::jsonb,
+      0.9,
+      '{}'::jsonb,
+      1,
+      'sha256:deletion-finding'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO publish_runs (
+      publish_run_id,
+      review_run_id,
+      repo_id,
+      idempotency_key,
+      status
+    )
+    VALUES (
+      'pub_data_deletion_exec',
+      'rrn_data_deletion_exec',
+      'repo_data_deletion',
+      'publish:rrn_data_deletion_exec',
+      'completed'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO published_findings (
+      finding_id,
+      validated_finding_id,
+      review_run_id,
+      provider,
+      provider_comment_id,
+      provider_review_id,
+      location,
+      title,
+      body,
+      published_at,
+      status,
+      fingerprint
+    )
+    VALUES (
+      'pfnd_data_deletion_exec',
+      'vfnd_data_deletion_exec',
+      'rrn_data_deletion_exec',
+      'github',
+      'provider_review_comment_data_deletion',
+      'provider_review_data_deletion',
+      '{"path": "src/index.ts", "startLine": 1, "endLine": 1}'::jsonb,
+      'Deletion finding',
+      'Finding body',
+      now(),
+      'published',
+      'sha256:deletion-finding'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO published_summary_comments (
+      published_summary_comment_id,
+      publish_run_id,
+      review_run_id,
+      provider,
+      provider_comment_id,
+      body_hash,
+      status
+    )
+    VALUES (
+      'psum_data_deletion_exec',
+      'pub_data_deletion_exec',
+      'rrn_data_deletion_exec',
+      'github',
+      'provider_summary_comment_data_deletion',
+      'sha256:summary',
+      'published'
+    )
+    ON CONFLICT DO NOTHING
+  `;
+  await sql`
+    INSERT INTO published_check_runs (
+      published_check_run_id,
+      publish_run_id,
+      review_run_id,
+      provider,
+      provider_check_run_id,
+      status,
+      conclusion
+    )
+    VALUES (
+      'pchk_data_deletion_exec',
+      'pub_data_deletion_exec',
+      'rrn_data_deletion_exec',
+      'github',
+      'provider_check_run_data_deletion',
+      'completed',
+      'success'
     )
     ON CONFLICT DO NOTHING
   `;

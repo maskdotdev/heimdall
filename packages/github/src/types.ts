@@ -257,6 +257,20 @@ export type ProviderCheckRun = {
   readonly htmlUrl?: string;
 };
 
+/** Provider comment selected for remote deletion. */
+export type DeleteProviderCommentInput = GitHubRepositoryRef & {
+  /** GitHub issue or pull-request review comment ID. */
+  readonly providerCommentId: string;
+};
+
+/** Provider check run selected for privacy-preserving output redaction. */
+export type RedactProviderCheckRunInput = GitHubRepositoryRef & {
+  /** GitHub check run ID. */
+  readonly providerCheckRunId: string;
+  /** Product-safe reason for the remote redaction. */
+  readonly reason: "data_deletion" | "retention_policy";
+};
+
 /** Summary comment input. */
 export type PublishSummaryCommentInput = GitHubPullRequestRef & {
   /** Stable review run ID. */
@@ -351,6 +365,12 @@ export interface GitProvider {
   fetchReviewThreadStates?(
     input: GitHubPullRequestRef,
   ): Promise<readonly ExistingReviewThreadState[]>;
+  /** Deletes a provider issue comment, including PR summary comments. */
+  deleteIssueComment?(input: DeleteProviderCommentInput): Promise<void>;
+  /** Deletes a provider pull-request review comment. */
+  deleteReviewComment?(input: DeleteProviderCommentInput): Promise<void>;
+  /** Redacts a provider check run when deletion is unavailable. */
+  redactCheckRun?(input: RedactProviderCheckRunInput): Promise<ProviderCheckRun>;
   /** Publishes a PR review with inline comments. */
   publishReview(input: PublishReviewInput): Promise<PublishedReview>;
   /** Publishes or creates a check run. */
