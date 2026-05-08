@@ -232,6 +232,36 @@ export class BackgroundJobRepository {
     return row ? toBackgroundJobRecord(row) : undefined;
   }
 
+  /** Gets a durable job by row ID. */
+  public async getBackgroundJobById(
+    backgroundJobId: string,
+  ): Promise<BackgroundJobRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(backgroundJobs)
+      .where(eq(backgroundJobs.backgroundJobId, backgroundJobId))
+      .limit(1);
+
+    return row ? toBackgroundJobRecord(row) : undefined;
+  }
+
+  /** Lists durable jobs matching any of the given idempotency keys in creation order. */
+  public async listBackgroundJobsByKeys(
+    jobKeys: readonly string[],
+  ): Promise<readonly BackgroundJobRecord[]> {
+    if (jobKeys.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .select()
+      .from(backgroundJobs)
+      .where(inArray(backgroundJobs.jobKey, [...jobKeys]))
+      .orderBy(asc(backgroundJobs.createdAt), asc(backgroundJobs.backgroundJobId));
+
+    return rows.map(toBackgroundJobRecord);
+  }
+
   /** Deletes durable embedding batch and repair jobs associated with an embedding job row. */
   public async deleteEmbeddingBackgroundJobsForEmbeddingJob(embeddingJobId: string): Promise<void> {
     await this.db

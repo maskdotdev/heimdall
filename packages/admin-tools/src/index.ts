@@ -14,7 +14,8 @@ import { ContextBundleSchema, JOB_TYPES, parseWithSchema } from "@repo/contracts
 import {
   adminActions,
   auditLogs,
-  backgroundJobs,
+  type BackgroundJobRecord,
+  BackgroundJobRepository,
   candidateFindings,
   codeChunkEmbeddings,
   codeChunks,
@@ -2741,16 +2742,13 @@ export async function getPublisherDebugDetails(
       .select()
       .from(publishedFindings)
       .where(eq(publishedFindings.reviewRunId, reviewRunId)),
-    dependencies.db
-      .select()
-      .from(backgroundJobs)
-      .where(
-        and(
-          eq(backgroundJobs.reviewRunId, reviewRunId),
-          eq(backgroundJobs.jobType, JOB_TYPES.PublishReview),
-        ),
-      )
-      .orderBy(desc(backgroundJobs.createdAt)),
+    new BackgroundJobRepository(dependencies.db)
+      .listBackgroundJobsForReviewRun(reviewRunId)
+      .then((jobs) =>
+        jobs
+          .filter((job) => job.jobType === JOB_TYPES.PublishReview)
+          .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()),
+      ),
     listReplayAuditLogs(dependencies.db, {
       actions: ["publish.review"],
       resourceType: "review_run",
@@ -3410,7 +3408,7 @@ export async function executePublisherReplay(
 }
 
 type WebhookEventRow = typeof webhookEvents.$inferSelect;
-type BackgroundJobRow = typeof backgroundJobs.$inferSelect;
+type BackgroundJobRow = BackgroundJobRecord;
 type AuditLogRow = typeof auditLogs.$inferSelect;
 type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
 type ReviewStageEventRow = typeof reviewRunStageEvents.$inferSelect;
@@ -3505,11 +3503,7 @@ async function getBackgroundJobRow(
   backgroundJobId: string,
   db: HeimdallDatabase,
 ): Promise<BackgroundJobRow> {
-  const [row] = await db
-    .select()
-    .from(backgroundJobs)
-    .where(eq(backgroundJobs.backgroundJobId, backgroundJobId))
-    .limit(1);
+  const row = await new BackgroundJobRepository(db).getBackgroundJobById(backgroundJobId);
 
   if (!row) {
     throw new AdminDebugNotFoundError("background_job", backgroundJobId);
@@ -3757,15 +3751,9 @@ async function listJobsByKeys(
   db: HeimdallDbExecutor,
   jobKeys: readonly string[],
 ): Promise<readonly AdminBackgroundJobDebugSummary[]> {
-  if (jobKeys.length === 0) {
-    return [];
-  }
-
-  const rows = await db
-    .select()
-    .from(backgroundJobs)
-    .where(inArray(backgroundJobs.jobKey, [...jobKeys]))
-    .orderBy(asc(backgroundJobs.createdAt));
+  const rows = await new BackgroundJobRepository(db as HeimdallDatabase).listBackgroundJobsByKeys(
+    jobKeys,
+  );
 
   return rows.map(toBackgroundJobDebugSummary);
 }
@@ -3812,21 +3800,25 @@ async function listRelatedReviewJobs(
   },
 ): Promise<readonly AdminBackgroundJobDebugSummary[]> {
   const reviewJobKey = `github:review:${input.repoId}:${input.pullRequestNumber}:${input.headSha}`;
-  const rows = await db
-    .select()
-    .from(backgroundJobs)
-    .where(
-      or(
-        eq(backgroundJobs.reviewRunId, input.reviewRunId),
-        and(
-          eq(backgroundJobs.jobType, JOB_TYPES.ReviewPullRequest),
-          eq(backgroundJobs.jobKey, reviewJobKey),
-        ),
-      ),
-    )
-    .orderBy(asc(backgroundJobs.createdAt));
+  const backgroundJobRepository = new BackgroundJobRepository(db);
+  const rows = [
+    ...(await backgroundJobRepository.listBackgroundJobsForReviewRun(input.reviewRunId)),
+    ...(await backgroundJobRepository.listBackgroundJobsByKeys([reviewJobKey])).filter(
+      (job) => job.jobType === JOB_TYPES.ReviewPullRequest,
+    ),
+  ];
+  const seenJobIds = new Set<string>();
+  const uniqueRows = rows
+    .filter((job) => {
+      if (seenJobIds.has(job.backgroundJobId)) {
+        return false;
+      }
+      seenJobIds.add(job.backgroundJobId);
+      return true;
+    })
+    .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
 
-  return rows.map(toBackgroundJobDebugSummary);
+  return uniqueRows.map(toBackgroundJobDebugSummary);
 }
 
 /** Lists artifact rows collected by the given sandbox runs. */
@@ -4107,7 +4099,7 @@ function toBackgroundJobDebugSummary(row: BackgroundJobRow): AdminBackgroundJobD
     ...(row.completedAt ? { completedAt: toIso(row.completedAt) } : {}),
     createdAt: toIso(row.createdAt),
     updatedAt: toIso(row.updatedAt),
-    payload: row.payload,
+    payload: row.envelope,
     ...(row.status === "failed" || row.status === "dead_lettered" ? { failure } : {}),
   };
 }
@@ -4210,12 +4202,7 @@ function embeddingJobIdFromBackgroundJob(row: BackgroundJobRow): string | undefi
     return undefined;
   }
 
-  try {
-    const envelope = parseJobEnvelope(row.payload);
-    return stringField(asRecord(envelope.payload), "embeddingJobId");
-  } catch {
-    return undefined;
-  }
+  return stringField(asRecord(row.envelope.payload), "embeddingJobId");
 }
 
 /** Computes a rounded embedding completion percentage from durable counters. */
@@ -5342,36 +5329,28 @@ async function insertReplayJobs(input: {
     const adminActionId = newId("admact");
     const replayRunId = newId("rply");
     const insertedJobIds: string[] = [];
+    const backgroundJobRepository = new BackgroundJobRepository(tx as HeimdallDatabase);
     for (const job of input.jobs) {
-      const [inserted] = await tx
-        .insert(backgroundJobs)
-        .values({
-          backgroundJobId: newId("job"),
-          queueName: job.queueName,
-          jobKey: job.replayJobKey,
-          jobType: job.jobType,
-          status: "pending",
-          orgId: job.orgId,
-          repoId: job.repoId,
-          reviewRunId: job.reviewRunId,
-          payload: job.envelope,
-          maxAttempts: job.envelope.maxAttempts,
-          scheduledAt: job.envelope.scheduledFor ? new Date(job.envelope.scheduledFor) : undefined,
-          metadata: {
-            replay: true,
-            replaySource: job.source,
-            ...(job.originalBackgroundJobId
-              ? { originalBackgroundJobId: job.originalBackgroundJobId }
-              : {}),
-            ...(job.originalJobKey ? { originalJobKey: job.originalJobKey } : {}),
-            confirmationToken: input.confirmationToken,
-          },
-        })
-        .onConflictDoNothing()
-        .returning({ backgroundJobId: backgroundJobs.backgroundJobId });
+      const result = await backgroundJobRepository.insertBackgroundJob({
+        backgroundJobId: newId("job"),
+        envelope: job.envelope,
+        metadata: {
+          replay: true,
+          replaySource: job.source,
+          ...(job.originalBackgroundJobId
+            ? { originalBackgroundJobId: job.originalBackgroundJobId }
+            : {}),
+          ...(job.originalJobKey ? { originalJobKey: job.originalJobKey } : {}),
+          confirmationToken: input.confirmationToken,
+        },
+        queueName: job.queueName,
+        ...(job.orgId ? { orgId: job.orgId } : {}),
+        ...(job.repoId ? { repoId: job.repoId } : {}),
+        ...(job.reviewRunId ? { reviewRunId: job.reviewRunId } : {}),
+      });
 
-      if (inserted) {
-        insertedJobIds.push(inserted.backgroundJobId);
+      if (result.inserted) {
+        insertedJobIds.push(result.job.backgroundJobId);
       }
     }
 

@@ -77,6 +77,20 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
       envelope: syncInstallationEnvelope("sync:background:future"),
       scheduledAt: "2026-05-08T01:00:00.000Z",
     });
+    await expect(
+      backgroundJobRepository.getBackgroundJobById("job_background_pending"),
+    ).resolves.toMatchObject({
+      backgroundJobId: "job_background_pending",
+      jobKey: "sync:background:pending",
+    });
+    expect(
+      (
+        await backgroundJobRepository.listBackgroundJobsByKeys([
+          "sync:background:pending",
+          "sync:background:future",
+        ])
+      ).map((job) => job.jobKey),
+    ).toEqual(["sync:background:pending", "sync:background:future"]);
 
     const claimed = await backgroundJobRepository.claimPendingJobs({ limit: 10, now });
     expect(claimed.map((job) => job.backgroundJobId)).toEqual(["job_background_pending"]);
