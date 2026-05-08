@@ -131,6 +131,14 @@ describe.runIf(integrationDatabaseUrl)("WebhookRepository integration", () => {
       provider: "github",
     });
     expect(fetched?.webhookEventId).toBe("webhook_repository_delivery");
+    await expect(
+      webhookRepository.getWebhookEventRecord("webhook_repository_delivery"),
+    ).resolves.toMatchObject({
+      action: "opened",
+      payload: { action: "opened" },
+      status: "processed",
+      webhookEventId: "webhook_repository_delivery",
+    });
 
     await expect(webhookRepository.getWebhookActivitySummary()).resolves.toEqual({
       latest: {

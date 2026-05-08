@@ -163,11 +163,12 @@ tracked milestone.
   settings lookups, bounded scoped repository discovery, active visible installation reads, recent
   installation reads, and scoped provider-installation discovery.
 - Latest DB webhook milestone: `WebhookRepository` now maps durable deliveries back to the webhook
-  contract and supports provider-delivery idempotent insert, delivery lookup, product activity
-  summary reads, and processing/processed/ignored/failed state transitions. GitHub webhook
-  ingestion now uses this repository boundary for delivery idempotency, the API uses it for product
-  onboarding webhook summaries, and the Postgres-backed integration test verifies conflict-safe
-  inserts, status/error updates, and activity summary counts.
+  contract and supports provider-delivery idempotent insert, delivery lookup, stable-row admin
+  inspection reads, product activity summary reads, and processing/processed/ignored/failed state
+  transitions. GitHub webhook ingestion now uses this repository boundary for delivery idempotency,
+  the API uses it for product onboarding webhook summaries, admin tooling uses it for webhook
+  inspector reads, and the Postgres-backed integration test verifies conflict-safe inserts,
+  status/error updates, durable row reads, and activity summary counts.
 - Latest DB pull request milestone: `PullRequestRepository` now upserts immutable pull request
   snapshots and mutable PR state together. GitHub webhook ingestion now uses this repository
   boundary for PR persistence, and the Postgres-backed integration test verifies snapshot refresh,
