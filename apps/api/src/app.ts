@@ -14828,6 +14828,7 @@ function setAdminResponseHeaders(
   set.headers = {
     ...(set.headers ?? {}),
     "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "x-request-id": requestId,
@@ -14868,7 +14869,9 @@ function setProductResponseHeaders(request: Request, set: AdminResponseSet): voi
   set.headers = {
     ...(set.headers ?? {}),
     "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
   };
 
   if (origin && allowedOrigins.includes(origin)) {

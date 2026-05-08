@@ -704,6 +704,10 @@ describe("api app", () => {
     const response = await app.handle(new Request("http://localhost/app/onboarding"));
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-frame-options")).toBe("DENY");
     await expect(response.json()).resolves.toMatchObject({
       data: {
         githubApp: {
@@ -2147,6 +2151,10 @@ describe("api app", () => {
     );
 
     expect(loginResponse.status).toBe(200);
+    expect(loginResponse.headers.get("cache-control")).toBe("no-store");
+    expect(loginResponse.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(loginResponse.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(loginResponse.headers.get("x-frame-options")).toBe("DENY");
     expect(loginResponse.headers.get("set-cookie")).toContain("test_admin_session=");
     await expect(loginResponse.json()).resolves.toMatchObject({
       data: {
