@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
+  type ProviderInstallation,
   type Repository,
   type RepositorySettings,
 } from "@repo/contracts";
@@ -11,6 +12,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { HeimdallDatabase } from "../src/client";
+import { ProviderInstallationRepository } from "../src/repositories/provider-installation-repository";
 import { RepositoryRepository } from "../src/repositories/repository-repository";
 
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
@@ -25,6 +27,7 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
   );
   const sql = postgres(integrationDatabaseUrl ?? "", { max: 1, onnotice: () => undefined });
   const db = drizzle(sql) as HeimdallDatabase;
+  const providerInstallationRepository = new ProviderInstallationRepository(db);
   const repositoryRepository = new RepositoryRepository(db);
 
   beforeAll(async () => {
@@ -202,6 +205,57 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
     ]);
     expect(listedOrgSettings).toMatchObject([{ orgId: "org_repository_test", version: 2 }]);
   });
+
+  it("loads provider installations through the repository boundary", async () => {
+    await expect(
+      providerInstallationRepository.getProviderInstallation("inst_repository_test"),
+    ).resolves.toMatchObject({
+      accountLogin: "acme",
+      installationId: "inst_repository_test",
+      orgId: "org_repository_test",
+      providerInstallationId: "repository-test-installation",
+    } satisfies Partial<ProviderInstallation>);
+    await expect(
+      providerInstallationRepository.getProviderInstallation("inst_repository_missing"),
+    ).resolves.toBeUndefined();
+
+    const activeForOrg =
+      await providerInstallationRepository.listActiveProviderInstallationsForOrgs([
+        "org_repository_test",
+        "org_repository_test",
+      ]);
+    expect(activeForOrg.map((installation) => installation.installationId)).toEqual([
+      "inst_repository_test",
+    ]);
+
+    const recent = await providerInstallationRepository.listRecentProviderInstallations({
+      limit: 2,
+    });
+    expect(recent.map((installation) => installation.installationId)).toEqual([
+      "inst_repository_deleted",
+      "inst_repository_other",
+    ]);
+
+    const scoped = await providerInstallationRepository.listProviderInstallations({
+      orgIds: ["org_repository_test"],
+      provider: "github",
+      search: "repository-test",
+      limit: 5,
+    });
+    expect(scoped.map((installation) => installation.installationId)).toEqual([
+      "inst_repository_test",
+    ]);
+
+    await expect(
+      providerInstallationRepository.listProviderInstallations({
+        orgIds: [],
+        limit: 5,
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      providerInstallationRepository.listRecentProviderInstallations({ limit: 0 }),
+    ).rejects.toThrow(/limit must be an integer/u);
+  });
 });
 
 /** Applies all generated SQL migrations in lexical order to a test schema. */
@@ -246,7 +300,7 @@ async function seedRepositoryParents(sql: postgres.Sql): Promise<void> {
         'repository-test-installation',
         'acme',
         'organization',
-        now()
+        '2026-05-08T00:00:00Z'
       ),
       (
         'inst_repository_other',
@@ -255,8 +309,22 @@ async function seedRepositoryParents(sql: postgres.Sql): Promise<void> {
         'repository-other-installation',
         'other',
         'organization',
-        now()
+        '2026-05-08T01:00:00Z'
+      ),
+      (
+        'inst_repository_deleted',
+        'org_repository_test',
+        'github',
+        'repository-deleted-installation',
+        'deleted',
+        'organization',
+        '2026-05-08T02:00:00Z'
       )
+  `;
+  await sql`
+    UPDATE provider_installations
+    SET deleted_at = '2026-05-08T03:00:00Z'
+    WHERE installation_id = 'inst_repository_deleted'
   `;
 }
 

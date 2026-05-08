@@ -2,6 +2,7 @@ import type {
   CandidateFinding,
   CodeIndexVersion,
   OrgSettings,
+  ProviderInstallation,
   PullRequestSnapshot,
   Repository,
   RepositorySettings,
@@ -13,6 +14,7 @@ import {
   CandidateFindingSchema,
   CodeIndexVersionSchema,
   OrgSettingsSchema,
+  ProviderInstallationSchema,
   PullRequestSnapshotSchema,
   parseWithSchema,
   RepositorySchema,
@@ -28,6 +30,8 @@ const optionalRecord = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+
+const record = (value: unknown): Record<string, unknown> => optionalRecord(value) ?? {};
 
 const optionalString = (value: string | null): string | undefined => value ?? undefined;
 
@@ -145,6 +149,34 @@ export const toOrgSettings = (row: {
     updatedAt: toIso(row.updatedAt),
   });
 };
+
+/** Converts a provider installation row to the public provider installation contract. */
+export const toProviderInstallation = (row: {
+  installationId: string;
+  orgId: string;
+  provider: string;
+  providerInstallationId: string;
+  accountLogin: string;
+  accountType: string;
+  permissions: unknown;
+  installedAt: Date;
+  suspendedAt: Date | null;
+  deletedAt: Date | null;
+  metadata: unknown;
+}): ProviderInstallation =>
+  parseWithSchema("ProviderInstallation", ProviderInstallationSchema, {
+    installationId: row.installationId,
+    orgId: row.orgId,
+    provider: row.provider as ProviderInstallation["provider"],
+    providerInstallationId: row.providerInstallationId,
+    accountLogin: row.accountLogin,
+    accountType: row.accountType as ProviderInstallation["accountType"],
+    permissions: record(row.permissions),
+    installedAt: toIso(row.installedAt),
+    ...withOptional("suspendedAt", row.suspendedAt ? toIso(row.suspendedAt) : undefined),
+    ...withOptional("deletedAt", row.deletedAt ? toIso(row.deletedAt) : undefined),
+    ...withOptional("metadata", optionalRecord(row.metadata)),
+  });
 
 /** Converts a webhook event row to the public webhook event contract. */
 export const toWebhookEvent = (row: {

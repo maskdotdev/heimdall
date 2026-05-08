@@ -56,6 +56,7 @@ import {
   type MemoryFactStatus,
   type OrgSettings,
   type PlanSnapshot,
+  type ProviderInstallation,
   type RepoRule,
   type Repository,
   type RepositorySettings,
@@ -104,6 +105,7 @@ import {
   oauthStates,
   orgMemberships,
   orgs,
+  ProviderInstallationRepository,
   providerInstallations,
   publishedFindings,
   pullRequestSnapshots,
@@ -8145,30 +8147,10 @@ async function listProductSessionInstallations(
   db: HeimdallDatabase,
   orgIds: readonly string[],
 ): Promise<readonly ProductSessionInstallationSummary[]> {
-  const uniqueOrgIds = [...new Set(orgIds)];
-  if (uniqueOrgIds.length === 0) {
-    return [];
-  }
-
-  const rows = await db
-    .select({
-      accountLogin: providerInstallations.accountLogin,
-      accountType: providerInstallations.accountType,
-      installationId: providerInstallations.installationId,
-      orgId: providerInstallations.orgId,
-      provider: providerInstallations.provider,
-      providerInstallationId: providerInstallations.providerInstallationId,
-    })
-    .from(providerInstallations)
-    .where(
-      and(
-        inArray(providerInstallations.orgId, uniqueOrgIds),
-        isNull(providerInstallations.deletedAt),
-      ),
-    )
-    .orderBy(desc(providerInstallations.installedAt));
-
-  return rows;
+  const installations = await new ProviderInstallationRepository(
+    db,
+  ).listActiveProviderInstallationsForOrgs(orgIds);
+  return installations.map(toProductSessionInstallationSummary);
 }
 
 /** Revokes one DB-backed product session. */
@@ -8532,27 +8514,40 @@ function productWebhookUrl(): string | undefined {
 async function listProductInstallations(
   db: HeimdallDatabase,
 ): Promise<readonly ProductInstallationSummary[]> {
-  const rows = await db
-    .select({
-      accountLogin: providerInstallations.accountLogin,
-      accountType: providerInstallations.accountType,
-      deletedAt: providerInstallations.deletedAt,
-      installedAt: providerInstallations.installedAt,
-      provider: providerInstallations.provider,
-      suspendedAt: providerInstallations.suspendedAt,
-    })
-    .from(providerInstallations)
-    .orderBy(desc(providerInstallations.installedAt))
-    .limit(10);
+  const installations = await new ProviderInstallationRepository(
+    db,
+  ).listRecentProviderInstallations({
+    limit: 10,
+  });
+  return installations.map(toProductInstallationSummary);
+}
 
-  return rows.map((row) => ({
-    accountLogin: row.accountLogin,
-    accountType: row.accountType,
-    ...(row.deletedAt ? { deletedAt: row.deletedAt.toISOString() } : {}),
-    installedAt: row.installedAt.toISOString(),
-    provider: row.provider,
-    ...(row.suspendedAt ? { suspendedAt: row.suspendedAt.toISOString() } : {}),
-  }));
+/** Converts a provider installation into a product session DTO. */
+function toProductSessionInstallationSummary(
+  installation: ProviderInstallation,
+): ProductSessionInstallationSummary {
+  return {
+    accountLogin: installation.accountLogin,
+    accountType: installation.accountType,
+    installationId: installation.installationId,
+    orgId: installation.orgId,
+    provider: installation.provider,
+    providerInstallationId: installation.providerInstallationId,
+  };
+}
+
+/** Converts a provider installation into a product onboarding DTO. */
+function toProductInstallationSummary(
+  installation: ProviderInstallation,
+): ProductInstallationSummary {
+  return {
+    accountLogin: installation.accountLogin,
+    accountType: installation.accountType,
+    ...(installation.deletedAt ? { deletedAt: installation.deletedAt } : {}),
+    installedAt: installation.installedAt,
+    provider: installation.provider,
+    ...(installation.suspendedAt ? { suspendedAt: installation.suspendedAt } : {}),
+  };
 }
 
 /** Lists organizations visible to a scoped admin actor. */
@@ -8674,26 +8669,15 @@ async function listProviderInstallations(
   db: HeimdallDatabase,
   query: AdminInstallationListQuery,
 ): Promise<readonly AdminProviderInstallationSummary[]> {
-  const conditions = installationListConditions(query);
-  const rows = await db
-    .select({
-      accountLogin: providerInstallations.accountLogin,
-      accountType: providerInstallations.accountType,
-      deletedAt: providerInstallations.deletedAt,
-      installationId: providerInstallations.installationId,
-      installedAt: providerInstallations.installedAt,
-      orgId: providerInstallations.orgId,
-      permissions: providerInstallations.permissions,
-      provider: providerInstallations.provider,
-      providerInstallationId: providerInstallations.providerInstallationId,
-      suspendedAt: providerInstallations.suspendedAt,
-    })
-    .from(providerInstallations)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(providerInstallations.installedAt))
-    .limit(boundedListLimit(query.limit));
+  const scopedOrgIds = query.orgIds?.includes("*") ? undefined : query.orgIds;
+  const installations = await new ProviderInstallationRepository(db).listProviderInstallations({
+    limit: boundedListLimit(query.limit),
+    ...(scopedOrgIds !== undefined ? { orgIds: scopedOrgIds } : {}),
+    ...(query.provider !== undefined ? { provider: query.provider } : {}),
+    ...(query.search !== undefined ? { search: query.search } : {}),
+  });
 
-  return rows.map(toAdminProviderInstallationSummary);
+  return installations.map(toAdminProviderInstallationSummary);
 }
 
 /** Gets one provider installation by internal ID. */
@@ -8701,92 +8685,32 @@ async function getProviderInstallation(
   db: HeimdallDatabase,
   installationId: string,
 ): Promise<AdminProviderInstallationSummary> {
-  const [row] = await db
-    .select({
-      accountLogin: providerInstallations.accountLogin,
-      accountType: providerInstallations.accountType,
-      deletedAt: providerInstallations.deletedAt,
-      installationId: providerInstallations.installationId,
-      installedAt: providerInstallations.installedAt,
-      orgId: providerInstallations.orgId,
-      permissions: providerInstallations.permissions,
-      provider: providerInstallations.provider,
-      providerInstallationId: providerInstallations.providerInstallationId,
-      suspendedAt: providerInstallations.suspendedAt,
-    })
-    .from(providerInstallations)
-    .where(eq(providerInstallations.installationId, installationId))
-    .limit(1);
+  const installation = await new ProviderInstallationRepository(db).getProviderInstallation(
+    installationId,
+  );
 
-  if (!row) {
+  if (!installation) {
     throw new AdminControlPlaneNotFoundError("provider_installation", installationId);
   }
 
-  return toAdminProviderInstallationSummary(row);
-}
-
-/** Builds SQL predicates for provider installation discovery. */
-function installationListConditions(query: AdminInstallationListQuery): SQL[] {
-  const conditions: SQL[] = [];
-  const orgIds = query.orgIds ?? [];
-  if (query.orgIds !== undefined && !orgIds.includes("*")) {
-    conditions.push(
-      orgIds.length > 0 ? inArray(providerInstallations.orgId, [...orgIds]) : sql`false`,
-    );
-  }
-  if (query.provider) {
-    conditions.push(eq(providerInstallations.provider, query.provider));
-  }
-
-  const search = query.search?.trim();
-  if (search) {
-    const pattern = `%${search}%`;
-    const searchCondition = or(
-      ilike(providerInstallations.accountLogin, pattern),
-      ilike(providerInstallations.providerInstallationId, pattern),
-    );
-    if (searchCondition) {
-      conditions.push(searchCondition);
-    }
-  }
-
-  return conditions;
+  return toAdminProviderInstallationSummary(installation);
 }
 
 /** Converts a provider installation row into a scoped API DTO. */
-function toAdminProviderInstallationSummary(row: {
-  /** Internal installation ID. */
-  readonly installationId: string;
-  /** Owning organization ID. */
-  readonly orgId: string;
-  /** Git provider. */
-  readonly provider: string;
-  /** Provider installation ID. */
-  readonly providerInstallationId: string;
-  /** Provider account login. */
-  readonly accountLogin: string;
-  /** Provider account type. */
-  readonly accountType: string;
-  /** Provider-granted permission map. */
-  readonly permissions: unknown;
-  /** Installation timestamp. */
-  readonly installedAt: Date;
-  /** Suspension timestamp. */
-  readonly suspendedAt: Date | null;
-  /** Deletion timestamp. */
-  readonly deletedAt: Date | null;
-}): AdminProviderInstallationSummary {
+function toAdminProviderInstallationSummary(
+  installation: ProviderInstallation,
+): AdminProviderInstallationSummary {
   return {
-    accountLogin: row.accountLogin,
-    accountType: row.accountType,
-    ...(row.deletedAt ? { deletedAt: row.deletedAt.toISOString() } : {}),
-    installationId: row.installationId,
-    installedAt: row.installedAt.toISOString(),
-    orgId: row.orgId,
-    permissions: asRecord(row.permissions),
-    provider: row.provider,
-    providerInstallationId: row.providerInstallationId,
-    ...(row.suspendedAt ? { suspendedAt: row.suspendedAt.toISOString() } : {}),
+    accountLogin: installation.accountLogin,
+    accountType: installation.accountType,
+    ...(installation.deletedAt ? { deletedAt: installation.deletedAt } : {}),
+    installationId: installation.installationId,
+    installedAt: installation.installedAt,
+    orgId: installation.orgId,
+    permissions: installation.permissions,
+    provider: installation.provider,
+    providerInstallationId: installation.providerInstallationId,
+    ...(installation.suspendedAt ? { suspendedAt: installation.suspendedAt } : {}),
   };
 }
 
