@@ -2169,6 +2169,8 @@ type ControlPlaneEffectivePolicy = {
   readonly trigger: {
     /** Enabled pull request actions. */
     readonly enabledActions: readonly string[];
+    /** Included base branch patterns. Empty means all base branches. */
+    readonly includeBaseBranches: readonly string[];
     /** Ignored pull request authors. */
     readonly ignoredAuthors: readonly string[];
     /** Ignored pull request labels. */
@@ -9642,6 +9644,7 @@ function renderPolicyPreviewDetails(preview: ControlPlanePolicyPreview): string 
     ["Inline comments", policy.publishing.publishInlineComments ? "on" : "off"],
     ["Summary comment", policy.publishing.publishSummaryComment ? "on" : "off"],
     ["Trigger actions", policy.trigger.enabledActions.join(", ")],
+    ["Base branches", policy.trigger.includeBaseBranches.join(", ") || "all"],
     ["Ignored labels", policy.trigger.ignoredLabels.join(", ") || "none"],
     ["Ignored authors", policy.trigger.ignoredAuthors.join(", ") || "none"],
     ["Required label", policy.trigger.requireLabel ?? "none"],

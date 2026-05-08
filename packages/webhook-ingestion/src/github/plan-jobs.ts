@@ -151,6 +151,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
     const triggerDecision = shouldReviewPr({
       action,
       authorLogin: snapshot.authorLogin,
+      baseRef: snapshot.baseRef,
       isDraft: snapshot.isDraft,
       labels: snapshot.labels,
       ...(options.metrics ? { metrics: options.metrics } : {}),

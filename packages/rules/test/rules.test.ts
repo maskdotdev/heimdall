@@ -418,6 +418,9 @@ describe("buildReviewPolicySnapshot", () => {
         "  require_any_label:",
         "    - ai-ready",
         "    - review-me",
+        "  include_base_branches:",
+        "    - main",
+        "    - release/**",
         "  skip_if_any_label:",
         "    - no-ai-review",
         "paths:",
@@ -484,6 +487,7 @@ describe("buildReviewPolicySnapshot", () => {
       },
       trigger: {
         enabledActions: ["opened"],
+        includeBaseBranches: ["main", "release/**"],
         ignoredLabels: ["no-ai-review"],
         requireLabel: "ai-ready",
       },
@@ -799,6 +803,23 @@ describe("shouldReviewPr", () => {
     expect(draft.reasonCode).toBe("draft_pr_skipped");
     expect(blockedLabel.reasonCode).toBe("blocked_label_present");
     expect(missingLabel.reasonCode).toBe("missing_required_label");
+  });
+
+  it("skips pull requests whose base branch is outside compiled trigger filters", () => {
+    const policy = createPolicyFixture({
+      trigger: { includeBaseBranches: ["main", "release/**"] },
+    });
+    const allowed = shouldReviewPr(createPrInputFixture({ baseRef: "release/2026.05", policy }));
+    const skipped = shouldReviewPr(createPrInputFixture({ baseRef: "develop", policy }));
+
+    expect(allowed).toMatchObject({
+      reasonCode: "allowed",
+      shouldReview: true,
+    });
+    expect(skipped).toMatchObject({
+      reasonCode: "base_branch_not_included",
+      shouldReview: false,
+    });
   });
 
   it("allows matching pull requests with an explainable trace", () => {

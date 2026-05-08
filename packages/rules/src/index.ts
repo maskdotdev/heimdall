@@ -216,6 +216,7 @@ export type PolicyDecisionTrace = Static<typeof PolicyDecisionTraceSchema>;
 export const EffectiveTriggerPolicySchema = Type.Object(
   {
     enabledActions: Type.Array(Type.String({ minLength: 1 })),
+    includeBaseBranches: Type.Array(Type.String({ minLength: 1, maxLength: 240 })),
     ignoredAuthors: Type.Array(Type.String()),
     ignoredLabels: Type.Array(Type.String()),
     requireLabel: Type.Optional(Type.String({ minLength: 1 })),
@@ -961,6 +962,8 @@ export type ShouldReviewPrInput = RulesTelemetryOptions & {
   readonly labels?: readonly string[];
   /** Pull request author login. */
   readonly authorLogin?: string;
+  /** Pull request base branch name. */
+  readonly baseRef?: string;
 };
 
 /** Cheap trigger decision used before enqueueing review work. */
@@ -1520,6 +1523,15 @@ export function matchesAnyPathPattern(path: string, patterns: readonly string[])
   return patterns.some((pattern) => compileGlobPattern(pattern).test(normalizedPath));
 }
 
+/** Returns whether a branch name matches at least one safe glob-like branch pattern. */
+function matchesAnyBranchPattern(branch: string, patterns: readonly string[]): boolean {
+  try {
+    return matchesAnyPathPattern(branch, patterns);
+  } catch {
+    return false;
+  }
+}
+
 /** Classifies a path with the compiled path policy. */
 export function classifyPath(input: ClassifyPathInput): PathClassification {
   const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesEvaluatePath, {
@@ -1658,6 +1670,8 @@ function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision 
   const ignoredAuthors = input.policy.trigger.ignoredAuthors.map(normalizeComparable);
   const matchedIgnoredLabel = ignoredLabels.find((label) => labels.has(label));
   const author = input.authorLogin ? normalizeComparable(input.authorLogin) : undefined;
+  const baseRef = input.baseRef?.trim();
+  const includeBaseBranches = input.policy.trigger.includeBaseBranches;
   const reviewPolicy = input.policy.reviewPolicy;
   let decision = true;
   let reasonCode = "allowed";
@@ -1671,6 +1685,12 @@ function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision 
   } else if (input.isDraft && input.policy.trigger.skipDraftPullRequests) {
     decision = false;
     reasonCode = "draft_pr_skipped";
+  } else if (
+    includeBaseBranches.length > 0 &&
+    (!baseRef || !matchesAnyBranchPattern(baseRef, includeBaseBranches))
+  ) {
+    decision = false;
+    reasonCode = "base_branch_not_included";
   } else if (
     input.policy.trigger.requireLabel &&
     !labels.has(normalizeComparable(input.policy.trigger.requireLabel))
@@ -1697,6 +1717,7 @@ function shouldReviewPrCore(input: ShouldReviewPrInput): ShouldReviewPrDecision 
       evaluatedRuleCount: input.policy.rules.length,
       details: {
         action: input.action,
+        baseRef: baseRef ?? "",
         labels: [...labels],
         matchedIgnoredLabel,
       },
@@ -1956,6 +1977,7 @@ export function createPrInputFixture(
   return {
     policy: overrides.policy ?? createPolicyFixture(),
     action: overrides.action ?? "opened",
+    baseRef: overrides.baseRef ?? "main",
     isDraft: overrides.isDraft ?? false,
     labels: overrides.labels ?? ["ready-for-review"],
     authorLogin: overrides.authorLogin ?? "octocat",
@@ -2873,22 +2895,13 @@ function compileTriggerPolicy(
       },
     });
   }
-  if (repoLocalConfig?.triggers?.includeBaseBranches?.length) {
-    warnings.push({
-      code: "repo_local_base_branch_filters_not_compiled",
-      message: "Repo-local base branch filters are parsed but not compiled yet.",
-      details: {
-        includeBaseBranches: repoLocalConfig.triggers.includeBaseBranches,
-      },
-    });
-  }
-
   return {
     enabledActions: [
       ...(repoLocalConfig?.triggers?.enabledActions ??
         orgSettings?.defaultTriggerPolicy.enabledActions ??
         DEFAULT_ENABLED_PR_ACTIONS),
     ],
+    includeBaseBranches: [...(repoLocalConfig?.triggers?.includeBaseBranches ?? [])],
     ignoredAuthors: uniqueStrings([
       ...(orgSettings?.defaultTriggerPolicy.ignoredAuthors ?? []),
       ...settings.ignoredAuthors,

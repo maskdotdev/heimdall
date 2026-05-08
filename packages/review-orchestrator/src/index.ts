@@ -2970,6 +2970,7 @@ export function decideReviewGate(input: {
   const decision = shouldReviewPr({
     action,
     authorLogin: input.snapshot.authorLogin,
+    baseRef: input.snapshot.baseRef,
     isDraft: input.snapshot.isDraft,
     labels: input.snapshot.labels,
     ...(input.dependencies.metrics ? { metrics: input.dependencies.metrics } : {}),
