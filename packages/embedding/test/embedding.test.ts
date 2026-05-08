@@ -83,6 +83,8 @@ type TestCodeChunkRow = {
 };
 
 type TestCachedEmbeddingRow = {
+  /** Immutable chunk content hash persisted with the previous embedding row. */
+  readonly contentHash: string;
   /** Vector stored by a previous embedding row. */
   readonly embedding: readonly number[];
   /** Durable cache key stored with the previous embedding row. */
@@ -399,6 +401,7 @@ describe("embedChunkBatch", () => {
   it("reuses durable cached vectors before calling the provider", async () => {
     const cachedSource = {
       chunkId: "chunk_cached",
+      contentHash: `sha256:${"c".repeat(64)}`,
       endLine: 4,
       path: "src/cached.ts",
       startLine: 1,
@@ -406,6 +409,7 @@ describe("embedChunkBatch", () => {
     };
     const missSource = {
       chunkId: "chunk_miss",
+      contentHash: `sha256:${"d".repeat(64)}`,
       endLine: 4,
       path: "src/miss.ts",
       startLine: 1,
@@ -430,6 +434,7 @@ describe("embedChunkBatch", () => {
         db: createEmbeddingDatabaseStub({
           cachedEmbeddingRows: [
             {
+              contentHash: cachedSource.contentHash,
               embedding: cachedVector,
               embeddingCacheKey: buildEmbeddingCacheKey({
                 dimensions: provider.dimensions,
@@ -444,10 +449,12 @@ describe("embedChunkBatch", () => {
           insertedValues,
           rows: [
             testCodeChunkRow("chunk_cached", {
+              contentHash: cachedSource.contentHash,
               metadata: { text: cachedSource.text },
               path: cachedSource.path,
             }),
             testCodeChunkRow("chunk_miss", {
+              contentHash: missSource.contentHash,
               metadata: { text: missSource.text },
               path: missSource.path,
             }),
@@ -478,6 +485,124 @@ describe("embedChunkBatch", () => {
           chunkId: "chunk_miss",
           embedding: [0.9, 1],
           provider: "fake",
+        }),
+      ]),
+    );
+  });
+
+  it("reuses durable cached vectors by content hash before calling the provider", async () => {
+    const contentHash = `sha256:${"e".repeat(64)}`;
+    const cachedVector = [0.3, 0.4];
+    const insertedValues: unknown[] = [];
+    const providerInputs: string[][] = [];
+    const provider = {
+      dimensions: 2,
+      embedTexts: async (texts) => {
+        providerInputs.push([...texts]);
+        return texts.map(() => [0.9, 1]);
+      },
+      model: "text-embedding-3-small",
+      providerId: "fake",
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      embedChunkBatch(testEmbeddingPayload(["chunk_reused"]), {
+        db: createEmbeddingDatabaseStub({
+          cachedEmbeddingRows: [
+            {
+              contentHash,
+              embedding: cachedVector,
+              embeddingCacheKey: buildEmbeddingCacheKey({
+                dimensions: provider.dimensions,
+                embeddingProfileVersion: DEFAULT_CODE_EMBEDDING_PROFILE_VERSION,
+                inputHash: `sha256:${"f".repeat(64)}`,
+                inputKind: "code_chunk",
+                model: provider.model,
+                provider: provider.providerId,
+              }),
+            },
+          ],
+          insertedValues,
+          rows: [
+            testCodeChunkRow("chunk_reused", {
+              contentHash,
+              metadata: { text: "export const reused = true;" },
+              path: "src/reused.ts",
+            }),
+          ],
+        }),
+        provider,
+      }),
+    ).resolves.toEqual({
+      embeddedChunkCount: 1,
+      skippedChunkIds: [],
+    });
+
+    expect(providerInputs).toEqual([]);
+    expect(insertedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          chunkId: "chunk_reused",
+          contentHash,
+          embedding: cachedVector,
+          provider: "fake",
+        }),
+      ]),
+    );
+  });
+
+  it("dedupes duplicate content hashes in one provider batch", async () => {
+    const contentHash = `sha256:${"1".repeat(64)}`;
+    const insertedValues: unknown[] = [];
+    const providerInputs: string[][] = [];
+    const provider = {
+      dimensions: 2,
+      embedTexts: async (texts) => {
+        providerInputs.push([...texts]);
+        return texts.map(() => [0.7, 0.8]);
+      },
+      model: "text-embedding-3-small",
+      providerId: "fake",
+    } satisfies EmbeddingProvider;
+
+    await expect(
+      embedChunkBatch(testEmbeddingPayload(["chunk_duplicate_a", "chunk_duplicate_b"]), {
+        db: createEmbeddingDatabaseStub({
+          insertedValues,
+          rows: [
+            testCodeChunkRow("chunk_duplicate_a", {
+              contentHash,
+              metadata: { text: "export const duplicated = true;" },
+              path: "src/a.ts",
+            }),
+            testCodeChunkRow("chunk_duplicate_b", {
+              contentHash,
+              metadata: { text: "export const duplicated = true;" },
+              path: "src/b.ts",
+            }),
+          ],
+        }),
+        provider,
+      }),
+    ).resolves.toEqual({
+      embeddedChunkCount: 2,
+      skippedChunkIds: [],
+    });
+
+    expect(providerInputs).toHaveLength(1);
+    expect(providerInputs[0]).toEqual([expect.stringContaining("path: src/a.ts")]);
+    expect(JSON.stringify(providerInputs)).not.toContain("src/b.ts");
+    expect(insertedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          chunkId: "chunk_duplicate_a",
+          contentHash,
+          embedding: [0.7, 0.8],
+        }),
+        expect.objectContaining({
+          chunkId: "chunk_duplicate_b",
+          contentHash,
+          embedding: [0.7, 0.8],
         }),
       ]),
     );
@@ -1109,7 +1234,7 @@ function testCodeChunkRow(
 ): TestCodeChunkRow {
   return {
     chunkId,
-    contentHash: `sha256:${"b".repeat(64)}`,
+    contentHash: testContentHash(chunkId),
     endLine: 4,
     metadata: { text: "export function run() { return true; }" },
     path: "src/index.ts",
@@ -1117,6 +1242,11 @@ function testCodeChunkRow(
     symbolId: null,
     ...overrides,
   };
+}
+
+/** Creates a deterministic valid SHA-256-shaped content hash for tests. */
+function testContentHash(seed: string): `sha256:${string}` {
+  return `sha256:${Buffer.from(seed).toString("hex").padEnd(64, "0").slice(0, 64)}` as const;
 }
 
 function createEmbeddingDatabaseStub(options: {
