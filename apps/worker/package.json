@@ -14,6 +14,7 @@
     "clean": "rm -rf dist .tsbuildinfo coverage"
   },
   "dependencies": {
+    "@repo/admin-tools": "workspace:*",
     "@repo/artifacts": "workspace:*",
     "@repo/billing": "workspace:*",
     "@repo/config": "workspace:*",

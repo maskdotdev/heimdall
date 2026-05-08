@@ -30,4 +30,5 @@ export const JOB_TYPES = {
   DataDeletionPlan: "data_deletion.plan.v1",
   SandboxCleanup: "sandbox.cleanup.v1",
   ReviewArtifactCleanup: "review_artifact.cleanup.v1",
+  ComplianceEvidenceCollect: "compliance_evidence.collect.v1",
 } as const;
