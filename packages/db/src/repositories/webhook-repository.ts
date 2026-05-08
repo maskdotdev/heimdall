@@ -7,6 +7,9 @@ import { toWebhookEvent } from "./row-mappers";
 /** Database surface required by webhook repository methods. */
 type WebhookRepositoryDatabase = Pick<HeimdallDatabase, "insert" | "select" | "update">;
 
+/** Durable webhook event row returned for admin debug inspection. */
+export type WebhookEventRecord = typeof webhookEvents.$inferSelect;
+
 /** Provider delivery identity used for idempotent webhook lookups. */
 export type WebhookDeliveryIdentity = {
   /** Git provider that sent the webhook. */
@@ -66,6 +69,19 @@ export class WebhookRepository {
   /** Creates a webhook query helper. */
   public constructor(private readonly db: WebhookRepositoryDatabase) {}
 
+  /** Gets a durable webhook event row by stable event ID. */
+  public async getWebhookEventRecord(
+    webhookEventId: string,
+  ): Promise<WebhookEventRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(webhookEvents)
+      .where(eq(webhookEvents.webhookEventId, webhookEventId))
+      .limit(1);
+
+    return row;
+  }
+
   /** Inserts a webhook event by provider delivery ID without duplicating deliveries. */
   public async insertWebhookEvent(
     input: InsertWebhookEventInput,
@@ -108,12 +124,7 @@ export class WebhookRepository {
 
   /** Gets a webhook event by stable event ID. */
   public async getWebhookEvent(webhookEventId: string): Promise<WebhookEvent | undefined> {
-    const [row] = await this.db
-      .select()
-      .from(webhookEvents)
-      .where(eq(webhookEvents.webhookEventId, webhookEventId))
-      .limit(1);
-
+    const row = await this.getWebhookEventRecord(webhookEventId);
     return row ? toWebhookEvent(row) : undefined;
   }
 

@@ -65,7 +65,8 @@ import {
   symbols,
   usageEvents,
   type ValidatedFindingRecord,
-  webhookEvents,
+  type WebhookEventRecord,
+  WebhookRepository,
 } from "@repo/db";
 import {
   type EvalActualFinding,
@@ -3591,7 +3592,7 @@ export async function executePublisherReplay(
   });
 }
 
-type WebhookEventRow = typeof webhookEvents.$inferSelect;
+type WebhookEventRow = WebhookEventRecord;
 type BackgroundJobRow = BackgroundJobRecord;
 type AuditLogRow = AuditLogRecord;
 type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
@@ -3668,11 +3669,7 @@ async function getWebhookEventRow(
   webhookEventId: string,
   db: HeimdallDatabase,
 ): Promise<WebhookEventRow> {
-  const [row] = await db
-    .select()
-    .from(webhookEvents)
-    .where(eq(webhookEvents.webhookEventId, webhookEventId))
-    .limit(1);
+  const row = await new WebhookRepository(db).getWebhookEventRecord(webhookEventId);
 
   if (!row) {
     throw new AdminDebugNotFoundError("webhook_event", webhookEventId);
