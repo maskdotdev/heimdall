@@ -2756,6 +2756,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       complianceEvidenceScheduler,
     );
     if (result.inserted) {
+      observability.metrics.count(OBSERVABILITY_METRIC_NAMES.workerMaintenanceJobsScheduledTotal, {
+        labels: {
+          job_type: JOB_TYPES.ComplianceEvidenceCollect,
+          scheduler: "compliance_evidence",
+        },
+      });
       observability.logger.info("scheduled compliance evidence collection enqueued", {
         attributes: {
           "compliance_evidence.job_key": result.jobKey,
@@ -2771,6 +2777,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       retentionCleanupScheduler,
     );
     if (result.insertedCount > 0) {
+      observability.metrics.count(OBSERVABILITY_METRIC_NAMES.workerMaintenanceJobsScheduledTotal, {
+        labels: {
+          scheduler: "retention_cleanup",
+        },
+        value: result.insertedCount,
+      });
       observability.logger.info("scheduled retention cleanup jobs enqueued", {
         attributes: {
           "event.name": "worker.retention_cleanup.scheduled",
@@ -2810,6 +2822,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const complianceEvidenceSchedulerInterval = shouldRunComplianceEvidenceScheduler
     ? setInterval(() => {
         enqueueComplianceEvidenceCollection().catch((error: unknown) => {
+          observability.metrics.count(
+            OBSERVABILITY_METRIC_NAMES.workerMaintenanceSchedulerFailuresTotal,
+            {
+              labels: { scheduler: "compliance_evidence" },
+            },
+          );
           observability.logger.error("compliance evidence scheduler failed", {
             error,
             target: "worker.compliance_evidence_scheduler",
@@ -2820,6 +2838,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const retentionCleanupSchedulerInterval = shouldRunRetentionCleanupScheduler
     ? setInterval(() => {
         enqueueRetentionCleanupJobs().catch((error: unknown) => {
+          observability.metrics.count(
+            OBSERVABILITY_METRIC_NAMES.workerMaintenanceSchedulerFailuresTotal,
+            {
+              labels: { scheduler: "retention_cleanup" },
+            },
+          );
           observability.logger.error("retention cleanup scheduler failed", {
             error,
             target: "worker.retention_cleanup_scheduler",
