@@ -47,6 +47,8 @@ configuration files, release gates, and rollback plan.
 - [ ] Production secrets are present in Railway and not copied into this ticket.
 - [ ] Production alerts exist for health, auth failure rate, replay audit visibility, settings
       audit visibility, and emergency disable.
+- [ ] Production monitoring dashboards exist for health, auth/access, actions/audit, worker queues,
+      data services, artifact security, and release/rollback checks.
 - [ ] Rollback revisions and emergency disable commands are identified.
 
 ## Enablement Record
@@ -65,6 +67,24 @@ configuration files, release gates, and rollback plan.
 | Manual dashboard drill completed | Pending |
 | Audit log IDs recorded | Pending |
 
+## Production Monitoring Record
+
+| Dashboard or signal | Link or query | Status | Notes |
+| --- | --- | --- | --- |
+| Control-plane health | Pending | Pending | API, dashboard, and gateway health |
+| Auth and access | Pending | Pending | Admin auth success, denials, and gateway rejections |
+| Actions and audit | Pending | Pending | Replay, settings, debug export, and eval import audit visibility |
+| Worker queues | Pending | Pending | Worker heartbeat, queue depth, and oldest job age |
+| Data services | Pending | Pending | Postgres, Redis, migrations, and queue recovery |
+| Artifact security | Pending | Pending | Artifact storage errors and raw-access denials |
+| Release and rollback | Pending | Pending | Deploy revisions, gate results, and emergency disable |
+
+## Follow-Up Issue Tracking
+
+| Issue | Owner | Severity | Due date | Status |
+| --- | --- | --- | --- | --- |
+| Pending | TBD | TBD | TBD | Pending |
+
 ## Go/No-Go Decision
 
 - Decision: Pending
@@ -79,3 +99,14 @@ configuration files, release gates, and rollback plan.
 - Dashboard rollback revision: Pending
 - Admin gateway rollback revision: Pending
 - Verification output: Pending
+
+## Post-Enablement
+
+- [ ] Watch production for one hour after enablement.
+- [ ] Confirm no unexpected `admin.access.denied` spike.
+- [ ] Confirm every `admin.replay.dispatched` has a matching replay audit row.
+- [ ] Confirm every `admin.settings.updated` has a matching `repo.settings.updated` row.
+- [ ] Record production dashboard links and alert check results.
+- [ ] Create follow-up issues for every unresolved alert, manual mitigation, missing dashboard,
+      missing alert, disabled route, or deferred phase risk.
+- [ ] Close the release after owners sign off and critical follow-up issues have owners.

@@ -36,6 +36,17 @@ const REQUIRED_ALERT_IDS = [
   "admin_emergency_disable",
 ];
 
+/** Required production dashboard IDs for admin control-plane post-release monitoring. */
+const REQUIRED_DASHBOARD_IDS = [
+  "admin_control_plane_health",
+  "admin_auth_access",
+  "admin_actions_audit",
+  "admin_worker_queues",
+  "admin_data_services",
+  "admin_artifact_security",
+  "admin_release_rollback",
+];
+
 /** Services that must use Railway config-as-code. */
 const REQUIRED_RAILWAY_CONFIG_SERVICES = [
   "api",
@@ -163,6 +174,8 @@ export type ProductionDeploymentAuditInput = {
 export type ProductionDeploymentAuditReport = {
   /** Alert IDs validated by the audit. */
   readonly alerts: readonly string[];
+  /** Dashboard IDs validated by the audit. */
+  readonly dashboards: readonly string[];
   /** Release-gate commands validated by the audit. */
   readonly releaseGates: readonly string[];
   /** Production services validated by the audit. */
@@ -200,6 +213,7 @@ export function buildProductionDeploymentAuditReport(
 
   return {
     alerts: alertIds(input.manifest),
+    dashboards: dashboardIds(input.manifest),
     releaseGates: releaseGateCommands(input.manifest),
     services: serviceNames(input.manifest),
     status: "admin control-plane production deployment audit passed",
@@ -246,6 +260,10 @@ export function productionDeploymentIssues(
     ...REQUIRED_ALERT_IDS.filter((alertId) => !alertIds(input.manifest).includes(alertId)).map(
       (alertId) => `observability alert ${alertId} is required`,
     ),
+    ...REQUIRED_DASHBOARD_IDS.filter(
+      (dashboardId) => !dashboardIds(input.manifest).includes(dashboardId),
+    ).map((dashboardId) => `observability dashboard ${dashboardId} is required`),
+    ...dashboardRecordIssues(input.manifest),
     ...missingDockerfileIssues(input),
     ...missingRailwayConfigIssues(input),
     requiredStringArray(recordField(input.manifest, "rollback"), "commands").length === 0
@@ -255,6 +273,24 @@ export function productionDeploymentIssues(
       ? "rollback checks are required"
       : undefined,
   ].filter((issue): issue is string => typeof issue === "string");
+}
+
+/** Returns issues for dashboard records that cannot support post-release monitoring. */
+function dashboardRecordIssues(manifest: JsonRecord): readonly string[] {
+  return recordArray(recordField(manifest, "observability"), "dashboards").flatMap((dashboard) => {
+    const dashboardId = stringField(dashboard, "id") ?? "unknown";
+    return [
+      !stringField(dashboard, "title")
+        ? `observability dashboard ${dashboardId} title is required`
+        : undefined,
+      !stringField(dashboard, "owner")
+        ? `observability dashboard ${dashboardId} owner is required`
+        : undefined,
+      requiredStringArray(dashboard, "signals").length === 0
+        ? `observability dashboard ${dashboardId} signals are required`
+        : undefined,
+    ].filter((issue): issue is string => typeof issue === "string");
+  });
 }
 
 /** Returns issues for role-specific worker service deployment records. */
@@ -335,6 +371,13 @@ function alertIds(manifest: JsonRecord): readonly string[] {
   return recordArray(recordField(manifest, "observability"), "alerts")
     .map((alert) => stringField(alert, "id"))
     .filter((alertId): alertId is string => typeof alertId === "string");
+}
+
+/** Returns dashboard IDs from a manifest. */
+function dashboardIds(manifest: JsonRecord): readonly string[] {
+  return recordArray(recordField(manifest, "observability"), "dashboards")
+    .map((dashboard) => stringField(dashboard, "id"))
+    .filter((dashboardId): dashboardId is string => typeof dashboardId === "string");
 }
 
 /** Returns service names from a manifest. */

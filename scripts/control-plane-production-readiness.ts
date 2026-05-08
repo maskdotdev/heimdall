@@ -28,6 +28,7 @@ const REQUIRED_RUNBOOK_SECTIONS = [
   "## Gateway Hardening Checklist",
   "## Secret Rotation Procedure",
   "## Monitoring and Rollback Checks",
+  "### Post-Release Monitoring and Follow-Up Tracking",
   "### Emergency Disable Path",
   "### Rollback Checks",
 ] as const;
@@ -139,7 +140,7 @@ export function buildProductionReadinessReport(
       },
       {
         detail:
-          "runbook includes rollout, hardening, rotation, monitoring, rollback, and disable procedures",
+          "runbook includes rollout, hardening, rotation, monitoring, follow-up tracking, rollback, and disable procedures",
         name: "production runbook coverage",
       },
       {

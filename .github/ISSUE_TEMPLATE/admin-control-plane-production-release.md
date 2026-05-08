@@ -46,6 +46,8 @@ and rollback plan.
 - [ ] API starts with `HEIMDALL_ADMIN_ENABLED=false` or route exposure disabled.
 - [ ] Gateway login allowlist is explicit or security owner approved all-org access.
 - [ ] Alert checks are configured for health, auth failures, replay audit, settings audit, and disable.
+- [ ] Monitoring dashboards exist for health, auth/access, actions/audit, worker queues, data
+      services, artifact security, and release/rollback checks.
 
 ## Enablement Checklist
 
@@ -68,6 +70,24 @@ and rollback plan.
 - Decision time:
 - Notes:
 
+## Production Monitoring Record
+
+| Dashboard or signal | Link or query | Status | Notes |
+| --- | --- | --- | --- |
+| Control-plane health |  |  | API, dashboard, and gateway health |
+| Auth and access |  |  | Admin auth success, denials, and gateway rejections |
+| Actions and audit |  |  | Replay, settings, debug export, and eval import audit visibility |
+| Worker queues |  |  | Worker heartbeat, queue depth, and oldest job age |
+| Data services |  |  | Postgres, Redis, migrations, and queue recovery |
+| Artifact security |  |  | Artifact storage errors and raw-access denials |
+| Release and rollback |  |  | Deploy revisions, gate results, and emergency disable |
+
+## Follow-Up Issue Tracking
+
+| Issue | Owner | Severity | Due date | Status |
+| --- | --- | --- | --- | --- |
+|  |  |  |  |  |
+
 ## Rollback
 
 - API disable command or Railway env change:
@@ -82,4 +102,7 @@ and rollback plan.
 - [ ] Confirm no unexpected `admin.access.denied` spike.
 - [ ] Confirm every `admin.replay.dispatched` has a matching replay audit row.
 - [ ] Confirm every `admin.settings.updated` has a matching `repo.settings.updated` row.
+- [ ] Record dashboard links and alert check results in the monitoring record.
+- [ ] Create follow-up issues for unresolved alerts, manual mitigations, missing dashboards,
+      missing alerts, disabled routes, and deferred phase risks.
 - [ ] Close the release after owners sign off.

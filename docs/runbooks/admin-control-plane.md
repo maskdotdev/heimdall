@@ -486,6 +486,18 @@ verifies that the committed staging proof passed, includes actor, scope, audit, 
 rollback evidence, and that this runbook covers rollout, hardening, rotation, monitoring, rollback,
 emergency disable, and the persisted replay audit action names.
 
+### Post-Release Monitoring and Follow-Up Tracking
+
+During the post-enablement watch, the release owner records production dashboard links and alert
+checks in the release ticket. Record links for control-plane health, auth/access, action/audit,
+worker queues, data services, artifact security, and release/rollback dashboards before closing the
+release.
+
+Open a follow-up issue for each unresolved alert, manual mitigation, disabled route, missing
+dashboard, missing alert, or deferred phase risk found during the release. Each follow-up issue must
+include an owner, severity, target date, affected phase, evidence link, and acceptance criteria. Do
+not close the release ticket while any critical follow-up issue lacks an owner or rollback decision.
+
 ### Emergency Disable Path
 
 1. Set `HEIMDALL_ADMIN_ENABLED=false` on `@app/api`, or set

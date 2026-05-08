@@ -50,6 +50,15 @@ describe("production deployment manifest", () => {
       "postgres",
       "redis",
     ]);
+    expect(report.dashboards).toEqual([
+      "admin_control_plane_health",
+      "admin_auth_access",
+      "admin_actions_audit",
+      "admin_worker_queues",
+      "admin_data_services",
+      "admin_artifact_security",
+      "admin_release_rollback",
+    ]);
   });
 
   it("rejects missing admin gateway service coverage", () => {
@@ -86,6 +95,46 @@ describe("production deployment manifest", () => {
       expect.arrayContaining([
         "observability alert admin_auth_failure_rate is required",
         "package script preflight:control-plane:staging is required",
+      ]),
+    );
+  });
+
+  it("reports missing production dashboard coverage", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        observability: {
+          ...validManifest().observability,
+          dashboards: validManifest().observability.dashboards.filter(
+            (dashboard) => dashboard.id !== "admin_actions_audit",
+          ),
+        },
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining(["observability dashboard admin_actions_audit is required"]),
+    );
+  });
+
+  it("reports incomplete production dashboard records", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        observability: {
+          ...validManifest().observability,
+          dashboards: validManifest().observability.dashboards.map((dashboard) =>
+            dashboard.id === "admin_worker_queues" ? { id: dashboard.id, signals: [] } : dashboard,
+          ),
+        },
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining([
+        "observability dashboard admin_worker_queues owner is required",
+        "observability dashboard admin_worker_queues signals are required",
+        "observability dashboard admin_worker_queues title is required",
       ]),
     );
   });
@@ -212,6 +261,15 @@ function validManifest() {
         alert("admin_settings_update_audit"),
         alert("admin_emergency_disable"),
       ],
+      dashboards: [
+        dashboard("admin_control_plane_health"),
+        dashboard("admin_auth_access"),
+        dashboard("admin_actions_audit"),
+        dashboard("admin_worker_queues"),
+        dashboard("admin_data_services"),
+        dashboard("admin_artifact_security"),
+        dashboard("admin_release_rollback"),
+      ],
     },
     provider: "railway",
     releaseGates: [
@@ -322,6 +380,11 @@ function validPackageJson() {
 /** Creates an alert fixture. */
 function alert(id: string) {
   return { id, query: "query", severity: "critical" };
+}
+
+/** Creates a dashboard fixture. */
+function dashboard(id: string) {
+  return { id, owner: "operations", signals: ["health"], title: id };
 }
 
 /** Creates a release-gate fixture. */
