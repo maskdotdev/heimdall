@@ -41,9 +41,11 @@ import {
   type PublishReviewJobPayload,
   parseWithSchema,
   type ReviewArtifactCleanupJobPayload,
+  ReviewArtifactCleanupJobPayloadSchema,
   type ReviewPullRequestJobPayload,
   type ReviewTrigger,
   type SandboxCleanupJobPayload,
+  SandboxCleanupJobPayloadSchema,
   type SyncInstallationJobPayload,
   type UpdateMemoryJobPayload,
 } from "@repo/contracts";
@@ -220,6 +222,12 @@ const DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_LIMIT = 100;
 /** Default actor label for scheduled compliance evidence jobs. */
 const DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_ACTOR = "worker:scheduled_compliance_evidence";
+/** Default delay between scheduled retention cleanup enqueue attempts. */
+const DEFAULT_RETENTION_CLEANUP_SCHEDULER_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Default row limit used by scheduled retention cleanup jobs. */
+const DEFAULT_RETENTION_CLEANUP_SCHEDULER_LIMIT = 100;
+/** Default sandbox run age cleaned up by scheduled retention jobs. */
+const DEFAULT_SANDBOX_RETENTION_CLEANUP_OLDER_THAN_DAYS = 30;
 /** Default delay between queue health metric samples. */
 const DEFAULT_QUEUE_METRICS_INTERVAL_MS = 30_000;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
@@ -458,6 +466,42 @@ export type EnqueueScheduledComplianceEvidenceCollectionResult = {
   /** Idempotency key used for the scheduled collection job. */
   readonly jobKey: string;
   /** ISO timestamp for the scheduler bucket represented by the job. */
+  readonly scheduledFor: string;
+};
+
+/** Worker-level settings for recurring retention cleanup jobs. */
+export type WorkerRetentionCleanupSchedulerConfig = {
+  /** Whether this scheduler should enqueue recurring retention cleanup jobs. */
+  readonly enabled: boolean;
+  /** Whether scheduled cleanup jobs should only plan work. */
+  readonly dryRun: boolean;
+  /** Milliseconds represented by one idempotent scheduler bucket. */
+  readonly intervalMs: number;
+  /** Maximum rows each cleanup job should inspect. */
+  readonly limit: number;
+  /** Minimum sandbox run age selected by scheduled sandbox cleanup. */
+  readonly sandboxOlderThanDays: number;
+};
+
+/** One durable cleanup job created by the retention scheduler. */
+export type EnqueuedScheduledRetentionCleanupJob = {
+  /** Durable background job row ID for the cleanup job. */
+  readonly backgroundJobId: string;
+  /** Whether this call inserted a new durable job row. */
+  readonly inserted: boolean;
+  /** Idempotency key used for the scheduled cleanup job. */
+  readonly jobKey: string;
+  /** Contract job type that will execute cleanup. */
+  readonly jobType: typeof JOB_TYPES.SandboxCleanup | typeof JOB_TYPES.ReviewArtifactCleanup;
+};
+
+/** Result returned after one scheduled retention cleanup enqueue attempt. */
+export type EnqueueScheduledRetentionCleanupJobsResult = {
+  /** Number of cleanup jobs inserted during this attempt. */
+  readonly insertedCount: number;
+  /** Durable cleanup jobs represented by this schedule bucket. */
+  readonly jobs: readonly EnqueuedScheduledRetentionCleanupJob[];
+  /** ISO timestamp for the scheduler bucket represented by the jobs. */
   readonly scheduledFor: string;
 };
 
@@ -1268,6 +1312,155 @@ export async function enqueueScheduledComplianceEvidenceCollection(
 
 /** Returns the start of the idempotent scheduler bucket for a compliance evidence run. */
 function complianceEvidenceSchedulerBucketStart(now: Date, intervalMs: number): Date {
+  return new Date(Math.floor(now.getTime() / intervalMs) * intervalMs);
+}
+
+/** Enqueues idempotent scheduled retention cleanup jobs for the current bucket. */
+export async function enqueueScheduledRetentionCleanupJobs(
+  db: HeimdallDatabase,
+  config: WorkerRetentionCleanupSchedulerConfig,
+  options: {
+    /** Current time used to calculate the scheduler bucket. */
+    readonly now?: Date;
+  } = {},
+): Promise<EnqueueScheduledRetentionCleanupJobsResult> {
+  const now = options.now ?? new Date();
+  const scheduledFor = retentionCleanupSchedulerBucketStart(now, config.intervalMs).toISOString();
+  const jobs: EnqueuedScheduledRetentionCleanupJob[] = [];
+
+  jobs.push(
+    await insertScheduledRetentionCleanupJob({
+      db,
+      envelope: createScheduledSandboxCleanupEnvelope(config, { now, scheduledFor }),
+      jobKeyPrefix: "sandbox_cleanup",
+      metadataTarget: "sandbox_runs",
+      scheduledFor,
+    }),
+  );
+  jobs.push(
+    await insertScheduledRetentionCleanupJob({
+      db,
+      envelope: createScheduledReviewArtifactCleanupEnvelope(config, { now, scheduledFor }),
+      jobKeyPrefix: "review_artifact_cleanup",
+      metadataTarget: "review_artifacts",
+      scheduledFor,
+    }),
+  );
+
+  return {
+    insertedCount: jobs.filter((job) => job.inserted).length,
+    jobs,
+    scheduledFor,
+  };
+}
+
+/** Input used to insert one scheduled retention cleanup job. */
+type InsertScheduledRetentionCleanupJobInput = {
+  /** Database facade used to insert the durable job. */
+  readonly db: HeimdallDatabase;
+  /** Durable cleanup envelope to persist. */
+  readonly envelope: JobEnvelope<SandboxCleanupJobPayload | ReviewArtifactCleanupJobPayload>;
+  /** Stable ID namespace for the cleanup job. */
+  readonly jobKeyPrefix: string;
+  /** Product-safe target label for job metadata. */
+  readonly metadataTarget: "sandbox_runs" | "review_artifacts";
+  /** ISO timestamp for the scheduler bucket represented by the job. */
+  readonly scheduledFor: string;
+};
+
+/** Inserts one durable retention cleanup job for a scheduler bucket. */
+async function insertScheduledRetentionCleanupJob(
+  input: InsertScheduledRetentionCleanupJobInput,
+): Promise<EnqueuedScheduledRetentionCleanupJob> {
+  const { inserted, job } = await new BackgroundJobRepository(input.db).insertBackgroundJob({
+    backgroundJobId: stableWorkerId("job", [input.jobKeyPrefix, input.envelope.idempotencyKey]),
+    envelope: input.envelope,
+    metadata: {
+      scheduledBucket: input.scheduledFor,
+      source: "retention_cleanup_scheduler",
+      target: input.metadataTarget,
+    },
+    queueName: QUEUE_NAMES.security,
+    scheduledAt: input.scheduledFor,
+  });
+
+  return {
+    backgroundJobId: job.backgroundJobId,
+    inserted,
+    jobKey: input.envelope.idempotencyKey,
+    jobType: input.envelope.jobType as
+      | typeof JOB_TYPES.SandboxCleanup
+      | typeof JOB_TYPES.ReviewArtifactCleanup,
+  };
+}
+
+/** Creates the scheduled sandbox cleanup job envelope for one scheduler bucket. */
+function createScheduledSandboxCleanupEnvelope(
+  config: WorkerRetentionCleanupSchedulerConfig,
+  input: {
+    /** Current wall-clock time used for deterministic envelopes. */
+    readonly now: Date;
+    /** ISO timestamp for the scheduler bucket represented by the job. */
+    readonly scheduledFor: string;
+  },
+): JobEnvelope<SandboxCleanupJobPayload> {
+  const jobKey = `sandbox:cleanup:retention:${input.scheduledFor}`;
+  const payload = parseWithSchema("SandboxCleanupJobPayload", SandboxCleanupJobPayloadSchema, {
+    dryRun: config.dryRun,
+    limit: config.limit,
+    olderThanDays: config.sandboxOlderThanDays,
+    reason: "retention_policy",
+  });
+
+  return {
+    attempt: 0,
+    createdAt: input.now.toISOString(),
+    idempotencyKey: jobKey,
+    jobId: stableWorkerId("job", ["sandbox_cleanup", jobKey, "envelope"]),
+    jobType: JOB_TYPES.SandboxCleanup,
+    maxAttempts: 3,
+    payload,
+    scheduledFor: input.scheduledFor,
+    schemaVersion: "sandbox_cleanup_job.v1",
+  };
+}
+
+/** Creates the scheduled review artifact cleanup job envelope for one scheduler bucket. */
+function createScheduledReviewArtifactCleanupEnvelope(
+  config: WorkerRetentionCleanupSchedulerConfig,
+  input: {
+    /** Current wall-clock time used for deterministic envelopes. */
+    readonly now: Date;
+    /** ISO timestamp for the scheduler bucket represented by the job. */
+    readonly scheduledFor: string;
+  },
+): JobEnvelope<ReviewArtifactCleanupJobPayload> {
+  const jobKey = `review-artifact:cleanup:retention:${input.scheduledFor}`;
+  const payload = parseWithSchema(
+    "ReviewArtifactCleanupJobPayload",
+    ReviewArtifactCleanupJobPayloadSchema,
+    {
+      dryRun: config.dryRun,
+      limit: config.limit,
+      reason: "retention_policy",
+    },
+  );
+
+  return {
+    attempt: 0,
+    createdAt: input.now.toISOString(),
+    idempotencyKey: jobKey,
+    jobId: stableWorkerId("job", ["review_artifact_cleanup", jobKey, "envelope"]),
+    jobType: JOB_TYPES.ReviewArtifactCleanup,
+    maxAttempts: 3,
+    payload,
+    scheduledFor: input.scheduledFor,
+    schemaVersion: "review_artifact_cleanup_job.v1",
+  };
+}
+
+/** Returns the start of the idempotent scheduler bucket for retention cleanup jobs. */
+function retentionCleanupSchedulerBucketStart(now: Date, intervalMs: number): Date {
   return new Date(Math.floor(now.getTime() / intervalMs) * intervalMs);
 }
 
@@ -2458,8 +2651,13 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const complianceEvidenceScheduler = createWorkerComplianceEvidenceSchedulerConfigFromEnvironment(
     process.env,
   );
+  const retentionCleanupScheduler = createWorkerRetentionCleanupSchedulerConfigFromEnvironment(
+    process.env,
+  );
   const shouldRunComplianceEvidenceScheduler =
     shouldRunWorkerMaintenance(process.env) && complianceEvidenceScheduler.enabled;
+  const shouldRunRetentionCleanupScheduler =
+    shouldRunWorkerMaintenance(process.env) && retentionCleanupScheduler.enabled;
   const workerQueueNames = createWorkerQueueNamesFromEnvironment(process.env);
   const workerRoleLabel = createWorkerRoleLabelFromEnvironment(process.env);
   const queueMetricsClients = createWorkerQueueMetricsClients(process.env, workerConnection);
@@ -2567,6 +2765,21 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       });
     }
   };
+  const enqueueRetentionCleanupJobs = async () => {
+    const result = await enqueueScheduledRetentionCleanupJobs(
+      databaseClient.db,
+      retentionCleanupScheduler,
+    );
+    if (result.insertedCount > 0) {
+      observability.logger.info("scheduled retention cleanup jobs enqueued", {
+        attributes: {
+          "event.name": "worker.retention_cleanup.scheduled",
+          "retention_cleanup.inserted_count": result.insertedCount,
+          "retention_cleanup.scheduled_for": result.scheduledFor,
+        },
+      });
+    }
+  };
   const dispatchInterval = setInterval(() => {
     dispatch().catch((error: unknown) => {
       observability.logger.error("outbox dispatch failed", {
@@ -2604,10 +2817,23 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
         });
       }, complianceEvidenceScheduler.intervalMs)
     : undefined;
+  const retentionCleanupSchedulerInterval = shouldRunRetentionCleanupScheduler
+    ? setInterval(() => {
+        enqueueRetentionCleanupJobs().catch((error: unknown) => {
+          observability.logger.error("retention cleanup scheduler failed", {
+            error,
+            target: "worker.retention_cleanup_scheduler",
+          });
+        });
+      }, retentionCleanupScheduler.intervalMs)
+    : undefined;
 
   await recoverStaleRunningJobs();
   if (shouldRunComplianceEvidenceScheduler) {
     await enqueueComplianceEvidenceCollection();
+  }
+  if (shouldRunRetentionCleanupScheduler) {
+    await enqueueRetentionCleanupJobs();
   }
   await dispatch();
   if (queueMetricsClients.length > 0) {
@@ -2635,6 +2861,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       }
       if (complianceEvidenceSchedulerInterval) {
         clearInterval(complianceEvidenceSchedulerInterval);
+      }
+      if (retentionCleanupSchedulerInterval) {
+        clearInterval(retentionCleanupSchedulerInterval);
       }
       observability.logger.info("worker service stopping", {
         attributes: { "event.name": "worker.service.stopping" },
@@ -3449,6 +3678,25 @@ export function createWorkerComplianceEvidenceSchedulerConfigFromEnvironment(
     target: complianceEvidenceCollectTargetFromEnvironment(
       env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_TARGET,
     ),
+  };
+}
+
+/** Creates recurring retention cleanup scheduler settings from worker environment values. */
+export function createWorkerRetentionCleanupSchedulerConfigFromEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+): WorkerRetentionCleanupSchedulerConfig {
+  return {
+    dryRun: optionalEnvBoolean(env.HEIMDALL_RETENTION_CLEANUP_SCHEDULER_DRY_RUN) ?? false,
+    enabled: optionalEnvBoolean(env.HEIMDALL_RETENTION_CLEANUP_SCHEDULER_ENABLED) ?? true,
+    intervalMs:
+      optionalPositiveInteger(env.HEIMDALL_RETENTION_CLEANUP_SCHEDULER_INTERVAL_MS) ??
+      DEFAULT_RETENTION_CLEANUP_SCHEDULER_INTERVAL_MS,
+    limit:
+      optionalPositiveInteger(env.HEIMDALL_RETENTION_CLEANUP_SCHEDULER_LIMIT) ??
+      DEFAULT_RETENTION_CLEANUP_SCHEDULER_LIMIT,
+    sandboxOlderThanDays:
+      optionalPositiveInteger(env.HEIMDALL_SANDBOX_CLEANUP_OLDER_THAN_DAYS) ??
+      DEFAULT_SANDBOX_RETENTION_CLEANUP_OLDER_THAN_DAYS,
   };
 }
 

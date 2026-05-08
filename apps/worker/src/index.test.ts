@@ -45,10 +45,12 @@ import {
   createWorkerLlmGatewayFromEnvironment,
   createWorkerQueueNamesFromEnvironment,
   createWorkerRepoSyncCleanupLimitFromEnvironment,
+  createWorkerRetentionCleanupSchedulerConfigFromEnvironment,
   createWorkerReviewIndexDependencyModeFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
   enqueueScheduledComplianceEvidenceCollection,
+  enqueueScheduledRetentionCleanupJobs,
   enqueueWaitingReviewRunsForIndex,
   loadGitHubInstallationRef,
   persistIndexArtifactForImport,
@@ -761,6 +763,116 @@ describe("enqueueScheduledComplianceEvidenceCollection", () => {
           payload: validComplianceEvidenceCollectJobPayloadFixture,
           scheduledFor: "2026-05-08T00:00:00.000Z",
           schemaVersion: "compliance_evidence_collect_job.v1",
+        },
+        queueName: QUEUE_NAMES.security,
+        scheduledAt: new Date("2026-05-08T00:00:00.000Z"),
+      },
+    ]);
+  });
+});
+
+describe("createWorkerRetentionCleanupSchedulerConfigFromEnvironment", () => {
+  it("uses bounded retention cleanup defaults", () => {
+    expect(createWorkerRetentionCleanupSchedulerConfigFromEnvironment({})).toEqual({
+      dryRun: false,
+      enabled: true,
+      intervalMs: 86_400_000,
+      limit: 100,
+      sandboxOlderThanDays: 30,
+    });
+  });
+
+  it("parses retention cleanup overrides", () => {
+    expect(
+      createWorkerRetentionCleanupSchedulerConfigFromEnvironment({
+        HEIMDALL_RETENTION_CLEANUP_SCHEDULER_DRY_RUN: "true",
+        HEIMDALL_RETENTION_CLEANUP_SCHEDULER_ENABLED: "false",
+        HEIMDALL_RETENTION_CLEANUP_SCHEDULER_INTERVAL_MS: "7200000",
+        HEIMDALL_RETENTION_CLEANUP_SCHEDULER_LIMIT: "50",
+        HEIMDALL_SANDBOX_CLEANUP_OLDER_THAN_DAYS: "14",
+      }),
+    ).toEqual({
+      dryRun: true,
+      enabled: false,
+      intervalMs: 7_200_000,
+      limit: 50,
+      sandboxOlderThanDays: 14,
+    });
+  });
+});
+
+describe("enqueueScheduledRetentionCleanupJobs", () => {
+  it("creates idempotent security-queue jobs for sandbox and artifact retention", async () => {
+    const insertedRows: unknown[] = [];
+    const now = new Date("2026-05-08T14:24:00.000Z");
+    const result = await enqueueScheduledRetentionCleanupJobs(
+      createBackgroundJobInsertDatabaseStub(insertedRows),
+      {
+        dryRun: false,
+        enabled: true,
+        intervalMs: 86_400_000,
+        limit: 100,
+        sandboxOlderThanDays: 30,
+      },
+      { now },
+    );
+
+    expect(result).toEqual({
+      insertedCount: 2,
+      jobs: [
+        {
+          backgroundJobId: expect.stringMatching(/^job_[a-f0-9]{24}$/),
+          inserted: true,
+          jobKey: "sandbox:cleanup:retention:2026-05-08T00:00:00.000Z",
+          jobType: JOB_TYPES.SandboxCleanup,
+        },
+        {
+          backgroundJobId: expect.stringMatching(/^job_[a-f0-9]{24}$/),
+          inserted: true,
+          jobKey: "review-artifact:cleanup:retention:2026-05-08T00:00:00.000Z",
+          jobType: JOB_TYPES.ReviewArtifactCleanup,
+        },
+      ],
+      scheduledFor: "2026-05-08T00:00:00.000Z",
+    });
+    expect(insertedRows).toMatchObject([
+      {
+        jobKey: "sandbox:cleanup:retention:2026-05-08T00:00:00.000Z",
+        jobType: JOB_TYPES.SandboxCleanup,
+        metadata: {
+          scheduledBucket: "2026-05-08T00:00:00.000Z",
+          source: "retention_cleanup_scheduler",
+          target: "sandbox_runs",
+        },
+        payload: {
+          payload: {
+            dryRun: false,
+            limit: 100,
+            olderThanDays: 30,
+            reason: "retention_policy",
+          },
+          scheduledFor: "2026-05-08T00:00:00.000Z",
+          schemaVersion: "sandbox_cleanup_job.v1",
+        },
+        queueName: QUEUE_NAMES.security,
+        scheduledAt: new Date("2026-05-08T00:00:00.000Z"),
+      },
+      {
+        jobKey: "review-artifact:cleanup:retention:2026-05-08T00:00:00.000Z",
+        jobType: JOB_TYPES.ReviewArtifactCleanup,
+        metadata: {
+          scheduledBucket: "2026-05-08T00:00:00.000Z",
+          source: "retention_cleanup_scheduler",
+          target: "review_artifacts",
+        },
+        payload: {
+          payload: {
+            dryRun: false,
+            limit: 100,
+            reason: "retention_policy",
+          },
+          scheduledFor: "2026-05-08T00:00:00.000Z",
+          schemaVersion: "review_artifact_cleanup_job.v1",
         },
         queueName: QUEUE_NAMES.security,
         scheduledAt: new Date("2026-05-08T00:00:00.000Z"),
