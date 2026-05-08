@@ -23,7 +23,9 @@ import {
   createDefaultReviewPassRegistry,
   createReviewEngine,
   llmReviewPass,
+  ReviewPassRegistry,
   runReviewPasses,
+  runReviewPassesDetailed,
   selectReviewPasses,
   staticAnalysisReviewPass,
   validateAndRankCandidateFindings,
@@ -121,6 +123,77 @@ describe("createReviewEngine", () => {
       category: "correctness",
       source: "llm",
       sourceName: "correctness",
+    });
+    expect(result.passResults.map((passResult) => passResult.status)).toEqual([
+      "succeeded",
+      "succeeded",
+      "succeeded",
+      "succeeded",
+      "succeeded",
+    ]);
+  });
+
+  it("isolates selected pass failures and returns structured pass results", async () => {
+    const engine = createReviewEngine();
+    const registry = new ReviewPassRegistry([
+      {
+        passId: "pr_summary",
+        pass: { name: "pr_summary", version: "1.0.0", run: async () => [] },
+      },
+      {
+        passId: "behavior_change",
+        pass: { name: "behavior_change", version: "1.0.0", run: async () => [] },
+      },
+      {
+        passId: "correctness",
+        pass: {
+          name: "correctness",
+          version: "1.0.0",
+          run: async () => [candidateFindingFixture({ sourceName: "correctness" })],
+        },
+      },
+      {
+        passId: "test_coverage",
+        pass: {
+          name: "test_coverage",
+          version: "1.0.0",
+          run: async () => {
+            throw new Error("fixture pass failure");
+          },
+        },
+      },
+      {
+        passId: "finding_judge",
+        pass: { name: "finding_judge", version: "1.0.0", run: async () => [] },
+      },
+    ]);
+
+    const result = await engine.run({
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        timestamp: validCandidateFindingFixture.createdAt,
+      },
+      registry,
+    });
+    const failedPass = result.passResults.find(
+      (passResult) => passResult.passName === "test_coverage",
+    );
+
+    expect(result.findings).toHaveLength(1);
+    expect(
+      result.passResults.map((passResult) => [passResult.passName, passResult.status]),
+    ).toEqual([
+      ["pr_summary", "succeeded"],
+      ["behavior_change", "succeeded"],
+      ["correctness", "succeeded"],
+      ["test_coverage", "failed"],
+      ["finding_judge", "succeeded"],
+    ]);
+    expect(failedPass?.error).toMatchObject({
+      code: "unknown_error",
+      message: "fixture pass failure",
+      retryable: false,
     });
   });
 });
@@ -262,6 +335,66 @@ describe("runReviewPasses telemetry", () => {
     expect(serializedTelemetry).not.toContain("Leaky body text");
     expect(serializedTelemetry).not.toContain("Leaky evidence summary");
     expect(serializedTelemetry).not.toContain("src/private-path.ts");
+  });
+
+  it("returns detailed pass results when failure isolation is enabled", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const result = await runReviewPassesDetailed({
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        timestamp: validCandidateFindingFixture.createdAt,
+      },
+      isolatePassFailures: true,
+      metrics: createRecordingMetrics(metrics),
+      passes: [
+        {
+          name: "success-pass",
+          version: "1.0.0",
+          run: async () => [candidateFindingFixture({ sourceName: "success-pass" })],
+        },
+        {
+          name: "failing-pass",
+          version: "1.0.0",
+          run: async () => {
+            throw new Error("fixture isolated failure");
+          },
+        },
+      ],
+      traces: createRecordingTraces(spans),
+    });
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.passResults.map((passResult) => passResult.status)).toEqual([
+      "succeeded",
+      "failed",
+    ]);
+    expect(result.passResults[1]?.error).toMatchObject({
+      code: "unknown_error",
+      message: "fixture isolated failure",
+      retryable: false,
+    });
+    expect(metrics).toContainEqual(
+      expect.objectContaining({
+        kind: "counter",
+        labels: {
+          error_class: "unknown_error",
+          pass_name: "failing-pass",
+          status: "failed",
+        },
+        name: OBSERVABILITY_METRIC_NAMES.reviewPassFailuresTotal,
+      }),
+    );
+    expect(spans).toContainEqual(
+      expect.objectContaining({
+        endAttributes: expect.objectContaining({
+          "review.judge_enabled": false,
+          "review.output_candidate_count": 1,
+        }),
+        name: OBSERVABILITY_SPAN_NAMES.reviewEngineJudgeCandidates,
+      }),
+    );
   });
 });
 

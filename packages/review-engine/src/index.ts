@@ -210,6 +210,8 @@ export type ReviewEngineInput = ReviewEngineTelemetryOptions & {
 export type ReviewEngineResult = {
   /** Pass IDs selected for this review run. */
   readonly selectedPassIds: readonly ReviewPassId[];
+  /** Structured execution results for selected passes. */
+  readonly passResults: readonly ReviewPassResult[];
   /** Candidate findings emitted by selected passes. */
   readonly findings: readonly CandidateFinding[];
 };
@@ -416,18 +418,60 @@ export function createReviewEngine(): ReviewEngine {
         snapshot: input.context.snapshot,
       });
       const passes = selectedPassIds.map((passId) => registry.require(passId));
-      const findings = await runReviewPasses({
+      const result = await runReviewPassesDetailed({
         context: input.context,
         ...(input.metrics ? { metrics: input.metrics } : {}),
+        isolatePassFailures: true,
         passes,
         ...(input.traceContext ? { traceContext: input.traceContext } : {}),
         ...(input.traces ? { traces: input.traces } : {}),
       });
 
-      return { findings, selectedPassIds };
+      return { findings: result.findings, passResults: result.passResults, selectedPassIds };
     },
   };
 }
+
+/** Final execution status for a single review pass. */
+export type ReviewPassResultStatus = "failed" | "succeeded";
+
+/** Product-safe failure details captured for an isolated review pass failure. */
+export type ReviewPassFailure = {
+  /** Product-safe error class. */
+  readonly code: string;
+  /** Bounded error message for operator debugging. */
+  readonly message: string;
+  /** Whether the pass failure is likely to succeed on retry. */
+  readonly retryable: boolean;
+};
+
+/** Structured result for one review pass execution. */
+export type ReviewPassResult = {
+  /** Stable pass name. */
+  readonly passName: string;
+  /** Pass implementation version. */
+  readonly passVersion: string;
+  /** Final pass status. */
+  readonly status: ReviewPassResultStatus;
+  /** ISO timestamp for when the pass started. */
+  readonly startedAt: string;
+  /** ISO timestamp for when the pass finished. */
+  readonly finishedAt: string;
+  /** Pass runtime in milliseconds. */
+  readonly durationMs: number;
+  /** Candidate findings emitted by the pass. Empty when the pass failed. */
+  readonly candidates: readonly CandidateFinding[];
+  /** Product-safe failure details when the pass failed. */
+  readonly error?: ReviewPassFailure;
+};
+
+/** Structured result for a review pass set. */
+export type RunReviewPassesResult = {
+  /** Candidate findings emitted by all successful passes. */
+  readonly findings: readonly CandidateFinding[];
+  /** Structured pass execution results in input pass order. */
+  readonly passResults: readonly ReviewPassResult[];
+};
 
 /** Input for executing selected review passes with optional telemetry. */
 export type RunReviewPassesInput = ReviewEngineTelemetryOptions & {
@@ -435,28 +479,40 @@ export type RunReviewPassesInput = ReviewEngineTelemetryOptions & {
   readonly passes?: readonly ReviewPass[];
   /** Review pass context shared across passes. */
   readonly context: ReviewPassContext;
+  /** Whether failed passes should return failed pass results instead of failing the full run. */
+  readonly isolatePassFailures?: boolean;
 };
 
 /** Runs review passes in order and returns all emitted candidate findings. */
 export async function runReviewPasses(
   input: RunReviewPassesInput,
 ): Promise<readonly CandidateFinding[]> {
+  return (await runReviewPassesDetailed(input)).findings;
+}
+
+/** Runs review passes and returns structured pass results plus successful candidate findings. */
+export async function runReviewPassesDetailed(
+  input: RunReviewPassesInput,
+): Promise<RunReviewPassesResult> {
   const passes = input.passes ?? [deterministicBoundaryPass];
   const telemetry = startReviewEngineRunTelemetry(input, passes.length);
 
   try {
-    const findingSets = await Promise.all(
+    const passResults = await Promise.all(
       passes.map((pass, index) => runReviewPassWithTelemetry(input, pass, index)),
     );
-    const findings = recordCandidateNormalizationTelemetry(input, findingSets.flat());
+    const findings = recordCandidateNormalizationTelemetry(
+      input,
+      passResults.flatMap((result) => result.candidates),
+    );
     recordCandidateJudgeTelemetry(input, passes, findings);
     finishReviewEngineRunTelemetry(telemetry, {
       candidateCount: findings.length,
       passCount: passes.length,
-      status: "succeeded",
+      status: passResults.some((result) => result.status === "failed") ? "partial" : "succeeded",
     });
 
-    return findings;
+    return { findings, passResults };
   } catch (error) {
     finishReviewEngineRunTelemetry(telemetry, {
       error,
@@ -515,8 +571,9 @@ async function runReviewPassWithTelemetry(
   input: RunReviewPassesInput,
   pass: ReviewPass,
   passIndex: number,
-): Promise<readonly CandidateFinding[]> {
+): Promise<ReviewPassResult> {
   const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
   const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewEnginePass, {
     attributes: {
       "app.repo_id": input.context.snapshot.repoId,
@@ -532,6 +589,7 @@ async function runReviewPassWithTelemetry(
   try {
     const findings = await pass.run(input.context);
     const durationMs = Math.max(0, Date.now() - startedAtMs);
+    const finishedAt = new Date().toISOString();
     const labels = reviewPassTelemetryLabels(pass, "succeeded");
 
     input.metrics?.histogram(OBSERVABILITY_METRIC_NAMES.reviewPassDurationMs, durationMs, {
@@ -550,9 +608,18 @@ async function runReviewPassWithTelemetry(
       },
     });
 
-    return findings;
+    return {
+      candidates: findings,
+      durationMs,
+      finishedAt,
+      passName: pass.name,
+      passVersion: pass.version,
+      startedAt,
+      status: "succeeded",
+    };
   } catch (error) {
     const durationMs = Math.max(0, Date.now() - startedAtMs);
+    const finishedAt = new Date().toISOString();
     const errorClass = classifyTelemetryError(error);
     const labels = reviewPassTelemetryLabels(pass, "failed");
 
@@ -571,8 +638,40 @@ async function runReviewPassWithTelemetry(
       },
       error,
     });
+
+    if (input.isolatePassFailures) {
+      return {
+        candidates: [],
+        durationMs,
+        error: reviewPassFailureFromError(error, errorClass),
+        finishedAt,
+        passName: pass.name,
+        passVersion: pass.version,
+        startedAt,
+        status: "failed",
+      };
+    }
+
     throw error;
   }
+}
+
+/** Converts an unknown pass error into bounded product-safe failure details. */
+function reviewPassFailureFromError(error: unknown, errorClass: string): ReviewPassFailure {
+  const message =
+    error instanceof Error
+      ? boundedText(error.message || error.name || "Review pass failed.", 500)
+      : "Review pass failed.";
+
+  return {
+    code: errorClass,
+    message,
+    retryable:
+      errorClass === "db_error" ||
+      errorClass === "provider_error" ||
+      errorClass === "rate_limit_error" ||
+      errorClass === "timeout_error",
+  };
 }
 
 /** Records the candidate normalization step without inspecting candidate text. */
@@ -606,12 +705,13 @@ function recordCandidateJudgeTelemetry(
   passes: readonly ReviewPass[],
   findings: readonly CandidateFinding[],
 ): void {
+  const judgePassCount = passes.filter((pass) => pass.name === "finding_judge").length;
   const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.reviewEngineJudgeCandidates, {
     attributes: {
       "app.repo_id": input.context.snapshot.repoId,
       "app.review_run_id": input.context.reviewRunId,
       "review.input_candidate_count": findings.length,
-      "review.judge_pass_count": 0,
+      "review.judge_pass_count": judgePassCount,
       "review.pass_version_count": new Set(passes.map((pass) => pass.version)).size,
     },
     kind: "internal",
@@ -620,7 +720,7 @@ function recordCandidateJudgeTelemetry(
 
   span?.end({
     attributes: {
-      "review.judge_enabled": false,
+      "review.judge_enabled": judgePassCount > 0,
       "review.output_candidate_count": findings.length,
     },
   });
@@ -639,7 +739,7 @@ function finishReviewEngineRunTelemetry(
     /** Number of selected passes. */
     readonly passCount: number;
     /** Final run status. */
-    readonly status: "failed" | "succeeded";
+    readonly status: "failed" | "partial" | "succeeded";
   },
 ): void {
   const durationMs = Math.max(0, Date.now() - telemetry.startedAtMs);
@@ -655,7 +755,7 @@ function finishReviewEngineRunTelemetry(
       "review.pass_count": context.passCount,
       "review.run_status": context.status,
     },
-    status: context.status === "succeeded" ? "ok" : "error",
+    status: context.status === "failed" ? "error" : "ok",
   });
 }
 
