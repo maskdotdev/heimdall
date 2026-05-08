@@ -1,4 +1,4 @@
-import type { IndexManifest } from "#contracts/index-artifact/manifest";
+import type { IndexArtifact, IndexManifest } from "#contracts/index-artifact/manifest";
 import type {
   ChunkRecord,
   EdgeRecord,
@@ -95,6 +95,11 @@ export const validChunkRecordFixture = {
 export const validIndexRecordsFixture = [
   validFileRecordFixture,
   validSymbolRecordFixture,
-  validEdgeRecordFixture,
   validChunkRecordFixture,
+  validEdgeRecordFixture,
 ] satisfies IndexRecord[];
+
+export const validIndexArtifactFixture = {
+  manifest: validIndexManifestFixture,
+  records: validIndexRecordsFixture,
+} satisfies IndexArtifact;

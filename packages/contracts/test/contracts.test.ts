@@ -1,3 +1,9 @@
+import {
+  IndexArtifactSchema as SourceIndexArtifactSchema,
+  IndexManifestSchema as SourceIndexManifestSchema,
+  IndexRecordSchema as SourceIndexRecordSchema,
+  validateIndexArtifact as sourceValidateIndexArtifact,
+} from "@repo/index-schema";
 import { describe, expect, it } from "vitest";
 import {
   CreateBillingCheckoutSessionRequestSchema,
@@ -29,6 +35,7 @@ import {
   validUserFixture,
 } from "#contracts/fixtures/identity.fixture";
 import {
+  validIndexArtifactFixture,
   validIndexManifestFixture,
   validIndexRecordsFixture,
 } from "#contracts/fixtures/index-artifact.fixture";
@@ -87,8 +94,10 @@ import { OrgSchema } from "#contracts/identity/org";
 import { UserSchema } from "#contracts/identity/user";
 import { CodeIndexVersionSchema } from "#contracts/index-artifact/artifact";
 import {
+  IndexArtifactSchema,
   IndexManifestSchema,
   isSupportedIndexManifestVersion,
+  validateIndexArtifact,
 } from "#contracts/index-artifact/manifest";
 import {
   IndexRecordSchema,
@@ -142,8 +151,27 @@ import { QuotaCounterSchema, QuotaReservationSchema } from "#contracts/usage/quo
 import { UsageEventSchema } from "#contracts/usage/usage-event";
 import { parseWithSchema, safeParseWithSchema } from "#contracts/validation/parse";
 import { WebhookEventSchema } from "#contracts/webhook/webhook-event";
+import packageJson from "../package.json";
 
 describe("contract validation", () => {
+  it("keeps contracts independent from implementation packages", () => {
+    const forbiddenDependencies = new Set([
+      "@app/worker",
+      "@repo/db",
+      "@repo/github",
+      "@repo/llm-gateway",
+      "@repo/queue",
+    ]);
+    const declaredDependencies = [
+      ...Object.keys(packageJson.dependencies ?? {}),
+      ...Object.keys(packageJson.devDependencies ?? {}),
+    ];
+
+    expect(
+      declaredDependencies.filter((dependency) => forbiddenDependencies.has(dependency)),
+    ).toEqual([]);
+  });
+
   it("validates primitive repo paths", () => {
     expect(safeParseWithSchema("RepoPath", RepoPathSchema, "src/index.ts").ok).toBe(true);
     expect(safeParseWithSchema("RepoPath", RepoPathSchema, "/src/index.ts").ok).toBe(false);
@@ -236,6 +264,14 @@ describe("contract validation", () => {
       expect(parseWithSchema("IndexRecord", IndexRecordSchema, record)).toEqual(record);
       expect(isSupportedIndexRecordVersion(record)).toBe(true);
     }
+  });
+
+  it("re-exports index artifact contracts from the schema package", () => {
+    expect(IndexManifestSchema).toBe(SourceIndexManifestSchema);
+    expect(IndexRecordSchema).toBe(SourceIndexRecordSchema);
+    expect(IndexArtifactSchema).toBe(SourceIndexArtifactSchema);
+    expect(validateIndexArtifact).toBe(sourceValidateIndexArtifact);
+    expect(validateIndexArtifact(validIndexArtifactFixture)).toEqual([]);
   });
 
   it("validates review and finding fixtures", () => {
