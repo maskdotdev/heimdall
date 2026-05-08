@@ -867,12 +867,22 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       const installation = await loadGitHubInstallationRef(options.db, payload.installationId);
       await throwIfWorkerJobCanceled(context);
 
-      await options.gitProvider.syncInstallation({
-        provider: "github",
-        installationId: installation.installationId,
-        providerInstallationId: installation.providerInstallationId,
-        orgId: installation.orgId,
-      });
+      try {
+        await options.gitProvider.syncInstallation({
+          provider: "github",
+          installationId: installation.installationId,
+          providerInstallationId: installation.providerInstallationId,
+          orgId: installation.orgId,
+        });
+      } catch (error) {
+        recordWorkerGitHubProviderSecurityEvent({
+          error,
+          installation,
+          operation: "sync_installation",
+          securityEventSink: options.securityEventSink,
+        });
+        throw error;
+      }
     },
     [JOB_TYPES.IndexRepoCommit]: async (envelope, context) => {
       const payload = asIndexRepoCommitPayload(envelope.payload);
@@ -1807,6 +1817,18 @@ type RecordWorkerComplianceEvidenceSecurityEventInput = {
   readonly type: "compliance_evidence_collected" | "compliance_evidence_failed";
 };
 
+/** Input used to record one GitHub provider-control failure from worker-owned jobs. */
+type RecordWorkerGitHubProviderSecurityEventInput = {
+  /** Error returned by the GitHub provider. */
+  readonly error: unknown;
+  /** GitHub installation affected by the worker operation. */
+  readonly installation: GitHubInstallationRuntimeRef;
+  /** Worker-owned GitHub operation that failed. */
+  readonly operation: "sync_installation";
+  /** Optional sink configured by the worker runtime. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+};
+
 /** Input used to record a sandbox policy-denial security event. */
 type RecordSandboxPolicyDeniedSecurityEventInput = {
   /** Sandbox request that triggered the denied policy decision. */
@@ -2568,6 +2590,83 @@ function recordWorkerComplianceEvidenceSecurityEvent(
     source: "worker",
     type: input.type,
   });
+}
+
+/** Records GitHub provider-control failures from worker-owned jobs. */
+function recordWorkerGitHubProviderSecurityEvent(
+  input: RecordWorkerGitHubProviderSecurityEventInput,
+): void {
+  if (!input.securityEventSink || !(input.error instanceof GitHubProviderError)) {
+    return;
+  }
+
+  const eventType = workerGitHubProviderSecurityEventType(input.error.code, input.operation);
+  if (!eventType) {
+    return;
+  }
+
+  recordSecurityEvent(input.securityEventSink, {
+    metadata: withoutUndefinedValues({
+      githubReason: input.error.code,
+      githubRequestId: input.error.requestId,
+      githubStatus: input.error.status,
+      installationId: input.installation.installationId,
+      operation: input.operation,
+      providerInstallationId: input.installation.providerInstallationId,
+      rateLimitRemaining: input.error.rateLimit?.remaining,
+      rateLimitBucket: input.error.rateLimit?.resource,
+      retryAfterSeconds: input.error.retryAfterSeconds,
+    }),
+    orgId: input.installation.orgId,
+    resourceId: input.installation.installationId,
+    resourceType: "github_installation",
+    severity: workerGitHubProviderSecurityEventSeverity(input.error.code),
+    source: "github",
+    type: eventType,
+  });
+}
+
+/** Maps worker-owned GitHub failures to security-event types worth triaging. */
+function workerGitHubProviderSecurityEventType(
+  code: GitHubErrorCode,
+  operation: RecordWorkerGitHubProviderSecurityEventInput["operation"],
+): string | undefined {
+  if (operation !== "sync_installation") {
+    return undefined;
+  }
+
+  switch (code) {
+    case "github_installation_suspended":
+      return "github_worker_sync_installation_suspended";
+    case "github_permission":
+      return "github_worker_sync_installation_permission_denied";
+    case "github_rate_limit":
+      return "github_worker_sync_installation_rate_limited";
+    case "github_secondary_rate_limit":
+      return "github_worker_sync_installation_secondary_rate_limited";
+    case "github_token":
+      return "github_worker_sync_installation_token_failed";
+    case "github_unavailable":
+      return "github_worker_sync_installation_unavailable";
+    case "github_unknown":
+    case "github_validation":
+      return "github_worker_sync_installation_provider_failed";
+    default:
+      return undefined;
+  }
+}
+
+/** Returns the security-event severity for one worker-owned GitHub provider failure. */
+function workerGitHubProviderSecurityEventSeverity(code: GitHubErrorCode): SecurityEventSeverity {
+  if (
+    code === "github_installation_suspended" ||
+    code === "github_permission" ||
+    code === "github_token"
+  ) {
+    return "high";
+  }
+
+  return "medium";
 }
 
 /** Builds an initial product-safe manifest for a data-deletion request. */
