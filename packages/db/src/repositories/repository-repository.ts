@@ -1,8 +1,43 @@
-import type { OrgSettings, Repository, RepositorySettings } from "@repo/contracts";
-import { eq } from "drizzle-orm";
+import { Buffer } from "node:buffer";
+import type { OrgSettings, PageInfo, Repository, RepositorySettings } from "@repo/contracts";
+import { and, asc, eq, gt, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { orgSettings, repositories, repositorySettings } from "../schema";
 import { toOrgSettings, toRepository, toRepositorySettings } from "./row-mappers";
+
+/** Provider identity used to find a repository row. */
+export type RepositoryProviderIdentity = {
+  /** Git provider that owns the repository. */
+  readonly provider: Repository["provider"];
+  /** Provider-native repository ID. */
+  readonly providerRepoId: string;
+};
+
+/** Input for listing enabled repositories within one organization. */
+export type ListEnabledRepositoriesInput = {
+  /** Organization ID that owns the repositories. */
+  readonly orgId: string;
+  /** Maximum number of repository rows to return. */
+  readonly limit: number;
+  /** Opaque cursor returned by a previous page. */
+  readonly cursor?: string;
+};
+
+/** Cursor-paginated repository page. */
+export type RepositoryPage = {
+  /** Repository rows in deterministic order. */
+  readonly items: readonly Repository[];
+  /** Page metadata and optional next cursor. */
+  readonly pageInfo: PageInfo;
+};
+
+/** Decoded cursor for deterministic repository pagination. */
+type RepositoryCursor = {
+  /** Last repository full name from the previous page. */
+  readonly fullName: string;
+  /** Last repository ID from the previous page. */
+  readonly repoId: string;
+};
 
 const requireReturnedRow = <T>(row: T | undefined): T => {
   if (!row) {
@@ -49,8 +84,62 @@ export class RepositoryRepository {
 
   /** Gets a repository by Heimdall repository ID. */
   public async getRepository(repoId: string): Promise<Repository | undefined> {
+    return this.getRepositoryById(repoId);
+  }
+
+  /** Gets a repository by Heimdall repository ID. */
+  public async getRepositoryById(repoId: string): Promise<Repository | undefined> {
     const [row] = await this.db.select().from(repositories).where(eq(repositories.repoId, repoId));
     return row ? toRepository(row) : undefined;
+  }
+
+  /** Gets a repository by provider and provider-native repository ID. */
+  public async getRepositoryByProviderId(
+    input: RepositoryProviderIdentity,
+  ): Promise<Repository | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(repositories)
+      .where(
+        and(
+          eq(repositories.provider, input.provider),
+          eq(repositories.providerRepoId, input.providerRepoId),
+        ),
+      )
+      .limit(1);
+
+    return row ? toRepository(row) : undefined;
+  }
+
+  /** Lists enabled repositories for an organization with stable cursor pagination. */
+  public async listEnabledRepositories(
+    input: ListEnabledRepositoriesInput,
+  ): Promise<RepositoryPage> {
+    const limit = repositoryPageLimit(input.limit);
+    const filters: SQL[] = [eq(repositories.orgId, input.orgId), eq(repositories.enabled, true)];
+    const cursor = input.cursor ? decodeRepositoryCursor(input.cursor) : undefined;
+    if (cursor) {
+      const cursorFilter = or(
+        gt(repositories.fullName, cursor.fullName),
+        and(eq(repositories.fullName, cursor.fullName), gt(repositories.repoId, cursor.repoId)),
+      );
+      if (cursorFilter) {
+        filters.push(cursorFilter);
+      }
+    }
+
+    const rows = await this.db
+      .select()
+      .from(repositories)
+      .where(and(...filters))
+      .orderBy(asc(repositories.fullName), asc(repositories.repoId))
+      .limit(limit + 1);
+    const items = rows.slice(0, limit).map(toRepository);
+
+    return {
+      items,
+      pageInfo: repositoryPageInfo(items, rows.length > limit),
+    };
   }
 
   /** Updates whether a repository is enabled for automated review. */
@@ -155,4 +244,55 @@ function toOrgSettingsJson(settings: OrgSettings): Record<string, unknown> {
     allowMemorySuppression: settings.allowMemorySuppression,
     allowUserDefinedRules: settings.allowUserDefinedRules,
   };
+}
+
+/** Validates and returns a repository page limit. */
+function repositoryPageLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new RangeError("Repository page limit must be an integer from 1 through 100.");
+  }
+  return limit;
+}
+
+/** Builds page metadata for a repository page. */
+function repositoryPageInfo(items: readonly Repository[], hasNextPage: boolean): PageInfo {
+  const lastItem = items.at(-1);
+  return {
+    hasNextPage,
+    ...(hasNextPage && lastItem ? { nextCursor: encodeRepositoryCursor(lastItem) } : {}),
+  };
+}
+
+/** Encodes a repository position as an opaque pagination cursor. */
+function encodeRepositoryCursor(repository: Repository): string {
+  return Buffer.from(
+    JSON.stringify({
+      fullName: repository.fullName,
+      repoId: repository.repoId,
+    } satisfies RepositoryCursor),
+    "utf8",
+  ).toString("base64url");
+}
+
+/** Decodes and validates an opaque repository pagination cursor. */
+function decodeRepositoryCursor(cursor: string): RepositoryCursor {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (isRepositoryCursor(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Fall through to the shared error below.
+  }
+
+  throw new Error("Invalid repository pagination cursor.");
+}
+
+/** Returns whether a decoded value has the repository cursor shape. */
+function isRepositoryCursor(value: unknown): value is RepositoryCursor {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.fullName === "string" && typeof record.repoId === "string";
 }
