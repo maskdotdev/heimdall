@@ -92,6 +92,29 @@ describe("parseAdminCliCommand", () => {
       kind: "job_retry",
     });
 
+    expect(parseAdminCliCommand(["publisher", "inspect", "rrn_1", "--json"])).toEqual({
+      json: true,
+      kind: "publisher_inspect",
+      reviewRunId: "rrn_1",
+    });
+
+    expect(
+      parseAdminCliCommand([
+        "publisher",
+        "replay",
+        "rrn_1",
+        "--execute",
+        "--confirmation-token",
+        "sha256:publisher",
+      ]),
+    ).toEqual({
+      confirmationToken: "sha256:publisher",
+      execute: true,
+      json: false,
+      kind: "publisher_replay",
+      reviewRunId: "rrn_1",
+    });
+
     expect(parseAdminCliCommand(["usage", "inspect", "rrn_1", "--json"])).toEqual({
       json: true,
       kind: "usage_inspect",
@@ -143,6 +166,8 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin job inspect <backgroundJobId>");
     expect(adminCliUsage()).toContain("admin job retry <backgroundJobId>");
     expect(adminCliUsage()).toContain("admin publisher dry-run <reviewRunId>");
+    expect(adminCliUsage()).toContain("admin publisher inspect <reviewRunId>");
+    expect(adminCliUsage()).toContain("admin publisher replay <reviewRunId>");
     expect(adminCliUsage()).toContain("admin usage inspect <reviewRunId>");
     expect(adminCliUsage()).toContain("admin index inspect <indexVersionId>");
     expect(adminCliUsage()).toContain("admin index import --artifact <uri>");

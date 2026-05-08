@@ -12,6 +12,7 @@ import {
   type AdminBackgroundJobDebugDetails,
   type AdminDebugService,
   type AdminIndexVersionInspection,
+  type AdminPublisherDebugDetails,
   type AdminReplayAuditActor,
   type AdminReplayExecutionResult,
   type AdminReviewDebugDetails,
@@ -21,6 +22,7 @@ import {
   type BackgroundJobReplayPlan,
   createAdminDebugService,
   type PublisherDryRunPlan,
+  type PublisherReplayPlan,
   redactDebugBundleValue,
   renderPublisherDryRun,
   type WebhookReplayPlan,
@@ -159,6 +161,30 @@ export type AdminCliCommand =
     }
   | {
       /** Command discriminator. */
+      readonly kind: "publisher_inspect";
+      /** Review run whose publisher state should be inspected. */
+      readonly reviewRunId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "publisher_replay";
+      /** Review run whose publisher job should be replayed. */
+      readonly reviewRunId: string;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Whether to dispatch the replay job after token confirmation. */
+      readonly execute: boolean;
+      /** Confirmation token required when execute is true. */
+      readonly confirmationToken?: string;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
       readonly kind: "usage_inspect";
       /** Review run whose usage and cost should be inspected. */
       readonly reviewRunId: string;
@@ -277,6 +303,10 @@ export async function runAdminCli(
         return await runJobRetryCommand(command, handle.service, env);
       case "publisher_dry_run":
         return await runPublisherDryRunCommand(command, handle);
+      case "publisher_inspect":
+        return await runPublisherInspectCommand(command, handle.service);
+      case "publisher_replay":
+        return await runPublisherReplayCommand(command, handle.service, env);
       case "usage_inspect":
         return await runUsageInspectCommand(command, handle.service);
       case "index_inspect":
@@ -396,6 +426,27 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
     };
   }
 
+  if (domain === "publisher" && action === "inspect" && reviewRunId) {
+    return {
+      kind: "publisher_inspect",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      json,
+      reviewRunId,
+    };
+  }
+
+  if (domain === "publisher" && action === "replay" && reviewRunId) {
+    const confirmationToken = stringFlag(parsed.flags, "confirmation-token");
+    return {
+      kind: "publisher_replay",
+      ...(confirmationToken ? { confirmationToken } : {}),
+      ...(databaseUrl ? { databaseUrl } : {}),
+      execute: parsed.flags.has("execute"),
+      json,
+      reviewRunId,
+    };
+  }
+
   if (domain === "usage" && action === "inspect" && reviewRunId) {
     return {
       kind: "usage_inspect",
@@ -459,6 +510,8 @@ export function adminCliUsage(): string {
     "  admin job inspect <backgroundJobId> [--json] [--database-url <url>]",
     "  admin job retry <backgroundJobId> [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin publisher dry-run <reviewRunId> [--json] [--database-url <url>]",
+    "  admin publisher inspect <reviewRunId> [--json] [--database-url <url>]",
+    "  admin publisher replay <reviewRunId> [--execute --confirmation-token <token>] [--json] [--database-url <url>]",
     "  admin usage inspect <reviewRunId> [--json] [--database-url <url>]",
     "  admin index inspect <indexVersionId> [--json] [--database-url <url>]",
     "  admin index import --artifact <uri> --repo-id <repoId> --commit <sha> [--enqueue-embeddings] [--json] [--database-url <url>]",
@@ -671,6 +724,50 @@ async function runPublisherDryRunCommand(
   return {
     exitCode: 0,
     stdout: command.json ? jsonOutput(dryRun) : formatPublisherDryRun(dryRun),
+  };
+}
+
+/** Runs publisher state inspection and formats the result. */
+async function runPublisherInspectCommand(
+  command: Extract<AdminCliCommand, { kind: "publisher_inspect" }>,
+  service: AdminDebugService,
+): Promise<AdminCliResult> {
+  const details = await service.getPublisherDebugDetails(command.reviewRunId);
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(details) : formatPublisherInspection(details),
+  };
+}
+
+/** Runs publisher replay planning or confirmed dispatch and formats the result. */
+async function runPublisherReplayCommand(
+  command: Extract<AdminCliCommand, { kind: "publisher_replay" }>,
+  service: AdminDebugService,
+  env: AdminCliEnvironment,
+): Promise<AdminCliResult> {
+  const plan = await service.createPublisherReplayPlan(command.reviewRunId);
+  if (!command.execute) {
+    return {
+      exitCode: 0,
+      stdout: command.json ? jsonOutput(plan) : formatPublisherReplayPlan(plan),
+    };
+  }
+
+  if (!command.confirmationToken) {
+    return {
+      exitCode: 2,
+      stderr: "Publisher replay dispatch requires --confirmation-token when --execute is set.",
+    };
+  }
+
+  const result = await service.executePublisherReplay(
+    command.reviewRunId,
+    command.confirmationToken,
+    cliActor(env),
+  );
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(result) : formatReplayExecution(result),
   };
 }
 
@@ -1071,6 +1168,44 @@ function formatPublisherDryRun(dryRun: PublisherDryRunPlan): string {
     `Summary fallback findings: ${dryRun.comments.summaryFallbackCount}`,
     `Check conclusion: ${dryRun.checkRunConclusion}`,
     `Mutates external state: ${dryRun.mutatesExternalState}`,
+  ].join("\n");
+}
+
+/** Formats publisher inspection details for terminal output. */
+function formatPublisherInspection(details: AdminPublisherDebugDetails): string {
+  return [
+    `Publisher inspection: ${details.reviewRunId}`,
+    `Repository: ${details.repoId}`,
+    `Publish runs: ${details.publishRuns.length}`,
+    `Operations: ${details.operations.length}`,
+    `Check runs: ${details.outputs.checkRuns.length}`,
+    `Reviews: ${details.outputs.reviews.length}`,
+    `Summary comments: ${details.outputs.summaryComments.length}`,
+    `Published findings: ${details.outputs.findings.length}`,
+    `Related jobs: ${details.relatedJobs.length}`,
+    `Replay audits: ${details.replayAudits.length}`,
+    `Reconciliation status: ${details.reconciliation.status}`,
+    `Reconciliation issues: ${details.reconciliation.issues.length}`,
+    `Failures: ${details.failures.length}`,
+  ].join("\n");
+}
+
+/** Formats a publisher replay plan for terminal output. */
+function formatPublisherReplayPlan(plan: PublisherReplayPlan): string {
+  return [
+    `Publisher replay action: ${plan.action}`,
+    `Review run: ${plan.dryRun.reviewRunId}`,
+    `Repository: ${plan.dryRun.repoId}`,
+    `Queue: ${plan.queueName}`,
+    `Replay job key: ${plan.jobKey}`,
+    `Findings: ${plan.dryRun.findingCount}`,
+    `Inline comments: ${plan.dryRun.comments.inlineCommentCount}`,
+    `Summary fallback findings: ${plan.dryRun.comments.summaryFallbackCount}`,
+    `Reconciliation status: ${plan.reconciliation.status}`,
+    `Reconciliation issues: ${plan.reconciliation.issues.length}`,
+    `Confirmation token: ${plan.confirmationToken}`,
+    "",
+    `Dispatch with: pnpm admin publisher replay ${plan.dryRun.reviewRunId} --execute --confirmation-token ${plan.confirmationToken}`,
   ].join("\n");
 }
 
