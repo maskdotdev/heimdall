@@ -668,6 +668,7 @@ describe("recordWorkerQueueMetrics", () => {
   it("records queue depth and oldest pending job age gauges", async () => {
     const now = new Date("2026-05-08T12:00:00.000Z");
     const metrics: WorkerRecordedMetric[] = [];
+    const persistedSnapshots: unknown[] = [];
 
     await recordWorkerQueueMetrics({
       metrics: createWorkerRecordingMetrics(metrics),
@@ -684,6 +685,11 @@ describe("recordWorkerQueueMetrics", () => {
           queueName: QUEUE_NAMES.review,
         },
       ],
+      snapshotStore: {
+        recordQueueHealthSnapshots: async ({ snapshots }) => {
+          persistedSnapshots.push(...snapshots);
+        },
+      },
     });
 
     expect(metrics).toEqual(
@@ -710,6 +716,18 @@ describe("recordWorkerQueueMetrics", () => {
         },
       ]),
     );
+    expect(persistedSnapshots).toEqual([
+      {
+        activeCount: 1,
+        completedCount: 8,
+        delayedCount: 0,
+        failedCount: 2,
+        oldestWaitingAgeMs: 5_000,
+        queueName: QUEUE_NAMES.review,
+        sampledAt: now,
+        waitingCount: 3,
+      },
+    ]);
   });
 });
 

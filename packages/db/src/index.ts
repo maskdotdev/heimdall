@@ -11,6 +11,7 @@ export * from "./repositories/memory-fact-repository";
 export * from "./repositories/product-auth-repository";
 export * from "./repositories/provider-installation-repository";
 export * from "./repositories/pull-request-repository";
+export * from "./repositories/queue-health-repository";
 export * from "./repositories/repo-rule-repository";
 export * from "./repositories/repository-repository";
 export * from "./repositories/review-repository";

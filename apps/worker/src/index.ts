@@ -48,6 +48,7 @@ import {
   ProviderInstallationRepository,
   type PublishedFindingFeedbackTargetRecord,
   type PublishedSummaryFeedbackTargetRecord,
+  QueueHealthRepository,
   RepositoryRepository,
   ReviewRepository,
   type SandboxArtifactInsert,
@@ -434,6 +435,35 @@ export type WorkerQueueMetricJob = {
   readonly timestamp?: number | undefined;
 };
 
+/** One normalized queue health snapshot produced by worker sampling. */
+export type WorkerQueueMetricSnapshot = {
+  /** Logical Heimdall queue name represented by this sample. */
+  readonly queueName: QueueName;
+  /** Number of jobs currently waiting. */
+  readonly waitingCount: number;
+  /** Number of delayed jobs currently scheduled. */
+  readonly delayedCount: number;
+  /** Number of active jobs currently running. */
+  readonly activeCount: number;
+  /** Number of completed jobs retained by the queue backend. */
+  readonly completedCount: number;
+  /** Number of failed jobs retained by the queue backend. */
+  readonly failedCount: number;
+  /** Age of the oldest waiting or delayed job in milliseconds. */
+  readonly oldestWaitingAgeMs: number;
+  /** Time when the queue backend was sampled. */
+  readonly sampledAt: Date;
+};
+
+/** Durable store used to retain queue health samples for dashboards. */
+export type WorkerQueueMetricSnapshotStore = {
+  /** Persists one or more queue health snapshots. */
+  readonly recordQueueHealthSnapshots: (input: {
+    /** Queue health snapshots to append. */
+    readonly snapshots: readonly WorkerQueueMetricSnapshot[];
+  }) => Promise<unknown>;
+};
+
 /** Queue client boundary used by worker queue metric sampling. */
 export type WorkerQueueMetricsClient = {
   /** Logical Heimdall queue name represented by this client. */
@@ -459,6 +489,8 @@ export type RecordWorkerQueueMetricsInput = {
   readonly metrics: TelemetryMetricRecorder;
   /** Queue clients to sample. */
   readonly queues: readonly WorkerQueueMetricsClient[];
+  /** Optional store receiving durable queue health snapshots. */
+  readonly snapshotStore?: WorkerQueueMetricSnapshotStore | undefined;
   /** Current time used by deterministic tests. */
   readonly now?: Date;
 };
@@ -1531,6 +1563,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const workerQueueNames = createWorkerQueueNamesFromEnvironment(process.env);
   const workerRoleLabel = createWorkerRoleLabelFromEnvironment(process.env);
   const queueMetricsClients = createWorkerQueueMetricsClients(process.env, workerConnection);
+  const queueHealthRepository = new QueueHealthRepository(databaseClient.db);
   const reviewIndexDependencyMode = createWorkerReviewIndexDependencyModeFromEnvironment(
     process.env,
   );
@@ -1615,6 +1648,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     await recordWorkerQueueMetrics({
       metrics: observability.metrics,
       queues: queueMetricsClients,
+      snapshotStore: queueHealthRepository,
     });
   };
   const dispatchInterval = setInterval(() => {
@@ -2231,36 +2265,54 @@ export async function verifyWorkerIndexerCapabilities(
 export async function recordWorkerQueueMetrics(
   input: RecordWorkerQueueMetricsInput,
 ): Promise<void> {
-  const nowMs = input.now?.getTime() ?? Date.now();
-  await Promise.all(
+  const sampledAt = input.now ?? new Date();
+  const nowMs = sampledAt.getTime();
+  const snapshots = await Promise.all(
     input.queues.map(async (queue) => {
       const counts = await queue.getJobCounts(...WORKER_QUEUE_METRIC_STATUSES);
+      const normalizedCounts = {
+        active: nonNegativeMetricValue(counts.active),
+        completed: nonNegativeMetricValue(counts.completed),
+        delayed: nonNegativeMetricValue(counts.delayed),
+        failed: nonNegativeMetricValue(counts.failed),
+        waiting: nonNegativeMetricValue(counts.waiting),
+      } as const satisfies Readonly<Record<WorkerQueueMetricStatus, number>>;
+
       for (const status of WORKER_QUEUE_METRIC_STATUSES) {
-        input.metrics.gauge(
-          OBSERVABILITY_METRIC_NAMES.queueDepth,
-          nonNegativeMetricValue(counts[status]),
-          {
-            labels: {
-              queue_name: queue.queueName,
-              status,
-            },
+        input.metrics.gauge(OBSERVABILITY_METRIC_NAMES.queueDepth, normalizedCounts[status], {
+          labels: {
+            queue_name: queue.queueName,
+            status,
           },
-        );
+        });
       }
 
       const oldestJobs = await queue.getJobs(WORKER_QUEUE_OLDEST_JOB_STATUSES, 0, 0, true);
       const oldestTimestamp = oldestQueueJobTimestamp(oldestJobs);
-      input.metrics.gauge(
-        OBSERVABILITY_METRIC_NAMES.queueOldestJobAgeMs,
-        oldestTimestamp === undefined ? 0 : Math.max(0, nowMs - oldestTimestamp),
-        {
-          labels: {
-            queue_name: queue.queueName,
-          },
+      const oldestWaitingAgeMs =
+        oldestTimestamp === undefined ? 0 : Math.max(0, nowMs - oldestTimestamp);
+      input.metrics.gauge(OBSERVABILITY_METRIC_NAMES.queueOldestJobAgeMs, oldestWaitingAgeMs, {
+        labels: {
+          queue_name: queue.queueName,
         },
-      );
+      });
+
+      return {
+        activeCount: normalizedCounts.active,
+        completedCount: normalizedCounts.completed,
+        delayedCount: normalizedCounts.delayed,
+        failedCount: normalizedCounts.failed,
+        oldestWaitingAgeMs,
+        queueName: queue.queueName,
+        sampledAt,
+        waitingCount: normalizedCounts.waiting,
+      };
     }),
   );
+
+  if (input.snapshotStore && snapshots.length > 0) {
+    await input.snapshotStore.recordQueueHealthSnapshots({ snapshots });
+  }
 }
 
 /** Creates queue metric clients for all logical queues when this runtime owns health sampling. */
