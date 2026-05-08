@@ -125,6 +125,65 @@ describe.runIf(integrationDatabaseUrl)("BillingRepository integration", () => {
       }),
     ).rejects.toThrow(/limit must be an integer/u);
   });
+
+  it("lists billing meter events and reconciliation issue rows", async () => {
+    await seedBillingInspectionRows(sql);
+
+    await expect(
+      billingRepository.listBillingMeterEvents({
+        limit: 10,
+        orgId: "org_billing_repository_test",
+      }),
+    ).resolves.toMatchObject([
+      { billingMeterEventId: "bme_billing_repository_fresh", status: "ready_to_send" },
+      { billingMeterEventId: "bme_billing_repository_sent", status: "sent" },
+      { billingMeterEventId: "bme_billing_repository_failed", status: "failed" },
+      { billingMeterEventId: "bme_billing_repository_stale", status: "ready_to_send" },
+    ]);
+    await expect(
+      billingRepository.listBillingMeterEvents({
+        limit: 10,
+        orgId: "org_billing_repository_test",
+        periodKey: "2026-05",
+        status: "failed",
+      }),
+    ).resolves.toMatchObject([{ billingMeterEventId: "bme_billing_repository_failed" }]);
+
+    await expect(
+      billingRepository.listBillingMeterSyncIssueRows({
+        lagCutoff: new Date("2026-05-08T00:03:00.000Z"),
+        limit: 10,
+        orgId: "org_billing_repository_test",
+        periodKey: "2026-05",
+      }),
+    ).resolves.toMatchObject([
+      { billingMeterEventId: "bme_billing_repository_failed", status: "failed" },
+      { billingMeterEventId: "bme_billing_repository_stale", status: "ready_to_send" },
+    ]);
+    await expect(
+      billingRepository.listBillingMeterSyncIssueRows({
+        lagCutoff: new Date("2026-05-08T00:03:00.000Z"),
+        limit: 0,
+        orgId: "org_billing_repository_test",
+      }),
+    ).rejects.toThrow(/limit must be an integer/u);
+
+    await expect(
+      billingRepository.listFailedBillingWebhookEvents({
+        limit: 10,
+        orgId: "org_billing_repository_test",
+      }),
+    ).resolves.toMatchObject([
+      {
+        billingWebhookEventId: "bwh_billing_repository_failed_latest",
+        eventType: "customer.subscription.updated",
+      },
+      {
+        billingWebhookEventId: "bwh_billing_repository_failed_oldest",
+        eventType: "invoice.payment_failed",
+      },
+    ]);
+  });
 });
 
 /** Applies all generated SQL migrations in lexical order to a test schema. */
@@ -150,6 +209,202 @@ async function seedBillingParents(sql: postgres.Sql): Promise<void> {
     VALUES
       ('org_billing_repository_test', 'Billing Repository Test Org', 'billing-repo-test-org'),
       ('org_billing_repository_other', 'Other Billing Repository Org', 'billing-repo-other-org')
+  `;
+  await sql`
+    INSERT INTO billing_accounts (
+      billing_account_id,
+      org_id,
+      billing_mode,
+      status,
+      provider,
+      provider_customer_id
+    )
+    VALUES (
+      'ba_billing_repository_test',
+      'org_billing_repository_test',
+      'self_serve',
+      'active',
+      'stripe',
+      'cus_billing_repository_test'
+    )
+  `;
+}
+
+/** Inserts billing meter and webhook rows for inspection tests. */
+async function seedBillingInspectionRows(sql: postgres.Sql): Promise<void> {
+  await sql`
+    INSERT INTO billing_meter_events (
+      billing_meter_event_id,
+      billing_account_id,
+      org_id,
+      provider,
+      provider_customer_id,
+      meter_key,
+      provider_event_name,
+      period_key,
+      period_start,
+      period_end,
+      quantity,
+      idempotency_key,
+      status,
+      attempt_count,
+      last_error_code,
+      last_error_message,
+      source_usage_event_ids,
+      sent_at,
+      created_at,
+      updated_at
+    )
+    VALUES
+      (
+        'bme_billing_repository_stale',
+        'ba_billing_repository_test',
+        'org_billing_repository_test',
+        'stripe',
+        'cus_billing_repository_test',
+        'review.credit',
+        'heimdall.review_credit',
+        '2026-05',
+        '2026-05-01T00:00:00.000Z',
+        '2026-06-01T00:00:00.000Z',
+        3,
+        'bme-stale',
+        'ready_to_send',
+        0,
+        null,
+        null,
+        '["use_billing_repository_stale"]'::jsonb,
+        null,
+        '2026-05-08T00:01:00.000Z',
+        '2026-05-08T00:01:00.000Z'
+      ),
+      (
+        'bme_billing_repository_failed',
+        'ba_billing_repository_test',
+        'org_billing_repository_test',
+        'stripe',
+        'cus_billing_repository_test',
+        'review.credit',
+        'heimdall.review_credit',
+        '2026-05',
+        '2026-05-01T00:00:00.000Z',
+        '2026-06-01T00:00:00.000Z',
+        5,
+        'bme-failed',
+        'failed',
+        2,
+        'rate_limited',
+        'Stripe rate limited the request.',
+        '["use_billing_repository_failed"]'::jsonb,
+        null,
+        '2026-05-08T00:05:00.000Z',
+        '2026-05-08T00:05:00.000Z'
+      ),
+      (
+        'bme_billing_repository_sent',
+        'ba_billing_repository_test',
+        'org_billing_repository_test',
+        'stripe',
+        'cus_billing_repository_test',
+        'review.credit',
+        'heimdall.review_credit',
+        '2026-05',
+        '2026-05-01T00:00:00.000Z',
+        '2026-06-01T00:00:00.000Z',
+        7,
+        'bme-sent',
+        'sent',
+        1,
+        null,
+        null,
+        '["use_billing_repository_sent"]'::jsonb,
+        '2026-05-08T00:07:00.000Z',
+        '2026-05-08T00:07:00.000Z',
+        '2026-05-08T00:07:00.000Z'
+      ),
+      (
+        'bme_billing_repository_fresh',
+        'ba_billing_repository_test',
+        'org_billing_repository_test',
+        'stripe',
+        'cus_billing_repository_test',
+        'review.credit',
+        'heimdall.review_credit',
+        '2026-05',
+        '2026-05-01T00:00:00.000Z',
+        '2026-06-01T00:00:00.000Z',
+        11,
+        'bme-fresh',
+        'ready_to_send',
+        0,
+        null,
+        null,
+        '["use_billing_repository_fresh"]'::jsonb,
+        null,
+        '2026-05-08T00:10:00.000Z',
+        '2026-05-08T00:10:00.000Z'
+      )
+    ON CONFLICT (billing_meter_event_id) DO NOTHING
+  `;
+  await sql`
+    INSERT INTO billing_webhook_events (
+      billing_webhook_event_id,
+      provider,
+      provider_event_id,
+      event_type,
+      org_id,
+      billing_account_id,
+      provider_customer_id,
+      status,
+      payload_hash,
+      payload,
+      error,
+      received_at
+    )
+    VALUES
+      (
+        'bwh_billing_repository_failed_oldest',
+        'stripe',
+        'evt_billing_repository_failed_oldest',
+        'invoice.payment_failed',
+        'org_billing_repository_test',
+        'ba_billing_repository_test',
+        'cus_billing_repository_test',
+        'failed',
+        'sha256:failed-oldest',
+        '{}'::jsonb,
+        '{"message":"Invoice payment failed."}'::jsonb,
+        '2026-05-08T00:03:00.000Z'
+      ),
+      (
+        'bwh_billing_repository_processed',
+        'stripe',
+        'evt_billing_repository_processed',
+        'invoice.paid',
+        'org_billing_repository_test',
+        'ba_billing_repository_test',
+        'cus_billing_repository_test',
+        'processed',
+        'sha256:processed',
+        '{}'::jsonb,
+        null,
+        '2026-05-08T00:04:00.000Z'
+      ),
+      (
+        'bwh_billing_repository_failed_latest',
+        'stripe',
+        'evt_billing_repository_failed_latest',
+        'customer.subscription.updated',
+        'org_billing_repository_test',
+        'ba_billing_repository_test',
+        'cus_billing_repository_test',
+        'failed',
+        'sha256:failed-latest',
+        '{}'::jsonb,
+        '{"message":"Subscription update failed."}'::jsonb,
+        '2026-05-08T00:06:00.000Z'
+      )
+    ON CONFLICT (billing_webhook_event_id) DO NOTHING
   `;
 }
 

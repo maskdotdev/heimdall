@@ -82,7 +82,6 @@ import {
   BackgroundJobRepository,
   BillingRepository,
   billingAccounts,
-  billingMeterEvents,
   billingPlans,
   billingPlanVersions,
   billingWebhookEvents,
@@ -11849,20 +11848,7 @@ async function listBillingMeterEvents(
   db: HeimdallDatabase,
   query: ScopedAdminBillingMeterEventsQuery,
 ): Promise<AdminBillingMeterEventsSummary> {
-  const conditions: SQL[] = [eq(billingMeterEvents.orgId, query.orgId)];
-  if (query.status) {
-    conditions.push(eq(billingMeterEvents.status, query.status));
-  }
-  if (query.periodKey) {
-    conditions.push(eq(billingMeterEvents.periodKey, query.periodKey));
-  }
-
-  const rows = await db
-    .select()
-    .from(billingMeterEvents)
-    .where(and(...conditions))
-    .orderBy(desc(billingMeterEvents.updatedAt), billingMeterEvents.billingMeterEventId)
-    .limit(query.limit);
+  const rows = await new BillingRepository(db).listBillingMeterEvents(query);
 
   return {
     meterEvents: rows.map(billingMeterEventSummaryFromRow),
@@ -11960,24 +11946,12 @@ async function listMeterSyncIssues(
   checkedAt: string,
 ): Promise<readonly AdminBillingReconciliationIssue[]> {
   const lagCutoff = new Date(Date.parse(checkedAt) - query.meterLagMinutes * 60_000);
-  const lagCondition = and(
-    eq(billingMeterEvents.status, "ready_to_send"),
-    lt(billingMeterEvents.updatedAt, lagCutoff),
-  );
-  const conditions: SQL[] = [
-    eq(billingMeterEvents.orgId, query.orgId),
-    or(eq(billingMeterEvents.status, "failed"), lagCondition ?? sql`false`) ?? sql`false`,
-  ];
-  if (query.periodKey) {
-    conditions.push(eq(billingMeterEvents.periodKey, query.periodKey));
-  }
-
-  const rows = await db
-    .select()
-    .from(billingMeterEvents)
-    .where(and(...conditions))
-    .orderBy(desc(billingMeterEvents.updatedAt))
-    .limit(query.limit);
+  const rows = await new BillingRepository(db).listBillingMeterSyncIssueRows({
+    lagCutoff,
+    limit: query.limit,
+    orgId: query.orgId,
+    periodKey: query.periodKey,
+  });
 
   return rows.map((row) => ({
     category: row.status === "failed" ? "meter_sync_failed" : "meter_sync_lag",
@@ -11998,14 +11972,10 @@ async function listBillingWebhookIssues(
   db: HeimdallDatabase,
   query: ScopedAdminBillingReconciliationQuery,
 ): Promise<readonly AdminBillingReconciliationIssue[]> {
-  const rows = await db
-    .select()
-    .from(billingWebhookEvents)
-    .where(
-      and(eq(billingWebhookEvents.orgId, query.orgId), eq(billingWebhookEvents.status, "failed")),
-    )
-    .orderBy(desc(billingWebhookEvents.receivedAt))
-    .limit(query.limit);
+  const rows = await new BillingRepository(db).listFailedBillingWebhookEvents({
+    limit: query.limit,
+    orgId: query.orgId,
+  });
 
   return rows.map((row) => ({
     category: "billing_webhook_failed",
