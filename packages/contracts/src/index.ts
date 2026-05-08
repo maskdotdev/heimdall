@@ -2,6 +2,7 @@ export * from "./api/billing";
 export * from "./api/common";
 export * from "./api/errors";
 export * from "./api/evaluation";
+export * from "./api/orgs";
 export * from "./api/repositories";
 export * from "./api/reviews";
 export * from "./api/rules";

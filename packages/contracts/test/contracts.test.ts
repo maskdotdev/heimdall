@@ -4,6 +4,7 @@ import {
   CreateBillingPortalSessionRequestSchema,
 } from "#contracts/api/billing";
 import { ApiErrorResponseSchema } from "#contracts/api/errors";
+import { OrgSettingsResponseSchema, UpdateOrgSettingsRequestSchema } from "#contracts/api/orgs";
 import {
   ListRepositoriesResponseSchema,
   UpdateRepositorySettingsRequestSchema,
@@ -443,6 +444,26 @@ describe("contract validation", () => {
       safeParseWithSchema("ListRepositoriesResponse", ListRepositoriesResponseSchema, {
         data: {
           repositories: [],
+        },
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      safeParseWithSchema("OrgSettingsResponse", OrgSettingsResponseSchema, {
+        data: {
+          settings: validOrgSettingsFixture,
+        },
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      safeParseWithSchema("UpdateOrgSettingsRequest", UpdateOrgSettingsRequestSchema, {
+        allowRepoLocalConfig: true,
+        defaultFindingPolicy: {
+          severityThreshold: "high",
+        },
+        defaultMemoryPolicy: {
+          maxMemoryFactsInContext: 4,
         },
       }).ok,
     ).toBe(true);

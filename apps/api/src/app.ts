@@ -54,6 +54,7 @@ import {
   type MemoryFactKind,
   type MemoryFactSource,
   type MemoryFactStatus,
+  type OrgSettings,
   type PlanSnapshot,
   type RepoRule,
   type Repository,
@@ -64,6 +65,8 @@ import {
   type TestRepositoryPolicyRequest,
   TestRepositoryPolicyRequestSchema,
   type UpdateMemoryJobPayload,
+  type UpdateOrgSettingsRequest,
+  UpdateOrgSettingsRequestSchema,
   type UpdateRepoRuleRequest,
   UpdateRepoRuleRequestSchema,
   type UpdateRepositoryControlPlaneSettingsRequest,
@@ -142,6 +145,7 @@ import {
   type BuildReviewPolicySnapshotResult,
   buildReviewPolicySnapshot,
   classifyPath,
+  createDefaultOrgSettings,
   type EffectiveReviewPolicy,
   type EvaluateFindingPolicyInput,
   evaluateFindingPolicy,
@@ -1010,6 +1014,14 @@ type AdminControlPlaneSettings = {
   readonly repository: Repository;
   /** Mutable review settings for the repository. */
   readonly settings: RepositorySettings;
+};
+
+/** Organization settings response used by the control-plane API and dashboard. */
+type AdminOrgControlPlaneSettings = {
+  /** Organization row being controlled. */
+  readonly org: AdminOrganizationSummary;
+  /** Mutable policy defaults and guardrails for the organization. */
+  readonly settings: OrgSettings;
 };
 
 /** Policy preview response for repository settings and rules UX. */
@@ -2856,6 +2868,17 @@ export type AdminControlPlaneService = {
     repoId: string,
     request: TestRepositoryPolicyRequest,
   ) => Promise<AdminRepositoryPolicyTest>;
+  /** Gets organization-level policy defaults and guardrails. */
+  readonly getOrgSettings: (orgId: string) => Promise<AdminOrgControlPlaneSettings>;
+  /** Updates organization-level policy defaults and guardrails. */
+  readonly updateOrgSettings: (
+    orgId: string,
+    patch: UpdateOrgSettingsRequest,
+    audit: Omit<
+      AdminAuditEventInput,
+      "action" | "metadata" | "orgId" | "resourceId" | "resourceType"
+    >,
+  ) => Promise<AdminOrgControlPlaneSettings>;
   /** Gets repository control-plane settings. */
   readonly getRepositorySettings: (repoId: string) => Promise<AdminControlPlaneSettings>;
   /** Updates repository control-plane settings and writes an audit log in the same transaction. */
@@ -3635,6 +3658,107 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         const events = await getAdminControlPlaneService().listProductUsageEvents(query);
 
         return { data: { events } };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
+    .get("/api/v1/orgs/:orgId/settings", async ({ params, request, set }) => {
+      const guardResult = await guardApiV1Session(
+        request,
+        set,
+        adminAuth,
+        productSessionAuth,
+        getProductSessionService,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const authorizationResponse = guardApiV1ScopedAccess(
+        guardResult,
+        params.orgId,
+        undefined,
+        "org:view",
+        set,
+      );
+      if (authorizationResponse) {
+        return authorizationResponse;
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().getOrgSettings(params.orgId);
+        return { data: { settings: settings.settings } };
+      } catch (error) {
+        return handleAdminControlPlaneError(error, set);
+      }
+    })
+    .patch("/api/v1/orgs/:orgId/settings", async ({ params, request, set }) => {
+      const guardResult = await guardApiV1Session(
+        request,
+        set,
+        adminAuth,
+        productSessionAuth,
+        getProductSessionService,
+        observabilitySink,
+        "admin.settings.manage",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const parsed = safeParseWithSchema(
+        "UpdateOrgSettingsRequest",
+        UpdateOrgSettingsRequestSchema,
+        await request.json().catch(() => undefined),
+      );
+      if (!parsed.ok) {
+        set.status = 400;
+        return {
+          error: {
+            code: parsed.error.code,
+            message: parsed.error.message,
+          },
+        };
+      }
+
+      const authorizationResponse = guardApiV1ScopedAccess(
+        guardResult,
+        params.orgId,
+        undefined,
+        "org:manage",
+        set,
+      );
+      if (authorizationResponse) {
+        return authorizationResponse;
+      }
+
+      try {
+        const settings = await getAdminControlPlaneService().updateOrgSettings(
+          params.orgId,
+          parsed.value,
+          {
+            actor: guardResult.actor,
+            requestId: guardResult.requestId,
+            sessionId: guardResult.session.sessionId,
+          },
+        );
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: guardResult.actor.actorUserId,
+          attributes: {
+            allowMemorySuppression: settings.settings.allowMemorySuppression,
+            allowRepoLocalConfig: settings.settings.allowRepoLocalConfig,
+            allowUserDefinedRules: settings.settings.allowUserDefinedRules,
+            version: settings.settings.version,
+          },
+          name: "admin.settings.updated",
+          orgId: settings.org.orgId,
+          requestId: guardResult.requestId,
+          statusCode: 200,
+        });
+
+        return { data: { settings: settings.settings } };
       } catch (error) {
         return handleAdminControlPlaneError(error, set);
       }
@@ -7249,6 +7373,7 @@ function createAdminControlPlaneService(dependencies: {
       getMemoryCandidate(dependencies.db, memoryCandidateId),
     getMemoryFact: (memoryFactId) => getMemoryFact(dependencies.db, memoryFactId),
     getOrganization: (orgId) => getOrganization(dependencies.db, orgId),
+    getOrgSettings: (orgId) => getOrgSettings(dependencies.db, orgId),
     getProductUsageSummary: (query) => getProductUsageSummary(dependencies.db, query),
     getProviderInstallation: (installationId) =>
       getProviderInstallation(dependencies.db, installationId),
@@ -7306,6 +7431,8 @@ function createAdminControlPlaneService(dependencies: {
     suppressSimilarFinding: (findingId, request) =>
       suppressSimilarFinding(dependencies.db, findingId, request),
     recordAuditEvent: (event) => insertAuditLog(dependencies.db, event),
+    updateOrgSettings: (orgId, patch, audit) =>
+      updateOrgSettings(dependencies.db, orgId, patch, audit),
     updateRepositoryRule: (repoId, ruleId, request, audit) =>
       updateRepositoryRule(dependencies.db, repoId, ruleId, request, audit),
     updateMemoryFact: (memoryFactId, request) =>
@@ -11517,6 +11644,22 @@ function boundedListLimit(limit: number | undefined): number {
   return Math.min(100, Math.max(1, limit));
 }
 
+/** Gets organization policy defaults, falling back to product defaults when the row is absent. */
+async function getOrgSettings(
+  db: HeimdallDatabase,
+  orgId: string,
+): Promise<AdminOrgControlPlaneSettings> {
+  const org = await getOrganization(db, orgId);
+  const repositoryRepository = new RepositoryRepository(db);
+
+  return {
+    org,
+    settings:
+      (await repositoryRepository.getOrgSettings(orgId)) ??
+      createDefaultOrgSettings(orgId, org.updatedAt),
+  };
+}
+
 /** Gets repository settings, falling back to default settings when the row is absent. */
 async function getRepositorySettings(
   db: HeimdallDatabase,
@@ -11725,6 +11868,156 @@ async function testRepositoryPolicy(
   };
 }
 
+/** Updates organization policy defaults and appends a before/after audit record atomically. */
+async function updateOrgSettings(
+  db: HeimdallDatabase,
+  orgId: string,
+  patch: UpdateOrgSettingsRequest,
+  audit: Omit<
+    AdminAuditEventInput,
+    "action" | "metadata" | "orgId" | "resourceId" | "resourceType"
+  >,
+): Promise<AdminOrgControlPlaneSettings> {
+  return db.transaction(async (tx) => {
+    const transactionDb = tx as HeimdallDatabase;
+    const repositoryRepository = new RepositoryRepository(transactionDb);
+    const before = await getOrgSettings(transactionDb, orgId);
+    const changedFields = Object.keys(patch).sort();
+    const settings =
+      changedFields.length > 0
+        ? await repositoryRepository.upsertOrgSettings(
+            mergeOrgSettingsPatch(
+              before.settings,
+              patch,
+              new Date().toISOString(),
+              updatedByUserIdFromAuditActor(audit.actor),
+            ),
+          )
+        : before.settings;
+
+    await insertAuditLog(transactionDb, {
+      ...audit,
+      action: "org.settings.updated",
+      metadata: {
+        after: { org: before.org, settings },
+        before,
+        changedFields,
+        requestId: audit.requestId,
+        sessionId: audit.sessionId,
+      },
+      orgId,
+      resourceId: orgId,
+      resourceType: "organization",
+    });
+
+    return { org: before.org, settings };
+  });
+}
+
+/** Applies a partial organization settings patch to a validated current settings document. */
+function mergeOrgSettingsPatch(
+  settings: OrgSettings,
+  patch: UpdateOrgSettingsRequest,
+  updatedAt: string,
+  updatedByUserId: string | null,
+): OrgSettings {
+  const triggerPatch = patch.defaultTriggerPolicy;
+  const findingPatch = patch.defaultFindingPolicy;
+  const publishingPatch = patch.defaultPublishingPolicy;
+  const memoryPatch = patch.defaultMemoryPolicy;
+  const requireLabel = triggerPatch?.requireLabel ?? settings.defaultTriggerPolicy.requireLabel;
+  const memoryTtlDays = memoryPatch?.memoryTtlDays ?? settings.defaultMemoryPolicy.memoryTtlDays;
+  const allowedModelProfiles =
+    patch.allowedModelProfiles !== undefined
+      ? [...patch.allowedModelProfiles]
+      : settings.allowedModelProfiles !== undefined
+        ? [...settings.allowedModelProfiles]
+        : undefined;
+
+  return {
+    schemaVersion: settings.schemaVersion,
+    orgId: settings.orgId,
+    defaultReviewPolicy: patch.defaultReviewPolicy ?? settings.defaultReviewPolicy,
+    defaultTriggerPolicy: {
+      enabledActions: [
+        ...(triggerPatch?.enabledActions ?? settings.defaultTriggerPolicy.enabledActions),
+      ],
+      ignoredAuthors: [
+        ...(triggerPatch?.ignoredAuthors ?? settings.defaultTriggerPolicy.ignoredAuthors),
+      ],
+      ignoredLabels: [
+        ...(triggerPatch?.ignoredLabels ?? settings.defaultTriggerPolicy.ignoredLabels),
+      ],
+      ...(requireLabel !== undefined ? { requireLabel } : {}),
+      skipDraftPullRequests:
+        triggerPatch?.skipDraftPullRequests ?? settings.defaultTriggerPolicy.skipDraftPullRequests,
+    },
+    defaultFindingPolicy: {
+      allowStyleFindings:
+        findingPatch?.allowStyleFindings ?? settings.defaultFindingPolicy.allowStyleFindings,
+      enabledCategories: [
+        ...(findingPatch?.enabledCategories ?? settings.defaultFindingPolicy.enabledCategories),
+      ],
+      maxCommentsPerReview:
+        findingPatch?.maxCommentsPerReview ?? settings.defaultFindingPolicy.maxCommentsPerReview,
+      minimumConfidence:
+        findingPatch?.minimumConfidence ?? settings.defaultFindingPolicy.minimumConfidence,
+      severityThreshold:
+        findingPatch?.severityThreshold ?? settings.defaultFindingPolicy.severityThreshold,
+      suppressGeneratedFileFindings:
+        findingPatch?.suppressGeneratedFileFindings ??
+        settings.defaultFindingPolicy.suppressGeneratedFileFindings,
+    },
+    defaultPublishingPolicy: {
+      maxCommentsPerReview:
+        publishingPatch?.maxCommentsPerReview ??
+        settings.defaultPublishingPolicy.maxCommentsPerReview,
+      publishCheckRun:
+        publishingPatch?.publishCheckRun ?? settings.defaultPublishingPolicy.publishCheckRun,
+      publishInlineComments:
+        publishingPatch?.publishInlineComments ??
+        settings.defaultPublishingPolicy.publishInlineComments,
+      publishSummaryComment:
+        publishingPatch?.publishSummaryComment ??
+        settings.defaultPublishingPolicy.publishSummaryComment,
+    },
+    defaultMemoryPolicy: {
+      allowExactFindingSuppression:
+        memoryPatch?.allowExactFindingSuppression ??
+        settings.defaultMemoryPolicy.allowExactFindingSuppression,
+      allowNaturalLanguageInstructions:
+        memoryPatch?.allowNaturalLanguageInstructions ??
+        settings.defaultMemoryPolicy.allowNaturalLanguageInstructions,
+      allowPathCategorySuppression:
+        memoryPatch?.allowPathCategorySuppression ??
+        settings.defaultMemoryPolicy.allowPathCategorySuppression,
+      enableMemoryContext:
+        memoryPatch?.enableMemoryContext ?? settings.defaultMemoryPolicy.enableMemoryContext,
+      enableMemorySuppression:
+        memoryPatch?.enableMemorySuppression ??
+        settings.defaultMemoryPolicy.enableMemorySuppression,
+      maxMemoryFactsInContext:
+        memoryPatch?.maxMemoryFactsInContext ??
+        settings.defaultMemoryPolicy.maxMemoryFactsInContext,
+      ...(memoryTtlDays !== undefined ? { memoryTtlDays } : {}),
+      requireApprovalForMemoryFacts:
+        memoryPatch?.requireApprovalForMemoryFacts ??
+        settings.defaultMemoryPolicy.requireApprovalForMemoryFacts,
+      trustedFeedbackRoles: [
+        ...(memoryPatch?.trustedFeedbackRoles ?? settings.defaultMemoryPolicy.trustedFeedbackRoles),
+      ],
+    },
+    ...(allowedModelProfiles !== undefined ? { allowedModelProfiles } : {}),
+    allowRepoLocalConfig: patch.allowRepoLocalConfig ?? settings.allowRepoLocalConfig,
+    allowMemorySuppression: patch.allowMemorySuppression ?? settings.allowMemorySuppression,
+    allowUserDefinedRules: patch.allowUserDefinedRules ?? settings.allowUserDefinedRules,
+    createdAt: settings.createdAt,
+    updatedAt,
+    updatedByUserId,
+    version: settings.version + 1,
+  };
+}
+
 /** Builds an effective policy snapshot for preview and local policy tests. */
 async function buildRepositoryPolicySnapshotForPreview(
   db: HeimdallDatabase,
@@ -11812,6 +12105,12 @@ function createdByUserIdFromAuditActor(
 ): Pick<RepoRule, "createdByUserId"> | Record<string, never> {
   const parsed = safeParseWithSchema("UserId", UserIdSchema, actor.actorUserId);
   return parsed.ok ? { createdByUserId: parsed.value } : {};
+}
+
+/** Returns a contract user ID from an admin actor when it can be stored on org settings. */
+function updatedByUserIdFromAuditActor(actor: AdminActor): string | null {
+  const parsed = safeParseWithSchema("UserId", UserIdSchema, actor.actorUserId);
+  return parsed.ok ? parsed.value : null;
 }
 
 /** Converts a compiled policy snapshot into the API preview shape. */

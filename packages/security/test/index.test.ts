@@ -120,6 +120,7 @@ describe("admin security", () => {
     expect(isProductRole("owner")).toBe(true);
     expect(isProductRole("support")).toBe(false);
     expect(productRoleHasPermission("owner", "billing:manage")).toBe(true);
+    expect(productRoleHasPermission("admin", "org:manage")).toBe(true);
     expect(productRoleHasPermission("admin", "repo:settings:write")).toBe(true);
     expect(productRoleHasPermission("admin", "billing:manage")).toBe(false);
     expect(productRoleHasPermission("member", "review:read")).toBe(true);
@@ -147,6 +148,7 @@ describe("admin security", () => {
     expect(productCapabilities("owner")).toMatchObject({
       canManageBilling: true,
       canManageMembers: true,
+      canManageOrgSettings: true,
       canReadUsage: true,
     });
     expect(productCapabilities("viewer")).toMatchObject({

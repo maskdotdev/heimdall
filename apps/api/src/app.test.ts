@@ -6,8 +6,10 @@ import {
   type AdminReplayAuditActor,
 } from "@repo/admin-tools";
 import type {
+  OrgSettings,
   Repository,
   RepositorySettings,
+  UpdateOrgSettingsRequest,
   UpdateRepositoryControlPlaneSettingsRequest,
 } from "@repo/contracts";
 import type { HeimdallDatabase } from "@repo/db";
@@ -613,6 +615,7 @@ describe("api app", () => {
         openapi: expect.any(String),
       });
       expect(body.paths).toHaveProperty("/api/v1/orgs");
+      expect(body.paths).toHaveProperty("/api/v1/orgs/{orgId}/settings");
       expect(body.paths).toHaveProperty("/api/v1/orgs/{orgId}/usage/summary");
     } finally {
       if (previousNodeEnv === undefined) {
@@ -2752,6 +2755,135 @@ describe("api app", () => {
           severityThreshold: "high",
         },
       },
+    });
+  });
+
+  it("serves and updates scoped API v1 organization settings with validation and CSRF", async () => {
+    const patches: UpdateOrgSettingsRequest[] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({
+        getOrgSettings: async (orgId) => ({
+          org: organizationFixture({ orgId }),
+          settings: {
+            ...orgSettingsFixture,
+            orgId,
+          },
+        }),
+        updateOrgSettings: async (orgId, patch) => {
+          patches.push(patch);
+          return {
+            org: organizationFixture({ orgId }),
+            settings: {
+              ...orgSettingsFixture,
+              orgId,
+              allowRepoLocalConfig:
+                patch.allowRepoLocalConfig ?? orgSettingsFixture.allowRepoLocalConfig,
+              defaultFindingPolicy: {
+                ...orgSettingsFixture.defaultFindingPolicy,
+                ...patch.defaultFindingPolicy,
+              },
+              version: orgSettingsFixture.version + 1,
+            },
+          };
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.inspect", "admin.settings.manage"],
+      providerSubject: "usr_admin",
+    });
+
+    const getResponse = await app.handle(
+      new Request("http://localhost/api/v1/orgs/org_1/settings", {
+        headers: { cookie: login.cookie },
+      }),
+    );
+    const patchResponse = await app.handle(
+      new Request("http://localhost/api/v1/orgs/org_1/settings", {
+        body: JSON.stringify({
+          allowRepoLocalConfig: true,
+          defaultFindingPolicy: { severityThreshold: "high" },
+        }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+        method: "PATCH",
+      }),
+    );
+
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      data: {
+        settings: {
+          orgId: "org_1",
+          version: 1,
+        },
+      },
+    });
+    expect(patchResponse.status).toBe(200);
+    expect(patches).toEqual([
+      expect.objectContaining({
+        allowRepoLocalConfig: true,
+        defaultFindingPolicy: { severityThreshold: "high" },
+      }),
+    ]);
+    await expect(patchResponse.json()).resolves.toMatchObject({
+      data: {
+        settings: {
+          allowRepoLocalConfig: true,
+          defaultFindingPolicy: {
+            severityThreshold: "high",
+          },
+          version: 2,
+        },
+      },
+    });
+  });
+
+  it("rejects product organization settings updates when the role lacks permission", async () => {
+    let updateCalled = false;
+    const viewerSession = productSessionFixture({
+      actor: {
+        memberships: [{ orgId: "org_1", role: "viewer" }],
+        selectedOrgId: "org_1",
+        userId: "usr_1",
+      },
+    });
+    const app = createApiApp({
+      adminControlPlaneService: createMockControlPlaneService({
+        updateOrgSettings: async () => {
+          updateCalled = true;
+          return {
+            org: organizationFixture(),
+            settings: orgSettingsFixture,
+          };
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+      productSessionAuth: productAuth,
+      productSessionService: createMockProductSessionService({
+        readSession: async () => viewerSession,
+      }),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/api/v1/orgs/org_1/settings", {
+        body: JSON.stringify({ allowRepoLocalConfig: true }),
+        headers: { cookie: "car_session=opaque", "content-type": "application/json" },
+        method: "PATCH",
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(updateCalled).toBe(false);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "product_auth.forbidden" },
     });
   });
 
@@ -6096,6 +6228,10 @@ function createMockControlPlaneService(
     getMemoryCandidate: async () => memoryCandidateFixture(),
     getMemoryFact: async () => memoryFactFixture(),
     getOrganization: async () => organizationFixture(),
+    getOrgSettings: async () => ({
+      org: organizationFixture(),
+      settings: orgSettingsFixture,
+    }),
     getProductUsageSummary: async () => productUsageSummaryFixture(),
     getProviderInstallation: async () => providerInstallationFixture(),
     listBillingMeterEvents: async () => billingMeterEventsFixture(),
@@ -6171,6 +6307,10 @@ function createMockControlPlaneService(
     rejectMemoryCandidate: async () => memoryCandidateRejectionFixture(),
     suppressSimilarFinding: async () => findingSuppressionFixture(),
     recordAuditEvent: async (event) => auditLog(event.action),
+    updateOrgSettings: async () => ({
+      org: organizationFixture(),
+      settings: orgSettingsFixture,
+    }),
     updateMemoryFact: async () => memoryFactFixture(),
     updateRepositoryRule: async () => repoRuleSummaryFixture(),
     updateRepositorySettings: async () => ({
@@ -7444,6 +7584,59 @@ const settingsFixture = {
   createdAt: "2026-05-05T12:00:00.000Z",
   updatedAt: "2026-05-05T12:00:00.000Z",
 } satisfies RepositorySettings;
+
+/** Organization settings fixture used by policy default route tests. */
+const orgSettingsFixture = {
+  schemaVersion: "org_settings.v1",
+  orgId: "org_1",
+  defaultReviewPolicy: "inline_comments_and_summary",
+  defaultTriggerPolicy: {
+    enabledActions: ["opened", "synchronize", "reopened", "ready_for_review", "labeled"],
+    ignoredAuthors: [],
+    ignoredLabels: [],
+    skipDraftPullRequests: true,
+  },
+  defaultFindingPolicy: {
+    allowStyleFindings: false,
+    enabledCategories: [
+      "correctness",
+      "security",
+      "performance",
+      "test_coverage",
+      "maintainability",
+      "architecture",
+      "dependency",
+    ],
+    maxCommentsPerReview: 5,
+    minimumConfidence: 0.65,
+    severityThreshold: "medium",
+    suppressGeneratedFileFindings: true,
+  },
+  defaultPublishingPolicy: {
+    maxCommentsPerReview: 5,
+    publishCheckRun: false,
+    publishInlineComments: true,
+    publishSummaryComment: true,
+  },
+  defaultMemoryPolicy: {
+    allowExactFindingSuppression: true,
+    allowNaturalLanguageInstructions: true,
+    allowPathCategorySuppression: true,
+    enableMemoryContext: true,
+    enableMemorySuppression: true,
+    maxMemoryFactsInContext: 6,
+    memoryTtlDays: 180,
+    requireApprovalForMemoryFacts: true,
+    trustedFeedbackRoles: ["org_admin", "repo_admin", "maintainer"],
+  },
+  allowRepoLocalConfig: false,
+  allowMemorySuppression: true,
+  allowUserDefinedRules: true,
+  createdAt: "2026-05-05T12:00:00.000Z",
+  updatedAt: "2026-05-05T12:00:00.000Z",
+  updatedByUserId: null,
+  version: 1,
+} satisfies OrgSettings;
 
 /** Review history fixture used by discovery route tests. */
 const reviewRunSummaryFixture = {

@@ -1186,6 +1186,7 @@ export function productCapabilities(role: ProductRole): Record<string, boolean> 
   return {
     canManageBilling: productRoleHasPermission(role, "billing:manage"),
     canManageMembers: productRoleHasPermission(role, "org:members:write"),
+    canManageOrgSettings: productRoleHasPermission(role, "org:manage"),
     canManageRepositorySettings: productRoleHasPermission(role, "repo:settings:write"),
     canReadAuditHistory: productRoleHasPermission(role, "audit:read"),
     canReadUsage: productRoleHasPermission(role, "usage:read"),
