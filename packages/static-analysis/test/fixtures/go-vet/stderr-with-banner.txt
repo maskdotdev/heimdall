@@ -1,0 +1,19 @@
+# example.com/repo/pkg
+{
+  "example.com/repo/pkg": {
+    "printf": [
+      {
+        "category": "printf",
+        "message": "fmt.Printf format %d has arg \"text\" of wrong type string",
+        "posn": "/workspace/repo/pkg/foo.go:10:6"
+      }
+    ],
+    "unreachable": [
+      {
+        "category": "unreachable",
+        "message": "unreachable code",
+        "posn": "/workspace/repo/pkg/foo.go:12:2"
+      }
+    ]
+  }
+}

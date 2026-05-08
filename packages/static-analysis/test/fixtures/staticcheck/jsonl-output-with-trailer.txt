@@ -1,0 +1,3 @@
+{"code":"SA5009","severity":"error","location":{"file":"/workspace/repo/pkg/foo.go","line":6,"column":14},"end":{"file":"/workspace/repo/pkg/foo.go","line":6,"column":18},"message":"Printf format %d has arg #1 of wrong type string"}
+{"code":"SA4006","severity":"error","location":{"file":"/workspace/repo/pkg/foo.go","line":10,"column":3},"end":{"file":"/workspace/repo/pkg/foo.go","line":10,"column":17},"message":"this value of value is never used"}
+exit status 1

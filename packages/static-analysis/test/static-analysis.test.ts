@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { ChangedFile, PullRequestSnapshot } from "@repo/contracts";
 import {
   validChangedFileFixture,
@@ -17,6 +18,7 @@ import {
   compareStaticAnalysisDiagnosticBaselines,
   createNormalizedToolDiagnostic,
   DEFAULT_STATIC_ANALYSIS_BUDGETS,
+  type ParseToolOutputDiagnosticsInput,
   parseToolOutputDiagnostics,
   planStaticAnalysis,
   runStaticAnalysis,
@@ -168,6 +170,45 @@ const rustRequest = {
   ...request,
   snapshot: rustPullRequestSnapshotFixture,
 } satisfies StaticAnalysisRequest;
+
+/** Tool output fixture fields used by parser tests. */
+type ToolOutputFixtureInput = {
+  /** Process exit code to expose to the parser. */
+  readonly exitCode?: number | undefined;
+  /** Captured standard error text. */
+  readonly stderr?: string | undefined;
+  /** Captured standard output text. */
+  readonly stdout?: string | undefined;
+};
+
+/** Reads a static-analysis parser fixture as UTF-8 text. */
+function fixtureText(path: string): string {
+  return readFileSync(new URL(`./fixtures/${path}`, import.meta.url), "utf8");
+}
+
+/** Builds a minimal tool-runner result for parser fixture tests. */
+function toolOutputResult(
+  input: ToolOutputFixtureInput,
+): ParseToolOutputDiagnosticsInput["result"] {
+  const stdout = input.stdout ?? "";
+  const stderr = input.stderr ?? "";
+  const exitCode = input.exitCode ?? 1;
+
+  return {
+    durationMs: 1,
+    exitCode,
+    finishedAt: "2026-05-06T00:00:00.001Z",
+    signal: null,
+    startedAt: "2026-05-06T00:00:00.000Z",
+    status: exitCode === 0 ? "succeeded" : "failed",
+    stderr,
+    stderrBytes: Buffer.byteLength(stderr),
+    stdout,
+    stdoutBytes: Buffer.byteLength(stdout),
+    timedOut: false,
+    truncated: false,
+  };
+}
 
 describe("static analysis", () => {
   it("plans bounded changed-file tool runs", () => {
@@ -1118,6 +1159,69 @@ describe("static analysis", () => {
       sourceTrust: "tool_output",
       tool: "cargo_check",
     });
+  });
+
+  it("parses fixture-backed Go vet output with multiple analyzers", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stderr: fixtureText("go-vet/stderr-with-banner.txt"),
+      }),
+      snapshot: goPullRequestSnapshotFixture,
+      tool: "go_vet",
+      toolRunId: "str_go_vet_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "printf",
+      "unreachable",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
+  });
+
+  it("parses fixture-backed Staticcheck JSONL output with mixed changed-line coverage", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stderr: fixtureText("staticcheck/jsonl-output-with-trailer.txt"),
+      }),
+      snapshot: goPullRequestSnapshotFixture,
+      tool: "staticcheck",
+      toolRunId: "str_staticcheck_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual(["SA5009", "SA4006"]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(false);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(true);
+  });
+
+  it("parses fixture-backed Cargo JSONL output and ignores non-diagnostic messages", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: toolOutputResult({
+        stdout: fixtureText("cargo/compiler-message.jsonl"),
+      }),
+      snapshot: rustPullRequestSnapshotFixture,
+      tool: "cargo_clippy",
+      toolRunId: "str_cargo_fixture",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(2);
+    expect(parsed.diagnostics.map((diagnostic) => diagnostic.ruleId)).toEqual([
+      "unused_variables",
+      "clippy::let_and_return",
+    ]);
+    expect(parsed.diagnostics[0]?.isOnChangedLine).toBe(true);
+    expect(parsed.diagnostics[1]?.isOnChangedLine).toBe(false);
   });
 
   it("parses Pyright JSON output into normalized diagnostics", () => {
