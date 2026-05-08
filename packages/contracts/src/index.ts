@@ -45,6 +45,7 @@ export * from "./review/artifacts";
 export * from "./review/context";
 export * from "./review/finding";
 export * from "./review/review-run";
+export * from "./security/data-deletion";
 export * from "./usage/entitlements";
 export * from "./usage/quota";
 export * from "./usage/usage-event";
