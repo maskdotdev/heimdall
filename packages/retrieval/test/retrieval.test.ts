@@ -1,6 +1,9 @@
 import type { RepoRule } from "@repo/contracts";
 import { ids } from "@repo/contracts/fixtures/common";
-import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
+import {
+  validChangedFileFixture,
+  validPullRequestSnapshotFixture,
+} from "@repo/contracts/fixtures/pull-request.fixture";
 import { createStaticRelevantMemoryRetriever, type MemoryFact } from "@repo/memory";
 import {
   OBSERVABILITY_METRIC_NAMES,
@@ -285,6 +288,56 @@ describe("retrieveContext", () => {
         ]),
       },
     });
+  });
+
+  it("emits fallback changed symbols for added, deleted, and renamed files", async () => {
+    const bundle = await retrieveContext({
+      reviewRunId: "rrn_01HREVIEW",
+      snapshot: {
+        ...validPullRequestSnapshotFixture,
+        changedFileCount: 3,
+        changedFiles: [
+          {
+            ...validChangedFileFixture,
+            path: "src/added.ts",
+            status: "added",
+          },
+          {
+            ...validChangedFileFixture,
+            path: "src/deleted.ts",
+            status: "deleted",
+          },
+          {
+            ...validChangedFileFixture,
+            oldPath: "src/old-name.ts",
+            path: "src/new-name.ts",
+            status: "renamed",
+          },
+        ],
+      },
+      indexAvailable: false,
+      timestamp: "2026-05-05T00:00:00.000Z",
+    });
+
+    expect(bundle.changedSymbols).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          changeType: "added",
+          newRange: { startLine: 2, endLine: 2 },
+          path: "src/added.ts",
+        }),
+        expect.objectContaining({
+          changeType: "deleted",
+          oldRange: { startLine: 2, endLine: 2 },
+          path: "src/deleted.ts",
+        }),
+        expect.objectContaining({
+          changeType: "renamed",
+          newRange: { startLine: 2, endLine: 2 },
+          path: "src/new-name.ts",
+        }),
+      ]),
+    );
   });
 
   it("adds index-backed same-file, symbol, test, full-text, and similar context", async () => {

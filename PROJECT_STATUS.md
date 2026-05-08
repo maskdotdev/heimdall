@@ -347,7 +347,9 @@ tracked milestone.
 - Latest retrieval changed-symbol milestone: `@repo/retrieval` now populates
   `ContextBundle.changedSymbols` from indexed symbols that overlap changed diff lines, limits
   changed-symbol context and graph expansion to those overlapping symbols, and emits line-range
-  fallback changed symbols for changed files without matching indexed symbols.
+  fallback changed symbols for changed files without matching indexed symbols. Public retrieval
+  tests now cover modified indexed-symbol detection plus added, deleted, and renamed fallback
+  changed-file cases.
 - Latest PR snapshot milestone: `@repo/pr-snapshot` now provides the first provider-neutral unified
   diff parser, raw diff hashing, canonical JSON snapshot hashing, minimal patch reconstruction,
   quoted Git path handling for paths with spaces, left/right commentable line indexing, file-level
