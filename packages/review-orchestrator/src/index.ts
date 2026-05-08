@@ -5,7 +5,10 @@ import {
   reviewArtifactPayloadDescriptor,
 } from "@repo/artifacts";
 import type {
+  ContextBundle,
+  ContextItem,
   JobEnvelope,
+  LineRange,
   PlanSnapshot,
   PublishReviewJobPayload,
   PullRequestSnapshot,
@@ -222,6 +225,64 @@ export type ReviewRunCurrentCheckInput = GitHubPullRequestRef & {
 
 /** Current-head state for a review run just before publish handoff. */
 export type ReviewRunCurrentStatus = "current" | "superseded" | "closed" | "unknown";
+
+/** Product-safe retrieval trace artifact persisted next to a context bundle. */
+export type RetrievalTraceArtifactPayload = {
+  /** Token budget and packing summary for the final bundle. */
+  readonly budget: Record<string, unknown>;
+  /** Aggregate changed-file and changed-symbol counts. */
+  readonly changeAnalysis: Record<string, unknown>;
+  /** Completion timestamp for trace generation. */
+  readonly completedAt: string;
+  /** Product-safe input summary for replay/debug inspection. */
+  readonly inputSummary: Record<string, unknown>;
+  /** Additional product-safe retrieval metadata copied from the context bundle. */
+  readonly metadata: Record<string, unknown>;
+  /** Repository that owns the retrieval. */
+  readonly repoId: string;
+  /** Stable retrieval trace ID. */
+  readonly retrievalId: string;
+  /** Review run that owns the retrieval. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot that grounded retrieval. */
+  readonly pullRequestSnapshotId: string;
+  /** Schema version for retrieval trace artifacts. */
+  readonly schemaVersion: "retrieval_trace.v1";
+  /** Product-safe selected context item trace rows. */
+  readonly selectedItems: readonly RetrievalTraceArtifactItem[];
+  /** Start timestamp copied from the context bundle creation time. */
+  readonly startedAt: string;
+  /** Non-fatal product-safe retrieval warnings. */
+  readonly warnings: readonly unknown[];
+};
+
+/** Product-safe selected context item row for retrieval trace artifacts. */
+export type RetrievalTraceArtifactItem = {
+  /** Stable context item ID. */
+  readonly contextItemId: string;
+  /** Context item kind. */
+  readonly kind: ContextItem["kind"];
+  /** Optional path for snippet-backed items. */
+  readonly path?: string | undefined;
+  /** Context packing priority. */
+  readonly priority: number;
+  /** Product-safe provenance reason. */
+  readonly reason: string;
+  /** Optional related symbol ID. */
+  readonly relatedSymbolId?: string | undefined;
+  /** Optional snippet range without source text. */
+  readonly range?: LineRange | undefined;
+  /** Retriever that produced the item. */
+  readonly retriever: string;
+  /** Optional normalized ranking score. */
+  readonly score?: number | undefined;
+  /** Context item source. */
+  readonly source: ContextItem["source"];
+  /** Optional item title. */
+  readonly title?: string | undefined;
+  /** Estimated token cost for the selected item. */
+  readonly tokenEstimate: number;
+};
 
 /** Workspace sync function used by review orchestration. */
 export type SyncWorkspace = (
@@ -773,6 +834,18 @@ export async function runPullRequestReview(
       payload: contextBundle,
       createdAt: now().toISOString(),
     });
+    const retrievalTraceCreatedAt = now().toISOString();
+    const retrievalTraceArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "retrieval_trace",
+      name: "retrieval-trace.json",
+      payload: buildRetrievalTraceArtifactPayload({
+        contextBundle,
+        generatedAt: retrievalTraceCreatedAt,
+      }),
+      createdAt: retrievalTraceCreatedAt,
+    });
     const retrievalMode =
       contextBundle.metadata && typeof contextBundle.metadata.retrievalMode === "string"
         ? contextBundle.metadata.retrievalMode
@@ -785,9 +858,11 @@ export async function runPullRequestReview(
       stage: "retrieval",
       status: "completed",
       metadata: {
+        contextArtifactId: contextArtifact.artifactId,
         contextBundleId: contextBundle.contextBundleId,
         estimatedTokens: contextBundle.tokenBudget.estimatedTokens,
         itemCount: contextBundle.items.length,
+        retrievalTraceArtifactId: retrievalTraceArtifact.artifactId,
         ...(indexVersionId ? { indexVersionId } : {}),
         ...(retrievalMode ? { retrievalMode } : {}),
         ...(retrievalWarningCount > 0 ? { warningCount: retrievalWarningCount } : {}),
@@ -1062,6 +1137,7 @@ export async function runPullRequestReview(
     const completedReviewArtifactRefs = [
       ...artifacts,
       contextArtifact,
+      retrievalTraceArtifact,
       candidateArtifact,
       validatedArtifact,
       rejectedArtifact,
@@ -1796,6 +1872,13 @@ function stringArrayField(record: Record<string, unknown>, field: string): strin
   return value.filter((item): item is string => typeof item === "string" && item.length > 0);
 }
 
+/** Reads an unknown JSON array field from a record. */
+function unknownArrayField(record: Record<string, unknown>, field: string): readonly unknown[] {
+  const value = record[field];
+
+  return Array.isArray(value) ? value : [];
+}
+
 /** Normalizes memory text for deterministic matching helpers. */
 function normalizeMemoryText(value: string): string {
   return value.trim().replace(/\s+/gu, " ").toLowerCase();
@@ -2179,6 +2262,91 @@ function planSnapshotMetadata(snapshot: PlanSnapshot): Record<string, unknown> {
     planVersionId: snapshot.planVersionId,
     subscriptionStatus: snapshot.subscriptionStatus,
   };
+}
+
+/** Builds a product-safe retrieval trace artifact from a validated context bundle. */
+export function buildRetrievalTraceArtifactPayload(input: {
+  /** Context bundle returned by retrieval. */
+  readonly contextBundle: ContextBundle;
+  /** Timestamp when the trace artifact is generated. */
+  readonly generatedAt: string;
+}): RetrievalTraceArtifactPayload {
+  const metadata = recordFromUnknown(input.contextBundle.metadata);
+  const ranking = recordField(metadata, "ranking");
+  const packing = recordField(metadata, "packing");
+  const memory = recordField(metadata, "memory");
+  const rules = recordField(metadata, "rules");
+  const indexVersionId = stringField(metadata, "indexVersionId");
+  const retrievalMode = stringField(metadata, "retrievalMode");
+
+  return {
+    budget: {
+      estimatedTokens: input.contextBundle.tokenBudget.estimatedTokens,
+      maxTokens: input.contextBundle.tokenBudget.maxTokens,
+      ...(packing ? { packing } : {}),
+    },
+    changeAnalysis: {
+      changedFileCount: input.contextBundle.changedFiles.length,
+      changedFilesByLanguage: countByString(
+        input.contextBundle.changedFiles.map((file) => file.language),
+      ),
+      changedFilesByStatus: countByString(
+        input.contextBundle.changedFiles.map((file) => file.status),
+      ),
+      changedSymbolCount: input.contextBundle.changedSymbols.length,
+    },
+    completedAt: input.generatedAt,
+    inputSummary: {
+      baseSha: input.contextBundle.baseSha,
+      headSha: input.contextBundle.headSha,
+      pullRequestSnapshotId: input.contextBundle.pullRequestSnapshotId,
+      ...(indexVersionId ? { indexVersionId } : {}),
+      ...(retrievalMode ? { retrievalMode } : {}),
+    },
+    metadata: {
+      ...(ranking ? { ranking } : {}),
+      ...(packing ? { packing } : {}),
+      ...(memory ? { memory } : {}),
+      ...(rules ? { rules } : {}),
+    },
+    pullRequestSnapshotId: input.contextBundle.pullRequestSnapshotId,
+    repoId: input.contextBundle.repoId,
+    retrievalId: stableId("retr", [input.contextBundle.contextBundleId]),
+    reviewRunId: input.contextBundle.reviewRunId,
+    schemaVersion: "retrieval_trace.v1",
+    selectedItems: input.contextBundle.items.map(retrievalTraceArtifactItem),
+    startedAt: input.contextBundle.createdAt,
+    warnings: unknownArrayField(metadata, "warnings"),
+  };
+}
+
+/** Builds one product-safe selected item row for a retrieval trace artifact. */
+function retrievalTraceArtifactItem(item: ContextItem): RetrievalTraceArtifactItem {
+  return {
+    contextItemId: item.contextItemId,
+    kind: item.kind,
+    ...(item.snippet ? { path: item.snippet.path, range: item.snippet.range } : {}),
+    priority: item.priority,
+    reason: item.provenance.reason,
+    ...(item.provenance.relatedSymbolId
+      ? { relatedSymbolId: item.provenance.relatedSymbolId }
+      : {}),
+    retriever: item.provenance.retriever,
+    ...(item.score === undefined ? {} : { score: item.score }),
+    source: item.source,
+    ...(item.title ? { title: item.title } : {}),
+    tokenEstimate: item.tokenEstimate,
+  };
+}
+
+/** Counts string labels for product-safe aggregate trace summaries. */
+function countByString(values: readonly string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) {
+    counts[value] = (counts[value] ?? 0) + 1;
+  }
+
+  return counts;
 }
 
 /** JSON object used inside durable publish plan payloads. */

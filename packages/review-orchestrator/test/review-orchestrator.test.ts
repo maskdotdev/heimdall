@@ -1,4 +1,5 @@
 import type { PullRequestSnapshot } from "@repo/contracts";
+import { validContextBundleFixture } from "@repo/contracts/fixtures/review.fixture";
 import {
   createMemoryTelemetrySpanSink,
   createTelemetrySpanRecorder,
@@ -8,6 +9,7 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   assertSnapshotMatchesJob,
+  buildRetrievalTraceArtifactPayload,
   checkReviewRunCurrent,
   createStaticAnalysisRequestForReview,
   ReviewInputSnapshotMismatchError,
@@ -133,6 +135,49 @@ describe("reviewRunStatusForStage", () => {
     expect(reviewRunStatusForStage("review")).toBe("reviewing");
     expect(reviewRunStatusForStage("validation")).toBe("validating_findings");
     expect(reviewRunStatusForStage("publish")).toBe("publish_queued");
+  });
+});
+
+describe("buildRetrievalTraceArtifactPayload", () => {
+  it("summarizes retrieval metadata without copying snippet text", () => {
+    const payload = buildRetrievalTraceArtifactPayload({
+      contextBundle: {
+        ...validContextBundleFixture,
+        metadata: {
+          packing: { droppedItemCount: 0 },
+          ranking: { strategy: "weighted_reciprocal_rank_fusion_v1" },
+          warnings: [{ code: "token_budget_exceeded" }],
+        },
+      },
+      generatedAt: "2026-05-05T00:00:01.000Z",
+    });
+
+    expect(payload).toMatchObject({
+      budget: {
+        estimatedTokens: validContextBundleFixture.tokenBudget.estimatedTokens,
+        maxTokens: validContextBundleFixture.tokenBudget.maxTokens,
+      },
+      changeAnalysis: {
+        changedFileCount: 1,
+        changedSymbolCount: 1,
+      },
+      completedAt: "2026-05-05T00:00:01.000Z",
+      metadata: {
+        ranking: { strategy: "weighted_reciprocal_rank_fusion_v1" },
+      },
+      schemaVersion: "retrieval_trace.v1",
+      selectedItems: [
+        expect.objectContaining({
+          contextItemId: "ctxitem_01HXAMPLE",
+          path: "src/math.ts",
+          reason: "Changed symbol context",
+          retriever: "fixture",
+        }),
+      ],
+      warnings: [{ code: "token_budget_exceeded" }],
+    });
+    expect(JSON.stringify(payload)).not.toContain("Number(a)");
+    expect(JSON.stringify(payload)).not.toContain("return Number");
   });
 });
 
