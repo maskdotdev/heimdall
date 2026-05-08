@@ -1319,7 +1319,8 @@ tracked milestone.
   failed deletion planning and provider-cleanup event emission through the sink boundary. Worker
   installation-sync jobs now also record product-safe GitHub security events for provider
   permission, installation-suspended, token, rate-limit, unavailable, and validation failures
-  through the same durable sink.
+  through the same durable sink, and worker index jobs now record the same provider-control event
+  families when GitHub clone-auth acquisition fails before repo-sync checkout.
 - Latest admin-gateway security-event milestone: `@repo/security` now recognizes
   `admin_gateway` as a security-event source, and the standalone GitHub admin gateway records
   product-safe events for OAuth-state, GitHub org/login, CORS, and scoped assertion denials through
