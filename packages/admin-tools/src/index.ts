@@ -39,14 +39,15 @@ import {
   MemoryCandidateRepository,
   type MemoryFactRecord,
   MemoryFactRepository,
+  type PublishedCheckRunRecord,
+  type PublishedFindingRecord,
+  type PublishedReviewRecord,
+  type PublishedSummaryCommentRecord,
+  PublisherRepository,
+  type PublishOperationRecord,
+  type PublishRunRecord,
   PullRequestRepository,
   type PullRequestSnapshotRecord,
-  publishedCheckRuns,
-  publishedFindings,
-  publishedReviews,
-  publishedSummaryComments,
-  publishOperations,
-  publishRuns,
   quotaCounters,
   quotaReservations,
   RepoRuleRepository,
@@ -87,7 +88,7 @@ import { parseJobEnvelope, QUEUE_NAMES, type QueueName } from "@repo/queue";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { validateAndRankCandidateFindings } from "@repo/review-engine";
 import { type EffectiveReviewPolicy, parseReviewPolicySnapshot } from "@repo/rules";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc as drizzleDesc, eq, sql } from "drizzle-orm";
 
 export * from "./compliance-evidence";
 
@@ -2896,16 +2897,13 @@ export async function getPublisherDebugDetails(
   dependencies: AdminDebugServiceDependencies,
 ): Promise<AdminPublisherDebugDetails> {
   const reviewRepository = new ReviewRepository(dependencies.db);
+  const publisherRepository = new PublisherRepository(dependencies.db);
   const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
   if (!reviewRun) {
     throw new AdminDebugNotFoundError("review_run", reviewRunId);
   }
 
-  const publishRunRows = await dependencies.db
-    .select()
-    .from(publishRuns)
-    .where(eq(publishRuns.reviewRunId, reviewRunId))
-    .orderBy(desc(publishRuns.createdAt));
+  const publishRunRows = await publisherRepository.listPublishRunsForReviewRun(reviewRunId);
   const publishRunIds = publishRunRows.map((publishRun) => publishRun.publishRunId);
   const [
     operationRows,
@@ -2916,14 +2914,11 @@ export async function getPublisherDebugDetails(
     relatedJobs,
     replayAudits,
   ] = await Promise.all([
-    listPublishOperations(dependencies.db, publishRunIds),
-    listPublishedCheckRuns(dependencies.db, publishRunIds),
-    listPublishedReviews(dependencies.db, publishRunIds),
-    listPublishedSummaryComments(dependencies.db, publishRunIds),
-    dependencies.db
-      .select()
-      .from(publishedFindings)
-      .where(eq(publishedFindings.reviewRunId, reviewRunId)),
+    publisherRepository.listPublishOperationsForRuns(publishRunIds),
+    publisherRepository.listPublishedCheckRunsForRuns(publishRunIds),
+    publisherRepository.listPublishedReviewsForRuns(publishRunIds),
+    publisherRepository.listPublishedSummaryCommentsForRuns(publishRunIds),
+    publisherRepository.listPublishedFindingsForReviewRun(reviewRunId),
     new BackgroundJobRepository(dependencies.db)
       .listBackgroundJobsForReviewRun(reviewRunId)
       .then((jobs) =>
@@ -3256,10 +3251,8 @@ export async function reconcilePublisherRun(
     reviewRun,
     dependencies,
   );
-  const [publishRun] = await dependencies.db
-    .select()
-    .from(publishRuns)
-    .where(eq(publishRuns.reviewRunId, reviewRunId));
+  const publisherRepository = new PublisherRepository(dependencies.db);
+  const publishRun = await publisherRepository.getLatestPublishRunForReviewRun(reviewRunId);
 
   if (!publishRun) {
     return {
@@ -3289,31 +3282,11 @@ export async function reconcilePublisherRun(
 
   const [operations, checkRuns, reviews, summaryComments, publishedFindingRows] = await Promise.all(
     [
-      dependencies.db
-        .select()
-        .from(publishOperations)
-        .where(eq(publishOperations.publishRunId, publishRun.publishRunId)),
-      dependencies.db
-        .select()
-        .from(publishedCheckRuns)
-        .where(eq(publishedCheckRuns.publishRunId, publishRun.publishRunId)),
-      dependencies.db
-        .select()
-        .from(publishedReviews)
-        .where(eq(publishedReviews.publishRunId, publishRun.publishRunId)),
-      dependencies.db
-        .select()
-        .from(publishedSummaryComments)
-        .where(eq(publishedSummaryComments.publishRunId, publishRun.publishRunId)),
-      dependencies.db
-        .select()
-        .from(publishedFindings)
-        .where(
-          and(
-            eq(publishedFindings.reviewRunId, reviewRunId),
-            eq(publishedFindings.provider, "github"),
-          ),
-        ),
+      publisherRepository.listPublishOperationsForRuns([publishRun.publishRunId]),
+      publisherRepository.listPublishedCheckRunsForRuns([publishRun.publishRunId]),
+      publisherRepository.listPublishedReviewsForRuns([publishRun.publishRunId]),
+      publisherRepository.listPublishedSummaryCommentsForRuns([publishRun.publishRunId]),
+      publisherRepository.listPublishedFindingsForReviewRun(reviewRunId, "github"),
     ],
   );
 
@@ -3605,12 +3578,12 @@ type LlmCallRow = LlmCallRecord;
 type UsageEventRow = typeof usageEvents.$inferSelect;
 type QuotaReservationRow = typeof quotaReservations.$inferSelect;
 type QuotaCounterRow = typeof quotaCounters.$inferSelect;
-type PublishRunRow = typeof publishRuns.$inferSelect;
-type PublishOperationRow = typeof publishOperations.$inferSelect;
-type PublishedCheckRunRow = typeof publishedCheckRuns.$inferSelect;
-type PublishedReviewRow = typeof publishedReviews.$inferSelect;
-type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
-type PublishedFindingRow = typeof publishedFindings.$inferSelect;
+type PublishRunRow = PublishRunRecord;
+type PublishOperationRow = PublishOperationRecord;
+type PublishedCheckRunRow = PublishedCheckRunRecord;
+type PublishedReviewRow = PublishedReviewRecord;
+type PublishedSummaryCommentRow = PublishedSummaryCommentRecord;
+type PublishedFindingRow = PublishedFindingRecord;
 type MemoryFactRow = MemoryFactRecord;
 type MemoryCandidateRow = MemoryCandidateRecord;
 type IndexVersionRow = IndexVersionRecord;
@@ -3814,7 +3787,7 @@ async function listIndexImportBatchRows(
     .select()
     .from(indexImportBatches)
     .where(eq(indexImportBatches.indexVersionId, indexVersionId))
-    .orderBy(desc(indexImportBatches.updatedAt));
+    .orderBy(drizzleDesc(indexImportBatches.updatedAt));
 }
 
 /** Lists embedding jobs attached to one index version, newest first. */
@@ -3826,7 +3799,7 @@ async function listEmbeddingJobRowsForIndexVersion(
     .select()
     .from(embeddingJobs)
     .where(eq(embeddingJobs.indexVersionId, indexVersionId))
-    .orderBy(desc(embeddingJobs.createdAt));
+    .orderBy(drizzleDesc(embeddingJobs.createdAt));
 }
 
 /** Gets one embedding job summary for background-job debug details. */
@@ -3962,66 +3935,6 @@ async function listRelatedReviewJobs(
     .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
 
   return uniqueRows.map(toBackgroundJobDebugSummary);
-}
-
-async function listPublishOperations(
-  db: HeimdallDatabase,
-  publishRunIds: readonly string[],
-): Promise<readonly (typeof publishOperations.$inferSelect)[]> {
-  if (publishRunIds.length === 0) {
-    return [];
-  }
-
-  return db
-    .select()
-    .from(publishOperations)
-    .where(inArray(publishOperations.publishRunId, [...publishRunIds]))
-    .orderBy(asc(publishOperations.createdAt));
-}
-
-async function listPublishedCheckRuns(
-  db: HeimdallDatabase,
-  publishRunIds: readonly string[],
-): Promise<readonly (typeof publishedCheckRuns.$inferSelect)[]> {
-  if (publishRunIds.length === 0) {
-    return [];
-  }
-
-  return db
-    .select()
-    .from(publishedCheckRuns)
-    .where(inArray(publishedCheckRuns.publishRunId, [...publishRunIds]))
-    .orderBy(asc(publishedCheckRuns.createdAt));
-}
-
-async function listPublishedReviews(
-  db: HeimdallDatabase,
-  publishRunIds: readonly string[],
-): Promise<readonly (typeof publishedReviews.$inferSelect)[]> {
-  if (publishRunIds.length === 0) {
-    return [];
-  }
-
-  return db
-    .select()
-    .from(publishedReviews)
-    .where(inArray(publishedReviews.publishRunId, [...publishRunIds]))
-    .orderBy(asc(publishedReviews.createdAt));
-}
-
-async function listPublishedSummaryComments(
-  db: HeimdallDatabase,
-  publishRunIds: readonly string[],
-): Promise<readonly (typeof publishedSummaryComments.$inferSelect)[]> {
-  if (publishRunIds.length === 0) {
-    return [];
-  }
-
-  return db
-    .select()
-    .from(publishedSummaryComments)
-    .where(inArray(publishedSummaryComments.publishRunId, [...publishRunIds]))
-    .orderBy(asc(publishedSummaryComments.createdAt));
 }
 
 function toWebhookDebugSummary(row: WebhookEventRow): AdminWebhookEventDebugSummary {
