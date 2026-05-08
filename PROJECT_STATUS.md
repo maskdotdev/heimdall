@@ -240,6 +240,11 @@ tracked milestone.
   `@repo/admin-tools` uses this repository boundary for compliance collection instead of importing
   raw membership, audit, security, repository, or settings tables, while keeping product-safe
   evidence mapping and redaction in the admin-tools package.
+- Latest DB publisher milestone: `PublisherRepository` now owns publisher persistence writes for
+  publish runs, publish operations, provider check runs, grouped reviews, summary comments, and
+  published findings. `@repo/publisher` uses this repository boundary instead of importing raw
+  publish-state tables, and Postgres-backed integration coverage verifies idempotent output
+  upserts and operation recording.
 - Latest DB review milestone: `ReviewRepository` now returns the stored candidate row when an
   idempotent insert conflicts on review/fingerprint uniqueness, instead of echoing the rejected
   input, owns validated finding inspection reads joined with repository and publication display
@@ -438,6 +443,10 @@ tracked milestone.
   `HEIMDALL_GITHUB_SMOKE_MODE=stale_head` for a real GitHub-read stale-head skip check that should
   avoid external publishing. `pnpm smoke:github-provider-errors` now runs guarded live GitHub
   provider-error probes and prints the observed typed provider error plus publisher serialization.
+- Latest publisher DB-boundary milestone: `@repo/publisher` now records publish runs, operation
+  attempts, check-run rows, grouped-review rows, summary-comment rows, and published findings
+  through `PublisherRepository`, keeping provider orchestration in the publisher package while the
+  publish-state SQL lives behind `@repo/db`.
 - Latest indexer CLI milestone: `@app/indexer-cli` now replaces the placeholder entrypoint with a
   working `indexer index` command that accepts required repo, commit, and workspace inputs by flags
   or request JSON, invokes the existing TypeScript indexer driver, writes artifact JSON to a file or
