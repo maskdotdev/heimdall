@@ -346,6 +346,40 @@ export const codeIndexVersions = pgTable(
   ],
 );
 
+/** Durable progress and outcome state for one index artifact import attempt. */
+export const indexImportBatches = pgTable(
+  "index_import_batches",
+  {
+    indexImportBatchId: text("index_import_batch_id").primaryKey(),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    commitSha: text("commit_sha").notNull(),
+    indexKey: text("index_key").notNull(),
+    indexVersionId: text("index_version_id").references(() => codeIndexVersions.indexVersionId),
+    artifactUri: text("artifact_uri").notNull(),
+    artifactHash: text("artifact_hash"),
+    status: text("status").notNull().default("running"),
+    phase: text("phase").notNull().default("created"),
+    recordCount: integer("record_count").notNull().default(0),
+    fileCount: integer("file_count").notNull().default(0),
+    symbolCount: integer("symbol_count").notNull().default(0),
+    edgeCount: integer("edge_count").notNull().default(0),
+    chunkCount: integer("chunk_count").notNull().default(0),
+    embeddingJobCount: integer("embedding_job_count").notNull().default(0),
+    error: jsonb("error"),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("index_import_batches_repo_status_idx").on(table.repoId, table.status, table.createdAt),
+    index("index_import_batches_index_version_idx").on(table.indexVersionId),
+    index("index_import_batches_artifact_hash_idx").on(table.artifactHash),
+  ],
+);
+
 /** Indexed file records imported from index artifacts. */
 export const indexedFiles = pgTable(
   "indexed_files",

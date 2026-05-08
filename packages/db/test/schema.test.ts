@@ -27,6 +27,7 @@ import {
   findingDuplicateGroups,
   findingValidationEvents,
   indexedFiles,
+  indexImportBatches,
   invoices,
   memoryCandidates,
   oauthStates,
@@ -87,6 +88,10 @@ const reviewRunMetricsMigrationPath = resolve(
   "../migrations/0017_secret_ironclad.sql",
 );
 const embeddingJobsMigrationPath = resolve(testDirectory, "../migrations/0020_luxuriant_zarda.sql");
+const indexImportBatchesMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0021_great_iron_monger.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -105,6 +110,7 @@ describe("database schema foundation", () => {
     expect(backgroundJobs.backgroundJobId.name).toBe("background_job_id");
     expect(pullRequests.pullRequestId.name).toBe("pull_request_id");
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
+    expect(indexImportBatches.indexImportBatchId.name).toBe("index_import_batch_id");
     expect(indexedFiles.fileId.name).toBe("file_id");
     expect(reviewArtifacts.reviewArtifactId.name).toBe("review_artifact_id");
     expect(reviewRunMetrics.reviewRunId.name).toBe("review_run_id");
@@ -174,6 +180,7 @@ describe("database schema foundation", () => {
     const evalHistoryMigration = await readFile(evalHistoryMigrationPath, "utf8");
     const reviewRunMetricsMigration = await readFile(reviewRunMetricsMigrationPath, "utf8");
     const embeddingJobsMigration = await readFile(embeddingJobsMigrationPath, "utf8");
+    const indexImportBatchesMigration = await readFile(indexImportBatchesMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -230,6 +237,10 @@ describe("database schema foundation", () => {
     expect(embeddingJobsMigration).toContain('CREATE TABLE "embedding_jobs"');
     expect(embeddingJobsMigration).toContain('CREATE TABLE "embedding_job_items"');
     expect(embeddingJobsMigration).toContain('CREATE INDEX "embedding_jobs_repo_status_idx"');
+    expect(indexImportBatchesMigration).toContain('CREATE TABLE "index_import_batches"');
+    expect(indexImportBatchesMigration).toContain(
+      'CREATE INDEX "index_import_batches_repo_status_idx"',
+    );
   });
 });
 
@@ -379,6 +390,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('admin_actions')::text) AS admin_actions_table,
         (SELECT to_regclass('finding_duplicate_groups')::text) AS finding_duplicate_groups_table,
         (SELECT to_regclass('finding_validation_events')::text) AS finding_validation_events_table,
+        (SELECT to_regclass('index_import_batches')::text) AS index_import_batches_table,
         (SELECT to_regclass('memory_candidates')::text) AS memory_candidates_table,
         (SELECT to_regclass('publish_plans')::text) AS publish_plans_table,
         (SELECT to_regclass('replay_runs')::text) AS replay_runs_table,
@@ -401,6 +413,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       admin_actions_table: "admin_actions",
       webhook_events: 1,
       index_versions: 1,
+      index_import_batches_table: "index_import_batches",
       embeddings: 1,
       eval_baselines_table: "eval_baselines",
       eval_case_results_table: "eval_case_results",

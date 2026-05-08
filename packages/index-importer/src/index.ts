@@ -19,6 +19,7 @@ import {
   embeddingJobs,
   type HeimdallDatabase,
   indexedFiles,
+  indexImportBatches,
   repositories,
   symbols,
 } from "@repo/db";
@@ -127,6 +128,8 @@ export type ImportIndexArtifactFromUriOptions = ImportIndexArtifactOptions & {
 
 /** Summary returned after importing an index artifact. */
 export type ImportIndexArtifactResult = {
+  /** Durable import batch ID that records phase and outcome state. */
+  readonly importBatchId: string;
   /** Imported index version ID. */
   readonly indexVersionId: string;
   /** Number of persisted file records. */
@@ -142,6 +145,36 @@ export type ImportIndexArtifactResult = {
 };
 
 type IndexImporterTelemetryStatus = "failed" | "succeeded";
+
+type IndexImportBatchPhase =
+  | "activating_index_version"
+  | "complete"
+  | "creating_index_version"
+  | "failed"
+  | "planning_embeddings"
+  | "validating_manifest"
+  | "writing_records";
+
+type IndexImportPlan = {
+  /** Artifact content hash used for idempotency and support lookup. */
+  readonly artifactHash: `sha256:${string}`;
+  /** Chunks classified from the artifact records. */
+  readonly chunks: readonly ChunkRecord[];
+  /** Edge records classified from the artifact records. */
+  readonly edgeRecords: readonly Extract<IndexArtifact["records"][number], { type: "edge" }>[];
+  /** File records classified from the artifact records. */
+  readonly files: readonly Extract<IndexArtifact["records"][number], { type: "file" }>[];
+  /** Durable import batch ID that owns progress state. */
+  readonly importBatchId: string;
+  /** Bounded insert batch size for normalized record writes. */
+  readonly importRecordBatchSize: number;
+  /** Deterministic index key for this importer/chunker profile. */
+  readonly indexKey: string;
+  /** Deterministic index version ID for this artifact profile. */
+  readonly indexVersionId: string;
+  /** Symbol records classified from the artifact records. */
+  readonly symbolRecords: readonly Extract<IndexArtifact["records"][number], { type: "symbol" }>[];
+};
 
 type IndexImporterTelemetryState = {
   /** Low-cardinality labels shared by index-import metrics. */
@@ -251,57 +284,47 @@ export async function importIndexArtifact(
   options: ImportIndexArtifactOptions,
 ): Promise<ImportIndexArtifactResult> {
   const telemetry = startIndexImporterTelemetry(artifact, options);
-  const validationErrors = validateIndexArtifact(artifact);
-  if (validationErrors.length > 0) {
-    finishIndexImporterTelemetry(options.metrics, telemetry, {
-      error: new Error(`Invalid index artifact validation failed: ${validationErrors.join("; ")}`),
-      status: "failed",
-      validationFailureCount: validationErrors.length,
-    });
-    throw new Error(`Invalid index artifact: ${validationErrors.join("; ")}`);
-  }
+  const importPlan = createIndexImportPlan(artifact, options);
+  let importBatchStarted = false;
+  let validationFailureCount = 0;
 
   try {
-    const indexVersionId = stableId("idx", [
-      artifact.manifest.repoId,
-      artifact.manifest.commitSha,
-      artifact.manifest.indexerName,
-      artifact.manifest.indexerVersion,
-      artifact.manifest.chunkerVersion,
-    ]);
-    const artifactHash = artifact.manifest.artifactHash ?? hashArtifact(artifact);
-    const files = artifact.records.filter((record) => record.type === "file");
-    const symbolRecords = artifact.records.filter((record) => record.type === "symbol");
-    const edgeRecords = artifact.records.filter((record) => record.type === "edge");
-    const chunks = artifact.records.filter(
-      (record): record is ChunkRecord => record.type === "chunk",
-    );
-    const importRecordBatchSize = boundedImportRecordBatchSize(options.importRecordBatchSize);
+    await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
+      phase: "validating_manifest",
+    });
+    importBatchStarted = true;
+
+    const validationErrors = validateIndexArtifact(artifact);
+    validationFailureCount = validationErrors.length;
+    if (validationErrors.length > 0) {
+      throw new Error(`Invalid index artifact: validation failed: ${validationErrors.join("; ")}`);
+    }
+
+    await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
+      phase: "creating_index_version",
+    });
 
     await options.db.transaction(async (tx) => {
       await tx
         .insert(codeIndexVersions)
         .values({
-          indexVersionId,
+          indexVersionId: importPlan.indexVersionId,
           repoId: artifact.manifest.repoId,
           commitSha: artifact.manifest.commitSha,
-          indexKey: [
-            artifact.manifest.indexerName,
-            artifact.manifest.indexerVersion,
-            artifact.manifest.chunkerVersion,
-          ].join(":"),
-          status: "ready",
+          indexKey: importPlan.indexKey,
+          status: "importing",
           artifactUri: options.artifactUri,
-          artifactHash,
+          artifactHash: importPlan.artifactHash,
           indexerName: artifact.manifest.indexerName,
           indexerVersion: artifact.manifest.indexerVersion,
           chunkerVersion: artifact.manifest.chunkerVersion,
-          fileCount: files.length,
-          symbolCount: symbolRecords.length,
-          edgeCount: edgeRecords.length,
-          chunkCount: chunks.length,
+          fileCount: importPlan.files.length,
+          symbolCount: importPlan.symbolRecords.length,
+          edgeCount: importPlan.edgeRecords.length,
+          chunkCount: importPlan.chunks.length,
           embeddedChunkCount: 0,
-          completedAt: new Date(artifact.manifest.generatedAt),
+          completedAt: null,
+          error: null,
         })
         .onConflictDoUpdate({
           target: [
@@ -310,22 +333,31 @@ export async function importIndexArtifact(
             codeIndexVersions.indexKey,
           ],
           set: {
-            status: "ready",
+            status: "importing",
             artifactUri: options.artifactUri,
-            artifactHash,
-            fileCount: files.length,
-            symbolCount: symbolRecords.length,
-            edgeCount: edgeRecords.length,
-            chunkCount: chunks.length,
-            completedAt: new Date(artifact.manifest.generatedAt),
+            artifactHash: importPlan.artifactHash,
+            fileCount: importPlan.files.length,
+            symbolCount: importPlan.symbolRecords.length,
+            edgeCount: importPlan.edgeRecords.length,
+            chunkCount: importPlan.chunks.length,
+            completedAt: null,
             error: null,
           },
         });
 
-      if (files.length > 0) {
-        const fileRows = files.map((file) => ({
+      await tx
+        .update(indexImportBatches)
+        .set({
+          indexVersionId: importPlan.indexVersionId,
+          phase: "writing_records",
+          updatedAt: new Date(),
+        })
+        .where(eq(indexImportBatches.indexImportBatchId, importPlan.importBatchId));
+
+      if (importPlan.files.length > 0) {
+        const fileRows = importPlan.files.map((file) => ({
           fileId: file.fileId,
-          indexVersionId,
+          indexVersionId: importPlan.indexVersionId,
           repoId: file.repoId,
           commitSha: file.commitSha,
           path: file.path,
@@ -339,15 +371,15 @@ export async function importIndexArtifact(
           isVendored: file.isVendored,
           metadata: file.metadata,
         }));
-        for (const batch of batchRecords(fileRows, importRecordBatchSize)) {
+        for (const batch of batchRecords(fileRows, importPlan.importRecordBatchSize)) {
           await tx.insert(indexedFiles).values(batch).onConflictDoNothing();
         }
       }
 
-      if (symbolRecords.length > 0) {
-        const symbolRows = symbolRecords.map((symbol) => ({
+      if (importPlan.symbolRecords.length > 0) {
+        const symbolRows = importPlan.symbolRecords.map((symbol) => ({
           symbolId: symbol.symbolId,
-          indexVersionId,
+          indexVersionId: importPlan.indexVersionId,
           fileId: symbol.fileId,
           repoId: symbol.repoId,
           commitSha: symbol.commitSha,
@@ -361,15 +393,15 @@ export async function importIndexArtifact(
           contentHash: symbol.contentHash,
           metadata: { ...symbol.metadata, signature: symbol.signature },
         }));
-        for (const batch of batchRecords(symbolRows, importRecordBatchSize)) {
+        for (const batch of batchRecords(symbolRows, importPlan.importRecordBatchSize)) {
           await tx.insert(symbols).values(batch).onConflictDoNothing();
         }
       }
 
-      if (edgeRecords.length > 0) {
-        const edgeRows = edgeRecords.map((edge) => ({
+      if (importPlan.edgeRecords.length > 0) {
+        const edgeRows = importPlan.edgeRecords.map((edge) => ({
           edgeId: edge.edgeId,
-          indexVersionId,
+          indexVersionId: importPlan.indexVersionId,
           repoId: edge.repoId,
           commitSha: edge.commitSha,
           fromId: edge.fromId,
@@ -380,15 +412,15 @@ export async function importIndexArtifact(
           confidence: edge.confidence,
           metadata: edge.metadata,
         }));
-        for (const batch of batchRecords(edgeRows, importRecordBatchSize)) {
+        for (const batch of batchRecords(edgeRows, importPlan.importRecordBatchSize)) {
           await tx.insert(codeEdges).values(batch).onConflictDoNothing();
         }
       }
 
-      if (chunks.length > 0) {
-        const chunkRows = chunks.map((chunk) => ({
+      if (importPlan.chunks.length > 0) {
+        const chunkRows = importPlan.chunks.map((chunk) => ({
           chunkId: chunk.chunkId,
-          indexVersionId,
+          indexVersionId: importPlan.indexVersionId,
           fileId: chunk.fileId,
           symbolId: chunk.symbolId,
           repoId: chunk.repoId,
@@ -405,27 +437,38 @@ export async function importIndexArtifact(
             tokenEstimate: chunk.tokenEstimate,
           },
         }));
-        for (const batch of batchRecords(chunkRows, importRecordBatchSize)) {
+        for (const batch of batchRecords(chunkRows, importPlan.importRecordBatchSize)) {
           await tx.insert(codeChunks).values(batch).onConflictDoNothing();
         }
       }
     });
 
-    const embeddingJobCount = options.enqueueEmbeddings
-      ? await enqueueEmbeddingBatches({
-          artifact,
-          chunks,
-          indexVersionId,
-          options,
-          repoId: artifact.manifest.repoId,
-        })
-      : 0;
+    let embeddingJobCount = 0;
+    if (options.enqueueEmbeddings) {
+      await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
+        phase: "planning_embeddings",
+      });
+      embeddingJobCount = await enqueueEmbeddingBatches({
+        artifact,
+        chunks: importPlan.chunks,
+        indexVersionId: importPlan.indexVersionId,
+        options,
+        repoId: artifact.manifest.repoId,
+      });
+    }
+
+    await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
+      phase: "activating_index_version",
+    });
+    await completeIndexImportBatch(options.db, artifact, importPlan, { embeddingJobCount });
+
     const result = {
-      indexVersionId,
-      fileCount: files.length,
-      symbolCount: symbolRecords.length,
-      edgeCount: edgeRecords.length,
-      chunkCount: chunks.length,
+      importBatchId: importPlan.importBatchId,
+      indexVersionId: importPlan.indexVersionId,
+      fileCount: importPlan.files.length,
+      symbolCount: importPlan.symbolRecords.length,
+      edgeCount: importPlan.edgeRecords.length,
+      chunkCount: importPlan.chunks.length,
       embeddingJobCount,
     } satisfies ImportIndexArtifactResult;
     finishIndexImporterTelemetry(options.metrics, telemetry, {
@@ -435,9 +478,220 @@ export async function importIndexArtifact(
     });
     return result;
   } catch (error) {
-    finishIndexImporterTelemetry(options.metrics, telemetry, { error, status: "failed" });
+    if (importBatchStarted) {
+      await markIndexImportBatchFailed(options.db, importPlan, error).catch(() => undefined);
+    }
+    finishIndexImporterTelemetry(options.metrics, telemetry, {
+      error,
+      status: "failed",
+      ...(validationFailureCount > 0 ? { validationFailureCount } : {}),
+    });
     throw error;
   }
+}
+
+/** Builds deterministic IDs and typed record groups for one artifact import. */
+function createIndexImportPlan(
+  artifact: IndexArtifact,
+  options: ImportIndexArtifactOptions,
+): IndexImportPlan {
+  const indexKey = [
+    artifact.manifest.indexerName,
+    artifact.manifest.indexerVersion,
+    artifact.manifest.chunkerVersion,
+  ].join(":");
+  const artifactHash = artifactHashForImport(artifact);
+  const files = artifact.records.filter((record) => record.type === "file");
+  const symbolRecords = artifact.records.filter((record) => record.type === "symbol");
+  const edgeRecords = artifact.records.filter((record) => record.type === "edge");
+  const chunks = artifact.records.filter(
+    (record): record is ChunkRecord => record.type === "chunk",
+  );
+  const indexVersionId = stableId("idx", [
+    artifact.manifest.repoId,
+    artifact.manifest.commitSha,
+    artifact.manifest.indexerName,
+    artifact.manifest.indexerVersion,
+    artifact.manifest.chunkerVersion,
+  ]);
+
+  return {
+    artifactHash,
+    chunks,
+    edgeRecords,
+    files,
+    importBatchId: stableId("imb", [
+      artifact.manifest.repoId,
+      artifact.manifest.commitSha,
+      indexKey,
+      artifactHash,
+    ]),
+    importRecordBatchSize: boundedImportRecordBatchSize(options.importRecordBatchSize),
+    indexKey,
+    indexVersionId,
+    symbolRecords,
+  };
+}
+
+/** Creates or refreshes the visible import batch phase for a running artifact import. */
+async function markIndexImportBatchRunning(
+  db: HeimdallDatabase,
+  artifact: IndexArtifact,
+  options: ImportIndexArtifactOptions,
+  plan: IndexImportPlan,
+  input: {
+    /** Import phase now being executed. */
+    readonly phase: IndexImportBatchPhase;
+  },
+): Promise<void> {
+  const now = new Date();
+  const indexVersionId = importBatchPhaseHasIndexVersion(input.phase) ? plan.indexVersionId : null;
+
+  await db
+    .insert(indexImportBatches)
+    .values({
+      indexImportBatchId: plan.importBatchId,
+      repoId: artifact.manifest.repoId,
+      commitSha: artifact.manifest.commitSha,
+      indexKey: plan.indexKey,
+      indexVersionId,
+      artifactUri: options.artifactUri,
+      artifactHash: plan.artifactHash,
+      status: "running",
+      phase: input.phase,
+      recordCount: artifact.manifest.recordCount,
+      fileCount: plan.files.length,
+      symbolCount: plan.symbolRecords.length,
+      edgeCount: plan.edgeRecords.length,
+      chunkCount: plan.chunks.length,
+      embeddingJobCount: 0,
+      error: null,
+      metadata: {
+        artifactId: artifact.manifest.artifactId,
+        chunkerVersion: artifact.manifest.chunkerVersion,
+        importRecordBatchSize: plan.importRecordBatchSize,
+        indexerName: artifact.manifest.indexerName,
+        indexerVersion: artifact.manifest.indexerVersion,
+        schemaVersion: artifact.manifest.schemaVersion,
+      },
+      startedAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: indexImportBatches.indexImportBatchId,
+      set: {
+        indexVersionId,
+        artifactUri: options.artifactUri,
+        artifactHash: plan.artifactHash,
+        status: "running",
+        phase: input.phase,
+        recordCount: artifact.manifest.recordCount,
+        fileCount: plan.files.length,
+        symbolCount: plan.symbolRecords.length,
+        edgeCount: plan.edgeRecords.length,
+        chunkCount: plan.chunks.length,
+        error: null,
+        metadata: {
+          artifactId: artifact.manifest.artifactId,
+          chunkerVersion: artifact.manifest.chunkerVersion,
+          importRecordBatchSize: plan.importRecordBatchSize,
+          indexerName: artifact.manifest.indexerName,
+          indexerVersion: artifact.manifest.indexerVersion,
+          schemaVersion: artifact.manifest.schemaVersion,
+        },
+        startedAt: now,
+        finishedAt: null,
+        updatedAt: now,
+      },
+    });
+}
+
+/** Marks an import batch complete and activates its index version atomically. */
+async function completeIndexImportBatch(
+  db: HeimdallDatabase,
+  artifact: IndexArtifact,
+  plan: IndexImportPlan,
+  input: {
+    /** Number of durable embedding jobs planned by the import. */
+    readonly embeddingJobCount: number;
+  },
+): Promise<void> {
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(codeIndexVersions)
+      .set({
+        completedAt: new Date(artifact.manifest.generatedAt),
+        error: null,
+        status: "ready",
+      })
+      .where(eq(codeIndexVersions.indexVersionId, plan.indexVersionId));
+
+    await tx
+      .update(indexImportBatches)
+      .set({
+        embeddingJobCount: input.embeddingJobCount,
+        finishedAt: now,
+        phase: "complete",
+        status: "complete",
+        updatedAt: now,
+      })
+      .where(eq(indexImportBatches.indexImportBatchId, plan.importBatchId));
+  });
+}
+
+/** Marks the visible import batch and its index version as failed. */
+async function markIndexImportBatchFailed(
+  db: HeimdallDatabase,
+  plan: IndexImportPlan,
+  error: unknown,
+): Promise<void> {
+  const now = new Date();
+  const serializedError = serializeIndexImportError(error);
+
+  await db
+    .update(indexImportBatches)
+    .set({
+      error: serializedError,
+      finishedAt: now,
+      phase: "failed",
+      status: "failed",
+      updatedAt: now,
+    })
+    .where(eq(indexImportBatches.indexImportBatchId, plan.importBatchId));
+
+  await db
+    .update(codeIndexVersions)
+    .set({
+      error: serializedError,
+      status: "failed",
+    })
+    .where(eq(codeIndexVersions.indexVersionId, plan.indexVersionId));
+}
+
+/** Serializes an import failure into product-safe database metadata. */
+function serializeIndexImportError(error: unknown): Record<string, string> {
+  return {
+    class: classifyTelemetryError(error),
+    message:
+      error instanceof Error ? error.message.slice(0, 1_000) : "Unknown index import failure.",
+  };
+}
+
+/** Returns the manifest artifact hash when valid, or computes a deterministic fallback hash. */
+function artifactHashForImport(artifact: IndexArtifact): `sha256:${string}` {
+  const artifactHash = artifact.manifest.artifactHash;
+  if (artifactHash?.startsWith("sha256:")) {
+    return artifactHash as `sha256:${string}`;
+  }
+
+  return hashArtifact(artifact);
+}
+
+/** Returns whether an import phase can safely reference an existing index version row. */
+function importBatchPhaseHasIndexVersion(phase: IndexImportBatchPhase): boolean {
+  return phase !== "validating_manifest" && phase !== "creating_index_version";
 }
 
 /** Starts product-safe index-import telemetry and returns shared metric labels. */
