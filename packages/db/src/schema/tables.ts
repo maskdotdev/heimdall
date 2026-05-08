@@ -338,10 +338,11 @@ export const codeIndexVersions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("code_index_versions_repo_commit_key_unique").on(
+    uniqueIndex("code_index_versions_repo_commit_key_artifact_unique").on(
       table.repoId,
       table.commitSha,
       table.indexKey,
+      table.artifactHash,
     ),
   ],
 );

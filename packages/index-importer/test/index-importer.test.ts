@@ -533,29 +533,6 @@ describe("importIndexArtifact telemetry", () => {
     expect(insertedRows).toEqual([]);
   });
 
-  it("rejects different ready artifacts without rewriting rows", async () => {
-    const insertedRows: unknown[] = [];
-
-    await expect(
-      importIndexArtifact(artifactWithHash(artifactWithChunk(), `sha256:${"e".repeat(64)}`), {
-        artifactUri: "file:///tmp/index-artifact.json",
-        db: createEmbeddingPlanningImportDatabaseStub(insertedRows, {
-          existingIndexVersion: {
-            artifactHash: `sha256:${"f".repeat(64)}`,
-            chunkCount: 1,
-            edgeCount: 0,
-            fileCount: 1,
-            indexVersionId: "idx_existing",
-            status: "ready",
-            symbolCount: 0,
-          },
-        }),
-      }),
-    ).rejects.toThrow("different artifact hash");
-
-    expect(insertedRows).toEqual([]);
-  });
-
   it("cleans stale rows before retrying a failed import", async () => {
     const artifactHash = `sha256:${"d".repeat(64)}` as const;
     const deletedTables: unknown[] = [];
@@ -621,6 +598,25 @@ describe("importIndexArtifact telemetry", () => {
       symbols,
       indexedFiles,
     ]);
+  });
+
+  it("creates distinct index versions for different artifact hashes", async () => {
+    const first = await importIndexArtifact(
+      artifactWithHash(artifactWithChunk(), `sha256:${"e".repeat(64)}`),
+      {
+        artifactUri: "file:///tmp/index-artifact-a.json",
+        db: createImportDatabaseStub(),
+      },
+    );
+    const second = await importIndexArtifact(
+      artifactWithHash(artifactWithChunk(), `sha256:${"f".repeat(64)}`),
+      {
+        artifactUri: "file:///tmp/index-artifact-b.json",
+        db: createImportDatabaseStub(),
+      },
+    );
+
+    expect(first.indexVersionId).not.toBe(second.indexVersionId);
   });
 
   it("marks import batches failed when record writes fail", async () => {

@@ -31,7 +31,12 @@ export class IndexVersionRepository {
         completedAt: indexVersion.completedAt ? new Date(indexVersion.completedAt) : undefined,
       })
       .onConflictDoUpdate({
-        target: [codeIndexVersions.repoId, codeIndexVersions.commitSha, codeIndexVersions.indexKey],
+        target: [
+          codeIndexVersions.repoId,
+          codeIndexVersions.commitSha,
+          codeIndexVersions.indexKey,
+          codeIndexVersions.artifactHash,
+        ],
         set: {
           status: indexVersion.status,
           artifactUri: indexVersion.artifactUri,

@@ -396,36 +396,21 @@ export async function importIndexArtifact(
       importPlan,
     );
     if (existingIndexVersion?.status === "ready") {
-      if (existingIndexVersion.artifactHash === importPlan.artifactHash) {
-        const result = {
-          importBatchId: importPlan.importBatchId,
-          indexVersionId: existingIndexVersion.indexVersionId,
-          fileCount: existingIndexVersion.fileCount,
-          symbolCount: existingIndexVersion.symbolCount,
-          edgeCount: existingIndexVersion.edgeCount,
-          chunkCount: existingIndexVersion.chunkCount,
-          embeddingJobCount: 0,
-        } satisfies ImportIndexArtifactResult;
-        finishIndexImporterTelemetry(options.metrics, telemetry, {
-          artifact,
-          result,
-          status: "succeeded",
-        });
-        return result;
-      }
-
-      throw new Error(
-        "A ready index version already exists for this repo, commit, and index profile with a different artifact hash.",
-      );
-    }
-    if (
-      existingIndexVersion?.status === "failed" &&
-      existingIndexVersion.artifactHash !== null &&
-      existingIndexVersion.artifactHash !== importPlan.artifactHash
-    ) {
-      throw new Error(
-        "A failed index version already exists for this repo, commit, and index profile with a different artifact hash.",
-      );
+      const result = {
+        importBatchId: importPlan.importBatchId,
+        indexVersionId: existingIndexVersion.indexVersionId,
+        fileCount: existingIndexVersion.fileCount,
+        symbolCount: existingIndexVersion.symbolCount,
+        edgeCount: existingIndexVersion.edgeCount,
+        chunkCount: existingIndexVersion.chunkCount,
+        embeddingJobCount: 0,
+      } satisfies ImportIndexArtifactResult;
+      finishIndexImporterTelemetry(options.metrics, telemetry, {
+        artifact,
+        result,
+        status: "succeeded",
+      });
+      return result;
     }
 
     await markIndexImportBatchRunning(options.db, artifact, options, importPlan, {
@@ -481,6 +466,7 @@ export async function importIndexArtifact(
             codeIndexVersions.repoId,
             codeIndexVersions.commitSha,
             codeIndexVersions.indexKey,
+            codeIndexVersions.artifactHash,
           ],
           set: {
             status: "importing",
@@ -669,6 +655,7 @@ function createIndexImportPlan(
     artifact.manifest.indexerName,
     artifact.manifest.indexerVersion,
     artifact.manifest.chunkerVersion,
+    artifactHash,
   ]);
   const embeddingJobId = stableId("embjob", [
     artifact.manifest.repoId,
@@ -880,6 +867,7 @@ async function findExistingIndexVersionForImport(
         eq(codeIndexVersions.repoId, artifact.manifest.repoId),
         eq(codeIndexVersions.commitSha, artifact.manifest.commitSha),
         eq(codeIndexVersions.indexKey, plan.indexKey),
+        eq(codeIndexVersions.artifactHash, plan.artifactHash),
       ),
     )
     .limit(1);

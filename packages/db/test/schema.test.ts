@@ -92,6 +92,10 @@ const indexImportBatchesMigrationPath = resolve(
   testDirectory,
   "../migrations/0021_great_iron_monger.sql",
 );
+const indexArtifactUniquenessMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0022_futuristic_quicksilver.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -181,6 +185,10 @@ describe("database schema foundation", () => {
     const reviewRunMetricsMigration = await readFile(reviewRunMetricsMigrationPath, "utf8");
     const embeddingJobsMigration = await readFile(embeddingJobsMigrationPath, "utf8");
     const indexImportBatchesMigration = await readFile(indexImportBatchesMigrationPath, "utf8");
+    const indexArtifactUniquenessMigration = await readFile(
+      indexArtifactUniquenessMigrationPath,
+      "utf8",
+    );
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -240,6 +248,12 @@ describe("database schema foundation", () => {
     expect(indexImportBatchesMigration).toContain('CREATE TABLE "index_import_batches"');
     expect(indexImportBatchesMigration).toContain(
       'CREATE INDEX "index_import_batches_repo_status_idx"',
+    );
+    expect(indexArtifactUniquenessMigration).toContain(
+      'DROP INDEX "code_index_versions_repo_commit_key_unique"',
+    );
+    expect(indexArtifactUniquenessMigration).toContain(
+      'CREATE UNIQUE INDEX "code_index_versions_repo_commit_key_artifact_unique"',
     );
   });
 });
