@@ -29,6 +29,7 @@ import {
   getRepoSyncWorktreePath,
   RepoSyncGitCommandError,
 } from "@repo/repo-sync";
+import { createMemorySecurityEventSink } from "@repo/security";
 import { describe, expect, it, vi } from "vitest";
 import {
   acquireWorkerRepositoryWorkspace,
@@ -948,6 +949,49 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validDataDeletionPlanJobPayloadFixture]);
+  });
+
+  it("records worker security events when data deletion planning fails", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+    const handlers = createWorkerHandlers({
+      dataDeletionPlanner: async () => {
+        throw new Error("planning failed");
+      },
+      db: {} as never,
+      gitProvider: {} as never,
+      securityEventSink,
+    });
+
+    await expect(
+      handlers[JOB_TYPES.DataDeletionPlan]?.({
+        attempt: 0,
+        createdAt: "2026-05-07T12:00:00.000Z",
+        idempotencyKey: "data-deletion:plan:ddr_01HXAMPLE",
+        jobId: "job_data_deletion_plan",
+        jobType: JOB_TYPES.DataDeletionPlan,
+        maxAttempts: 3,
+        payload: validDataDeletionPlanJobPayloadFixture,
+        schemaVersion: "data_deletion_plan_job.v1",
+      }),
+    ).rejects.toThrow("planning failed");
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        actorId: validDataDeletionPlanJobPayloadFixture.requestedBy,
+        metadata: {
+          dataDeletionRequestId: validDataDeletionPlanJobPayloadFixture.dataDeletionRequestId,
+          dryRun: false,
+          errorName: "Error",
+          reason: validDataDeletionPlanJobPayloadFixture.reason,
+          scope: validDataDeletionPlanJobPayloadFixture.scope,
+        },
+        resourceId: validDataDeletionPlanJobPayloadFixture.dataDeletionRequestId,
+        resourceType: "data_deletion_request",
+        severity: "high",
+        source: "worker",
+        type: "data_deletion_failed",
+      },
+    ]);
   });
 
   it("dispatches embedding repair jobs through the configured repairer", async () => {
