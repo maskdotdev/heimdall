@@ -15,7 +15,7 @@ import {
   pullRequests,
   repositories,
   repositorySettings,
-  webhookEvents,
+  WebhookRepository,
 } from "@repo/db";
 import {
   type GitHubWebhookHeaders,
@@ -29,7 +29,7 @@ import {
   type TelemetrySpanRecorder,
   type TelemetryTraceContext,
 } from "@repo/observability";
-import { eq, inArray } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
 import {
@@ -169,14 +169,9 @@ export class GitHubWebhookHandler {
         typeof normalized.payload.action === "string" ? normalized.payload.action : undefined;
       const status = supportedEvents.has(normalized.headers.eventName) ? "processed" : "ignored";
       const primaryRepo = normalized.repositories[0]?.repository;
+      const webhookRepository = new WebhookRepository(tx);
 
-      const [existingWebhookRow] = await tx
-        .select({ webhookEventId: webhookEvents.webhookEventId })
-        .from(webhookEvents)
-        .where(eq(webhookEvents.webhookEventId, webhookEventId))
-        .limit(1);
-
-      if (existingWebhookRow) {
+      if (await webhookRepository.getWebhookEvent(webhookEventId)) {
         return {
           status: "duplicate" as const,
           deliveryId: normalized.headers.deliveryId,
@@ -197,28 +192,26 @@ export class GitHubWebhookHandler {
         await persistPullRequest(tx, normalized.pullRequest);
       }
 
-      const [webhookRow] = await tx
-        .insert(webhookEvents)
-        .values({
-          webhookEventId,
-          provider: "github",
-          deliveryId: normalized.headers.deliveryId,
-          eventName: normalized.headers.eventName,
-          action,
-          installationId: normalized.installation?.installationId,
-          orgId: normalized.installation?.orgId,
-          repoId: primaryRepo?.repoId,
-          receivedAt: new Date(),
-          processedAt: new Date(),
-          status,
-          payloadHash: normalized.payloadHash,
-          payload: normalized.payload,
-          metadata: { githubWebhookSecretVersion: normalized.matchedSecretVersion },
-        })
-        .onConflictDoNothing()
-        .returning();
+      const webhookInsert = await webhookRepository.insertWebhookEvent({
+        webhookEventId,
+        provider: "github",
+        deliveryId: normalized.headers.deliveryId,
+        eventName: normalized.headers.eventName,
+        ...(action ? { action } : {}),
+        ...(normalized.installation?.installationId
+          ? { installationId: normalized.installation.installationId }
+          : {}),
+        ...(normalized.installation?.orgId ? { orgId: normalized.installation.orgId } : {}),
+        ...(primaryRepo?.repoId ? { repoId: primaryRepo.repoId } : {}),
+        receivedAt: new Date().toISOString(),
+        processedAt: new Date().toISOString(),
+        status,
+        payloadHash: normalized.payloadHash,
+        payload: normalized.payload,
+        metadata: { githubWebhookSecretVersion: normalized.matchedSecretVersion },
+      });
 
-      if (!webhookRow) {
+      if (!webhookInsert.inserted) {
         return {
           status: "duplicate" as const,
           deliveryId: normalized.headers.deliveryId,

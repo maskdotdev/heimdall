@@ -7,6 +7,7 @@ import type {
   RepositorySettings,
   ReviewRun,
   ValidatedFinding,
+  WebhookEvent,
 } from "@repo/contracts";
 import {
   CandidateFindingSchema,
@@ -18,6 +19,7 @@ import {
   RepositorySettingsSchema,
   ReviewRunSchema,
   ValidatedFindingSchema,
+  WebhookEventSchema,
 } from "@repo/contracts";
 
 const toIso = (value: Date): string => value.toISOString();
@@ -143,6 +145,38 @@ export const toOrgSettings = (row: {
     updatedAt: toIso(row.updatedAt),
   });
 };
+
+/** Converts a webhook event row to the public webhook event contract. */
+export const toWebhookEvent = (row: {
+  webhookEventId: string;
+  provider: string;
+  deliveryId: string;
+  eventName: string;
+  action: string | null;
+  installationId: string | null;
+  repoId: string | null;
+  payloadHash: string;
+  status: string;
+  receivedAt: Date;
+  processedAt: Date | null;
+  error: unknown;
+  metadata: unknown;
+}): WebhookEvent =>
+  parseWithSchema("WebhookEvent", WebhookEventSchema, {
+    webhookEventId: row.webhookEventId,
+    provider: row.provider as WebhookEvent["provider"],
+    deliveryId: row.deliveryId,
+    eventName: row.eventName,
+    ...withOptional("action", optionalString(row.action)),
+    ...withOptional("installationId", optionalString(row.installationId)),
+    ...withOptional("repoId", optionalString(row.repoId)),
+    payloadHash: row.payloadHash,
+    status: row.status as WebhookEvent["status"],
+    receivedAt: toIso(row.receivedAt),
+    ...withOptional("processedAt", row.processedAt ? toIso(row.processedAt) : undefined),
+    ...withOptional("error", optionalRecord(row.error) as WebhookEvent["error"]),
+    ...withOptional("metadata", optionalRecord(row.metadata)),
+  });
 
 /** Converts a code index row to the code index version contract. */
 export const toCodeIndexVersion = (row: {
