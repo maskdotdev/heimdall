@@ -111,6 +111,56 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
     expect(validatedFindings.map((finding) => finding.findingId)).toEqual([
       "fnd_review_repository_validated",
     ]);
+
+    await reviewRepository.insertSuppressionMatches([
+      {
+        candidateFindingId: "fnd_review_repository_candidate",
+        confidence: 0.91,
+        createdAt: "2026-05-08T00:04:00.000Z",
+        findingId: "fnd_review_repository_validated",
+        matchKind: "exact",
+        memoryFactId: "mem_review_repository_suppression",
+        orgId: "org_review_repository_test",
+        reason: "Matches a stored suppression fact.",
+        repoId: "repo_review_repository_test",
+        reviewRunId: "rrn_review_repository",
+        suppressionMatchId: "sm_review_repository",
+      },
+    ]);
+    const suppressionMatches = await reviewRepository.listRepositorySuppressionMatches({
+      limit: 10,
+      repoId: "repo_review_repository_test",
+    });
+    expect(suppressionMatches).toEqual([
+      expect.objectContaining({
+        candidateFindingId: "fnd_review_repository_candidate",
+        confidence: 0.91,
+        createdAt: new Date("2026-05-08T00:04:00.000Z"),
+        findingCategory: "correctness",
+        findingId: "fnd_review_repository_validated",
+        findingSeverity: "medium",
+        findingTitle: "Validate user input before saving",
+        location: expect.objectContaining({ path: "src/service.ts" }),
+        matchKind: "exact",
+        memoryFactId: "mem_review_repository_suppression",
+        memoryStatus: "active",
+        memoryText: "Suppress already accepted validation findings.",
+        reason: "Matches a stored suppression fact.",
+        reviewRunId: "rrn_review_repository",
+        suppressionMatchId: "sm_review_repository",
+      }),
+    ]);
+    await expect(
+      reviewRepository.listRepositorySuppressionMatches({
+        limit: 0,
+        repoId: "repo_review_repository_test",
+      }),
+    ).rejects.toThrow(/limit must be an integer/u);
+    await expect(
+      reviewRepository.listRepositorySuppressionMatches({
+        repoId: "repo_review_repository_other",
+      }),
+    ).resolves.toEqual([]);
   });
 });
 
@@ -178,6 +228,32 @@ async function seedReviewParents(sql: postgres.Sql): Promise<void> {
       'heimdall',
       'acme/heimdall',
       'private'
+    )
+  `;
+  await sql`
+    INSERT INTO memory_facts (
+      memory_fact_id,
+      org_id,
+      repo_id,
+      fact_type,
+      body,
+      status,
+      confidence,
+      metadata,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      'mem_review_repository_suppression',
+      'org_review_repository_test',
+      'repo_review_repository_test',
+      'suppression',
+      'Suppress already accepted validation findings.',
+      'active',
+      0.95,
+      ${JSON.stringify({ source: "integration_test" })}::jsonb,
+      '2026-05-08T00:00:00.000Z',
+      '2026-05-08T00:01:00.000Z'
     )
   `;
   await sql`

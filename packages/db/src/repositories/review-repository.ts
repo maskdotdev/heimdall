@@ -11,6 +11,7 @@ import {
   candidateFindings,
   findingDuplicateGroups,
   findingValidationEvents,
+  memoryFacts,
   publishedFindings,
   publishPlans,
   reviewArtifacts,
@@ -110,6 +111,48 @@ export type SuppressionMatchInsert = {
   readonly metadata?: Record<string, unknown>;
   /** Match creation time. */
   readonly createdAt?: Date | string;
+};
+
+/** Repository suppression match row joined with memory and finding display fields. */
+export type RepositorySuppressionMatchRecord = {
+  /** Durable suppression match row ID. */
+  readonly suppressionMatchId: string;
+  /** Review run that emitted the suppression decision. */
+  readonly reviewRunId: string;
+  /** Validated finding row suppressed by memory. */
+  readonly findingId: string;
+  /** Candidate finding inspected by the memory matcher. */
+  readonly candidateFindingId: string;
+  /** Durable memory fact responsible for suppression. */
+  readonly memoryFactId: string;
+  /** Human-readable memory fact body. */
+  readonly memoryText: string;
+  /** Current status of the memory fact. */
+  readonly memoryStatus: string;
+  /** Finding title associated with the suppressed candidate. */
+  readonly findingTitle: string;
+  /** Finding category associated with the suppressed candidate. */
+  readonly findingCategory: string;
+  /** Finding severity associated with the suppressed candidate. */
+  readonly findingSeverity: string;
+  /** Finding location associated with the suppressed candidate. */
+  readonly location: unknown;
+  /** Suppression match strategy. */
+  readonly matchKind: string;
+  /** Suppression matcher confidence from zero to one. */
+  readonly confidence: number;
+  /** Product-safe matcher reason when available. */
+  readonly reason: string | null;
+  /** Match creation timestamp. */
+  readonly createdAt: Date;
+};
+
+/** Input used to list recent suppression matches for one repository. */
+export type ListRepositorySuppressionMatchesInput = {
+  /** Repository that owns the suppression matches. */
+  readonly repoId: string;
+  /** Maximum number of rows to return. */
+  readonly limit?: number | undefined;
 };
 
 /** Publish plan row to persist for review replay and publisher handoff debugging. */
@@ -403,6 +446,38 @@ export class ReviewRepository {
       .onConflictDoNothing();
   }
 
+  /** Lists recent memory suppression matches for one repository. */
+  public async listRepositorySuppressionMatches(
+    input: ListRepositorySuppressionMatchesInput,
+  ): Promise<readonly RepositorySuppressionMatchRecord[]> {
+    const rows = await this.db
+      .select({
+        candidateFindingId: suppressionMatches.candidateFindingId,
+        confidence: suppressionMatches.confidence,
+        createdAt: suppressionMatches.createdAt,
+        findingCategory: validatedFindings.category,
+        findingId: suppressionMatches.findingId,
+        findingSeverity: validatedFindings.severity,
+        findingTitle: validatedFindings.title,
+        location: validatedFindings.location,
+        matchKind: suppressionMatches.matchKind,
+        memoryFactId: suppressionMatches.memoryFactId,
+        memoryStatus: memoryFacts.status,
+        memoryText: memoryFacts.body,
+        reason: suppressionMatches.reason,
+        reviewRunId: suppressionMatches.reviewRunId,
+        suppressionMatchId: suppressionMatches.suppressionMatchId,
+      })
+      .from(suppressionMatches)
+      .innerJoin(memoryFacts, eq(suppressionMatches.memoryFactId, memoryFacts.memoryFactId))
+      .innerJoin(validatedFindings, eq(suppressionMatches.findingId, validatedFindings.findingId))
+      .where(eq(suppressionMatches.repoId, input.repoId))
+      .orderBy(desc(suppressionMatches.createdAt), desc(suppressionMatches.suppressionMatchId))
+      .limit(repositorySuppressionMatchLimit(input.limit));
+
+    return rows;
+  }
+
   /** Inserts a publish plan and preserves existing review-run plans. */
   public async insertPublishPlan(plan: PublishPlanInsert): Promise<void> {
     await this.db
@@ -542,4 +617,16 @@ export class ReviewRepository {
 
     return toValidatedFinding(requireReturnedRow(row));
   }
+}
+
+/** Validates a bounded suppression match inspection limit. */
+function repositorySuppressionMatchLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return 100;
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error("Suppression match list limit must be an integer between 1 and 500.");
+  }
+
+  return limit;
 }

@@ -105,7 +105,7 @@ import {
   type MemoryFactRecord,
   MemoryFactRepository,
   type memoryCandidates,
-  memoryFacts,
+  type memoryFacts,
   oauthStates,
   orgMemberships,
   orgs,
@@ -116,6 +116,8 @@ import {
   quotaCounters,
   RepoRuleRepository,
   RepositoryRepository,
+  type RepositorySuppressionMatchRecord,
+  ReviewRepository,
   repoRuleScope,
   repoRuleType,
   repositories,
@@ -124,7 +126,6 @@ import {
   reviewRuns,
   securityEvents,
   subscriptions,
-  suppressionMatches,
   usageEvents,
   userProviderAccounts,
   userSessions,
@@ -1899,38 +1900,7 @@ type MemoryFactRow = typeof memoryFacts.$inferSelect | MemoryFactRecord;
 type MemoryCandidateRow = typeof memoryCandidates.$inferSelect | MemoryCandidateRecord;
 
 /** Joined row shape for repository suppression match history. */
-type SuppressionMatchRow = {
-  /** Durable suppression match row ID. */
-  readonly suppressionMatchId: string;
-  /** Review run that emitted the suppression decision. */
-  readonly reviewRunId: string;
-  /** Validated finding row suppressed by memory. */
-  readonly findingId: string;
-  /** Candidate finding inspected by the memory matcher. */
-  readonly candidateFindingId: string;
-  /** Durable memory fact responsible for suppression. */
-  readonly memoryFactId: string;
-  /** Human-readable memory fact body. */
-  readonly memoryText: string;
-  /** Current status of the memory fact. */
-  readonly memoryStatus: string;
-  /** Finding title associated with the suppressed candidate. */
-  readonly findingTitle: string;
-  /** Finding category associated with the suppressed candidate. */
-  readonly findingCategory: string;
-  /** Finding severity associated with the suppressed candidate. */
-  readonly findingSeverity: string;
-  /** Finding location associated with the suppressed candidate. */
-  readonly location: unknown;
-  /** Suppression match strategy. */
-  readonly matchKind: string;
-  /** Suppression matcher confidence from zero to one. */
-  readonly confidence: number;
-  /** Product-safe matcher reason when available. */
-  readonly reason: string | null;
-  /** Match creation timestamp. */
-  readonly createdAt: Date;
-};
+type SuppressionMatchRow = RepositorySuppressionMatchRecord;
 
 /** Query options for repository discovery. */
 type AdminRepositoryListQuery = {
@@ -10582,30 +10552,10 @@ async function listRepositorySuppressionMatches(
   repoId: string,
   query: AdminSuppressionMatchListQuery,
 ): Promise<readonly AdminSuppressionMatchSummary[]> {
-  const rows = await db
-    .select({
-      candidateFindingId: suppressionMatches.candidateFindingId,
-      confidence: suppressionMatches.confidence,
-      createdAt: suppressionMatches.createdAt,
-      findingCategory: validatedFindings.category,
-      findingId: suppressionMatches.findingId,
-      findingSeverity: validatedFindings.severity,
-      findingTitle: validatedFindings.title,
-      location: validatedFindings.location,
-      matchKind: suppressionMatches.matchKind,
-      memoryFactId: suppressionMatches.memoryFactId,
-      memoryStatus: memoryFacts.status,
-      memoryText: memoryFacts.body,
-      reason: suppressionMatches.reason,
-      reviewRunId: suppressionMatches.reviewRunId,
-      suppressionMatchId: suppressionMatches.suppressionMatchId,
-    })
-    .from(suppressionMatches)
-    .innerJoin(memoryFacts, eq(suppressionMatches.memoryFactId, memoryFacts.memoryFactId))
-    .innerJoin(validatedFindings, eq(suppressionMatches.findingId, validatedFindings.findingId))
-    .where(eq(suppressionMatches.repoId, repoId))
-    .orderBy(desc(suppressionMatches.createdAt), desc(suppressionMatches.suppressionMatchId))
-    .limit(boundedListLimit(query.limit));
+  const rows = await new ReviewRepository(db).listRepositorySuppressionMatches({
+    limit: boundedListLimit(query.limit),
+    repoId,
+  });
 
   return rows.map(toAdminSuppressionMatchSummary);
 }
