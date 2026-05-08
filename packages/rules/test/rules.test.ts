@@ -167,6 +167,126 @@ describe("buildReviewPolicySnapshot", () => {
     expect(result.snapshot.activeRuleVersions).toEqual([{ ruleId: "rule_active", version: now }]);
   });
 
+  it("compiles safe repo-local rule actions into finding suppression rules", () => {
+    const parsed = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "rules:",
+        "  - name: Only severe security workflow findings",
+        "    when:",
+        "      paths:",
+        "        - .github/workflows/**",
+        "    action:",
+        "      enabled_categories:",
+        "        - security",
+        "        - correctness",
+        "      severity_threshold: high",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".github/ai-reviewer.yml",
+    });
+    if (!parsed.ok) {
+      throw new Error(JSON.stringify(parsed.errors));
+    }
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      orgSettings: { ...createDefaultOrgSettings(ids.orgId, now), allowRepoLocalConfig: true },
+      repoLocalConfig: parsed.config,
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+    const policy = result.snapshot.effectivePolicy;
+    const workflowLocation = {
+      path: ".github/workflows/ci.yml",
+      line: 1,
+      side: "RIGHT" as const,
+      isInDiff: true,
+    };
+    const disabledCategory = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          category: "performance",
+          location: workflowLocation,
+          severity: "critical",
+        },
+      }),
+    );
+    const belowSeverity = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          category: "security",
+          location: workflowLocation,
+          severity: "medium",
+        },
+      }),
+    );
+    const allowed = evaluateFindingPolicy(
+      createFindingInputFixture({
+        policy,
+        finding: {
+          category: "security",
+          location: workflowLocation,
+          severity: "high",
+        },
+      }),
+    );
+
+    expect(result.warnings).toEqual([]);
+    expect(policy.rules).toHaveLength(2);
+    expect(policy.rules.map((rule) => rule.effect)).toEqual(["suppress", "suppress"]);
+    expect(policy.rules.map((rule) => rule.metadata?.source)).toEqual([
+      "repo_local_config",
+      "repo_local_config",
+    ]);
+    expect(disabledCategory).toMatchObject({
+      reasonCode: "suppressed_by_repo_rule",
+      shouldPublish: false,
+    });
+    expect(disabledCategory.trace.matchedRuleIds[0]).toMatch(/^rule_/u);
+    expect(belowSeverity).toMatchObject({
+      reasonCode: "suppressed_by_repo_rule",
+      shouldPublish: false,
+    });
+    expect(allowed).toMatchObject({
+      reasonCode: "allowed",
+      shouldPublish: true,
+    });
+  });
+
+  it("warns when repo-local rule actions need unsupported confidence matching", () => {
+    const parsed = parseRepoLocalConfig({
+      content: [
+        "version: 1",
+        "rules:",
+        "  - name: Require high confidence generated findings",
+        "    action:",
+        "      minimum_confidence: 0.9",
+      ].join("\n"),
+      format: "yaml",
+      sourceCommitSha: "abcdef1",
+      sourcePath: ".github/ai-reviewer.yml",
+    });
+    if (!parsed.ok) {
+      throw new Error(JSON.stringify(parsed.errors));
+    }
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      orgSettings: { ...createDefaultOrgSettings(ids.orgId, now), allowRepoLocalConfig: true },
+      repoLocalConfig: parsed.config,
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+
+    expect(result.snapshot.effectivePolicy.rules).toEqual([]);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "repo_local_rule_minimum_confidence_not_compiled",
+      "repo_local_rules_not_compiled",
+    ]);
+  });
+
   it("applies organization settings as policy defaults and guardrails", () => {
     const orgSettings: OrgSettings = {
       ...createDefaultOrgSettings(ids.orgId, now),

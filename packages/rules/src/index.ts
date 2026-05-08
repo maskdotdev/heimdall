@@ -16,6 +16,7 @@ import {
   RepoPathSchema,
   type RepoRule,
   RepoRuleIdSchema,
+  type RepoRuleMatcher,
   RepoRuleSchema,
   type Repository,
   type RepositorySettings,
@@ -120,6 +121,29 @@ export const DEFAULT_ENABLED_FINDING_CATEGORIES = [
   "architecture",
   "dependency",
 ] as const satisfies readonly FindingCategory[];
+
+/** All finding categories accepted by rule and finding contracts. */
+const ALL_FINDING_CATEGORIES = [
+  "correctness",
+  "security",
+  "performance",
+  "test_coverage",
+  "maintainability",
+  "architecture",
+  "style",
+  "dependency",
+  "documentation",
+  "other",
+] as const satisfies readonly FindingCategory[];
+
+/** Ordered finding severities from least to most severe. */
+const ORDERED_FINDING_SEVERITIES = [
+  "info",
+  "low",
+  "medium",
+  "high",
+  "critical",
+] as const satisfies readonly FindingSeverity[];
 
 /** Safety floor that repository settings cannot weaken. */
 export const DEFAULT_SAFETY_FLOOR = {
@@ -1184,9 +1208,23 @@ function buildReviewPolicySnapshotCore(
     .sort(
       (left, right) => left.priority - right.priority || left.ruleId.localeCompare(right.ruleId),
     );
-  const activeRules = orgSettings?.allowUserDefinedRules === false ? [] : configuredRules;
   const repoLocalConfig =
     orgSettings?.allowRepoLocalConfig === true ? input.repoLocalConfig : undefined;
+  const repoLocalRules = repoLocalConfig
+    ? compileRepoLocalRules({
+        repoLocalConfig,
+        repository: input.repository,
+        timestamp,
+        warnings,
+      })
+    : [];
+  const activeRules =
+    orgSettings?.allowUserDefinedRules === false
+      ? repoLocalRules
+      : [...configuredRules, ...repoLocalRules].sort(
+          (left, right) =>
+            left.priority - right.priority || left.ruleId.localeCompare(right.ruleId),
+        );
   const safetyFloor = DEFAULT_SAFETY_FLOOR;
   const orgFindingPolicy = orgSettings?.defaultFindingPolicy;
   const orgPublishingPolicy = orgSettings?.defaultPublishingPolicy;
@@ -1243,16 +1281,6 @@ function buildReviewPolicySnapshotCore(
       details: {
         sourceHash: input.repoLocalConfig.sourceHash,
         sourcePath: input.repoLocalConfig.sourcePath,
-      },
-    });
-  }
-
-  if (repoLocalConfig?.rules && repoLocalConfig.rules.length > 0) {
-    warnings.push({
-      code: "repo_local_rules_not_compiled",
-      message: "Repo-local rule action blocks are parsed but not compiled into active rules yet.",
-      details: {
-        ruleCount: repoLocalConfig.rules.length,
       },
     });
   }
@@ -2878,6 +2906,209 @@ function compileTriggerPolicy(
   };
 }
 
+/** Input for compiling repo-local rule action blocks into runtime repository rules. */
+type CompileRepoLocalRulesInput = {
+  /** Trusted repo-local config being compiled. */
+  readonly repoLocalConfig: RepoLocalConfig;
+  /** Repository that owns the policy snapshot. */
+  readonly repository: Pick<Repository, "orgId" | "repoId">;
+  /** Policy compilation timestamp. */
+  readonly timestamp: string;
+  /** Mutable warning accumulator for unsupported rule fields. */
+  readonly warnings: PolicyWarning[];
+};
+
+/** Compiles the safe repo-local rule-action subset into synthetic suppression rules. */
+function compileRepoLocalRules(input: CompileRepoLocalRulesInput): readonly RepoRule[] {
+  const rules = input.repoLocalConfig.rules ?? [];
+  const compiledRules = rules.flatMap((rule, ruleIndex) =>
+    compileRepoLocalRule({
+      ...input,
+      rule,
+      ruleIndex,
+    }),
+  );
+
+  if (rules.length > 0 && compiledRules.length === 0) {
+    input.warnings.push({
+      code: "repo_local_rules_not_compiled",
+      message: "Repo-local rule action blocks did not contain MVP-supported actions.",
+      details: {
+        ruleCount: rules.length,
+      },
+    });
+  }
+
+  return compiledRules;
+}
+
+/** Input for compiling one repo-local rule into zero or more runtime rules. */
+type CompileRepoLocalRuleInput = CompileRepoLocalRulesInput & {
+  /** Normalized repo-local rule. */
+  readonly rule: RepoLocalRuleConfig;
+  /** Rule index in the config file. */
+  readonly ruleIndex: number;
+};
+
+/** Compiles one repo-local rule into product-safe finding suppression rules. */
+function compileRepoLocalRule(input: CompileRepoLocalRuleInput): readonly RepoRule[] {
+  const baseMatcher = repoLocalRuleBaseMatcher(input.rule.when);
+  const action = input.rule.action;
+  const rules: RepoRule[] = [];
+
+  if (action.disabledCategories && action.disabledCategories.length > 0) {
+    const categories = categoriesSelectedByRuleCondition(
+      baseMatcher.categories,
+      action.disabledCategories,
+    );
+    if (categories.length > 0) {
+      rules.push(
+        createRepoLocalSuppressionRule(input, "disabled_categories", {
+          ...baseMatcher,
+          categories,
+        }),
+      );
+    }
+  }
+
+  if (action.enabledCategories && action.enabledCategories.length > 0) {
+    const categories = categoriesExcludedByEnabledList(
+      baseMatcher.categories,
+      action.enabledCategories,
+    );
+    if (categories.length > 0) {
+      rules.push(
+        createRepoLocalSuppressionRule(input, "enabled_categories", {
+          ...baseMatcher,
+          categories,
+        }),
+      );
+    }
+  }
+
+  if (action.severityThreshold) {
+    const severities = severitiesBelowThreshold(baseMatcher.severities, action.severityThreshold);
+    if (severities.length > 0) {
+      rules.push(
+        createRepoLocalSuppressionRule(input, "severity_threshold", {
+          ...baseMatcher,
+          severities,
+        }),
+      );
+    }
+  }
+
+  if (action.minimumConfidence !== undefined) {
+    input.warnings.push({
+      code: "repo_local_rule_minimum_confidence_not_compiled",
+      message:
+        "Repo-local minimum-confidence rule actions require a confidence-aware runtime matcher and were not compiled.",
+      details: {
+        ruleIndex: input.ruleIndex,
+        ruleName: input.rule.name,
+        sourceHash: input.repoLocalConfig.sourceHash,
+        sourcePath: input.repoLocalConfig.sourcePath,
+      },
+    });
+  }
+
+  return rules;
+}
+
+/** Returns the base matcher carried by one repo-local rule condition. */
+function repoLocalRuleBaseMatcher(
+  condition: RepoLocalRuleConditionConfig | undefined,
+): RepoRuleMatcher {
+  return {
+    ...(condition?.categories ? { categories: [...condition.categories] } : {}),
+    ...(condition?.paths ? { paths: [...condition.paths] } : {}),
+    ...(condition?.severities ? { severities: [...condition.severities] } : {}),
+  };
+}
+
+/** Creates one synthetic suppression rule for an MVP-supported repo-local action. */
+function createRepoLocalSuppressionRule(
+  input: CompileRepoLocalRuleInput,
+  actionKind: string,
+  matcher: RepoRuleMatcher,
+): RepoRule {
+  return parseRepoRule({
+    ruleId: stableId("rule", [
+      "repo-local",
+      input.repoLocalConfig.sourceHash,
+      input.ruleIndex,
+      actionKind,
+    ]),
+    orgId: input.repository.orgId,
+    repoId: input.repository.repoId,
+    name: boundedRuleName(`${input.rule.name} (${actionKind})`),
+    effect: "suppress",
+    matcher,
+    instruction: `Suppress findings matched by repo-local rule "${input.rule.name}" action ${actionKind}.`,
+    priority: repoLocalRulePriority(input.ruleIndex),
+    enabled: true,
+    createdAt: input.timestamp,
+    updatedAt: input.timestamp,
+    metadata: {
+      actionKind,
+      configVersion: input.repoLocalConfig.configVersion,
+      ruleIndex: input.ruleIndex,
+      ruleName: input.rule.name,
+      source: "repo_local_config",
+      sourceCommitSha: input.repoLocalConfig.sourceCommitSha,
+      sourceHash: input.repoLocalConfig.sourceHash,
+      sourcePath: input.repoLocalConfig.sourcePath,
+    },
+  });
+}
+
+/** Parses a synthetic repo-local rule through the shared runtime schema. */
+function parseRepoRule(rule: RepoRule): RepoRule {
+  if (!Value.Check(RepoRuleSchema, rule)) {
+    throw new Error("Repo-local rule compilation produced an invalid repository rule.");
+  }
+
+  return rule;
+}
+
+/** Returns categories selected by a condition and rule action. */
+function categoriesSelectedByRuleCondition(
+  conditionCategories: readonly FindingCategory[] | undefined,
+  actionCategories: readonly FindingCategory[],
+): FindingCategory[] {
+  const candidates = conditionCategories ?? ALL_FINDING_CATEGORIES;
+  return uniqueStrings(candidates.filter((category) => actionCategories.includes(category)));
+}
+
+/** Returns categories suppressed when a repo-local rule defines an enabled-category list. */
+function categoriesExcludedByEnabledList(
+  conditionCategories: readonly FindingCategory[] | undefined,
+  enabledCategories: readonly FindingCategory[],
+): FindingCategory[] {
+  const candidates = conditionCategories ?? ALL_FINDING_CATEGORIES;
+  return uniqueStrings(candidates.filter((category) => !enabledCategories.includes(category)));
+}
+
+/** Returns severities below an action threshold, optionally intersected with condition severities. */
+function severitiesBelowThreshold(
+  conditionSeverities: readonly FindingSeverity[] | undefined,
+  threshold: FindingSeverity,
+): FindingSeverity[] {
+  const thresholdRank = severityRank(threshold);
+  const candidates = conditionSeverities ?? ORDERED_FINDING_SEVERITIES;
+  return uniqueStrings(candidates.filter((severity) => severityRank(severity) < thresholdRank));
+}
+
+/** Returns a schema-safe name for a synthetic repo-local rule. */
+function boundedRuleName(name: string): string {
+  return name.length <= 200 ? name : name.slice(0, 200);
+}
+
+/** Returns a schema-safe priority for synthetic repo-local rules. */
+function repoLocalRulePriority(ruleIndex: number): number {
+  return Math.min(1000, 900 + ruleIndex);
+}
+
 /** Compiles organization memory defaults and suppression guardrails. */
 function compileMemoryPolicy(
   orgSettings: OrgSettings | undefined,
@@ -3031,7 +3262,7 @@ function severityRank(severity: FindingSeverity): number {
 }
 
 /** Returns unique strings while preserving first occurrence order. */
-function uniqueStrings(values: readonly string[]): string[] {
+function uniqueStrings<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)];
 }
 
