@@ -26,7 +26,7 @@
     "test": "vitest run --passWithNoTests test/*.test.ts && turbo test",
     "test:watch": "vitest --watch",
     "eval": "pnpm --filter @repo/evaluation eval",
-    "eval:ci": "pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models --output-dir .tmp/eval-runs/smoke-full-pipeline-v1 --clean-output",
+    "eval:ci": "pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models --output-dir .tmp/eval-runs/smoke-full-pipeline-v1 --clean-output && pnpm eval compare --baseline-report packages/evaluation/fixtures/smoke-full-pipeline-v1-baseline-report.json --candidate-report .tmp/eval-runs/smoke-full-pipeline-v1/report.json --output-file .tmp/eval-runs/smoke-full-pipeline-v1/comparison.md",
     "boundaries:check": "bun run scripts/check-boundaries.ts",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm eval:ci && pnpm boundaries:check",
     "ci:control-plane:release": "pnpm audit:control-plane:deployment && pnpm readiness:control-plane:production && pnpm check && pnpm build",

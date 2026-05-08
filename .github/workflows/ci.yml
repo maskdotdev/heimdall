@@ -68,3 +68,4 @@ jobs:
           path: |
             .tmp/eval-runs/smoke-full-pipeline-v1/report.md
             .tmp/eval-runs/smoke-full-pipeline-v1/report.json
+            .tmp/eval-runs/smoke-full-pipeline-v1/comparison.md

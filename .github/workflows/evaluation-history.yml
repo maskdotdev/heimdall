@@ -63,6 +63,11 @@ jobs:
             --git-commit "$GITHUB_SHA" \
             --branch "$GITHUB_REF_NAME"
 
+          pnpm eval compare \
+            --baseline-report packages/evaluation/fixtures/smoke-full-pipeline-v1-baseline-report.json \
+            --candidate-report .tmp/eval-runs/smoke-full-pipeline-v1/report.json \
+            --output-file .tmp/eval-runs/smoke-full-pipeline-v1/comparison.md
+
       - name: Upload eval report
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,3 +79,4 @@ jobs:
             .tmp/eval-runs/smoke-full-pipeline-v1/report.html
             .tmp/eval-runs/smoke-full-pipeline-v1/report.json
             .tmp/eval-runs/smoke-full-pipeline-v1/report.junit.xml
+            .tmp/eval-runs/smoke-full-pipeline-v1/comparison.md

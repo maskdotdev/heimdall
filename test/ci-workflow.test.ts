@@ -33,10 +33,18 @@ const REVIEW_ORCHESTRATOR_INTEGRATION_TEST_FILE = resolve(
   "packages/review-orchestrator/test/review-orchestrator.integration.test.ts",
 );
 
+/** Checked-in deterministic eval baseline report used by CI comparison gates. */
+const EVAL_BASELINE_REPORT_FILE =
+  "packages/evaluation/fixtures/smoke-full-pipeline-v1-baseline-report.json";
+
+/** Deterministic eval comparison report file that CI should preserve. */
+const EVAL_COMPARISON_REPORT_PATH = ".tmp/eval-runs/smoke-full-pipeline-v1/comparison.md";
+
 /** Deterministic evaluation report files that CI should preserve. */
 const EVAL_REPORT_PATHS = [
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.md",
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.json",
+  EVAL_COMPARISON_REPORT_PATH,
 ];
 
 /** Scheduled evaluation history report files that should be retained. */
@@ -45,6 +53,7 @@ const SCHEDULED_EVAL_REPORT_PATHS = [
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.html",
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.json",
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.junit.xml",
+  EVAL_COMPARISON_REPORT_PATH,
 ];
 
 /** Representative cross-tenant API tests that the release gate must keep running. */
@@ -63,6 +72,7 @@ describe("CI workflow", () => {
     const workflow = readFileSync(CI_WORKFLOW_FILE, "utf8");
     const packageJson = readFileSync(PACKAGE_JSON_FILE, "utf8");
     const turboConfig = readFileSync(TURBO_CONFIG_FILE, "utf8");
+    const baselineReport = readFileSync(resolve(EVAL_BASELINE_REPORT_FILE), "utf8");
 
     expect(workflow).toContain("pnpm ci:control-plane:release");
     expect(packageJson).toContain(
@@ -74,6 +84,14 @@ describe("CI workflow", () => {
       '"check": "pnpm typecheck && pnpm lint && pnpm test && pnpm eval:ci && ' +
         'pnpm boundaries:check"',
     );
+    expect(packageJson).toContain("pnpm eval compare");
+    expect(packageJson).toContain(`--baseline-report ${EVAL_BASELINE_REPORT_FILE}`);
+    expect(packageJson).toContain(
+      "--candidate-report .tmp/eval-runs/smoke-full-pipeline-v1/report.json",
+    );
+    expect(packageJson).toContain(`--output-file ${EVAL_COMPARISON_REPORT_PATH}`);
+    expect(baselineReport).toContain('"schemaVersion": "eval_report.v1"');
+    expect(baselineReport).toContain('"suiteId": "smoke-full-pipeline-v1"');
     expect(workflow).toContain("image: pgvector/pgvector:pg17");
     expect(workflow).toContain("HEIMDALL_DB_TEST_URL:");
     expect(turboConfig).toContain('"HEIMDALL_DB_TEST_URL"');
@@ -149,6 +167,12 @@ describe("CI workflow", () => {
     expect(workflow).toContain("--history-environment scheduled-ci");
     expect(workflow).toContain('--git-commit "$GITHUB_SHA"');
     expect(workflow).toContain('--branch "$GITHUB_REF_NAME"');
+    expect(workflow).toContain("pnpm eval compare");
+    expect(workflow).toContain(`--baseline-report ${EVAL_BASELINE_REPORT_FILE}`);
+    expect(workflow).toContain(
+      "--candidate-report .tmp/eval-runs/smoke-full-pipeline-v1/report.json",
+    );
+    expect(workflow).toContain(`--output-file ${EVAL_COMPARISON_REPORT_PATH}`);
     expect(workflow).toContain("name: scheduled-smoke-full-pipeline-v1-eval-report");
 
     for (const reportPath of SCHEDULED_EVAL_REPORT_PATHS) {
