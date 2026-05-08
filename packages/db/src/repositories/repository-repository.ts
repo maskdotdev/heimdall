@@ -1,8 +1,8 @@
-import type { Repository, RepositorySettings } from "@repo/contracts";
+import type { OrgSettings, Repository, RepositorySettings } from "@repo/contracts";
 import { eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { repositories, repositorySettings } from "../schema";
-import { toRepository, toRepositorySettings } from "./row-mappers";
+import { orgSettings, repositories, repositorySettings } from "../schema";
+import { toOrgSettings, toRepository, toRepositorySettings } from "./row-mappers";
 
 const requireReturnedRow = <T>(row: T | undefined): T => {
   if (!row) {
@@ -12,7 +12,7 @@ const requireReturnedRow = <T>(row: T | undefined): T => {
   return row;
 };
 
-/** Query helper for repository records and their mutable settings. */
+/** Query helper for repository records, repository settings, and organization defaults. */
 export class RepositoryRepository {
   /** Creates a repository query helper. */
   public constructor(private readonly db: HeimdallDatabase) {}
@@ -105,4 +105,54 @@ export class RepositoryRepository {
 
     return row ? toRepositorySettings(row) : undefined;
   }
+
+  /** Inserts or updates mutable organization policy defaults. */
+  public async upsertOrgSettings(settings: OrgSettings): Promise<OrgSettings> {
+    const [row] = await this.db
+      .insert(orgSettings)
+      .values({
+        orgId: settings.orgId,
+        settingsJson: toOrgSettingsJson(settings),
+        version: settings.version,
+        updatedByUserId: settings.updatedByUserId,
+        createdAt: new Date(settings.createdAt),
+        updatedAt: new Date(settings.updatedAt),
+      })
+      .onConflictDoUpdate({
+        target: orgSettings.orgId,
+        set: {
+          settingsJson: toOrgSettingsJson(settings),
+          version: settings.version,
+          updatedByUserId: settings.updatedByUserId,
+          updatedAt: new Date(settings.updatedAt),
+        },
+      })
+      .returning();
+
+    return toOrgSettings(requireReturnedRow(row));
+  }
+
+  /** Gets mutable organization policy defaults. */
+  public async getOrgSettings(orgId: string): Promise<OrgSettings | undefined> {
+    const [row] = await this.db.select().from(orgSettings).where(eq(orgSettings.orgId, orgId));
+    return row ? toOrgSettings(row) : undefined;
+  }
+}
+
+/** Returns the JSON payload stored in the organization settings row. */
+function toOrgSettingsJson(settings: OrgSettings): Record<string, unknown> {
+  return {
+    schemaVersion: settings.schemaVersion,
+    defaultReviewPolicy: settings.defaultReviewPolicy,
+    defaultTriggerPolicy: settings.defaultTriggerPolicy,
+    defaultFindingPolicy: settings.defaultFindingPolicy,
+    defaultPublishingPolicy: settings.defaultPublishingPolicy,
+    defaultMemoryPolicy: settings.defaultMemoryPolicy,
+    ...(settings.allowedModelProfiles
+      ? { allowedModelProfiles: settings.allowedModelProfiles }
+      : {}),
+    allowRepoLocalConfig: settings.allowRepoLocalConfig,
+    allowMemorySuppression: settings.allowMemorySuppression,
+    allowUserDefinedRules: settings.allowUserDefinedRules,
+  };
 }

@@ -71,6 +71,7 @@ import {
   validPullRequestSnapshotFixture,
 } from "#contracts/fixtures/pull-request.fixture";
 import {
+  validOrgSettingsFixture,
   validRepositoryFixture,
   validRepositorySettingsFixture,
 } from "#contracts/fixtures/repository.fixture";
@@ -112,7 +113,7 @@ import { RepoPathSchema } from "#contracts/primitives/paths";
 import { ChangeSetSchema } from "#contracts/pull-request/change-set";
 import { PullRequestSnapshotSchema } from "#contracts/pull-request/pull-request";
 import { RepositorySchema } from "#contracts/repository/repository";
-import { RepositorySettingsSchema } from "#contracts/repository/settings";
+import { OrgSettingsSchema, RepositorySettingsSchema } from "#contracts/repository/settings";
 import { getReviewArtifactRedactionLevel } from "#contracts/review/artifacts";
 import { ContextBundleSchema } from "#contracts/review/context";
 import {
@@ -215,6 +216,9 @@ describe("contract validation", () => {
         validRepositorySettingsFixture,
       ),
     ).toEqual(validRepositorySettingsFixture);
+    expect(parseWithSchema("OrgSettings", OrgSettingsSchema, validOrgSettingsFixture)).toEqual(
+      validOrgSettingsFixture,
+    );
   });
 
   it("validates index manifest and record fixtures", () => {

@@ -1,6 +1,7 @@
+import { validOrgSettingsFixture } from "@repo/contracts/fixtures/repository.fixture";
 import { describe, expect, it } from "vitest";
 import { toRepoRule } from "../src/repositories/repo-rule-repository";
-import { toRepository } from "../src/repositories/row-mappers";
+import { toOrgSettings, toRepository } from "../src/repositories/row-mappers";
 
 describe("database row mappers", () => {
   it("validates mapped rows against public contracts", () => {
@@ -54,5 +55,28 @@ describe("database row mappers", () => {
       priority: 100,
       enabled: true,
     });
+  });
+
+  it("maps organization settings rows into typed policy defaults", () => {
+    const row = toOrgSettings({
+      orgId: validOrgSettingsFixture.orgId,
+      settingsJson: {
+        schemaVersion: validOrgSettingsFixture.schemaVersion,
+        defaultReviewPolicy: validOrgSettingsFixture.defaultReviewPolicy,
+        defaultTriggerPolicy: validOrgSettingsFixture.defaultTriggerPolicy,
+        defaultFindingPolicy: validOrgSettingsFixture.defaultFindingPolicy,
+        defaultPublishingPolicy: validOrgSettingsFixture.defaultPublishingPolicy,
+        defaultMemoryPolicy: validOrgSettingsFixture.defaultMemoryPolicy,
+        allowRepoLocalConfig: validOrgSettingsFixture.allowRepoLocalConfig,
+        allowMemorySuppression: validOrgSettingsFixture.allowMemorySuppression,
+        allowUserDefinedRules: validOrgSettingsFixture.allowUserDefinedRules,
+      },
+      version: validOrgSettingsFixture.version,
+      updatedByUserId: validOrgSettingsFixture.updatedByUserId,
+      createdAt: new Date(validOrgSettingsFixture.createdAt),
+      updatedAt: new Date(validOrgSettingsFixture.updatedAt),
+    });
+
+    expect(row).toEqual(validOrgSettingsFixture);
   });
 });

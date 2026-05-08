@@ -1,6 +1,7 @@
 import {
   JOB_TYPES,
   type JobPayload,
+  type OrgSettings,
   type RepositorySettings,
   type UpdateMemoryReason,
 } from "@repo/contracts";
@@ -26,6 +27,7 @@ type PlanOptions = {
   readonly action?: string | undefined;
   readonly installation?: NormalizedGitHubInstallation | undefined;
   readonly repositories: readonly NormalizedGitHubRepository[];
+  readonly orgSettings?: readonly OrgSettings[];
   readonly repositorySettings?: readonly RepositorySettings[];
   readonly pullRequest?: NormalizedGitHubPullRequest | undefined;
   readonly feedback?: NormalizedGitHubFeedback | undefined;
@@ -135,9 +137,13 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
     const settings =
       options.repositorySettings?.find((candidate) => candidate.repoId === snapshot.repoId) ??
       normalizedRepository.settings;
+    const orgSettings = options.orgSettings?.find(
+      (candidate) => candidate.orgId === normalizedRepository.repository.orgId,
+    );
     const { snapshot: policySnapshot } = buildReviewPolicySnapshot({
       ...(options.metrics ? { metrics: options.metrics } : {}),
       repository: normalizedRepository.repository,
+      ...(orgSettings ? { orgSettings } : {}),
       settings,
       ...(options.traceContext ? { traceContext: options.traceContext } : {}),
       ...(options.traces ? { traces: options.traces } : {}),

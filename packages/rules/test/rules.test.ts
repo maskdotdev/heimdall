@@ -1,4 +1,4 @@
-import type { RepoRule, RepositorySettings } from "@repo/contracts";
+import type { OrgSettings, RepoRule, RepositorySettings } from "@repo/contracts";
 import { ids, now } from "@repo/contracts/fixtures/common";
 import {
   OBSERVABILITY_METRIC_NAMES,
@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildReviewPolicySnapshot,
   classifyPath,
+  createDefaultOrgSettings,
   createDefaultRepositorySettings,
   createFindingInputFixture,
   createPolicyFixture,
@@ -161,6 +162,85 @@ describe("buildReviewPolicySnapshot", () => {
     });
 
     expect(result.snapshot.activeRuleVersions).toEqual([{ ruleId: "rule_active", version: now }]);
+  });
+
+  it("applies organization settings as policy defaults and guardrails", () => {
+    const orgSettings: OrgSettings = {
+      ...createDefaultOrgSettings(ids.orgId, now),
+      defaultReviewPolicy: "summary_only",
+      defaultTriggerPolicy: {
+        enabledActions: ["opened"],
+        ignoredAuthors: ["automation-bot"],
+        ignoredLabels: ["skip-ai"],
+        requireLabel: "ready-for-ai",
+        skipDraftPullRequests: true,
+      },
+      defaultFindingPolicy: {
+        allowStyleFindings: true,
+        enabledCategories: ["security"],
+        maxCommentsPerReview: 3,
+        minimumConfidence: 0.8,
+        severityThreshold: "high",
+        suppressGeneratedFileFindings: true,
+      },
+      defaultPublishingPolicy: {
+        maxCommentsPerReview: 3,
+        publishCheckRun: false,
+        publishInlineComments: false,
+        publishSummaryComment: true,
+      },
+      defaultMemoryPolicy: {
+        ...createDefaultOrgSettings(ids.orgId, now).defaultMemoryPolicy,
+        maxMemoryFactsInContext: 2,
+      },
+      allowMemorySuppression: false,
+      allowUserDefinedRules: false,
+      version: 7,
+    };
+    const result = buildReviewPolicySnapshot({
+      repository: { enabled: true, orgId: ids.orgId, repoId: ids.repoId },
+      orgSettings,
+      activeRules: [createRuleFixture({ effect: "context" })],
+      timestamp: now,
+      reviewRunId: ids.reviewRunId,
+    });
+
+    expect(result.snapshot.decisionInputs).toMatchObject({
+      allowRepoLocalConfig: false,
+      orgSettingsUpdatedAt: now,
+      orgSettingsVersion: 7,
+    });
+    expect(result.snapshot.activeRuleVersions).toEqual([]);
+    expect(result.snapshot.effectivePolicy).toMatchObject({
+      reviewPolicy: "summary_only",
+      findings: {
+        allowStyleFindings: true,
+        enabledCategories: ["security"],
+        maxCommentsPerReview: 3,
+        minimumConfidence: 0.8,
+        severityThreshold: "high",
+      },
+      memory: {
+        allowExactFindingSuppression: false,
+        allowPathCategorySuppression: false,
+        enableMemorySuppression: false,
+        maxMemoryFactsInContext: 2,
+      },
+      publishing: {
+        maxCommentsPerReview: 3,
+        publishInlineComments: false,
+        publishSummaryComment: true,
+      },
+      trigger: {
+        enabledActions: ["opened"],
+        ignoredAuthors: ["automation-bot"],
+        ignoredLabels: ["skip-ai"],
+        requireLabel: "ready-for-ai",
+      },
+    });
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "user_rules_disabled_by_org_settings",
+    ]);
   });
 });
 

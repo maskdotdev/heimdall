@@ -220,6 +220,17 @@ export const repositorySettings = pgTable("repository_settings", {
   ...timestamps,
 });
 
+/** Organization-level defaults and guardrails for repository review settings. */
+export const orgSettings = pgTable("org_settings", {
+  orgId: text("org_id")
+    .primaryKey()
+    .references(() => orgs.orgId),
+  settingsJson: jsonb("settings_json").notNull().default(sql`'{}'::jsonb`),
+  version: integer("version").notNull().default(1),
+  updatedByUserId: text("updated_by_user_id").references(() => users.userId),
+  ...timestamps,
+});
+
 /** Normalized webhook deliveries for idempotency and debugging. */
 export const webhookEvents = pgTable(
   "webhook_events",

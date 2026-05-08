@@ -558,6 +558,7 @@ export async function runPullRequestReview(
         })
       : undefined;
   const repositorySettings = await repositoryRepository.getSettings(input.repoId);
+  const orgSettings = await repositoryRepository.getOrgSettings(repositoryRecord.orgId);
   const activeRules = await new RepoRuleRepository(dependencies.db).listEffectiveRules({
     orgId: repositoryRecord.orgId,
     repoId: input.repoId,
@@ -566,6 +567,7 @@ export async function runPullRequestReview(
     activeRules,
     ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
     repository: repositoryRecord,
+    ...(orgSettings ? { orgSettings } : {}),
     ...(repositorySettings ? { settings: repositorySettings } : {}),
     ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
     timestamp: startedAt,

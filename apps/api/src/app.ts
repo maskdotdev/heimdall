@@ -11746,9 +11746,11 @@ async function buildRepositoryPolicySnapshotForPreview(
     orgId: current.repository.orgId,
     repoId,
   });
+  const orgSettings = await new RepositoryRepository(db).getOrgSettings(current.repository.orgId);
 
   return buildReviewPolicySnapshot({
     activeRules,
+    ...(orgSettings ? { orgSettings } : {}),
     repository,
     settings,
     timestamp,

@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import {
   type CandidateFinding,
+  DEFAULT_ORG_SETTINGS,
   DEFAULT_REPOSITORY_SETTINGS,
   type FindingCategory,
   FindingCategorySchema,
   type FindingSeverity,
   FindingSeveritySchema,
+  type OrgSettings,
   type RepoRule,
   RepoRuleIdSchema,
   RepoRuleSchema,
@@ -362,6 +364,9 @@ export const ReviewPolicySnapshotSchema = Type.Object(
     createdAt: IsoDateTimeSchema,
     decisionInputs: Type.Object(
       {
+        allowRepoLocalConfig: Type.Optional(Type.Boolean()),
+        orgSettingsUpdatedAt: Type.Optional(IsoDateTimeSchema),
+        orgSettingsVersion: Type.Optional(Type.Integer({ minimum: 1 })),
         repositoryEnabled: Type.Boolean(),
         repositorySettingsUpdatedAt: IsoDateTimeSchema,
         source: Type.Literal("repository_settings"),
@@ -406,6 +411,8 @@ export type RulesTelemetryOptions = {
 export type BuildReviewPolicySnapshotInput = RulesTelemetryOptions & {
   /** Repository identity and enablement state. */
   readonly repository: Pick<Repository, "enabled" | "orgId" | "repoId">;
+  /** Organization policy defaults and guardrails. */
+  readonly orgSettings?: OrgSettings;
   /** Repository settings row. Defaults are used when the row is missing. */
   readonly settings?: RepositorySettings;
   /** Active organization and repository rules. */
@@ -586,21 +593,76 @@ export type PolicyFixtureOverrides = Omit<
   readonly trigger?: Partial<EffectiveTriggerPolicy>;
 };
 
+/** Creates organization settings with product defaults and deterministic timestamps. */
+export function createDefaultOrgSettings(
+  orgId: string,
+  timestamp = new Date().toISOString(),
+  updatedByUserId: string | null = null,
+): OrgSettings {
+  return {
+    schemaVersion: "org_settings.v1",
+    orgId,
+    defaultReviewPolicy: DEFAULT_ORG_SETTINGS.defaultReviewPolicy,
+    defaultTriggerPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy,
+      enabledActions: [...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy.enabledActions],
+      ignoredAuthors: [...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy.ignoredAuthors],
+      ignoredLabels: [...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy.ignoredLabels],
+    },
+    defaultFindingPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultFindingPolicy,
+      enabledCategories: [...DEFAULT_ORG_SETTINGS.defaultFindingPolicy.enabledCategories],
+    },
+    defaultPublishingPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultPublishingPolicy,
+    },
+    defaultMemoryPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultMemoryPolicy,
+      trustedFeedbackRoles: [...DEFAULT_ORG_SETTINGS.defaultMemoryPolicy.trustedFeedbackRoles],
+    },
+    allowRepoLocalConfig: DEFAULT_ORG_SETTINGS.allowRepoLocalConfig,
+    allowMemorySuppression: DEFAULT_ORG_SETTINGS.allowMemorySuppression,
+    allowUserDefinedRules: DEFAULT_ORG_SETTINGS.allowUserDefinedRules,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    updatedByUserId,
+    version: 1,
+  };
+}
+
 /** Creates repository settings with product defaults and deterministic timestamps. */
 export function createDefaultRepositorySettings(
   repoId: string,
   timestamp = new Date().toISOString(),
+  orgSettings?: OrgSettings,
 ): RepositorySettings {
   return {
     repoId,
-    reviewPolicy: DEFAULT_REPOSITORY_SETTINGS.reviewPolicy,
-    severityThreshold: DEFAULT_REPOSITORY_SETTINGS.severityThreshold,
-    maxCommentsPerReview: DEFAULT_REPOSITORY_SETTINGS.maxCommentsPerReview,
+    reviewPolicy: orgSettings?.defaultReviewPolicy ?? DEFAULT_REPOSITORY_SETTINGS.reviewPolicy,
+    severityThreshold:
+      orgSettings?.defaultFindingPolicy.severityThreshold ??
+      DEFAULT_REPOSITORY_SETTINGS.severityThreshold,
+    maxCommentsPerReview:
+      orgSettings?.defaultFindingPolicy.maxCommentsPerReview ??
+      DEFAULT_REPOSITORY_SETTINGS.maxCommentsPerReview,
     ignoredPaths: [...DEFAULT_REPOSITORY_SETTINGS.ignoredPaths],
-    ignoredAuthors: [...DEFAULT_REPOSITORY_SETTINGS.ignoredAuthors],
-    ignoredLabels: [...DEFAULT_REPOSITORY_SETTINGS.ignoredLabels],
-    skipGeneratedFiles: DEFAULT_REPOSITORY_SETTINGS.skipGeneratedFiles,
-    skipDraftPullRequests: DEFAULT_REPOSITORY_SETTINGS.skipDraftPullRequests,
+    ignoredAuthors: [
+      ...(orgSettings?.defaultTriggerPolicy.ignoredAuthors ??
+        DEFAULT_REPOSITORY_SETTINGS.ignoredAuthors),
+    ],
+    ignoredLabels: [
+      ...(orgSettings?.defaultTriggerPolicy.ignoredLabels ??
+        DEFAULT_REPOSITORY_SETTINGS.ignoredLabels),
+    ],
+    ...(orgSettings?.defaultTriggerPolicy.requireLabel
+      ? { requireLabel: orgSettings.defaultTriggerPolicy.requireLabel }
+      : {}),
+    skipGeneratedFiles:
+      orgSettings?.defaultFindingPolicy.suppressGeneratedFileFindings ??
+      DEFAULT_REPOSITORY_SETTINGS.skipGeneratedFiles,
+    skipDraftPullRequests:
+      orgSettings?.defaultTriggerPolicy.skipDraftPullRequests ??
+      DEFAULT_REPOSITORY_SETTINGS.skipDraftPullRequests,
     createdAt: timestamp,
     updatedAt: timestamp,
   } satisfies RepositorySettings;
@@ -613,6 +675,7 @@ export function buildReviewPolicySnapshot(
   const startedAtMs = Date.now();
   const span = startRulesSpan(input, OBSERVABILITY_SPAN_NAMES.rulesCompilePolicy, {
     "rules.active_rule_input_count": input.activeRules?.length ?? 0,
+    "rules.org_settings_provided": Boolean(input.orgSettings),
     "rules.repository_enabled": input.repository.enabled,
     "rules.review_run_attached": Boolean(input.reviewRunId),
     "rules.settings_provided": Boolean(input.settings),
@@ -651,9 +714,12 @@ function buildReviewPolicySnapshotCore(
   input: BuildReviewPolicySnapshotInput,
 ): BuildReviewPolicySnapshotResult {
   const timestamp = input.timestamp ?? new Date().toISOString();
+  const orgSettings = input.orgSettings;
   const settings =
-    input.settings ?? createDefaultRepositorySettings(input.repository.repoId, timestamp);
-  const activeRules = (input.activeRules ?? [])
+    input.settings ??
+    createDefaultRepositorySettings(input.repository.repoId, timestamp, orgSettings);
+  const warnings: PolicyWarning[] = [];
+  const configuredRules = (input.activeRules ?? [])
     .filter((rule) => rule.enabled)
     .filter((rule) => !ruleExpired(rule, timestamp))
     .filter((rule) => rule.orgId === input.repository.orgId)
@@ -661,34 +727,72 @@ function buildReviewPolicySnapshotCore(
     .sort(
       (left, right) => left.priority - right.priority || left.ruleId.localeCompare(right.ruleId),
     );
-  const warnings: PolicyWarning[] = [];
+  const activeRules = orgSettings?.allowUserDefinedRules === false ? [] : configuredRules;
   const safetyFloor = DEFAULT_SAFETY_FLOOR;
-  const severityThreshold = stricterSeverity(
-    settings.severityThreshold,
-    safetyFloor.minimumPublishSeverity,
+  const orgFindingPolicy = orgSettings?.defaultFindingPolicy;
+  const orgPublishingPolicy = orgSettings?.defaultPublishingPolicy;
+  const orgSeverityThreshold = orgFindingPolicy?.severityThreshold;
+  const severityAfterOrg = orgSeverityThreshold
+    ? stricterSeverity(settings.severityThreshold, orgSeverityThreshold)
+    : settings.severityThreshold;
+  const severityThreshold = stricterSeverity(severityAfterOrg, safetyFloor.minimumPublishSeverity);
+  const repositoryMaxComments = Math.max(0, settings.maxCommentsPerReview);
+  const commentsAfterOrg = Math.min(
+    repositoryMaxComments,
+    orgFindingPolicy?.maxCommentsPerReview ?? repositoryMaxComments,
+    orgPublishingPolicy?.maxCommentsPerReview ?? repositoryMaxComments,
   );
-  const maxCommentsPerReview = Math.min(
-    Math.max(0, settings.maxCommentsPerReview),
-    safetyFloor.maxAllowedCommentsPerReview,
-  );
+  const maxCommentsPerReview = Math.min(commentsAfterOrg, safetyFloor.maxAllowedCommentsPerReview);
 
-  if (severityThreshold !== settings.severityThreshold) {
+  if (orgSettings?.allowUserDefinedRules === false && configuredRules.length > 0) {
+    warnings.push({
+      code: "user_rules_disabled_by_org_settings",
+      message: "Organization settings disabled user-defined rules for this policy snapshot.",
+      details: {
+        ignoredRuleCount: configuredRules.length,
+      },
+    });
+  }
+
+  if (severityAfterOrg !== settings.severityThreshold) {
+    warnings.push({
+      code: "severity_clamped_by_org_settings",
+      message: "Repository severity threshold was clamped by organization settings.",
+      details: {
+        requested: settings.severityThreshold,
+        effective: severityAfterOrg,
+      },
+    });
+  }
+
+  if (severityThreshold !== severityAfterOrg) {
     warnings.push({
       code: "severity_clamped_by_safety_floor",
       message: "Repository severity threshold was clamped by the safety floor.",
       details: {
-        requested: settings.severityThreshold,
+        requested: severityAfterOrg,
         effective: severityThreshold,
       },
     });
   }
 
-  if (maxCommentsPerReview !== settings.maxCommentsPerReview) {
+  if (commentsAfterOrg !== repositoryMaxComments) {
+    warnings.push({
+      code: "comment_budget_clamped_by_org_settings",
+      message: "Repository comment budget was clamped by organization settings.",
+      details: {
+        requested: repositoryMaxComments,
+        effective: commentsAfterOrg,
+      },
+    });
+  }
+
+  if (maxCommentsPerReview !== commentsAfterOrg) {
     warnings.push({
       code: "comment_budget_clamped_by_safety_floor",
       message: "Repository comment budget was clamped by the safety floor.",
       details: {
-        requested: settings.maxCommentsPerReview,
+        requested: commentsAfterOrg,
         effective: maxCommentsPerReview,
       },
     });
@@ -703,18 +807,27 @@ function buildReviewPolicySnapshotCore(
     compilerVersion: RULES_ENGINE_VERSION,
     enabled: input.repository.enabled && settings.reviewPolicy !== "disabled",
     findings: {
-      allowStyleFindings: activeRules.some((rule) => rule.effect === "style_preference"),
-      enabledCategories: [...DEFAULT_ENABLED_FINDING_CATEGORIES],
+      allowStyleFindings:
+        (orgFindingPolicy?.allowStyleFindings ?? false) ||
+        activeRules.some((rule) => rule.effect === "style_preference"),
+      enabledCategories: [
+        ...(orgFindingPolicy?.enabledCategories ?? DEFAULT_ENABLED_FINDING_CATEGORIES),
+      ],
       maxCommentsPerReview,
-      minimumConfidence: safetyFloor.minimumAllowedConfidence,
+      minimumConfidence: Math.max(
+        safetyFloor.minimumAllowedConfidence,
+        orgFindingPolicy?.minimumConfidence ?? safetyFloor.minimumAllowedConfidence,
+      ),
       severityThreshold,
       suppressGeneratedFileFindings:
-        settings.skipGeneratedFiles || safetyFloor.alwaysSuppressGeneratedFiles,
+        settings.skipGeneratedFiles ||
+        (orgFindingPolicy?.suppressGeneratedFileFindings ?? false) ||
+        safetyFloor.alwaysSuppressGeneratedFiles,
     },
     instructions: activeRules
       .filter((rule) => rule.effect === "context" || rule.effect === "style_preference")
       .map((rule) => rule.instruction),
-    memory: DEFAULT_MEMORY_POLICY,
+    memory: compileMemoryPolicy(orgSettings),
     paths: {
       configPaths: [...DEFAULT_CONFIG_PATHS],
       documentationPaths: [...DEFAULT_DOCUMENTATION_PATHS],
@@ -728,18 +841,33 @@ function buildReviewPolicySnapshotCore(
       testPaths: [...DEFAULT_TEST_PATHS],
       vendoredPaths: ["**/vendor/**", "**/third_party/**"],
     },
-    publishing: publishingPolicyFromReviewPolicy(settings.reviewPolicy, maxCommentsPerReview),
+    publishing: compilePublishingPolicy(
+      publishingPolicyFromReviewPolicy(settings.reviewPolicy, maxCommentsPerReview),
+      orgSettings,
+    ),
     repoId: input.repository.repoId,
     reviewPolicy: settings.reviewPolicy,
     rules: activeRules,
     sandbox,
     safetyFloor,
     trigger: {
-      enabledActions: [...DEFAULT_ENABLED_PR_ACTIONS],
-      ignoredAuthors: [...settings.ignoredAuthors],
-      ignoredLabels: [...settings.ignoredLabels],
-      ...(settings.requireLabel ? { requireLabel: settings.requireLabel } : {}),
-      skipDraftPullRequests: settings.skipDraftPullRequests,
+      enabledActions: [
+        ...(orgSettings?.defaultTriggerPolicy.enabledActions ?? DEFAULT_ENABLED_PR_ACTIONS),
+      ],
+      ignoredAuthors: uniqueStrings([
+        ...(orgSettings?.defaultTriggerPolicy.ignoredAuthors ?? []),
+        ...settings.ignoredAuthors,
+      ]),
+      ignoredLabels: uniqueStrings([
+        ...(orgSettings?.defaultTriggerPolicy.ignoredLabels ?? []),
+        ...settings.ignoredLabels,
+      ]),
+      ...((settings.requireLabel ?? orgSettings?.defaultTriggerPolicy.requireLabel)
+        ? { requireLabel: settings.requireLabel ?? orgSettings?.defaultTriggerPolicy.requireLabel }
+        : {}),
+      skipDraftPullRequests:
+        settings.skipDraftPullRequests ||
+        (orgSettings?.defaultTriggerPolicy.skipDraftPullRequests ?? false),
     },
   });
   const policyHash = sha256(canonicalJson(effectivePolicy));
@@ -751,6 +879,13 @@ function buildReviewPolicySnapshotCore(
     })),
     createdAt: timestamp,
     decisionInputs: {
+      ...(orgSettings
+        ? {
+            allowRepoLocalConfig: orgSettings.allowRepoLocalConfig,
+            orgSettingsUpdatedAt: orgSettings.updatedAt,
+            orgSettingsVersion: orgSettings.version,
+          }
+        : {}),
       repositoryEnabled: input.repository.enabled,
       repositorySettingsUpdatedAt: settings.updatedAt,
       source: "repository_settings",
@@ -1345,6 +1480,47 @@ function publishingPolicyFromReviewPolicy(
         publishSummaryComment: true,
       };
   }
+}
+
+/** Applies organization publishing guardrails to a derived publication policy. */
+function compilePublishingPolicy(
+  base: EffectivePublishingPolicy,
+  orgSettings: OrgSettings | undefined,
+): EffectivePublishingPolicy {
+  const orgPublishingPolicy = orgSettings?.defaultPublishingPolicy;
+
+  if (!orgPublishingPolicy) {
+    return base;
+  }
+
+  return {
+    maxCommentsPerReview: Math.min(
+      base.maxCommentsPerReview,
+      orgPublishingPolicy.maxCommentsPerReview,
+    ),
+    publishCheckRun: base.publishCheckRun && orgPublishingPolicy.publishCheckRun,
+    publishInlineComments: base.publishInlineComments && orgPublishingPolicy.publishInlineComments,
+    publishSummaryComment: base.publishSummaryComment && orgPublishingPolicy.publishSummaryComment,
+  };
+}
+
+/** Compiles organization memory defaults and suppression guardrails. */
+function compileMemoryPolicy(orgSettings: OrgSettings | undefined): EffectiveMemoryPolicy {
+  const base = {
+    ...DEFAULT_MEMORY_POLICY,
+    ...(orgSettings?.defaultMemoryPolicy ?? {}),
+  };
+
+  if (orgSettings?.allowMemorySuppression === false) {
+    return {
+      ...base,
+      allowExactFindingSuppression: false,
+      allowPathCategorySuppression: false,
+      enableMemorySuppression: false,
+    };
+  }
+
+  return base;
 }
 
 /** Compiles sandbox settings with MVP safety clamps. */

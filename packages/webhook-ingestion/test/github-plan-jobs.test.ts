@@ -1,5 +1,6 @@
 import { JOB_TYPES } from "@repo/contracts";
 import { QUEUE_NAMES } from "@repo/queue";
+import { createDefaultOrgSettings } from "@repo/rules";
 import { describe, expect, it } from "vitest";
 import {
   normalizeGitHubFeedback,
@@ -139,6 +140,36 @@ describe("GitHub webhook job planning", () => {
             },
           ]
         : [],
+      pullRequest: normalizeGitHubPullRequest(pullRequestPayload),
+    });
+
+    expect(jobs).toEqual([]);
+  });
+
+  it("uses organization trigger defaults when deciding whether to enqueue review jobs", () => {
+    const [repository] = normalizeGitHubRepositories(pullRequestPayload);
+    const jobs = planGitHubWebhookJobs({
+      deliveryId: "delivery-6b",
+      eventName: "pull_request",
+      action: "opened",
+      installation: normalizeGitHubInstallation(pullRequestPayload),
+      orgSettings: repository
+        ? [
+            {
+              ...createDefaultOrgSettings(
+                repository.repository.orgId,
+                repository.settings.updatedAt,
+              ),
+              defaultTriggerPolicy: {
+                enabledActions: ["opened"],
+                ignoredAuthors: [],
+                ignoredLabels: ["ready-for-review"],
+                skipDraftPullRequests: true,
+              },
+            },
+          ]
+        : [],
+      repositories: repository ? [repository] : [],
       pullRequest: normalizeGitHubPullRequest(pullRequestPayload),
     });
 

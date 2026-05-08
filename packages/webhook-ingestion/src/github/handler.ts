@@ -1,4 +1,6 @@
 import {
+  type OrgSettings,
+  OrgSettingsSchema,
   parseWithSchema,
   type RepositorySettings,
   RepositorySettingsSchema,
@@ -6,6 +8,7 @@ import {
 import type { HeimdallDatabase } from "@repo/db";
 import {
   backgroundJobs,
+  orgSettings,
   orgs,
   providerInstallations,
   pullRequestSnapshots,
@@ -234,6 +237,7 @@ export class GitHubWebhookHandler {
         eventName: normalized.headers.eventName,
         action,
         installation: normalized.installation,
+        orgSettings: await loadPersistedOrgSettings(tx, normalized.repositories),
         repositories: await loadRepositoriesForPlanning(tx, normalized.repositories),
         repositorySettings: await loadPersistedRepositorySettings(tx, normalized.repositories),
         pullRequest: normalized.pullRequest,
@@ -268,6 +272,13 @@ function uniqueRepositoryIds(
   normalizedRepositories: readonly NormalizedGitHubRepository[],
 ): readonly string[] {
   return [...new Set(normalizedRepositories.map((repository) => repository.repository.repoId))];
+}
+
+/** Returns unique organization IDs from normalized repository payloads. */
+function uniqueOrgIds(
+  normalizedRepositories: readonly NormalizedGitHubRepository[],
+): readonly string[] {
+  return [...new Set(normalizedRepositories.map((repository) => repository.repository.orgId))];
 }
 
 /** Applies persisted repository enablement to normalized repositories before job planning. */
@@ -315,6 +326,46 @@ async function loadPersistedRepositorySettings(
     .where(inArray(repositorySettings.repoId, repoIds));
 
   return rows.map(parseRepositorySettingsRow);
+}
+
+/** Loads persisted organization settings so trigger gating uses organization defaults. */
+async function loadPersistedOrgSettings(
+  tx: Transaction,
+  normalizedRepositories: readonly NormalizedGitHubRepository[],
+): Promise<readonly OrgSettings[]> {
+  const orgIds = uniqueOrgIds(normalizedRepositories);
+
+  if (orgIds.length === 0) {
+    return [];
+  }
+
+  const rows = await tx.select().from(orgSettings).where(inArray(orgSettings.orgId, orgIds));
+
+  return rows.map(parseOrgSettingsRow);
+}
+
+/** Parses an organization settings database row into the public contract. */
+function parseOrgSettingsRow(row: {
+  readonly orgId: string;
+  readonly settingsJson: unknown;
+  readonly version: number;
+  readonly updatedByUserId: string | null;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}): OrgSettings {
+  const settingsJson =
+    row.settingsJson && typeof row.settingsJson === "object" && !Array.isArray(row.settingsJson)
+      ? (row.settingsJson as Record<string, unknown>)
+      : {};
+
+  return parseWithSchema("OrgSettings", OrgSettingsSchema, {
+    ...settingsJson,
+    orgId: row.orgId,
+    version: row.version,
+    updatedByUserId: row.updatedByUserId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
 }
 
 /** Parses a repository settings database row into the public contract. */

@@ -1,6 +1,7 @@
 import type {
   CandidateFinding,
   CodeIndexVersion,
+  OrgSettings,
   PullRequestSnapshot,
   Repository,
   RepositorySettings,
@@ -10,6 +11,7 @@ import type {
 import {
   CandidateFindingSchema,
   CodeIndexVersionSchema,
+  OrgSettingsSchema,
   PullRequestSnapshotSchema,
   parseWithSchema,
   RepositorySchema,
@@ -117,6 +119,30 @@ export const toRepositorySettings = (row: {
     createdAt: toIso(row.createdAt),
     updatedAt: toIso(row.updatedAt),
   });
+
+/** Converts an organization settings row to the organization settings contract. */
+export const toOrgSettings = (row: {
+  orgId: string;
+  settingsJson: unknown;
+  version: number;
+  updatedByUserId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): OrgSettings => {
+  const settingsJson =
+    row.settingsJson && typeof row.settingsJson === "object" && !Array.isArray(row.settingsJson)
+      ? (row.settingsJson as Record<string, unknown>)
+      : {};
+
+  return parseWithSchema("OrgSettings", OrgSettingsSchema, {
+    ...settingsJson,
+    orgId: row.orgId,
+    version: row.version,
+    updatedByUserId: row.updatedByUserId,
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  });
+};
 
 /** Converts a code index row to the code index version contract. */
 export const toCodeIndexVersion = (row: {
