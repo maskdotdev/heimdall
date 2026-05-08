@@ -44,10 +44,11 @@ together.
 
 ## Secret References
 
-Secret reference variables accept `env:NAME`, `aws:secret-name#version`, and
-`gcp:projects/project-id/secrets/secret-id#version`. AWS refs require AWS credentials and region
-environment variables. GCP refs require `GCP_SECRET_MANAGER_ACCESS_TOKEN`,
-`GOOGLE_OAUTH_ACCESS_TOKEN`, or `GOOGLE_ACCESS_TOKEN`.
+Secret reference variables accept `env:NAME`, `aws:secret-name#version`,
+`gcp:projects/project-id/secrets/secret-id#version`, and `vault:path/to/secret#version`. AWS refs
+require AWS credentials and region environment variables. GCP refs require
+`GCP_SECRET_MANAGER_ACCESS_TOKEN`, `GOOGLE_OAUTH_ACCESS_TOKEN`, or `GOOGLE_ACCESS_TOKEN`. Vault refs
+require `VAULT_ADDR` and `VAULT_TOKEN`.
 
 ## Queue Maintenance
 

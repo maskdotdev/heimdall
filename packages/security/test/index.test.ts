@@ -15,6 +15,7 @@ import {
   createSecretsManagerFromEnvironment,
   createSecurityEvent,
   createUnsupportedProductionSecretsManager,
+  createVaultSecretsManager,
   DEFAULT_RETENTION_POLICY,
   defaultSecurityEventSeverity,
   formatSecretRef,
@@ -35,6 +36,7 @@ import {
   sanitizeComplianceEvidenceMetadata,
   shouldAlertSecurityEvent,
   signAdminIdentityAssertion,
+  type VaultSecretsManagerFetch,
   verifyAdminIdentityAssertion,
   verifyCsrfToken,
 } from "../src";
@@ -485,6 +487,81 @@ describe("admin security", () => {
     });
   });
 
+  it("resolves Vault KV payloads with token authentication", async () => {
+    let requestedUrl: string | undefined;
+    let requestedInit: Parameters<VaultSecretsManagerFetch>[1] | undefined;
+    const fetch: VaultSecretsManagerFetch = async (url, init) => {
+      requestedUrl = url;
+      requestedInit = init;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            data: {
+              data: {
+                value: "vault-secret-value",
+              },
+              metadata: {
+                version: 7,
+              },
+            },
+          }),
+      };
+    };
+    const manager = createVaultSecretsManager({
+      endpoint: "https://vault.example.com/",
+      fetch,
+      namespace: "admin/team-a",
+      now: () => new Date("2026-05-08T14:15:16.000Z"),
+      token: "vault-token",
+    });
+
+    const resolved = await manager.resolveSecret(parseSecretRef("vault:secret/data/github-app#7"));
+
+    expect(resolved).toEqual({
+      ref: {
+        name: "secret/data/github-app",
+        provider: "vault",
+        version: "7",
+      },
+      resolvedAt: "2026-05-08T14:15:16.000Z",
+      value: "vault-secret-value",
+      version: "7",
+    });
+    expect(requestedUrl).toBe("https://vault.example.com/v1/secret/data/github-app?version=7");
+    expect(requestedInit).toEqual({
+      headers: {
+        accept: "application/json",
+        "x-vault-namespace": "admin/team-a",
+        "x-vault-token": "vault-token",
+      },
+      method: "GET",
+    });
+  });
+
+  it("maps Vault provider failures to product-safe resolution errors", async () => {
+    const fetchNotFound: VaultSecretsManagerFetch = async () => ({
+      ok: false,
+      status: 404,
+      text: async () =>
+        JSON.stringify({
+          errors: ["not found"],
+        }),
+    });
+    const manager = createVaultSecretsManager({
+      endpoint: "https://vault.example.com",
+      fetch: fetchNotFound,
+      token: "vault-token",
+    });
+
+    await expect(
+      manager.resolveSecret(parseSecretRef("vault:secret/data/missing")),
+    ).rejects.toMatchObject({
+      code: "secret_not_found",
+    });
+  });
+
   it("routes environment and managed secret refs from runtime environment configuration", async () => {
     const fetch: AwsSecretsManagerFetch = async () => ({
       ok: true,
@@ -506,6 +583,16 @@ describe("admin security", () => {
           },
         }),
     });
+    const vaultFetch: VaultSecretsManagerFetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          data: {
+            value: "vault-env-secret",
+          },
+        }),
+    });
     const manager = createSecretsManagerFromEnvironment({
       env: {
         AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
@@ -513,10 +600,13 @@ describe("admin security", () => {
         AWS_SECRET_ACCESS_KEY: "secret-access-key",
         GCP_SECRET_MANAGER_ACCESS_TOKEN: "gcp-access-token",
         LOCAL_SECRET: "local-secret",
+        VAULT_ADDR: "https://vault.example.com",
+        VAULT_TOKEN: "vault-token",
       },
       fetch,
       gcpFetch,
       now: () => new Date("2026-05-08T14:15:16.000Z"),
+      vaultFetch,
     });
 
     await expect(manager.resolveSecret(parseSecretRef("env:LOCAL_SECRET"))).resolves.toMatchObject({
@@ -534,6 +624,11 @@ describe("admin security", () => {
       value: "gcp-env-secret",
       version: "9",
     });
+    await expect(
+      manager.resolveSecret(parseSecretRef("vault:secret/data/llm-api-key")),
+    ).resolves.toMatchObject({
+      value: "vault-env-secret",
+    });
 
     const envOnlyManager = createSecretsManagerFromEnvironment({
       env: {
@@ -548,6 +643,11 @@ describe("admin security", () => {
     });
     await expect(
       envOnlyManager.resolveSecret(parseSecretRef("gcp:projects/prod/secrets/missing-config")),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+    await expect(
+      envOnlyManager.resolveSecret(parseSecretRef("vault:secret/data/missing-config")),
     ).rejects.toMatchObject({
       code: "secret_provider_unsupported",
     });
