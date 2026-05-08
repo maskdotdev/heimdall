@@ -233,6 +233,38 @@ describe("tool runner", () => {
     });
   });
 
+  it("maps mypy sandbox commands to type-check execution", async () => {
+    const capturedRequests: SandboxRunRequest[] = [];
+    const fakeRunner = createFakeSandboxRunner([{ executable: "mypy", stdout: "" }]);
+    const sandboxRunner: SandboxRunner = {
+      run: async (request) => {
+        capturedRequests.push(request);
+        return fakeRunner.run(request);
+      },
+    };
+    const runner = createSandboxToolRunner({
+      commitSha: "abc123",
+      orgId: "org_1",
+      repoId: "repo_1",
+      runner: sandboxRunner,
+    });
+
+    await runner.run({
+      command: {
+        ...command,
+        args: ["--show-column-numbers", "src/app.py"],
+        displayCommand: "mypy --show-column-numbers src/app.py",
+        executable: "mypy",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_mypy",
+      startedAt: "2026-05-06T00:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(capturedRequests[0]?.category).toBe("type_check");
+  });
+
   it("enforces the shared tool output budget on sandbox streams", async () => {
     const runner = createSandboxToolRunner({
       commitSha: "abc123",

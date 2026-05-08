@@ -545,7 +545,12 @@ function categoryFromToolCommand(command: ToolCommandSpec): SandboxExecutionCate
   if (executable === "eslint" || executable === "biome" || executable === "ruff") {
     return "lint";
   }
-  if (executable === "tsc" || executable === "typescript" || executable === "pyright") {
+  if (
+    executable === "tsc" ||
+    executable === "typescript" ||
+    executable === "pyright" ||
+    executable === "mypy"
+  ) {
     return "type_check";
   }
   if (executable === "semgrep") {

@@ -707,6 +707,26 @@ const SemgrepJsonOutputSchema = Type.Object(
 /** Semgrep JSON result. */
 type SemgrepJsonResult = Static<typeof SemgrepJsonResultSchema>;
 
+/** Parsed mypy text diagnostic. */
+type MypyTextDiagnostic = {
+  /** One-based column parsed from the diagnostic location. */
+  readonly column: number;
+  /** Optional mypy error code. */
+  readonly code?: string | undefined;
+  /** Optional one-based end column parsed from `--show-error-end`. */
+  readonly endColumn?: number | undefined;
+  /** Optional one-based end line parsed from `--show-error-end`. */
+  readonly endLine?: number | undefined;
+  /** Repository or workspace path emitted by mypy. */
+  readonly filePath: string;
+  /** One-based line parsed from the diagnostic location. */
+  readonly line: number;
+  /** Diagnostic message emitted by mypy. */
+  readonly message: string;
+  /** Mypy diagnostic severity. */
+  readonly severity: "error" | "note" | "warning";
+};
+
 type TypeScriptTextDiagnostic = {
   /** TypeScript diagnostic code without the `TS` prefix. */
   readonly code: string;
@@ -726,6 +746,10 @@ type TypeScriptTextDiagnostic = {
 const TYPESCRIPT_TEXT_DIAGNOSTIC_PATTERN =
   /^(?<filePath>.+?)\((?<line>\d+),(?<column>\d+)\): (?<severity>error|warning) TS(?<code>\d+): (?<message>.+)$/u;
 
+/** Matches one mypy diagnostic line with a concrete file location. */
+const MYPY_TEXT_DIAGNOSTIC_PATTERN =
+  /^(?<filePath>.+?):(?<line>\d+):(?<column>\d+)(?::(?<endLine>\d+):(?<endColumn>\d+))?: (?<severity>error|note|warning): (?<message>.*?)(?: {2}\[(?<code>[^\]]+)\])?$/u;
+
 /** Built-in tool descriptors for MVP planning. */
 export const STATIC_TOOL_DESCRIPTORS = [
   descriptor("eslint", "ESLint", ["javascript", "typescript", "jsx", "tsx"], ["maintainability"]),
@@ -733,6 +757,7 @@ export const STATIC_TOOL_DESCRIPTORS = [
   descriptor("biome", "Biome", ["javascript", "typescript", "jsx", "tsx"], ["style"]),
   descriptor("ruff", "Ruff", ["python"], ["maintainability"]),
   descriptor("pyright", "Pyright", ["python"], ["correctness"]),
+  descriptor("mypy", "Mypy", ["python"], ["correctness"]),
   descriptor(
     "semgrep",
     "Semgrep",
@@ -857,6 +882,9 @@ export function parseToolOutputDiagnostics(
   }
   if (input.tool === "semgrep") {
     return parseSemgrepJsonDiagnostics(input);
+  }
+  if (input.tool === "mypy") {
+    return parseMypyTextDiagnostics(input);
   }
   if (input.tool === "typescript") {
     return parseTypeScriptTextDiagnostics(input);
@@ -1646,6 +1674,53 @@ function parseSemgrepJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses mypy text output into normalized diagnostics. */
+function parseMypyTextDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = [input.result.stdout, input.result.stderr]
+    .map((stream) => stream.trim())
+    .filter((stream) => stream.length > 0)
+    .join("\n");
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedDiagnostics = rawOutput
+    .split(/\r?\n/u)
+    .map(parseMypyDiagnosticLine)
+    .filter(isPresent)
+    .map((diagnostic) => mypyDiagnosticToNormalizedDiagnostic(input, diagnostic));
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings: StaticAnalysisWarning[] = [];
+
+  if (parsedDiagnostics.length === 0) {
+    warnings.push(
+      warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+        format: "mypy_text",
+        tool: input.tool,
+        toolRunId: input.toolRunId,
+      }),
+    );
+  }
+  if (parsedDiagnostics.length > diagnostics.length) {
+    warnings.push(
+      warning(
+        "tool_output_diagnostic_budget_truncated",
+        "Static analysis tool output diagnostics were truncated.",
+        {
+          diagnosticCount: parsedDiagnostics.length,
+          maxDiagnostics: input.maxDiagnostics,
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        },
+      ),
+    );
+  }
+
+  return { diagnostics, warnings };
+}
+
 /** Parses `tsc --pretty false` output into normalized diagnostics. */
 function parseTypeScriptTextDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
@@ -1693,6 +1768,29 @@ function parseTypeScriptTextDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses one mypy text diagnostic line. */
+function parseMypyDiagnosticLine(line: string): MypyTextDiagnostic | undefined {
+  const match = MYPY_TEXT_DIAGNOSTIC_PATTERN.exec(line.trim());
+  const groups = match?.groups;
+  if (!groups) {
+    return undefined;
+  }
+
+  const endLine = groups.endLine ? Number.parseInt(groups.endLine, 10) : undefined;
+  const endColumn = groups.endColumn ? Number.parseInt(groups.endColumn, 10) : undefined;
+
+  return {
+    column: Number.parseInt(groups.column ?? "0", 10) + 1,
+    ...(groups.code ? { code: groups.code } : {}),
+    ...(endColumn !== undefined ? { endColumn: endColumn + 1 } : {}),
+    ...(endLine !== undefined ? { endLine } : {}),
+    filePath: groups.filePath ?? "",
+    line: Math.max(1, Number.parseInt(groups.line ?? "1", 10)),
+    message: groups.message ?? "",
+    severity: mypyTextSeverity(groups.severity),
+  };
+}
+
 /** Parses one TypeScript text diagnostic line. */
 function parseTypeScriptDiagnosticLine(line: string): TypeScriptTextDiagnostic | undefined {
   const match = TYPESCRIPT_TEXT_DIAGNOSTIC_PATTERN.exec(line.trim());
@@ -1709,6 +1807,35 @@ function parseTypeScriptDiagnosticLine(line: string): TypeScriptTextDiagnostic |
     message: groups.message ?? "",
     severity: groups.severity === "warning" ? "warning" : "error",
   };
+}
+
+/** Converts one parsed mypy diagnostic into the normalized report shape. */
+function mypyDiagnosticToNormalizedDiagnostic(
+  input: ParseToolOutputDiagnosticsInput,
+  diagnostic: MypyTextDiagnostic,
+): NormalizedToolDiagnostic {
+  const filePath = normalizeToolFilePath(diagnostic.filePath, input.workspacePath);
+
+  return createNormalizedToolDiagnostic({
+    category: categoryForMypyDiagnostic(diagnostic.code),
+    location: {
+      ...(diagnostic.endColumn !== undefined ? { endColumn: diagnostic.endColumn } : {}),
+      ...(diagnostic.endLine !== undefined ? { endLine: diagnostic.endLine } : {}),
+      filePath,
+      ...(filePath === diagnostic.filePath ? {} : { originalPath: diagnostic.filePath }),
+      startColumn: diagnostic.column,
+      startLine: diagnostic.line,
+    },
+    message: diagnostic.message,
+    metadata: mypyDiagnosticMetadata(diagnostic),
+    rawMessage: diagnostic.message,
+    ...(diagnostic.code ? { ruleId: diagnostic.code, ruleName: diagnostic.code } : {}),
+    severity: mypySeverity(diagnostic.severity),
+    snapshot: input.snapshot,
+    sourceTrust: "parsed_text",
+    tool: "mypy",
+    toolRunId: input.toolRunId,
+  });
 }
 
 /** Converts one parsed TypeScript diagnostic into the normalized report shape. */
@@ -1980,6 +2107,20 @@ function biomeSeverity(severity: string): ToolDiagnosticSeverity {
   return "info";
 }
 
+/** Maps mypy severity words to normalized diagnostic severities. */
+function mypySeverity(severity: MypyTextDiagnostic["severity"]): ToolDiagnosticSeverity {
+  if (severity === "error") return "error";
+  if (severity === "warning") return "warning";
+  return "info";
+}
+
+/** Maps a parsed mypy severity string into the closed mypy severity union. */
+function mypyTextSeverity(severity: string | undefined): MypyTextDiagnostic["severity"] {
+  if (severity === "warning") return "warning";
+  if (severity === "note") return "note";
+  return "error";
+}
+
 /** Maps Semgrep severity strings to normalized diagnostic severities. */
 function semgrepSeverity(severity: string | undefined): ToolDiagnosticSeverity {
   const normalizedSeverity = severity?.toLowerCase() ?? "";
@@ -2070,6 +2211,16 @@ function categoryForPyrightRule(ruleId: string | undefined): FindingCategory {
   return "correctness";
 }
 
+/** Returns a product category for a mypy diagnostic. */
+function categoryForMypyDiagnostic(code: string | undefined): FindingCategory {
+  const normalizedCode = code?.toLowerCase() ?? "";
+  if (normalizedCode.includes("import")) {
+    return "dependency";
+  }
+
+  return "correctness";
+}
+
 /** Returns a product category for a Biome diagnostic category. */
 function categoryForBiomeDiagnostic(
   category: string | undefined,
@@ -2136,6 +2287,13 @@ function pyrightDiagnosticMetadata(
   const rule = diagnostic.rule?.trim();
   return {
     ...(rule ? { rule } : {}),
+  };
+}
+
+/** Returns product-safe metadata for a mypy diagnostic. */
+function mypyDiagnosticMetadata(diagnostic: MypyTextDiagnostic): Readonly<Record<string, unknown>> {
+  return {
+    ...(diagnostic.code ? { errorCode: diagnostic.code } : {}),
   };
 }
 
@@ -2222,7 +2380,7 @@ function descriptor(
     mutatesWorkspace: false,
     name,
     outputFormats: ["json", "text"],
-    preferredOutputFormat: name === "typescript" ? "text" : "json",
+    preferredOutputFormat: name === "typescript" || name === "mypy" ? "text" : "json",
     requiresDependencies: name !== "semgrep",
     supportsBaseHeadDelta: true,
     supportsChangedFiles: true,
@@ -2323,6 +2481,16 @@ function toolCommandArgs(tool: StaticToolName, paths: readonly string[]): readon
   }
   if (tool === "pyright") {
     return ["--outputjson", ...paths];
+  }
+  if (tool === "mypy") {
+    return [
+      "--show-column-numbers",
+      "--show-error-end",
+      "--show-error-codes",
+      "--no-error-summary",
+      "--no-color-output",
+      ...paths,
+    ];
   }
   if (tool === "semgrep") {
     return ["scan", "--json", "--metrics=off", "--config=auto", ...paths];

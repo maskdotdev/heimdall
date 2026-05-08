@@ -97,6 +97,7 @@ describe("static analysis", () => {
 
   it("plans runnable commands for supported local tools", () => {
     const biomePlan = planStaticAnalysis({ ...request, requestedTools: ["biome"] });
+    const mypyPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["mypy"] });
     const pyrightPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["pyright"] });
     const ruffPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["ruff"] });
     const semgrepPlan = planStaticAnalysis({ ...request, requestedTools: ["semgrep"] });
@@ -106,6 +107,19 @@ describe("static analysis", () => {
       args: ["check", "--reporter=json", "src/math.ts"],
       displayCommand: "biome check --reporter=json src/math.ts",
       executable: "biome",
+    });
+    expect(mypyPlan.toolRuns[0]?.command).toMatchObject({
+      args: [
+        "--show-column-numbers",
+        "--show-error-end",
+        "--show-error-codes",
+        "--no-error-summary",
+        "--no-color-output",
+        "src/app.py",
+      ],
+      displayCommand:
+        "mypy --show-column-numbers --show-error-end --show-error-codes --no-error-summary --no-color-output src/app.py",
+      executable: "mypy",
     });
     expect(pyrightPlan.toolRuns[0]?.command).toMatchObject({
       args: ["--outputjson", "src/app.py"],
@@ -419,6 +433,52 @@ describe("static analysis", () => {
       severity: "error",
       sourceTrust: "tool_output",
       tool: "biome",
+    });
+  });
+
+  it("parses mypy text output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout:
+          '/workspace/repo/src/app.py:2:6:2:10: error: Incompatible types in assignment (expression has type "str", variable has type "int")  [assignment]',
+        stdoutBytes: 142,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "mypy",
+      toolRunId: "str_mypy",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 11,
+        endLine: 2,
+        filePath: "src/app.py",
+        originalPath: "/workspace/repo/src/app.py",
+        startColumn: 7,
+        startLine: 2,
+      },
+      metadata: { errorCode: "assignment" },
+      ruleId: "assignment",
+      ruleName: "assignment",
+      severity: "error",
+      sourceTrust: "parsed_text",
+      tool: "mypy",
     });
   });
 
