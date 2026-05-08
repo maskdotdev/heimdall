@@ -66,6 +66,25 @@ const pythonChangedFile = {
   ],
 } satisfies ChangedFile;
 
+const pythonConfigChangedFile = {
+  ...validChangedFileFixture,
+  language: "unknown",
+  path: "pyproject.toml",
+  patch: "@@ -1,2 +1,3 @@",
+  hunks: [
+    {
+      ...validDiffHunkFixture,
+      lines: [
+        {
+          kind: "addition",
+          content: "[tool.ruff]",
+          newLine: 1,
+        },
+      ],
+    },
+  ],
+} satisfies ChangedFile;
+
 const pythonPullRequestSnapshotFixture = {
   ...validPullRequestSnapshotFixture,
   changedFiles: [pythonChangedFile],
@@ -165,6 +184,28 @@ describe("static analysis", () => {
       scope: { kind: "changed_files", paths: ["src/math.ts"] },
     });
     expect(plan.warnings).toEqual([expect.objectContaining({ code: "tool_run_budget_truncated" })]);
+  });
+
+  it("warns when a pull request changes static-analysis configuration", () => {
+    const plan = planStaticAnalysis({
+      ...pythonRequest,
+      snapshot: {
+        ...pythonPullRequestSnapshotFixture,
+        changedFileCount: 2,
+        changedFiles: [pythonChangedFile, pythonConfigChangedFile],
+      },
+    });
+
+    expect(plan.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "static_analysis_config_changed",
+        details: {
+          affectedTools: ["mypy", "pyright", "ruff"],
+          changedConfigCount: 1,
+          changedConfigPaths: ["pyproject.toml"],
+        },
+      }),
+    );
   });
 
   it("plans runnable commands for supported local tools", () => {

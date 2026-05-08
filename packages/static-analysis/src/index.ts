@@ -911,6 +911,7 @@ export function planStaticAnalysis(input: StaticAnalysisRequest): StaticAnalysis
     toolApplies({ descriptor, disabled, languages, mode: input.mode, requested }),
   );
   const warnings: StaticAnalysisWarning[] = [];
+  warnings.push(...staticAnalysisConfigChangeWarnings(changedFiles));
   if (
     input.mode === "changed_files_fast" &&
     changedFiles.length > budgets.maxChangedFilesForFastMode
@@ -3082,6 +3083,116 @@ function toolApplies(input: {
     return false;
   }
   return input.descriptor.languages.some((language) => input.languages.has(language));
+}
+
+/** Returns warnings for PR changes to static-analysis configuration files. */
+function staticAnalysisConfigChangeWarnings(
+  changedFiles: readonly ChangedFile[],
+): readonly StaticAnalysisWarning[] {
+  const configChanges = changedFiles
+    .map((file) => staticAnalysisConfigChangeForPath(file.path))
+    .filter(isPresent);
+  if (configChanges.length === 0) {
+    return [];
+  }
+
+  return [
+    warning(
+      "static_analysis_config_changed",
+      "Static analysis configuration changed in this pull request.",
+      {
+        affectedTools: uniqueSortedStrings(configChanges.flatMap((change) => change.tools)),
+        changedConfigCount: configChanges.length,
+        changedConfigPaths: configChanges.map((change) => change.path).slice(0, 20),
+      },
+    ),
+  ];
+}
+
+/** Static-analysis configuration change metadata. */
+type StaticAnalysisConfigChange = {
+  /** Changed repository path that configures one or more static-analysis tools. */
+  readonly path: string;
+  /** Tool names affected by the configuration path. */
+  readonly tools: readonly StaticToolName[];
+};
+
+/** Returns static-analysis config metadata for one repository path. */
+function staticAnalysisConfigChangeForPath(path: string): StaticAnalysisConfigChange | undefined {
+  const normalizedPath = path.replaceAll("\\", "/");
+  const basename = normalizedPath.split("/").at(-1)?.toLowerCase() ?? "";
+  const lowerPath = normalizedPath.toLowerCase();
+  const tools = staticAnalysisConfigToolsForPath(lowerPath, basename);
+  if (tools.length === 0) {
+    return undefined;
+  }
+
+  return { path: normalizedPath, tools };
+}
+
+/** Returns static-analysis tools affected by one config path. */
+function staticAnalysisConfigToolsForPath(
+  lowerPath: string,
+  basename: string,
+): readonly StaticToolName[] {
+  const tools: StaticToolName[] = [];
+  if (
+    basename === "eslint.config.js" ||
+    basename === "eslint.config.mjs" ||
+    basename === "eslint.config.cjs" ||
+    basename === "eslint.config.ts" ||
+    basename === ".eslintrc" ||
+    basename.startsWith(".eslintrc.")
+  ) {
+    tools.push("eslint");
+  }
+  if (basename === "biome.json" || basename === "biome.jsonc") {
+    tools.push("biome");
+  }
+  if (basename === "tsconfig.json" || /^tsconfig\..+\.json$/u.test(basename)) {
+    tools.push("typescript");
+  }
+  if (basename === "pyproject.toml" || basename === "ruff.toml" || basename === ".ruff.toml") {
+    tools.push("ruff");
+  }
+  if (basename === "pyrightconfig.json" || basename === "pyproject.toml") {
+    tools.push("pyright");
+  }
+  if (basename === "mypy.ini" || basename === "setup.cfg" || basename === "pyproject.toml") {
+    tools.push("mypy");
+  }
+  if (
+    basename === ".semgrep.yml" ||
+    basename === ".semgrep.yaml" ||
+    lowerPath.startsWith(".semgrep/") ||
+    lowerPath.includes("/.semgrep/")
+  ) {
+    tools.push("semgrep");
+  }
+  if (basename === "go.mod" || basename === "go.work") {
+    tools.push("go_vet", "staticcheck");
+  }
+  if (basename === "staticcheck.conf") {
+    tools.push("staticcheck");
+  }
+  if (basename === "cargo.toml" || basename === "cargo.lock") {
+    tools.push("cargo_check", "cargo_clippy");
+  }
+  if (basename === "clippy.toml" || basename === ".clippy.toml") {
+    tools.push("cargo_clippy");
+  }
+
+  return uniqueSortedStaticToolNames(tools);
+}
+
+/** Returns sorted unique static-analysis tool names. */
+function uniqueSortedStaticToolNames(values: readonly StaticToolName[]): StaticToolName[] {
+  return [...new Set(values)].sort();
+}
+
+/** Returns sorted unique strings. */
+function uniqueSortedStrings(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
 }
 
 /** Creates one tool run plan. */
