@@ -256,6 +256,30 @@ describe("retrieveContext", () => {
         },
       ],
       getRelatedChunks: async () => [],
+      getDependenciesForFiles: async () => [
+        {
+          dependencyId: "dep_hono",
+          manifestPath: "package.json",
+          packageManager: "pnpm",
+          name: "hono",
+          versionSpec: "^4.0.0",
+          dependencyType: "prod",
+        },
+      ],
+      getRoutesForFiles: async () => [
+        {
+          routeId: "route_user",
+          path: "src/index.ts",
+          language: "typescript",
+          routePattern: "/api/users/:id",
+          methods: ["GET"],
+          handlerSymbolId: "sym_same",
+          startLine: 1,
+          endLine: 3,
+          framework: "hono",
+          confidence: 0.95,
+        },
+      ],
       getRelatedTestChunks: async () => [
         {
           chunkId: "chunk_test",
@@ -314,6 +338,8 @@ describe("retrieveContext", () => {
       expect.arrayContaining([
         "same_file_context",
         "changed_symbol",
+        "dependency",
+        "config",
         "related_test",
         "similar_pattern",
         "diff",
@@ -321,6 +347,14 @@ describe("retrieveContext", () => {
     );
     expect(bundle.items).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          kind: "dependency",
+          text: expect.stringContaining("Dependency: hono"),
+        }),
+        expect.objectContaining({
+          kind: "config",
+          text: expect.stringContaining("Route: GET /api/users/:id"),
+        }),
         expect.objectContaining({
           kind: "similar_pattern",
           source: "full_text_search",

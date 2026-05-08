@@ -6,7 +6,10 @@ import type { CodeSnippet, ContextBundle, ContextItem } from "@repo/contracts/re
 import {
   codeChunkEmbeddings,
   codeChunks,
+  codeDependencies,
   codeEdges,
+  codeRoutes,
+  codeTestMappings,
   type HeimdallDatabase,
   indexedFiles,
   symbols,
@@ -73,6 +76,48 @@ export type RetrievalSymbol = {
   readonly endLine: number;
 };
 
+/** Dependency metadata imported from package manifests. */
+export type RetrievalDependency = {
+  /** Stable imported dependency ID. */
+  readonly dependencyId: string;
+  /** Manifest path that declared the dependency. */
+  readonly manifestPath: string;
+  /** Package manager or ecosystem when known. */
+  readonly packageManager?: string | null;
+  /** Dependency package or module name. */
+  readonly name: string;
+  /** Declared version constraint when known. */
+  readonly versionSpec?: string | null;
+  /** Resolved version when known. */
+  readonly resolvedVersion?: string | null;
+  /** Dependency category when known. */
+  readonly dependencyType?: string | null;
+};
+
+/** Route metadata imported from framework route declarations. */
+export type RetrievalRoute = {
+  /** Stable imported route ID. */
+  readonly routeId: string;
+  /** Source path that declared the route. */
+  readonly path: string;
+  /** Route source language. */
+  readonly language: string;
+  /** Framework route pattern. */
+  readonly routePattern: string;
+  /** HTTP methods declared by the route record. */
+  readonly methods: readonly string[];
+  /** Handler symbol ID when the indexer could resolve it. */
+  readonly handlerSymbolId?: string | null;
+  /** 1-based start line when known. */
+  readonly startLine?: number | null;
+  /** 1-based end line when known. */
+  readonly endLine?: number | null;
+  /** Framework that owns the route when known. */
+  readonly framework?: string | null;
+  /** Indexer confidence for the route extraction. */
+  readonly confidence: number;
+};
+
 /** Query interface over an imported repository index. */
 export type RetrievalIndex = {
   /** Imported index version ID. */
@@ -83,6 +128,12 @@ export type RetrievalIndex = {
   readonly getSymbolsForFiles: (paths: readonly string[]) => Promise<readonly RetrievalSymbol[]>;
   /** Returns graph-related chunks for changed symbols. */
   readonly getRelatedChunks: (symbolIds: readonly string[]) => Promise<readonly RetrievalChunk[]>;
+  /** Returns dependency metadata for changed package manifests. */
+  readonly getDependenciesForFiles?: (
+    paths: readonly string[],
+  ) => Promise<readonly RetrievalDependency[]>;
+  /** Returns framework route metadata for changed files. */
+  readonly getRoutesForFiles?: (paths: readonly string[]) => Promise<readonly RetrievalRoute[]>;
   /** Returns likely related test chunks. */
   readonly getRelatedTestChunks: (paths: readonly string[]) => Promise<readonly RetrievalChunk[]>;
   /** Returns full-text matches for changed text when no embedding search is required. */
@@ -480,7 +531,92 @@ export function createDatabaseRetrievalIndex(options: {
         return relationKind ? { ...chunk, relationKind } : chunk;
       });
     },
+    getDependenciesForFiles: async (paths) => {
+      if (paths.length === 0) return [];
+      return options.db
+        .select({
+          dependencyId: codeDependencies.dependencyId,
+          manifestPath: codeDependencies.manifestPath,
+          packageManager: codeDependencies.packageManager,
+          name: codeDependencies.name,
+          versionSpec: codeDependencies.versionSpec,
+          resolvedVersion: codeDependencies.resolvedVersion,
+          dependencyType: codeDependencies.dependencyType,
+        })
+        .from(codeDependencies)
+        .where(
+          and(
+            eq(codeDependencies.indexVersionId, options.indexVersionId),
+            inArray(codeDependencies.manifestPath, [...paths]),
+          ),
+        );
+    },
+    getRoutesForFiles: async (paths) => {
+      if (paths.length === 0) return [];
+      const rows = await options.db
+        .select({
+          routeId: codeRoutes.routeId,
+          path: codeRoutes.path,
+          language: codeRoutes.language,
+          routePattern: codeRoutes.routePattern,
+          methods: codeRoutes.methods,
+          handlerSymbolId: codeRoutes.handlerSymbolId,
+          startLine: codeRoutes.startLine,
+          endLine: codeRoutes.endLine,
+          framework: codeRoutes.framework,
+          confidence: codeRoutes.confidence,
+        })
+        .from(codeRoutes)
+        .where(
+          and(
+            eq(codeRoutes.indexVersionId, options.indexVersionId),
+            inArray(codeRoutes.path, [...paths]),
+          ),
+        );
+
+      return rows.map((row) => ({
+        ...row,
+        methods: jsonStringArray(row.methods),
+      }));
+    },
     getRelatedTestChunks: async (paths) => {
+      if (paths.length === 0) return [];
+
+      const changedFiles = await options.db
+        .select({ fileId: indexedFiles.fileId })
+        .from(indexedFiles)
+        .where(
+          and(
+            eq(indexedFiles.indexVersionId, options.indexVersionId),
+            inArray(indexedFiles.path, [...paths]),
+          ),
+        );
+      const changedFileIds = changedFiles.map((file) => file.fileId);
+      if (changedFileIds.length > 0) {
+        const mappings = await options.db
+          .select({ testFileId: codeTestMappings.testFileId })
+          .from(codeTestMappings)
+          .where(
+            and(
+              eq(codeTestMappings.indexVersionId, options.indexVersionId),
+              inArray(codeTestMappings.targetFileId, changedFileIds),
+            ),
+          );
+        const testFileIds = uniqueStrings(mappings.map((mapping) => mapping.testFileId));
+        if (testFileIds.length > 0) {
+          const rows = await options.db
+            .select()
+            .from(codeChunks)
+            .where(
+              and(
+                eq(codeChunks.indexVersionId, options.indexVersionId),
+                inArray(codeChunks.fileId, testFileIds),
+              ),
+            );
+          return rows.map(toRetrievalChunk);
+        }
+      }
+
       const stems = paths
         .map((path) =>
           path
@@ -551,9 +687,26 @@ async function retrieveIndexedItems(
     input.index.getSymbolsForFiles(paths),
   ]);
   const symbolIds = symbolsForFiles.map((symbol) => symbol.symbolId);
-  const [relatedResult, relatedTestsResult, fullTextResult, similarResult] = await Promise.all([
+  const [
+    relatedResult,
+    dependencyResult,
+    routeResult,
+    relatedTestsResult,
+    fullTextResult,
+    similarResult,
+  ] = await Promise.all([
     retrieveOptionalIndexItems("symbol-graph", "graph_retrieval_failed", () =>
       input.index.getRelatedChunks(symbolIds),
+    ),
+    retrieveOptionalIndexItems(
+      "dependency-metadata",
+      "dependency_retrieval_failed",
+      () => input.index.getDependenciesForFiles?.(paths) ?? Promise.resolve([]),
+    ),
+    retrieveOptionalIndexItems(
+      "route-metadata",
+      "route_retrieval_failed",
+      () => input.index.getRoutesForFiles?.(paths) ?? Promise.resolve([]),
     ),
     retrieveOptionalIndexItems("related-tests", "test_retrieval_failed", () =>
       input.index.getRelatedTestChunks(paths),
@@ -581,6 +734,8 @@ async function retrieveIndexedItems(
           `${chunk.relationKind === "caller" ? "Caller" : "Callee"} indexed context.`,
         ),
       ),
+      ...dependencyResult.items.map(dependencyItem),
+      ...routeResult.items.map(routeItem),
       ...relatedTestsResult.items.map((chunk) =>
         chunkItem(chunk, "related_test", "Related test context."),
       ),
@@ -593,6 +748,8 @@ async function retrieveIndexedItems(
     ]),
     warnings: [
       ...relatedResult.warnings,
+      ...dependencyResult.warnings,
+      ...routeResult.warnings,
       ...relatedTestsResult.warnings,
       ...fullTextResult.warnings,
       ...similarResult.warnings,
@@ -883,12 +1040,81 @@ function symbolItem(symbol: RetrievalSymbol): ContextItem {
   };
 }
 
+function dependencyItem(dependency: RetrievalDependency): ContextItem {
+  const text = [
+    `Dependency: ${dependency.name}`,
+    `Manifest: ${dependency.manifestPath}`,
+    ...(dependency.versionSpec ? [`Version constraint: ${dependency.versionSpec}`] : []),
+    ...(dependency.resolvedVersion ? [`Resolved version: ${dependency.resolvedVersion}`] : []),
+    ...(dependency.dependencyType ? [`Dependency type: ${dependency.dependencyType}`] : []),
+    ...(dependency.packageManager ? [`Package manager: ${dependency.packageManager}`] : []),
+  ].join("\n");
+
+  return {
+    contextItemId: stableId("ctxitem", ["dependency", dependency.dependencyId]),
+    kind: "dependency",
+    source: "symbol_graph",
+    title: dependency.name,
+    text,
+    priority: 66,
+    tokenEstimate: estimateTokens(text),
+    provenance: {
+      retriever: "dependency-index",
+      reason: "Changed package manifest dependency imported from the repository index.",
+    },
+    metadata: {
+      dependencyId: dependency.dependencyId,
+      manifestPath: dependency.manifestPath,
+      ...(dependency.packageManager ? { packageManager: dependency.packageManager } : {}),
+      ...(dependency.dependencyType ? { dependencyType: dependency.dependencyType } : {}),
+    },
+  };
+}
+
+function routeItem(route: RetrievalRoute): ContextItem {
+  const methods = route.methods.length > 0 ? route.methods.join(", ") : "ANY";
+  const text = [
+    `Route: ${methods} ${route.routePattern}`,
+    `Source: ${route.path}`,
+    ...(route.framework ? [`Framework: ${route.framework}`] : []),
+    ...(route.handlerSymbolId ? [`Handler symbol: ${route.handlerSymbolId}`] : []),
+    `Confidence: ${route.confidence.toFixed(2)}`,
+  ].join("\n");
+
+  return {
+    contextItemId: stableId("ctxitem", ["route", route.routeId]),
+    kind: "config",
+    source: "symbol_graph",
+    title: `${methods} ${route.routePattern}`,
+    text,
+    priority: 68,
+    tokenEstimate: estimateTokens(text),
+    provenance: {
+      retriever: "route-index",
+      reason: "Changed file declares a framework route in the repository index.",
+      ...(route.handlerSymbolId ? { relatedSymbolId: route.handlerSymbolId } : {}),
+    },
+    metadata: {
+      routeId: route.routeId,
+      path: route.path,
+      routePattern: route.routePattern,
+      methods: route.methods,
+      ...(route.framework ? { framework: route.framework } : {}),
+      ...(route.startLine ? { startLine: route.startLine } : {}),
+      ...(route.endLine ? { endLine: route.endLine } : {}),
+    },
+  };
+}
+
 function dedupeContextItems(items: readonly ContextItem[]): readonly ContextItem[] {
   const seen = new Set<string>();
   const deduped: ContextItem[] = [];
 
   for (const item of items) {
-    const key = item.snippet?.chunkId ?? item.provenance.relatedSymbolId ?? item.contextItemId;
+    const key =
+      item.snippet?.chunkId ??
+      (item.kind === "changed_symbol" ? item.provenance.relatedSymbolId : undefined) ??
+      item.contextItemId;
     if (seen.has(key)) {
       continue;
     }
@@ -897,6 +1123,16 @@ function dedupeContextItems(items: readonly ContextItem[]): readonly ContextItem
   }
 
   return deduped;
+}
+
+function jsonStringArray(value: unknown): readonly string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
 }
 
 function priorityForKind(kind: ContextItem["kind"]): number {
