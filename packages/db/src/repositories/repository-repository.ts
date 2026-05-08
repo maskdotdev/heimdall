@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { OrgSettings, PageInfo, Repository, RepositorySettings } from "@repo/contracts";
-import { and, asc, eq, gt, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { orgSettings, repositories, repositorySettings } from "../schema";
 import { toOrgSettings, toRepository, toRepositorySettings } from "./row-mappers";
@@ -82,6 +82,35 @@ export class RepositoryRepository {
     return toRepository(requireReturnedRow(row));
   }
 
+  /** Inserts or updates provider-owned repository metadata while preserving product enablement. */
+  public async upsertProviderRepositoryMetadata(repository: Repository): Promise<Repository> {
+    const [row] = await this.db
+      .insert(repositories)
+      .values({
+        ...repository,
+        createdAt: new Date(repository.createdAt),
+        updatedAt: new Date(repository.updatedAt),
+      })
+      .onConflictDoUpdate({
+        target: [repositories.provider, repositories.providerRepoId],
+        set: {
+          owner: repository.owner,
+          name: repository.name,
+          fullName: repository.fullName,
+          defaultBranch: repository.defaultBranch,
+          cloneUrl: repository.cloneUrl,
+          visibility: repository.visibility,
+          isArchived: repository.isArchived,
+          isFork: repository.isFork,
+          metadata: repository.metadata,
+          updatedAt: new Date(repository.updatedAt),
+        },
+      })
+      .returning();
+
+    return toRepository(requireReturnedRow(row));
+  }
+
   /** Gets a repository by Heimdall repository ID. */
   public async getRepository(repoId: string): Promise<Repository | undefined> {
     return this.getRepositoryById(repoId);
@@ -109,6 +138,22 @@ export class RepositoryRepository {
       .limit(1);
 
     return row ? toRepository(row) : undefined;
+  }
+
+  /** Lists repositories by durable IDs. */
+  public async listRepositoriesByIds(repoIds: readonly string[]): Promise<readonly Repository[]> {
+    const uniqueRepoIds = uniqueStrings(repoIds);
+    if (uniqueRepoIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .select()
+      .from(repositories)
+      .where(inArray(repositories.repoId, uniqueRepoIds))
+      .orderBy(asc(repositories.repoId));
+
+    return rows.map(toRepository);
   }
 
   /** Lists enabled repositories for an organization with stable cursor pagination. */
@@ -185,6 +230,30 @@ export class RepositoryRepository {
     return toRepositorySettings(requireReturnedRow(row));
   }
 
+  /** Inserts repository settings only when no row exists yet. */
+  public async insertSettingsIfAbsent(settings: RepositorySettings): Promise<RepositorySettings> {
+    const [row] = await this.db
+      .insert(repositorySettings)
+      .values({
+        ...settings,
+        createdAt: new Date(settings.createdAt),
+        updatedAt: new Date(settings.updatedAt),
+      })
+      .onConflictDoNothing()
+      .returning();
+
+    if (row) {
+      return toRepositorySettings(row);
+    }
+
+    const existing = await this.getSettings(settings.repoId);
+    if (!existing) {
+      throw new Error(`Repository settings row was not returned after insert: ${settings.repoId}`);
+    }
+
+    return existing;
+  }
+
   /** Gets mutable settings for a repository. */
   public async getSettings(repoId: string): Promise<RepositorySettings | undefined> {
     const [row] = await this.db
@@ -193,6 +262,24 @@ export class RepositoryRepository {
       .where(eq(repositorySettings.repoId, repoId));
 
     return row ? toRepositorySettings(row) : undefined;
+  }
+
+  /** Lists mutable settings for repositories by durable IDs. */
+  public async listSettingsForRepositories(
+    repoIds: readonly string[],
+  ): Promise<readonly RepositorySettings[]> {
+    const uniqueRepoIds = uniqueStrings(repoIds);
+    if (uniqueRepoIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .select()
+      .from(repositorySettings)
+      .where(inArray(repositorySettings.repoId, uniqueRepoIds))
+      .orderBy(asc(repositorySettings.repoId));
+
+    return rows.map(toRepositorySettings);
   }
 
   /** Inserts or updates mutable organization policy defaults. */
@@ -225,6 +312,22 @@ export class RepositoryRepository {
   public async getOrgSettings(orgId: string): Promise<OrgSettings | undefined> {
     const [row] = await this.db.select().from(orgSettings).where(eq(orgSettings.orgId, orgId));
     return row ? toOrgSettings(row) : undefined;
+  }
+
+  /** Lists mutable organization policy defaults by durable organization IDs. */
+  public async listOrgSettings(orgIds: readonly string[]): Promise<readonly OrgSettings[]> {
+    const uniqueOrgIds = uniqueStrings(orgIds);
+    if (uniqueOrgIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .select()
+      .from(orgSettings)
+      .where(inArray(orgSettings.orgId, uniqueOrgIds))
+      .orderBy(asc(orgSettings.orgId));
+
+    return rows.map(toOrgSettings);
   }
 }
 
@@ -295,4 +398,9 @@ function isRepositoryCursor(value: unknown): value is RepositoryCursor {
   }
   const record = value as Record<string, unknown>;
   return typeof record.fullName === "string" && typeof record.repoId === "string";
+}
+
+/** Returns unique strings while preserving first-seen order. */
+function uniqueStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
 }

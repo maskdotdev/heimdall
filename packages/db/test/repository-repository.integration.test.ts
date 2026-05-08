@@ -1,7 +1,12 @@
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Repository } from "@repo/contracts";
+import {
+  DEFAULT_ORG_SETTINGS,
+  type OrgSettings,
+  type Repository,
+  type RepositorySettings,
+} from "@repo/contracts";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -115,6 +120,61 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
         limit: 1,
       }),
     ).rejects.toThrow(/Invalid repository pagination cursor/u);
+
+    await repositoryRepository.updateRepositoryEnabled("repo_repository_alpha", false);
+    const providerRefresh = await repositoryRepository.upsertProviderRepositoryMetadata(
+      repositoryFixture({
+        fullName: "acme/alpha-renamed",
+        name: "alpha-renamed",
+        providerRepoId: "1001",
+        repoId: "repo_repository_alpha",
+      }),
+    );
+    expect(providerRefresh).toMatchObject({
+      enabled: false,
+      fullName: "acme/alpha-renamed",
+      repoId: "repo_repository_alpha",
+    });
+
+    const repositoriesById = await repositoryRepository.listRepositoriesByIds([
+      "repo_repository_beta",
+      "repo_repository_alpha",
+    ]);
+    expect(repositoriesById.map((repository) => repository.repoId)).toEqual([
+      "repo_repository_alpha",
+      "repo_repository_beta",
+    ]);
+
+    const settings = await repositoryRepository.insertSettingsIfAbsent(
+      repositorySettingsFixture({
+        repoId: "repo_repository_alpha",
+        severityThreshold: "medium",
+      }),
+    );
+    expect(settings.severityThreshold).toBe("medium");
+
+    const preservedSettings = await repositoryRepository.insertSettingsIfAbsent(
+      repositorySettingsFixture({
+        repoId: "repo_repository_alpha",
+        severityThreshold: "high",
+      }),
+    );
+    expect(preservedSettings.severityThreshold).toBe("medium");
+
+    const listedSettings = await repositoryRepository.listSettingsForRepositories([
+      "repo_repository_alpha",
+      "repo_repository_missing",
+    ]);
+    expect(listedSettings.map((row) => row.repoId)).toEqual(["repo_repository_alpha"]);
+
+    await repositoryRepository.upsertOrgSettings(
+      orgSettingsFixture({ orgId: "org_repository_test", version: 2 }),
+    );
+    const listedOrgSettings = await repositoryRepository.listOrgSettings([
+      "org_repository_other",
+      "org_repository_test",
+    ]);
+    expect(listedOrgSettings).toMatchObject([{ orgId: "org_repository_test", version: 2 }]);
   });
 });
 
@@ -208,6 +268,58 @@ function repositoryFixture(input: {
     repoId: input.repoId,
     updatedAt: "2026-05-08T00:00:00.000Z",
     visibility: "private",
+  };
+}
+
+/** Builds a repository settings contract fixture for repository query tests. */
+function repositorySettingsFixture(
+  overrides: Partial<RepositorySettings> = {},
+): RepositorySettings {
+  return {
+    repoId: "repo_repository_alpha",
+    reviewPolicy: "inline_comments_and_summary",
+    severityThreshold: "medium",
+    maxCommentsPerReview: 5,
+    ignoredPaths: ["node_modules/**", "dist/**"],
+    ignoredAuthors: [],
+    ignoredLabels: [],
+    skipGeneratedFiles: true,
+    skipDraftPullRequests: true,
+    createdAt: "2026-05-08T00:00:00.000Z",
+    updatedAt: "2026-05-08T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** Builds an organization settings contract fixture for repository query tests. */
+function orgSettingsFixture(overrides: Partial<OrgSettings> = {}): OrgSettings {
+  return {
+    schemaVersion: "org_settings.v1",
+    orgId: "org_repository_test",
+    defaultReviewPolicy: DEFAULT_ORG_SETTINGS.defaultReviewPolicy,
+    defaultTriggerPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy,
+      enabledActions: [...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy.enabledActions],
+      ignoredAuthors: [...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy.ignoredAuthors],
+      ignoredLabels: [...DEFAULT_ORG_SETTINGS.defaultTriggerPolicy.ignoredLabels],
+    },
+    defaultFindingPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultFindingPolicy,
+      enabledCategories: [...DEFAULT_ORG_SETTINGS.defaultFindingPolicy.enabledCategories],
+    },
+    defaultPublishingPolicy: { ...DEFAULT_ORG_SETTINGS.defaultPublishingPolicy },
+    defaultMemoryPolicy: {
+      ...DEFAULT_ORG_SETTINGS.defaultMemoryPolicy,
+      trustedFeedbackRoles: [...DEFAULT_ORG_SETTINGS.defaultMemoryPolicy.trustedFeedbackRoles],
+    },
+    allowRepoLocalConfig: DEFAULT_ORG_SETTINGS.allowRepoLocalConfig,
+    allowMemorySuppression: DEFAULT_ORG_SETTINGS.allowMemorySuppression,
+    allowUserDefinedRules: DEFAULT_ORG_SETTINGS.allowUserDefinedRules,
+    createdAt: "2026-05-08T00:00:00.000Z",
+    updatedAt: "2026-05-08T00:00:00.000Z",
+    updatedByUserId: null,
+    version: 1,
+    ...overrides,
   };
 }
 

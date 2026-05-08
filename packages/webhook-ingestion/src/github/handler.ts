@@ -1,19 +1,11 @@
-import {
-  type OrgSettings,
-  OrgSettingsSchema,
-  parseWithSchema,
-  type RepositorySettings,
-  RepositorySettingsSchema,
-} from "@repo/contracts";
+import type { OrgSettings, RepositorySettings } from "@repo/contracts";
 import type { HeimdallDatabase } from "@repo/db";
 import {
   backgroundJobs,
-  orgSettings,
   orgs,
   PullRequestRepository,
   providerInstallations,
-  repositories,
-  repositorySettings,
+  RepositoryRepository,
   WebhookRepository,
 } from "@repo/db";
 import {
@@ -28,7 +20,6 @@ import {
   type TelemetrySpanRecorder,
   type TelemetryTraceContext,
 } from "@repo/observability";
-import { inArray } from "drizzle-orm";
 import { newId, sha256, stableId } from "../ids";
 import { type PlannedJob, WebhookAuthenticationError, type WebhookIngestionResult } from "../types";
 import {
@@ -284,10 +275,7 @@ async function loadRepositoriesForPlanning(
     return normalizedRepositories;
   }
 
-  const rows = await tx
-    .select({ enabled: repositories.enabled, repoId: repositories.repoId })
-    .from(repositories)
-    .where(inArray(repositories.repoId, repoIds));
+  const rows = await new RepositoryRepository(tx).listRepositoriesByIds(repoIds);
   const enabledByRepoId = new Map(rows.map((row) => [row.repoId, row.enabled]));
 
   return normalizedRepositories.map((normalizedRepository) => ({
@@ -312,12 +300,7 @@ async function loadPersistedRepositorySettings(
     return [];
   }
 
-  const rows = await tx
-    .select()
-    .from(repositorySettings)
-    .where(inArray(repositorySettings.repoId, repoIds));
-
-  return rows.map(parseRepositorySettingsRow);
+  return new RepositoryRepository(tx).listSettingsForRepositories(repoIds);
 }
 
 /** Loads persisted organization settings so trigger gating uses organization defaults. */
@@ -331,68 +314,7 @@ async function loadPersistedOrgSettings(
     return [];
   }
 
-  const rows = await tx.select().from(orgSettings).where(inArray(orgSettings.orgId, orgIds));
-
-  return rows.map(parseOrgSettingsRow);
-}
-
-/** Parses an organization settings database row into the public contract. */
-function parseOrgSettingsRow(row: {
-  readonly orgId: string;
-  readonly settingsJson: unknown;
-  readonly version: number;
-  readonly updatedByUserId: string | null;
-  readonly createdAt: Date;
-  readonly updatedAt: Date;
-}): OrgSettings {
-  const settingsJson =
-    row.settingsJson && typeof row.settingsJson === "object" && !Array.isArray(row.settingsJson)
-      ? (row.settingsJson as Record<string, unknown>)
-      : {};
-
-  return parseWithSchema("OrgSettings", OrgSettingsSchema, {
-    ...settingsJson,
-    orgId: row.orgId,
-    version: row.version,
-    updatedByUserId: row.updatedByUserId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  });
-}
-
-/** Parses a repository settings database row into the public contract. */
-function parseRepositorySettingsRow(row: {
-  readonly repoId: string;
-  readonly reviewPolicy: string;
-  readonly severityThreshold: string;
-  readonly maxCommentsPerReview: number;
-  readonly ignoredPaths: unknown;
-  readonly ignoredAuthors: unknown;
-  readonly ignoredLabels: unknown;
-  readonly requireLabel: string | null;
-  readonly skipGeneratedFiles: boolean;
-  readonly skipDraftPullRequests: boolean;
-  readonly enabledLanguages: unknown;
-  readonly customInstructions: string | null;
-  readonly createdAt: Date;
-  readonly updatedAt: Date;
-}): RepositorySettings {
-  return parseWithSchema("RepositorySettings", RepositorySettingsSchema, {
-    repoId: row.repoId,
-    reviewPolicy: row.reviewPolicy,
-    severityThreshold: row.severityThreshold,
-    maxCommentsPerReview: row.maxCommentsPerReview,
-    ignoredPaths: row.ignoredPaths,
-    ignoredAuthors: row.ignoredAuthors,
-    ignoredLabels: row.ignoredLabels,
-    ...(row.requireLabel === null ? {} : { requireLabel: row.requireLabel }),
-    skipGeneratedFiles: row.skipGeneratedFiles,
-    skipDraftPullRequests: row.skipDraftPullRequests,
-    ...(row.enabledLanguages === null ? {} : { enabledLanguages: row.enabledLanguages }),
-    ...(row.customInstructions === null ? {} : { customInstructions: row.customInstructions }),
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  });
+  return new RepositoryRepository(tx).listOrgSettings(orgIds);
 }
 
 async function persistInstallation(
@@ -452,38 +374,10 @@ async function persistRepository(
   normalizedRepository: NormalizedGitHubRepository,
 ): Promise<void> {
   const { repository, settings } = normalizedRepository;
+  const repositoryRepository = new RepositoryRepository(tx);
 
-  await tx
-    .insert(repositories)
-    .values({
-      ...repository,
-      createdAt: new Date(repository.createdAt),
-      updatedAt: new Date(repository.updatedAt),
-    })
-    .onConflictDoUpdate({
-      target: [repositories.provider, repositories.providerRepoId],
-      set: {
-        owner: repository.owner,
-        name: repository.name,
-        fullName: repository.fullName,
-        defaultBranch: repository.defaultBranch,
-        cloneUrl: repository.cloneUrl,
-        visibility: repository.visibility,
-        isArchived: repository.isArchived,
-        isFork: repository.isFork,
-        metadata: repository.metadata,
-        updatedAt: new Date(repository.updatedAt),
-      },
-    });
-
-  await tx
-    .insert(repositorySettings)
-    .values({
-      ...settings,
-      createdAt: new Date(settings.createdAt),
-      updatedAt: new Date(settings.updatedAt),
-    })
-    .onConflictDoNothing();
+  await repositoryRepository.upsertProviderRepositoryMetadata(repository);
+  await repositoryRepository.insertSettingsIfAbsent(settings);
 }
 
 async function persistPullRequest(
