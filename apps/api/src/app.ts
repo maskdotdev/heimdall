@@ -8,6 +8,7 @@ import {
   type AdminFailureDetail,
   type AdminFailureSource,
   type AdminReplayAuditActor,
+  type AdminSandboxRunListQuery,
   createAdminDebugService,
   type ImportReviewRunToEvalRequest,
   redactDebugBundleValue,
@@ -7078,6 +7079,39 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           securityEvents: await getAdminControlPlaneService().listSecurityEvents(query),
         },
       };
+    })
+    .get("/admin/sandbox/runs", async ({ request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.inspect",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      const query = sandboxRunListQueryFromUrl(new URL(request.url));
+      const authorizationResponse = await guardSandboxRunListQueryScope(
+        guardResult.actor,
+        query,
+        set,
+        getAdminControlPlaneService(),
+      );
+      if (authorizationResponse) {
+        return authorizationResponse;
+      }
+
+      try {
+        return {
+          data: {
+            sandboxRuns: await getAdminDebugService().listSandboxRuns(query),
+          },
+        };
+      } catch (error) {
+        return handleAdminDebugError(error, set);
+      }
     })
     .post("/admin/sandbox/cleanup/run", async ({ request, set }) => {
       const guardResult = guardAdminSession(
@@ -15092,6 +15126,31 @@ function guardBillingQueryScope(
   return undefined;
 }
 
+/** Guards repository scope for sandbox run history. */
+async function guardSandboxRunListQueryScope(
+  actor: AdminActor,
+  query: AdminSandboxRunListQuery,
+  set: AdminStatusSet,
+  service: AdminControlPlaneService,
+): Promise<AdminErrorResponse | undefined> {
+  if (query.repoId) {
+    return guardRepoIdScopedAccess(actor, query.repoId, set, service);
+  }
+
+  if (!actor.orgIds.includes("*")) {
+    set.status = 403;
+    return {
+      error: {
+        code: "admin.sandbox_run_scope_required",
+        message:
+          "Sandbox run history requires a repoId filter unless the actor has all-organization scope.",
+      },
+    };
+  }
+
+  return undefined;
+}
+
 /** Guards repository scope for manual sandbox cleanup jobs. */
 async function guardSandboxCleanupQueryScope(
   actor: AdminActor,
@@ -16926,6 +16985,16 @@ function billingReconciliationQueryFromUrl(
     periodEnd: optionalIsoQueryString(url, "periodEnd"),
     periodKey: optionalQueryString(url, "periodKey"),
     periodStart: optionalIsoQueryString(url, "periodStart"),
+  };
+}
+
+/** Converts a URL into a sandbox run history query. */
+function sandboxRunListQueryFromUrl(url: URL): AdminSandboxRunListQuery {
+  return {
+    limit: Math.min(optionalPositiveIntegerQuery(url, "limit") ?? 25, 100),
+    repoId: optionalQueryString(url, "repoId"),
+    reviewRunId: optionalQueryString(url, "reviewRunId"),
+    status: optionalQueryString(url, "status"),
   };
 }
 

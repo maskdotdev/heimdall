@@ -313,6 +313,12 @@ type AdminSandboxPolicyDecisionCounts = {
 type AdminSandboxRunSummary = {
   /** Sandbox run row ID. */
   readonly sandboxRunId: string;
+  /** Organization that owns the sandbox run. */
+  readonly orgId: string;
+  /** Repository that owns the sandbox run. */
+  readonly repoId: string;
+  /** Review run that owns the sandbox run when available. */
+  readonly reviewRunId?: string;
   /** Unique sandbox request ID. */
   readonly requestId: string;
   /** Runner kind used for the execution. */
@@ -3024,6 +3030,18 @@ type SecurityEventViewState = {
   cleanupRunLoading?: string | undefined;
   /** Error message from manual sandbox cleanup enqueueing. */
   cleanupRunError?: string | undefined;
+  /** Repository scope for sandbox run history. */
+  sandboxRepoId: string;
+  /** Optional sandbox run status filter. */
+  sandboxStatus: string;
+  /** Maximum sandbox runs to load. */
+  sandboxLimit: string;
+  /** Loaded sandbox run history rows. */
+  sandboxRows: readonly AdminSandboxRunSummary[];
+  /** Loading label for sandbox run history. */
+  sandboxLoading?: string | undefined;
+  /** Error message from sandbox run history loading. */
+  sandboxError?: string | undefined;
   /** Loading label. */
   loading?: string | undefined;
   /** Error message. */
@@ -3502,6 +3520,10 @@ const state: AppState = {
     cleanupLimit: "100",
     cleanupOlderThanDays: "30",
     cleanupRepoId: "",
+    sandboxLimit: "25",
+    sandboxRepoId: initialRouteState.securityRepoId ?? "",
+    sandboxRows: [],
+    sandboxStatus: "any",
   },
   usage: {
     orgId: initialRouteState.usageOrgId ?? "",
@@ -3973,6 +3995,11 @@ async function handleClick(event: MouseEvent): Promise<void> {
 
   if (action === "load-security") {
     await loadSecurityEvents();
+    return;
+  }
+
+  if (action === "load-sandbox-runs") {
+    await loadSandboxRuns();
     return;
   }
 
@@ -6051,6 +6078,31 @@ async function loadSecurityEvents(): Promise<void> {
   }
 }
 
+/** Loads product-safe sandbox run history using the current security view controls. */
+async function loadSandboxRuns(): Promise<void> {
+  state.security.sandboxLoading = "Loading sandbox runs";
+  state.security.sandboxError = undefined;
+  try {
+    const params = new URLSearchParams();
+    appendQueryParam(params, "repoId", state.security.sandboxRepoId);
+    appendQueryParam(
+      params,
+      "status",
+      state.security.sandboxStatus === "any" ? "" : state.security.sandboxStatus,
+    );
+    appendQueryParam(params, "limit", state.security.sandboxLimit);
+    const result = await requestAdminData<{
+      readonly sandboxRuns: readonly AdminSandboxRunSummary[];
+    }>(`/admin/sandbox/runs?${params.toString()}`);
+    state.security.sandboxRows = result.sandboxRuns;
+  } catch (error) {
+    state.security.sandboxError = errorMessage(error);
+  } finally {
+    state.security.sandboxLoading = undefined;
+    render();
+  }
+}
+
 /** Enqueues a manual sandbox cleanup job using the current security view controls. */
 async function runSandboxCleanup(): Promise<void> {
   state.security.cleanupRunLoading = "Queueing sandbox cleanup";
@@ -6663,6 +6715,7 @@ function applyDashboardRouteState(route: DashboardRouteState): void {
   state.audit.search = route.auditSearch ?? "";
   state.security.orgId = route.securityOrgId ?? "";
   state.security.repoId = route.securityRepoId ?? "";
+  state.security.sandboxRepoId = route.securityRepoId ?? "";
   state.security.type = route.securityType ?? "";
   state.security.severity = route.securitySeverity ?? "";
   state.security.source = route.securitySource ?? "";
@@ -11280,9 +11333,89 @@ function renderSecurityEventView(): string {
           ${renderTextInput("security.orgId", "Organization ID", security.orgId, "org_...")}
         </div>
       </section>
+      ${renderSandboxRunHistoryPanel(security)}
       ${renderSandboxCleanupPanel(security)}
       ${renderSecurityEventRows(security.rows)}
     </main>
+  `;
+}
+
+/** Renders product-safe sandbox run history controls for operators. */
+function renderSandboxRunHistoryPanel(security: SecurityEventViewState): string {
+  return `
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Sandbox</p>
+          <h3>Run History</h3>
+        </div>
+        <button
+          class="small"
+          data-action="load-sandbox-runs"
+          ${state.session?.capabilities.canInspect && !security.sandboxLoading ? "" : "disabled"}
+          type="button"
+        >
+          ${security.sandboxLoading ? "Loading..." : "Load runs"}
+        </button>
+      </div>
+      ${security.sandboxError ? `<p class="error-line">${escapeHtml(security.sandboxError)}</p>` : ""}
+      <div class="form-grid">
+        ${renderTextInput("security.sandboxRepoId", "Repository ID", security.sandboxRepoId, "repo_...")}
+        ${renderSelect("security.sandboxStatus", "Status", security.sandboxStatus, [
+          "any",
+          "succeeded",
+          "failed",
+          "timed_out",
+          "killed",
+          "policy_denied",
+          "resource_exceeded",
+          "runner_error",
+        ])}
+        ${renderNumberInput("security.sandboxLimit", "Row limit", security.sandboxLimit, "1", "100")}
+      </div>
+      ${renderSandboxRunHistoryRows(security.sandboxRows)}
+    </section>
+  `;
+}
+
+/** Renders sandbox run history rows without artifact payloads. */
+function renderSandboxRunHistoryRows(rows: readonly AdminSandboxRunSummary[]): string {
+  if (rows.length === 0) {
+    return `<p class="muted-text">No sandbox runs loaded.</p>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Status</th><th>Scope</th><th>Runner</th><th>Tool run</th><th>Policy</th><th>Output</th><th>Artifacts</th><th>Finished</th></tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map(
+              (run) => `
+                <tr>
+                  <td><span class="status ${statusClass(run.status)}">${escapeHtml(run.status)}</span></td>
+                  <td>
+                    <code>${escapeHtml(shortHash(run.repoId))}</code>
+                    <div class="muted-text">${escapeHtml(run.reviewRunId ? shortHash(run.reviewRunId) : shortHash(run.orgId))}</div>
+                  </td>
+                  <td>
+                    ${escapeHtml(`${run.runnerKind}/${run.category}`)}
+                    <div class="muted-text">${escapeHtml(run.trustLevel)}</div>
+                  </td>
+                  <td>${renderSandboxToolRunCell(run)}</td>
+                  <td>${renderSandboxPolicyCell(run)}</td>
+                  <td>${renderSandboxOutputCell(run)}</td>
+                  <td>${renderSandboxArtifactsCell(run.artifacts)}</td>
+                  <td>${run.finishedAt ? formatTime(run.finishedAt) : "n/a"}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -13487,7 +13620,11 @@ function updateSecurityEventField(field: string, value: string): void {
     (
       state.security as Record<
         string,
-        string | readonly AdminSecurityEventSummary[] | AdminSandboxCleanupRunSummary | undefined
+        | string
+        | readonly AdminSecurityEventSummary[]
+        | readonly AdminSandboxRunSummary[]
+        | AdminSandboxCleanupRunSummary
+        | undefined
       >
     )[field] = value;
   }
