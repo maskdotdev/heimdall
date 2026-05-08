@@ -1,4 +1,4 @@
-import type { PullRequestSnapshot } from "@repo/contracts";
+import { JOB_TYPES, type PullRequestSnapshot } from "@repo/contracts";
 import { validContextBundleFixture } from "@repo/contracts/fixtures/review.fixture";
 import {
   createMemoryTelemetrySpanSink,
@@ -11,6 +11,8 @@ import {
   assertSnapshotMatchesJob,
   buildRetrievalTraceArtifactPayload,
   checkReviewRunCurrent,
+  createIndexDependencyJobEnvelope,
+  createIndexDependencyJobKey,
   createStaticAnalysisRequestForReview,
   ReviewInputSnapshotMismatchError,
   type ReviewMemoryFactRow,
@@ -158,6 +160,37 @@ describe("reviewRunStatusForStage", () => {
     expect(reviewRunStatusForStage("review")).toBe("reviewing");
     expect(reviewRunStatusForStage("validation")).toBe("validating_findings");
     expect(reviewRunStatusForStage("publish")).toBe("publish_queued");
+  });
+});
+
+describe("createIndexDependencyJobEnvelope", () => {
+  it("uses the webhook-compatible index idempotency key for review-owned index gaps", () => {
+    const envelope = createIndexDependencyJobEnvelope({
+      commitSha: reviewInput.headSha,
+      installationId: reviewInput.installationId,
+      repoId: reviewInput.repoId,
+      timestamp: "2026-05-05T00:00:00.000Z",
+      traceContext: { requestId: "req_review" },
+    });
+
+    expect(
+      createIndexDependencyJobKey({ commitSha: reviewInput.headSha, repoId: reviewInput.repoId }),
+    ).toBe("github:index:repo_test:2222222");
+    expect(envelope).toMatchObject({
+      createdAt: "2026-05-05T00:00:00.000Z",
+      idempotencyKey: "github:index:repo_test:2222222",
+      jobType: JOB_TYPES.IndexRepoCommit,
+      maxAttempts: 3,
+      payload: {
+        commitSha: reviewInput.headSha,
+        installationId: reviewInput.installationId,
+        priority: "high",
+        reason: "pr_review",
+        repoId: reviewInput.repoId,
+      },
+      traceContext: { requestId: "req_review" },
+    });
+    expect(envelope.jobId).toMatch(/^job_/u);
   });
 });
 

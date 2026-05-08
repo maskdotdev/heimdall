@@ -7,6 +7,7 @@ import {
 import type {
   ContextBundle,
   ContextItem,
+  IndexRepoCommitJobPayload,
   JobEnvelope,
   LineRange,
   PlanSnapshot,
@@ -833,6 +834,15 @@ export async function runPullRequestReview(
         }),
       },
     );
+    const indexDependencyJobKey = indexVersionId
+      ? undefined
+      : await enqueueIndexDependencyJob(dependencies.db, {
+          commitSha: snapshot.headSha,
+          installationId: snapshot.installationId,
+          repoId: snapshot.repoId,
+          timestamp: now().toISOString(),
+          ...(dependencies.traceContext ? { traceContext: dependencies.traceContext } : {}),
+        });
     await reviewRepository.insertStageEvent({
       reviewRunId,
       stage: "index",
@@ -840,6 +850,7 @@ export async function runPullRequestReview(
       metadata: {
         commitSha: snapshot.headSha,
         ...(indexVersionId ? { indexVersionId } : {}),
+        ...(indexDependencyJobKey ? { queuedIndexJobKey: indexDependencyJobKey } : {}),
       },
     });
     currentStage = "staleness";
@@ -2851,6 +2862,78 @@ function reviewArtifactClassification(
   }
 
   return "customer_confidential";
+}
+
+/** Creates the idempotent index job envelope used when a review reaches a missing index. */
+export function createIndexDependencyJobEnvelope(input: {
+  /** Commit SHA that must be indexed before richer retrieval can run. */
+  readonly commitSha: string;
+  /** GitHub installation used to clone the repository. */
+  readonly installationId: string;
+  /** Repository that owns the commit. */
+  readonly repoId: string;
+  /** Timestamp used for deterministic durable job creation. */
+  readonly timestamp: string;
+  /** Optional trace context propagated from the review job. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
+}): JobEnvelope<IndexRepoCommitJobPayload> {
+  const idempotencyKey = createIndexDependencyJobKey(input);
+  return {
+    jobId: stableId("job", [idempotencyKey]),
+    jobType: JOB_TYPES.IndexRepoCommit,
+    schemaVersion: "job_envelope.v1",
+    idempotencyKey,
+    createdAt: input.timestamp,
+    attempt: 0,
+    maxAttempts: 3,
+    payload: {
+      commitSha: input.commitSha,
+      installationId: input.installationId,
+      priority: "high",
+      reason: "pr_review",
+      repoId: input.repoId,
+    },
+    ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+  };
+}
+
+/** Creates the webhook-compatible idempotency key for review-owned index jobs. */
+export function createIndexDependencyJobKey(input: {
+  /** Commit SHA that must be indexed. */
+  readonly commitSha: string;
+  /** Repository that owns the commit. */
+  readonly repoId: string;
+}): string {
+  return `github:index:${input.repoId}:${input.commitSha}`;
+}
+
+async function enqueueIndexDependencyJob(
+  db: HeimdallDatabase,
+  input: {
+    readonly commitSha: string;
+    readonly installationId: string;
+    readonly repoId: string;
+    readonly timestamp: string;
+    readonly traceContext?: TelemetryTraceContext | undefined;
+  },
+): Promise<string> {
+  const envelope = createIndexDependencyJobEnvelope(input);
+
+  await db
+    .insert(backgroundJobs)
+    .values({
+      backgroundJobId: envelope.jobId,
+      queueName: "indexing",
+      jobKey: envelope.idempotencyKey,
+      jobType: JOB_TYPES.IndexRepoCommit,
+      status: "pending",
+      repoId: input.repoId,
+      payload: envelope,
+      maxAttempts: envelope.maxAttempts,
+    })
+    .onConflictDoNothing();
+
+  return envelope.idempotencyKey;
 }
 
 async function enqueuePublishJob(
