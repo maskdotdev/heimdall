@@ -151,7 +151,18 @@ export type DispatchPendingJobsResult = {
 /** Handler for one durable job envelope. */
 export type DurableJobHandler<TPayload extends JobPayload = JobPayload> = (
   envelope: JobEnvelope<TPayload>,
+  context?: DurableJobHandlerContext,
 ) => Promise<void>;
+
+/** Context helpers provided to durable job handlers by the processor wrapper. */
+export type DurableJobHandlerContext = {
+  /** Refreshes durable heartbeat state and returns the observed run state. */
+  readonly heartbeat: () => Promise<DurableJobRunState>;
+  /** Returns whether the durable row has been canceled or otherwise superseded. */
+  readonly isCancellationRequested: () => Promise<boolean>;
+  /** Throws a cancellation marker when the durable row should stop cooperatively. */
+  readonly throwIfCanceled: () => Promise<void>;
+};
 
 /** Job type to durable handler mapping used by worker processes. */
 export type DurableJobHandlerMap = Readonly<Record<string, DurableJobHandler | undefined>>;
@@ -176,6 +187,19 @@ const maxStaleRunningJobRecoveryLimit = 1_000;
 const queueNameValues = new Set<string>(Object.values(QUEUE_NAMES));
 const staleRunningJobErrorName = "StaleDurableJobError";
 const defaultHeartbeatIntervalMs = 30_000;
+
+/** Error thrown when a durable job handler stops at a cooperative cancellation checkpoint. */
+export class DurableJobCanceledError extends Error {
+  /** Durable run state that caused handler cancellation. */
+  public readonly runState: Extract<DurableJobRunState, "already_completed" | "canceled">;
+
+  /** Creates a cooperative durable job cancellation marker. */
+  public constructor(runState: Extract<DurableJobRunState, "already_completed" | "canceled">) {
+    super(`Durable job stopped because its run state is ${runState}.`);
+    this.name = "DurableJobCanceledError";
+    this.runState = runState;
+  }
+}
 
 /** Parses and validates a durable job envelope. */
 export function parseJobEnvelope(input: unknown): JobEnvelope<JobPayload> {
@@ -633,12 +657,41 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
         return "missing";
       }
     };
+    const checkRunState = async (): Promise<DurableJobRunState> => {
+      const checkedRunState = await recordHeartbeat();
+      if (heartbeatError) {
+        throw heartbeatError;
+      }
+      return checkedRunState;
+    };
+    const handlerContext: DurableJobHandlerContext = {
+      heartbeat: async () => {
+        const checkedRunState = await checkRunState();
+        if (checkedRunState === "missing") {
+          throw durableJobMissingBeforeCompletionError(envelope);
+        }
+        return checkedRunState;
+      },
+      isCancellationRequested: async () => {
+        const checkedRunState = await checkRunState();
+        return checkedRunState === "already_completed" || checkedRunState === "canceled";
+      },
+      throwIfCanceled: async () => {
+        const checkedRunState = await checkRunState();
+        if (checkedRunState === "already_completed" || checkedRunState === "canceled") {
+          throw new DurableJobCanceledError(checkedRunState);
+        }
+        if (checkedRunState === "missing") {
+          throw durableJobMissingBeforeCompletionError(envelope);
+        }
+      },
+    };
     const heartbeatInterval = setInterval(() => {
       void recordHeartbeat();
     }, heartbeatIntervalMs);
 
     try {
-      await handler(envelope);
+      await handler(envelope, handlerContext);
       clearInterval(heartbeatInterval);
       if (heartbeatError) {
         throw heartbeatError;
@@ -652,9 +705,7 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
         return;
       }
       if (finalRunState === "missing") {
-        const error = new Error(
-          `Durable job ${envelope.jobType}:${envelope.idempotencyKey} disappeared before completion.`,
-        );
+        const error = durableJobMissingBeforeCompletionError(envelope);
         recordDurableJobFailureMetrics(
           options.metrics,
           envelope,
@@ -676,6 +727,11 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       span?.end({ attributes: { "job.run_state": "completed" } });
     } catch (error) {
       clearInterval(heartbeatInterval);
+      if (error instanceof DurableJobCanceledError) {
+        span?.end({ attributes: { "job.run_state": error.runState } });
+        return;
+      }
+
       const serialized = serializeJobError(error);
       const isFinalAttempt = job.attemptsMade + 1 >= envelope.maxAttempts;
       try {
@@ -711,6 +767,13 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       throw error;
     }
   };
+}
+
+/** Builds the standard missing durable job error for post-start lifecycle checks. */
+function durableJobMissingBeforeCompletionError(envelope: JobEnvelope<JobPayload>): Error {
+  return new Error(
+    `Durable job ${envelope.jobType}:${envelope.idempotencyKey} disappeared before completion.`,
+  );
 }
 
 /** Returns low-cardinality span attributes for one durable job envelope. */

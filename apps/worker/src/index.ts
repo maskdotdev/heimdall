@@ -141,6 +141,7 @@ import {
   BullMqQueueProducer,
   createDurableJobProcessor,
   DrizzleDurableJobStore,
+  type DurableJobHandlerContext,
   type DurableJobHandlerMap,
   dispatchPendingJobs,
   QUEUE_NAMES,
@@ -731,9 +732,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
   const workspaceAcquirer = options.workspaceAcquirer ?? acquireWorkerRepositoryWorkspace;
 
   return {
-    [JOB_TYPES.SyncInstallation]: async (envelope) => {
+    [JOB_TYPES.SyncInstallation]: async (envelope, context) => {
       const payload = asSyncInstallationPayload(envelope.payload);
       const installation = await loadGitHubInstallationRef(options.db, payload.installationId);
+      await throwIfWorkerJobCanceled(context);
 
       await options.gitProvider.syncInstallation({
         provider: "github",
@@ -742,10 +744,11 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         orgId: installation.orgId,
       });
     },
-    [JOB_TYPES.IndexRepoCommit]: async (envelope) => {
+    [JOB_TYPES.IndexRepoCommit]: async (envelope, context) => {
       const payload = asIndexRepoCommitPayload(envelope.payload);
       const repository = await loadGitHubRepositoryRef(options.db, payload);
 
+      await throwIfWorkerJobCanceled(context);
       const workspace = await workspaceAcquirer({
         commitSha: payload.commitSha,
         gitProvider: options.gitProvider,
@@ -774,6 +777,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             ...(options.traces ? { traces: options.traces } : {}),
           },
         );
+        await throwIfWorkerJobCanceled(context);
         const result = await driver.indexRepository({
           repoId: payload.repoId,
           commitSha: payload.commitSha,
@@ -790,6 +794,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         const importRecordBatchSize = options.indexImportRecordBatchSize;
         const artifactUploadMode = options.indexArtifactUploadMode ?? "local_only";
         if (result.artifactUri && artifactUploadMode !== "object_storage") {
+          await throwIfWorkerJobCanceled(context);
           await importIndexArtifact(result.artifact, {
             artifactUri: result.artifactUri,
             db: options.db,
@@ -810,6 +815,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
               ...(result.artifactUri ? { sourceArtifactUri: result.artifactUri } : {}),
               uploadMode: artifactUploadMode,
             }));
+          await throwIfWorkerJobCanceled(context);
           await importIndexArtifactFromUri({
             artifactResolver:
               options.indexArtifactResolver ??
@@ -842,8 +848,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         });
       }
     },
-    [JOB_TYPES.EmbeddingBatch]: async (envelope) => {
+    [JOB_TYPES.EmbeddingBatch]: async (envelope, context) => {
       const payload = asEmbeddingBatchPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
       await embedChunkBatch(payload, {
         db: options.db,
         provider:
@@ -861,8 +868,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.traces ? { traces: options.traces } : {}),
       });
     },
-    [JOB_TYPES.EmbeddingRepair]: async (envelope) => {
+    [JOB_TYPES.EmbeddingRepair]: async (envelope, context) => {
       const payload = asEmbeddingRepairPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
       if (options.embeddingRepairer) {
         await options.embeddingRepairer(payload);
         return;
@@ -908,9 +916,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         );
       }
     },
-    [JOB_TYPES.ReviewPullRequest]: async (envelope) => {
+    [JOB_TYPES.ReviewPullRequest]: async (envelope, context) => {
       const payload = asReviewPullRequestPayload(envelope.payload);
 
+      await throwIfWorkerJobCanceled(context);
       await runPullRequestReview(
         { ...payload, jobId: envelope.jobId },
         {
@@ -936,9 +945,10 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         },
       );
     },
-    [JOB_TYPES.PublishReview]: async (envelope) => {
+    [JOB_TYPES.PublishReview]: async (envelope, context) => {
       const payload = asPublishReviewPayload(envelope.payload);
 
+      await throwIfWorkerJobCanceled(context);
       await publishReviewRun(payload, {
         db: options.db,
         gitProvider: options.gitProvider,
@@ -948,9 +958,11 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...(options.traces ? { traces: options.traces } : {}),
       });
     },
-    [JOB_TYPES.UpdateMemory]: async (envelope) => {
+    [JOB_TYPES.UpdateMemory]: async (envelope, context) => {
       const payload = asUpdateMemoryPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
       await updateMemoryFromFindingOutcome(options.db, payload);
+      await throwIfWorkerJobCanceled(context);
       await reconcileScheduledProviderThreadFeedback(
         options.db,
         options.gitProvider,
@@ -962,14 +974,16 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
           ...(options.traces ? { traces: options.traces } : {}),
         },
       );
+      await throwIfWorkerJobCanceled(context);
       await recordOutcomeFromProviderFeedback(options.db, payload, envelope.createdAt, {
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
         ...(options.traces ? { traces: options.traces } : {}),
       });
     },
-    [JOB_TYPES.BillingReconcile]: async (envelope) => {
+    [JOB_TYPES.BillingReconcile]: async (envelope, context) => {
       const payload = asBillingReconcilePayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
       if (options.billingReconciler) {
         await options.billingReconciler(payload);
         return;
@@ -981,8 +995,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...payload,
       });
     },
-    [JOB_TYPES.SandboxCleanup]: async (envelope) => {
+    [JOB_TYPES.SandboxCleanup]: async (envelope, context) => {
       const payload = asSandboxCleanupPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
       if (options.sandboxCleaner) {
         await options.sandboxCleaner(payload);
         return;
@@ -990,8 +1005,9 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
 
       await cleanupSandboxRuns(options.db, payload);
     },
-    [JOB_TYPES.ReviewArtifactCleanup]: async (envelope) => {
+    [JOB_TYPES.ReviewArtifactCleanup]: async (envelope, context) => {
       const payload = asReviewArtifactCleanupPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
       if (options.reviewArtifactCleaner) {
         await options.reviewArtifactCleaner(payload);
         return;
@@ -1004,6 +1020,13 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       );
     },
   };
+}
+
+/** Runs an optional durable cancellation checkpoint for direct and wrapped handler calls. */
+async function throwIfWorkerJobCanceled(
+  context: DurableJobHandlerContext | undefined,
+): Promise<void> {
+  await context?.throwIfCanceled();
 }
 
 /** Acquires a cached repository workspace for a worker index job. */
