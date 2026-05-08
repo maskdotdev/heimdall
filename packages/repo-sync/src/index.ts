@@ -309,6 +309,30 @@ export type RepositoryWorktreeLease = {
   readonly release: () => Promise<void>;
 };
 
+/** Input required to acquire a cached repository workspace at an exact commit. */
+export type AcquireRepositoryWorkspaceInput = EnsureRepositoryCommitInput & {
+  /** Purpose attached to the created worktree lease. */
+  readonly purpose: RepositoryWorktreePurpose;
+  /** Optional deterministic lease ID. */
+  readonly leaseId?: string;
+  /** Optional lease TTL in seconds. */
+  readonly ttlSeconds?: number;
+};
+
+/** Dependencies for cached repository workspace acquisition. */
+export type AcquireRepositoryWorkspaceDependencies = EnsureRepositoryMirrorDependencies &
+  CreateRepositoryWorktreeLeaseDependencies;
+
+/** Cached repository workspace lease with mirror/fetch metadata. */
+export type RepositoryWorkspaceLease = RepositoryWorktreeLease & {
+  /** SHA-256 hash of the sanitized clone URL used for the mirror. */
+  readonly cloneUrlHash: string;
+  /** True when workspace acquisition created the mirror. */
+  readonly mirrorCreated: boolean;
+  /** True when workspace acquisition fetched refs after an initial commit miss. */
+  readonly fetched: boolean;
+};
+
 /** Product-safe captured Git command output attached to failures. */
 export type CapturedGitOutput = {
   /** Redacted captured text, truncated when needed. */
@@ -646,6 +670,33 @@ export async function createRepositoryWorktreeLease(
       released = true;
     },
     repoId: input.repoId,
+  };
+}
+
+/** Acquires a cached repository workspace for an exact commit. */
+export async function acquireRepositoryWorkspace(
+  input: AcquireRepositoryWorkspaceInput,
+  dependencies: AcquireRepositoryWorkspaceDependencies = {},
+): Promise<RepositoryWorkspaceLease> {
+  const commit = await ensureRepositoryCommit(input, dependencies);
+  const lease = await createRepositoryWorktreeLease(
+    {
+      commitSha: input.commitSha,
+      config: input.config,
+      ...(input.leaseId === undefined ? {} : { leaseId: input.leaseId }),
+      mirrorPath: commit.mirrorPath,
+      purpose: input.purpose,
+      repoId: input.repoId,
+      ...(input.ttlSeconds === undefined ? {} : { ttlSeconds: input.ttlSeconds }),
+    },
+    dependencies,
+  );
+
+  return {
+    ...lease,
+    cloneUrlHash: commit.cloneUrlHash,
+    fetched: commit.fetched,
+    mirrorCreated: commit.created,
   };
 }
 

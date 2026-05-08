@@ -12,6 +12,7 @@ import {
 } from "@repo/observability";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  acquireRepositoryWorkspace,
   assertAllowedGitUrl,
   assertFullCommitSha,
   assertInsideRoot,
@@ -624,6 +625,95 @@ describe("repo sync workspace", () => {
     ).rejects.toThrow("worktree add failed");
 
     await expect(access(worktreePath)).rejects.toThrow();
+  });
+
+  it("acquires a cached exact-commit workspace and releases its lease", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-acquire-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 120 });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const mutableCommands: string[][] = [];
+    let commitExists = false;
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[0] === "clone") {
+        await mkdir(args[args.length - 1] ?? "", { recursive: true });
+        return "";
+      }
+      if (args[2] === "cat-file") {
+        if (commitExists) {
+          return "";
+        }
+        throw createMissingCommitGitError();
+      }
+      if (args[2] === "fetch") {
+        commitExists = true;
+        return "";
+      }
+      if (args[2] === "worktree" && args[3] === "add") {
+        await mkdir(worktreePath, { recursive: true });
+        return "";
+      }
+      if (args[2] === "worktree" && args[3] === "remove") {
+        await rm(worktreePath, { force: true, recursive: true });
+        return "";
+      }
+      return "";
+    };
+
+    const lease = await acquireRepositoryWorkspace(
+      {
+        cloneUrl: "https://github.com/acme/api.git",
+        commitSha,
+        config,
+        fetchRefHints: ["refs/pull/1/head"],
+        leaseId: "lease_123",
+        purpose: "review",
+        repoId: "repo_123",
+      },
+      {
+        gitRunner,
+        now: () => new Date("2026-01-01T00:00:00.000Z"),
+        tempIdFactory: () => "tmp_456",
+      },
+    );
+
+    expect(lease).toMatchObject({
+      cloneUrlHash: hashGitUrl("https://github.com/acme/api.git"),
+      commitSha,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2026-01-01T00:02:00.000Z",
+      fetched: true,
+      leaseId: "lease_123",
+      mirrorCreated: true,
+      mirrorPath,
+      path: worktreePath,
+      purpose: "review",
+      repoId: "repo_123",
+    });
+    await expect(access(worktreePath)).resolves.toBeUndefined();
+
+    await lease.release();
+
+    await expect(access(worktreePath)).rejects.toThrow();
+    expect(mutableCommands).toEqual([
+      [
+        "clone",
+        "--bare",
+        "--filter=blob:none",
+        "--no-tags",
+        "https://github.com/acme/api.git",
+        tempMirrorPath,
+      ],
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+      ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/1/head"],
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+      ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+      ["-C", mirrorPath, "worktree", "prune"],
+    ]);
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {
