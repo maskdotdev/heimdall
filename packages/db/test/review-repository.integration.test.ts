@@ -143,6 +143,56 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         repoId: "repo_review_repository_test",
       }),
     ).rejects.toThrow(/limit must be an integer/u);
+    await reviewRepository.insertReviewArtifact({
+      artifact: {
+        artifactId: "art_review_repository_expired",
+        contentHash: `sha256:${"e".repeat(64)}`,
+        createdAt: "2026-05-08T00:04:00.000Z",
+        kind: "context_bundle",
+        metadata: { redactionLevel: "contains_code" },
+        uri: "db://review_artifacts/rrn_review_repository/context_bundle/context-bundle.json",
+      },
+      classification: "internal",
+      metadata: { redactionLevel: "contains_code" },
+      name: "context-bundle.json",
+      repoId: "repo_review_repository_test",
+      retentionUntil: "2026-05-08T00:04:00.000Z",
+      reviewRunId: "rrn_review_repository",
+      sizeBytes: 123,
+    });
+    await expect(
+      reviewRepository.listExpiredReviewArtifactCleanupTargets({
+        cutoff: new Date("2026-05-08T00:05:00.000Z"),
+        excludeUriPrefix: "deleted://review_artifacts/",
+        limit: 10,
+        repoId: "repo_review_repository_test",
+      }),
+    ).resolves.toEqual([
+      {
+        metadata: { redactionLevel: "contains_code" },
+        reviewArtifactId: "art_review_repository_expired",
+        uri: "db://review_artifacts/rrn_review_repository/context_bundle/context-bundle.json",
+      },
+    ]);
+    await reviewRepository.updateReviewArtifactPayloadTombstone({
+      metadata: {
+        deletedPayload: {
+          deletedAt: "2026-05-08T00:05:30.000Z",
+          reason: "retention_policy",
+        },
+      },
+      reviewArtifactId: "art_review_repository_expired",
+      sizeBytes: 0,
+      uri: "deleted://review_artifacts/art_review_repository_expired",
+    });
+    await expect(
+      reviewRepository.listExpiredReviewArtifactCleanupTargets({
+        cutoff: new Date("2026-05-08T00:06:00.000Z"),
+        excludeUriPrefix: "deleted://review_artifacts/",
+        limit: 10,
+        repoId: "repo_review_repository_test",
+      }),
+    ).resolves.toEqual([]);
 
     const candidate = await reviewRepository.insertCandidateFinding(
       candidateFindingFixture({

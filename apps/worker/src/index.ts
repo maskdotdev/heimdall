@@ -50,7 +50,6 @@ import {
   type PublishedSummaryFeedbackTargetRecord,
   RepositoryRepository,
   ReviewRepository,
-  reviewArtifacts,
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
@@ -155,7 +154,7 @@ import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } fro
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Worker } from "bullmq";
-import { and, asc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
+import { and, asc, eq, inArray, lt } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -1640,25 +1639,13 @@ export async function cleanupExpiredReviewArtifacts(
 ): Promise<ReviewArtifactCleanupSummary> {
   const cutoff = reviewArtifactCleanupCutoff(payload, now);
   const dryRun = payload.dryRun ?? false;
-  const conditions = [
-    isNotNull(reviewArtifacts.retentionUntil),
-    lte(reviewArtifacts.retentionUntil, cutoff),
-    not(like(reviewArtifacts.uri, `${DELETED_REVIEW_ARTIFACT_URI_PREFIX}%`)),
-  ];
-  if (payload.repoId) {
-    conditions.push(eq(reviewArtifacts.repoId, payload.repoId));
-  }
-
-  const artifactRows = await db
-    .select({
-      metadata: reviewArtifacts.metadata,
-      reviewArtifactId: reviewArtifacts.reviewArtifactId,
-      uri: reviewArtifacts.uri,
-    })
-    .from(reviewArtifacts)
-    .where(and(...conditions))
-    .orderBy(asc(reviewArtifacts.retentionUntil), asc(reviewArtifacts.reviewArtifactId))
-    .limit(payload.limit ?? 100);
+  const reviewRepository = new ReviewRepository(db);
+  const artifactRows = await reviewRepository.listExpiredReviewArtifactCleanupTargets({
+    cutoff,
+    excludeUriPrefix: DELETED_REVIEW_ARTIFACT_URI_PREFIX,
+    limit: payload.limit ?? 100,
+    ...(payload.repoId ? { repoId: payload.repoId } : {}),
+  });
 
   if (dryRun || artifactRows.length === 0) {
     return {
@@ -1691,18 +1678,16 @@ export async function cleanupExpiredReviewArtifacts(
         missingPayloadCount += 1;
       }
 
-      await db
-        .update(reviewArtifacts)
-        .set({
-          metadata: reviewArtifactPayloadDeletedMetadata({
-            deletedAt,
-            metadata: artifact.metadata,
-            reason,
-          }),
-          sizeBytes: 0,
-          uri: deletedReviewArtifactUri(artifact.reviewArtifactId),
-        })
-        .where(eq(reviewArtifacts.reviewArtifactId, artifact.reviewArtifactId));
+      await reviewRepository.updateReviewArtifactPayloadTombstone({
+        metadata: reviewArtifactPayloadDeletedMetadata({
+          deletedAt,
+          metadata: artifact.metadata,
+          reason,
+        }),
+        reviewArtifactId: artifact.reviewArtifactId,
+        sizeBytes: 0,
+        uri: deletedReviewArtifactUri(artifact.reviewArtifactId),
+      });
       updatedArtifactCount += 1;
     } catch {
       failedPayloadCount += 1;

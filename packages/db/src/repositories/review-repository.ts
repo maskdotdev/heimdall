@@ -5,7 +5,20 @@ import type {
   ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
-import { and, asc, desc, eq, inArray, ne, or, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  like,
+  lte,
+  ne,
+  not,
+  or,
+  type SQL,
+} from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
@@ -344,6 +357,40 @@ export type ReviewRunWaitingForIndexRecord = {
   readonly reviewRunId: string;
   /** Trigger that created the review run. */
   readonly trigger: string;
+};
+
+/** Input used to select expired review artifacts for payload cleanup. */
+export type ListExpiredReviewArtifactCleanupTargetsInput = {
+  /** Retention cutoff; artifacts expiring at or before this time are eligible. */
+  readonly cutoff: Date;
+  /** URI prefix that marks artifacts already tombstoned. */
+  readonly excludeUriPrefix: string;
+  /** Maximum rows to return. */
+  readonly limit: number;
+  /** Optional repository scope. */
+  readonly repoId?: string | undefined;
+};
+
+/** Expired review artifact fields needed for payload cleanup. */
+export type ReviewArtifactCleanupTargetRecord = {
+  /** Product-safe artifact metadata used by the payload store. */
+  readonly metadata: unknown;
+  /** Durable review artifact ID. */
+  readonly reviewArtifactId: string;
+  /** Payload URI to delete. */
+  readonly uri: string;
+};
+
+/** Input used to replace a deleted review artifact payload with a tombstone. */
+export type UpdateReviewArtifactPayloadTombstoneInput = {
+  /** Product-safe tombstone metadata. */
+  readonly metadata: unknown;
+  /** Durable review artifact ID. */
+  readonly reviewArtifactId: string;
+  /** Remaining payload size after deletion. */
+  readonly sizeBytes: number;
+  /** Tombstone URI. */
+  readonly uri: string;
 };
 
 /** Published finding target used to correlate provider feedback events. */
@@ -991,6 +1038,43 @@ export class ReviewRepository {
         ...(input.retentionUntil ? { retentionUntil: new Date(input.retentionUntil) } : {}),
       })
       .onConflictDoNothing();
+  }
+
+  /** Lists expired review artifacts whose payloads can be cleaned up. */
+  public async listExpiredReviewArtifactCleanupTargets(
+    input: ListExpiredReviewArtifactCleanupTargetsInput,
+  ): Promise<readonly ReviewArtifactCleanupTargetRecord[]> {
+    const conditions = [
+      isNotNull(reviewArtifacts.retentionUntil),
+      lte(reviewArtifacts.retentionUntil, input.cutoff),
+      not(like(reviewArtifacts.uri, `${input.excludeUriPrefix}%`)),
+      ...(input.repoId ? [eq(reviewArtifacts.repoId, input.repoId)] : []),
+    ];
+
+    return this.db
+      .select({
+        metadata: reviewArtifacts.metadata,
+        reviewArtifactId: reviewArtifacts.reviewArtifactId,
+        uri: reviewArtifacts.uri,
+      })
+      .from(reviewArtifacts)
+      .where(and(...conditions))
+      .orderBy(asc(reviewArtifacts.retentionUntil), asc(reviewArtifacts.reviewArtifactId))
+      .limit(repositoryInspectionLimit(input.limit));
+  }
+
+  /** Updates one review artifact after its payload is deleted from backing storage. */
+  public async updateReviewArtifactPayloadTombstone(
+    input: UpdateReviewArtifactPayloadTombstoneInput,
+  ): Promise<void> {
+    await this.db
+      .update(reviewArtifacts)
+      .set({
+        metadata: input.metadata,
+        sizeBytes: input.sizeBytes,
+        uri: input.uri,
+      })
+      .where(eq(reviewArtifacts.reviewArtifactId, input.reviewArtifactId));
   }
 
   /** Records a review stage timeline event for replay and debugging. */
