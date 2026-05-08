@@ -48,6 +48,7 @@ import {
   loadGitHubInstallationRef,
   persistIndexArtifactForImport,
   type RedisPublishThrottleClient,
+  recordWorkerQueueMetrics,
   resolveWorkerEmbeddingApiKey,
   resolveWorkerGitHubPrivateKey,
   resolveWorkerLlmApiKey,
@@ -660,6 +661,55 @@ describe("createWorkerQueueNamesFromEnvironment", () => {
         WORKER_ROLE: "not-a-role",
       }),
     ).toThrow("Unsupported worker role: not-a-role");
+  });
+});
+
+describe("recordWorkerQueueMetrics", () => {
+  it("records queue depth and oldest pending job age gauges", async () => {
+    const now = new Date("2026-05-08T12:00:00.000Z");
+    const metrics: WorkerRecordedMetric[] = [];
+
+    await recordWorkerQueueMetrics({
+      metrics: createWorkerRecordingMetrics(metrics),
+      now,
+      queues: [
+        {
+          getJobCounts: async () => ({
+            active: 1,
+            completed: 8,
+            failed: 2,
+            waiting: 3,
+          }),
+          getJobs: async () => [{ timestamp: now.getTime() - 5_000 }],
+          queueName: QUEUE_NAMES.review,
+        },
+      ],
+    });
+
+    expect(metrics).toEqual(
+      expect.arrayContaining([
+        {
+          labels: { queue_name: QUEUE_NAMES.review, status: "waiting" },
+          name: OBSERVABILITY_METRIC_NAMES.queueDepth,
+          value: 3,
+        },
+        {
+          labels: { queue_name: QUEUE_NAMES.review, status: "delayed" },
+          name: OBSERVABILITY_METRIC_NAMES.queueDepth,
+          value: 0,
+        },
+        {
+          labels: { queue_name: QUEUE_NAMES.review, status: "active" },
+          name: OBSERVABILITY_METRIC_NAMES.queueDepth,
+          value: 1,
+        },
+        {
+          labels: { queue_name: QUEUE_NAMES.review },
+          name: OBSERVABILITY_METRIC_NAMES.queueOldestJobAgeMs,
+          value: 5_000,
+        },
+      ]),
+    );
   });
 });
 
