@@ -82,6 +82,12 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
       providerRepoId: "1001",
     });
     expect(foundByProvider?.repoId).toBe("repo_repository_alpha");
+    await expect(repositoryRepository.getRepositoryOrgId("repo_repository_alpha")).resolves.toBe(
+      "org_repository_test",
+    );
+    await expect(repositoryRepository.getRepositoryOrgId("repo_repository_missing")).resolves.toBe(
+      undefined,
+    );
 
     const firstPage = await repositoryRepository.listEnabledRepositories({
       orgId: "org_repository_test",

@@ -8,7 +8,7 @@ import {
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
-  repositories,
+  RepositoryRepository,
 } from "@repo/db";
 import {
   classifyTelemetryError,
@@ -1732,17 +1732,13 @@ function assignProviderVectorsByContentHash(input: {
 
 /** Loads the owning organization for a repository before recording provider usage. */
 async function loadEmbeddingRepositoryOrgId(db: HeimdallDatabase, repoId: string): Promise<string> {
-  const [repository] = await db
-    .select({ orgId: repositories.orgId })
-    .from(repositories)
-    .where(eq(repositories.repoId, repoId))
-    .limit(1);
+  const orgId = await new RepositoryRepository(db).getRepositoryOrgId(repoId);
 
-  if (!repository) {
+  if (!orgId) {
     throw new Error(`Repository ${repoId} was not found for embedding usage recording.`);
   }
 
-  return repository.orgId;
+  return orgId;
 }
 
 /** DB surface used to update embedding job progress inside or outside a transaction. */

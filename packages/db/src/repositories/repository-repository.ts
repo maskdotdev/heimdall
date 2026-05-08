@@ -122,6 +122,17 @@ export class RepositoryRepository {
     return row ? toRepository(row) : undefined;
   }
 
+  /** Gets the owning organization ID for a repository. */
+  public async getRepositoryOrgId(repoId: string): Promise<string | undefined> {
+    const [row] = await this.db
+      .select({ orgId: repositories.orgId })
+      .from(repositories)
+      .where(eq(repositories.repoId, repoId))
+      .limit(1);
+
+    return row?.orgId;
+  }
+
   /** Gets a repository by provider and provider-native repository ID. */
   public async getRepositoryByProviderId(
     input: RepositoryProviderIdentity,
