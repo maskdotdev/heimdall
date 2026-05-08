@@ -94,6 +94,16 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
       "mem_memory_fact_org",
       "mem_memory_fact_disabled",
     ]);
+
+    const filteredFacts = await memoryFactRepository.listRepositoryMemoryFacts({
+      factType: "suppression",
+      includeOrgFacts: false,
+      limit: 1,
+      orgId: "org_memory_fact_test",
+      repoId: "repo_memory_fact_test",
+      status: "active",
+    });
+    expect(filteredFacts.map((fact) => fact.memoryFactId)).toEqual(["mem_memory_fact_expired"]);
   });
 
   it("lists repository and organization memory candidates for inspection", async () => {
@@ -120,6 +130,18 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
       status: "pending",
       trustLevel: "maintainer",
     });
+
+    const filteredCandidates = await memoryCandidateRepository.listRepositoryMemoryCandidates({
+      candidateKind: "suppression",
+      includeOrgCandidates: false,
+      limit: 1,
+      orgId: "org_memory_fact_test",
+      repoId: "repo_memory_fact_test",
+      status: "pending",
+    });
+    expect(filteredCandidates.map((candidate) => candidate.memoryCandidateId)).toEqual([
+      "memcand_memory_fact_repo_recent",
+    ]);
   });
 });
 

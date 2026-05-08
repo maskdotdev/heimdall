@@ -100,6 +100,10 @@ import {
   findingOutcomes,
   type HeimdallDatabase,
   invoices,
+  type MemoryCandidateRecord,
+  MemoryCandidateRepository,
+  type MemoryFactRecord,
+  MemoryFactRepository,
   memoryCandidates,
   memoryFacts,
   oauthStates,
@@ -1889,10 +1893,10 @@ type AdminMemoryCandidateRejectionSummary = {
 };
 
 /** Database row shape for memory fact queries. */
-type MemoryFactRow = typeof memoryFacts.$inferSelect;
+type MemoryFactRow = typeof memoryFacts.$inferSelect | MemoryFactRecord;
 
 /** Database row shape for memory candidate queries. */
-type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
+type MemoryCandidateRow = typeof memoryCandidates.$inferSelect | MemoryCandidateRecord;
 
 /** Joined row shape for repository suppression match history. */
 type SuppressionMatchRow = {
@@ -10541,27 +10545,14 @@ async function listRepositoryMemoryFacts(
   query: AdminMemoryFactListQuery,
 ): Promise<readonly AdminMemoryFactSummary[]> {
   const settings = await getRepositorySettings(db, repoId);
-  const scopeCondition =
-    query.includeOrgFacts === false
-      ? eq(memoryFacts.repoId, repoId)
-      : or(
-          eq(memoryFacts.repoId, repoId),
-          and(eq(memoryFacts.orgId, settings.repository.orgId), isNull(memoryFacts.repoId)),
-        );
-  const conditions: SQL[] = [scopeCondition ?? sql`false`];
-  if (query.status) {
-    conditions.push(eq(memoryFacts.status, query.status));
-  }
-  if (query.kind) {
-    conditions.push(eq(memoryFacts.factType, query.kind));
-  }
-
-  const rows = await db
-    .select()
-    .from(memoryFacts)
-    .where(and(...conditions))
-    .orderBy(asc(memoryFacts.status), desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId))
-    .limit(boundedListLimit(query.limit));
+  const rows = await new MemoryFactRepository(db).listRepositoryMemoryFacts({
+    factType: query.kind,
+    includeOrgFacts: query.includeOrgFacts,
+    limit: boundedListLimit(query.limit),
+    orgId: settings.repository.orgId,
+    repoId,
+    status: query.status,
+  });
 
   return rows.map(toAdminMemoryFactSummary);
 }
@@ -10573,34 +10564,14 @@ async function listRepositoryMemoryCandidates(
   query: AdminMemoryCandidateListQuery,
 ): Promise<readonly AdminMemoryCandidateSummary[]> {
   const settings = await getRepositorySettings(db, repoId);
-  const scopeCondition =
-    query.includeOrgCandidates === false
-      ? eq(memoryCandidates.repoId, repoId)
-      : or(
-          eq(memoryCandidates.repoId, repoId),
-          and(
-            eq(memoryCandidates.orgId, settings.repository.orgId),
-            isNull(memoryCandidates.repoId),
-          ),
-        );
-  const conditions: SQL[] = [scopeCondition ?? sql`false`];
-  if (query.status) {
-    conditions.push(eq(memoryCandidates.status, query.status));
-  }
-  if (query.candidateKind) {
-    conditions.push(eq(memoryCandidates.candidateKind, query.candidateKind));
-  }
-
-  const rows = await db
-    .select()
-    .from(memoryCandidates)
-    .where(and(...conditions))
-    .orderBy(
-      asc(memoryCandidates.status),
-      desc(memoryCandidates.updatedAt),
-      asc(memoryCandidates.memoryCandidateId),
-    )
-    .limit(boundedListLimit(query.limit));
+  const rows = await new MemoryCandidateRepository(db).listRepositoryMemoryCandidates({
+    candidateKind: query.candidateKind,
+    includeOrgCandidates: query.includeOrgCandidates,
+    limit: boundedListLimit(query.limit),
+    orgId: settings.repository.orgId,
+    repoId,
+    status: query.status,
+  });
 
   return rows.map(toAdminMemoryCandidateSummary);
 }

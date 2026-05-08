@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { memoryCandidates } from "../schema";
 
@@ -56,6 +56,14 @@ export type ListRepositoryMemoryCandidatesInput = {
   readonly orgId: string;
   /** Repository being inspected. */
   readonly repoId: string;
+  /** Whether organization-scoped candidates should be included with repository candidates. */
+  readonly includeOrgCandidates?: boolean | undefined;
+  /** Optional lifecycle status filter. */
+  readonly status?: string | undefined;
+  /** Optional candidate kind filter. */
+  readonly candidateKind?: string | undefined;
+  /** Optional maximum number of rows to return. */
+  readonly limit?: number | undefined;
 };
 
 /** Query helper for durable memory candidates. */
@@ -67,20 +75,32 @@ export class MemoryCandidateRepository {
   public async listRepositoryMemoryCandidates(
     input: ListRepositoryMemoryCandidatesInput,
   ): Promise<readonly MemoryCandidateRecord[]> {
-    const rows = await this.db
+    const scopeCondition =
+      input.includeOrgCandidates === false
+        ? eq(memoryCandidates.repoId, input.repoId)
+        : or(
+            eq(memoryCandidates.repoId, input.repoId),
+            and(eq(memoryCandidates.orgId, input.orgId), isNull(memoryCandidates.repoId)),
+          );
+    const filters: SQL[] = [scopeCondition ?? sql`false`];
+    if (input.status) {
+      filters.push(eq(memoryCandidates.status, input.status));
+    }
+    if (input.candidateKind) {
+      filters.push(eq(memoryCandidates.candidateKind, input.candidateKind));
+    }
+
+    const query = this.db
       .select()
       .from(memoryCandidates)
-      .where(
-        or(
-          eq(memoryCandidates.repoId, input.repoId),
-          and(eq(memoryCandidates.orgId, input.orgId), isNull(memoryCandidates.repoId)),
-        ),
-      )
+      .where(and(...filters))
       .orderBy(
         asc(memoryCandidates.status),
         desc(memoryCandidates.updatedAt),
         asc(memoryCandidates.memoryCandidateId),
       );
+    const rows =
+      input.limit === undefined ? await query : await query.limit(memoryListLimit(input.limit));
 
     return rows.map(toMemoryCandidateRecord);
   }
@@ -111,4 +131,13 @@ function toMemoryCandidateRecord(row: MemoryCandidateRow): MemoryCandidateRecord
     trustLevel: row.trustLevel,
     updatedAt: row.updatedAt,
   };
+}
+
+/** Validates a bounded memory inspection list limit. */
+function memoryListLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error("Memory inspection list limit must be an integer between 1 and 500.");
+  }
+
+  return limit;
 }

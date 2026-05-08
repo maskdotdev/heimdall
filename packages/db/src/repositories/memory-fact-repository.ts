@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { memoryFacts } from "../schema";
 
@@ -48,6 +48,14 @@ export type ListRepositoryMemoryFactsInput = {
   readonly orgId: string;
   /** Repository being inspected. */
   readonly repoId: string;
+  /** Whether organization-scoped facts should be included with repository facts. */
+  readonly includeOrgFacts?: boolean | undefined;
+  /** Optional lifecycle status filter. */
+  readonly status?: string | undefined;
+  /** Optional fact type filter. */
+  readonly factType?: string | undefined;
+  /** Optional maximum number of rows to return. */
+  readonly limit?: number | undefined;
 };
 
 /** Query helper for durable memory facts. */
@@ -84,16 +92,28 @@ export class MemoryFactRepository {
   public async listRepositoryMemoryFacts(
     input: ListRepositoryMemoryFactsInput,
   ): Promise<readonly MemoryFactRecord[]> {
-    const rows = await this.db
+    const scopeCondition =
+      input.includeOrgFacts === false
+        ? eq(memoryFacts.repoId, input.repoId)
+        : or(
+            eq(memoryFacts.repoId, input.repoId),
+            and(eq(memoryFacts.orgId, input.orgId), isNull(memoryFacts.repoId)),
+          );
+    const filters: SQL[] = [scopeCondition ?? sql`false`];
+    if (input.status) {
+      filters.push(eq(memoryFacts.status, input.status));
+    }
+    if (input.factType) {
+      filters.push(eq(memoryFacts.factType, input.factType));
+    }
+
+    const query = this.db
       .select()
       .from(memoryFacts)
-      .where(
-        or(
-          eq(memoryFacts.repoId, input.repoId),
-          and(eq(memoryFacts.orgId, input.orgId), isNull(memoryFacts.repoId)),
-        ),
-      )
+      .where(and(...filters))
       .orderBy(asc(memoryFacts.status), desc(memoryFacts.updatedAt), asc(memoryFacts.memoryFactId));
+    const rows =
+      input.limit === undefined ? await query : await query.limit(memoryListLimit(input.limit));
 
     return rows.map(toMemoryFactRecord);
   }
@@ -114,4 +134,13 @@ function toMemoryFactRecord(row: MemoryFactRow): MemoryFactRecord {
     status: row.status,
     updatedAt: row.updatedAt,
   };
+}
+
+/** Validates a bounded memory inspection list limit. */
+function memoryListLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error("Memory inspection list limit must be an integer between 1 and 500.");
+  }
+
+  return limit;
 }
