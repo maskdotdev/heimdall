@@ -2393,8 +2393,10 @@ async function recordOutcomeFromProviderFeedback(
   telemetry: MemoryTelemetryOptions = {},
 ): Promise<void> {
   if (
-    (payload.reason !== "comment_reply" && payload.reason !== "provider_reaction") ||
-    (!payload.externalCommentId && !payload.externalParentCommentId)
+    (payload.reason !== "comment_reply" &&
+      payload.reason !== "comment_thread" &&
+      payload.reason !== "provider_reaction") ||
+    (!payload.externalCommentId && !payload.externalParentCommentId && !payload.externalThreadId)
   ) {
     return;
   }
@@ -2435,7 +2437,8 @@ async function recordOutcomeFromProviderFeedback(
           payload.externalEventId ??
             payload.externalReactionId ??
             payload.externalParentCommentId ??
-            payload.externalCommentId,
+            payload.externalCommentId ??
+            payload.externalThreadId,
         ]),
         metadata: providerFeedbackOutcomeMetadata(payload),
         occurredAt: new Date(receivedAt),
@@ -2714,6 +2717,7 @@ function providerFeedbackEventFromPayload(
     ...((payload.externalParentCommentId ?? payload.externalCommentId)
       ? { externalCommentId: payload.externalParentCommentId ?? payload.externalCommentId }
       : {}),
+    ...(payload.externalThreadId ? { externalThreadId: payload.externalThreadId } : {}),
     payloadRedacted: providerFeedbackPayloadRedacted(payload),
     receivedAt,
   };
@@ -2776,6 +2780,11 @@ function feedbackSignalRow(signal: FeedbackSignal): typeof feedbackSignals.$infe
 
 /** Maps provider memory-job metadata to the normalized feedback event vocabulary. */
 function feedbackEventKindFromPayload(payload: UpdateMemoryJobPayload): FeedbackEventKind {
+  if (payload.reason === "comment_thread") {
+    return payload.feedbackKind === "thread_unresolved"
+      ? "review_thread_unresolved"
+      : "review_thread_resolved";
+  }
   if (payload.reason === "provider_reaction") {
     return "reaction_added";
   }
@@ -2803,6 +2812,7 @@ function providerFeedbackPayloadRedacted(payload: UpdateMemoryJobPayload): Recor
       ? { externalParentCommentId: payload.externalParentCommentId }
       : {}),
     ...(payload.externalReactionId ? { externalReactionId: payload.externalReactionId } : {}),
+    ...(payload.externalThreadId ? { externalThreadId: payload.externalThreadId } : {}),
     ...(payload.feedbackKind ? { feedbackKind: payload.feedbackKind } : {}),
     ...(payload.feedbackCommand
       ? {
@@ -2840,6 +2850,12 @@ function outcomeFromProviderFeedbackKind(
   }
   if (feedbackKind === "negative_reaction") {
     return "negative_reaction";
+  }
+  if (feedbackKind === "thread_resolved") {
+    return "resolved";
+  }
+  if (feedbackKind === "thread_unresolved") {
+    return "commented";
   }
   if (
     feedbackKind === "comment_reply" ||

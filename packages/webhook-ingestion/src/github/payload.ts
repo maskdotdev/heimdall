@@ -125,7 +125,11 @@ export type NormalizedGitHubFeedback = {
   /** Stable feedback event ID derived from provider-owned identifiers. */
   readonly feedbackEventId: string;
   /** Provider event name that delivered the feedback. */
-  readonly eventName: "issue_comment" | "pull_request_review_comment" | "reaction";
+  readonly eventName:
+    | "issue_comment"
+    | "pull_request_review_comment"
+    | "pull_request_review_thread"
+    | "reaction";
   /** Provider event action. */
   readonly action: string;
   /** Repository that owns the comment or reaction. */
@@ -139,6 +143,8 @@ export type NormalizedGitHubFeedback = {
     | "comment_reply"
     | "comment_edited"
     | "comment_deleted"
+    | "thread_resolved"
+    | "thread_unresolved"
     | "positive_reaction"
     | "negative_reaction";
   /** Provider comment ID when the event is tied to a comment. */
@@ -147,6 +153,8 @@ export type NormalizedGitHubFeedback = {
   readonly externalParentCommentId?: string | undefined;
   /** Provider reaction ID when the event is tied to a reaction. */
   readonly externalReactionId?: string | undefined;
+  /** Provider review thread ID when the event is tied to a thread. */
+  readonly externalThreadId?: string | undefined;
   /** Login for the actor that produced the signal. */
   readonly actorLogin?: string | undefined;
   /** SHA-256 hash of comment text when available. */
@@ -339,6 +347,10 @@ export function normalizeGitHubFeedback(
     return normalizeReactionFeedback(payload);
   }
 
+  if (eventName === "pull_request_review_thread") {
+    return normalizeReviewThreadFeedback(payload);
+  }
+
   return undefined;
 }
 
@@ -463,6 +475,54 @@ function normalizeReactionFeedback(payload: JsonRecord): NormalizedGitHubFeedbac
     ...withOptional("pullRequestNumber", pullRequestNumber),
     repoId: repository.repoId,
   };
+}
+
+function normalizeReviewThreadFeedback(payload: JsonRecord): NormalizedGitHubFeedback | undefined {
+  const action = optionalString(payload, "action") ?? "unknown";
+  if (action !== "resolved" && action !== "unresolved") {
+    return undefined;
+  }
+
+  const repository = normalizeGitHubRepository(payload).repository;
+  const installation = normalizeGitHubInstallation(payload);
+  const thread = asRecord(payload.thread, "thread");
+  const pullRequest = optionalRecord(payload.pull_request);
+  const externalThreadId = stringValue(thread, "id");
+  const externalCommentId = firstThreadCommentId(thread);
+  const pullRequestNumber = pullRequest ? numberValue(pullRequest, "number") : undefined;
+
+  return {
+    action,
+    ...withOptional("actorLogin", actorLogin(payload, thread)),
+    eventName: "pull_request_review_thread",
+    ...withOptional("externalCommentId", externalCommentId),
+    externalThreadId,
+    feedbackEventId: stableId("fb", [
+      "github",
+      "pull_request_review_thread",
+      action,
+      externalThreadId,
+    ]),
+    feedbackKind: action === "resolved" ? "thread_resolved" : "thread_unresolved",
+    installationId: installation.installationId,
+    ...withOptional("pullRequestNumber", pullRequestNumber),
+    repoId: repository.repoId,
+  };
+}
+
+function firstThreadCommentId(thread: JsonRecord): string | undefined {
+  const comments = Array.isArray(thread.comments) ? thread.comments : [];
+  for (const comment of comments) {
+    if (!comment || typeof comment !== "object" || Array.isArray(comment)) {
+      continue;
+    }
+    const id = optionalProviderId(comment as JsonRecord, "id");
+    if (id) {
+      return id;
+    }
+  }
+
+  return undefined;
 }
 
 function actorLogin(payload: JsonRecord, fallbackSource: JsonRecord): string | undefined {

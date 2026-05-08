@@ -1,4 +1,9 @@
-import { JOB_TYPES, type JobPayload, type RepositorySettings } from "@repo/contracts";
+import {
+  JOB_TYPES,
+  type JobPayload,
+  type RepositorySettings,
+  type UpdateMemoryReason,
+} from "@repo/contracts";
 import type {
   TelemetryMetricRecorder,
   TelemetrySpanRecorder,
@@ -47,6 +52,25 @@ const envelope = <TPayload extends JobPayload>(
   ...(traceContext ? { traceContext } : {}),
   payload,
 });
+
+/** Maps normalized provider feedback to the memory update reason vocabulary. */
+function updateMemoryReasonForFeedback(feedback: NormalizedGitHubFeedback): UpdateMemoryReason {
+  if (
+    feedback.feedbackKind === "thread_resolved" ||
+    feedback.feedbackKind === "thread_unresolved"
+  ) {
+    return "comment_thread";
+  }
+
+  if (
+    feedback.feedbackKind === "positive_reaction" ||
+    feedback.feedbackKind === "negative_reaction"
+  ) {
+    return "provider_reaction";
+  }
+
+  return "comment_reply";
+}
 
 /** Plans durable downstream jobs for a normalized GitHub webhook. */
 export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob[] {
@@ -169,11 +193,7 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
   }
 
   if (options.feedback) {
-    const reason =
-      options.feedback.feedbackKind === "positive_reaction" ||
-      options.feedback.feedbackKind === "negative_reaction"
-        ? "provider_reaction"
-        : "comment_reply";
+    const reason = updateMemoryReasonForFeedback(options.feedback);
     jobs.push({
       queueName: QUEUE_NAMES.memory,
       ...(options.installation ? { orgId: options.installation.orgId } : {}),
@@ -195,6 +215,9 @@ export function planGitHubWebhookJobs(options: PlanOptions): readonly PlannedJob
             : {}),
           ...(options.feedback.externalReactionId
             ? { externalReactionId: options.feedback.externalReactionId }
+            : {}),
+          ...(options.feedback.externalThreadId
+            ? { externalThreadId: options.feedback.externalThreadId }
             : {}),
           ...(options.feedback.actorLogin ? { actorLogin: options.feedback.actorLogin } : {}),
           ...(options.feedback.bodyHash ? { bodyHash: options.feedback.bodyHash } : {}),

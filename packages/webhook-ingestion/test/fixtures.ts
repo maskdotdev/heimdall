@@ -123,3 +123,35 @@ export const reactionPayload = {
     login: "maintainer",
   },
 } as const;
+
+/** GitHub pull_request_review_thread webhook fixture for a resolved bot thread. */
+export const reviewThreadPayload = {
+  action: "resolved",
+  installation: installationPayload.installation,
+  repository: installationPayload.repositories[0],
+  pull_request: {
+    number: 7,
+  },
+  thread: {
+    id: 444,
+    is_resolved: true,
+    author_association: "MEMBER",
+    comments: [
+      {
+        id: 888,
+        user: {
+          login: "heimdall-app",
+          type: "Bot",
+        },
+      },
+    ],
+    user: {
+      login: "maintainer",
+      type: "User",
+    },
+  },
+  sender: {
+    login: "maintainer",
+    type: "User",
+  },
+} as const;

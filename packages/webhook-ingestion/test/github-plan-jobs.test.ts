@@ -13,6 +13,7 @@ import {
   issueCommentPayload,
   pullRequestPayload,
   reactionPayload,
+  reviewThreadPayload,
 } from "./fixtures";
 
 describe("GitHub webhook job planning", () => {
@@ -177,6 +178,27 @@ describe("GitHub webhook job planning", () => {
       externalCommentId: "888",
       feedbackKind: "negative_reaction",
       reason: "provider_reaction",
+    });
+  });
+
+  it("plans memory update jobs for review thread feedback", () => {
+    const threadJobs = planGitHubWebhookJobs({
+      action: "resolved",
+      deliveryId: "delivery-9",
+      eventName: "pull_request_review_thread",
+      feedback: normalizeGitHubFeedback(reviewThreadPayload, "pull_request_review_thread"),
+      installation: normalizeGitHubInstallation(reviewThreadPayload),
+      repositories: normalizeGitHubRepositories(reviewThreadPayload),
+    });
+
+    expect(threadJobs).toHaveLength(1);
+    expect(threadJobs[0]?.queueName).toBe(QUEUE_NAMES.memory);
+    expect(threadJobs[0]?.envelope.jobType).toBe(JOB_TYPES.UpdateMemory);
+    expect(threadJobs[0]?.envelope.payload).toMatchObject({
+      externalCommentId: "888",
+      externalThreadId: "444",
+      feedbackKind: "thread_resolved",
+      reason: "comment_thread",
     });
   });
 });

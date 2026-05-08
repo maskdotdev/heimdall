@@ -10,6 +10,7 @@ import {
   issueCommentPayload,
   pullRequestPayload,
   reactionPayload,
+  reviewThreadPayload,
 } from "./fixtures";
 
 describe("GitHub webhook normalization", () => {
@@ -53,6 +54,19 @@ describe("GitHub webhook normalization", () => {
       eventName: "reaction",
       externalCommentId: "888",
       feedbackKind: "negative_reaction",
+      pullRequestNumber: 7,
+    });
+  });
+
+  it("normalizes review thread resolution as feedback", () => {
+    const thread = normalizeGitHubFeedback(reviewThreadPayload, "pull_request_review_thread");
+
+    expect(thread).toMatchObject({
+      actorLogin: "maintainer",
+      eventName: "pull_request_review_thread",
+      externalCommentId: "888",
+      externalThreadId: "444",
+      feedbackKind: "thread_resolved",
       pullRequestNumber: 7,
     });
   });

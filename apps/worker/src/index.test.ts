@@ -954,6 +954,104 @@ describe("createWorkerHandlers", () => {
     );
   });
 
+  it("records provider webhook outcomes from review thread resolution feedback jobs", async () => {
+    const selectRows: unknown[][] = [
+      [
+        {
+          publishedFindingId: "pub_1",
+          reviewRunId: "rrn_1",
+          validatedFindingId: "vf_1",
+        },
+      ],
+      [
+        {
+          body: "Leaked debug output should not be committed.",
+          candidateFindingId: "cf_1",
+          category: "correctness",
+          confidence: 0.93,
+          findingId: "vf_1",
+          fingerprint: "fp_thread_1",
+          location: { path: "src/debug.ts", startLine: 12 },
+          reviewRunId: "rrn_1",
+          severity: "medium",
+          title: "Debug output is still enabled",
+        },
+      ],
+      [{ repoId: "repo_1" }],
+      [{ orgId: "org_1" }],
+    ];
+    const insertedRows: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedRows.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => selectRows.shift() ?? [],
+          }),
+        }),
+      }),
+    };
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.UpdateMemory]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "github:memory:fb_thread",
+      jobId: "job_memory_thread_feedback",
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      payload: {
+        actorLogin: "maintainer",
+        externalCommentId: "888",
+        externalEventId: "fb_thread",
+        externalThreadId: "444",
+        feedbackKind: "thread_resolved",
+        provider: "github",
+        reason: "comment_thread",
+        repoId: "repo_1",
+      },
+      schemaVersion: "job_envelope.v1",
+    });
+
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        eventKind: "review_thread_resolved",
+        externalThreadId: "444",
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        orgId: "org_1",
+        payloadRedacted: expect.objectContaining({
+          externalThreadId: "444",
+          feedbackKind: "thread_resolved",
+        }),
+        publishedFindingId: "pub_1",
+        repoId: "repo_1",
+      }),
+      expect.objectContaining({
+        feedbackEventId: expect.stringMatching(/^fevt_/u),
+        polarity: "positive",
+        signalKind: "thread_resolved",
+      }),
+      expect.objectContaining({
+        candidateFindingId: "cf_1",
+        orgId: "org_1",
+        outcome: "resolved",
+        publishedFindingId: "pub_1",
+        repoId: "repo_1",
+        source: "provider_webhook",
+      }),
+    ]);
+  });
+
   it("creates pending memory candidates from trusted provider feedback commands", async () => {
     const selectRows: unknown[][] = [
       [
