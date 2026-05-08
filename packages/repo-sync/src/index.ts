@@ -189,6 +189,12 @@ export type BuildWorktreePathArgsInput = {
   readonly workspacePath: string;
 };
 
+/** Input for constructing a workspace HEAD verification command. */
+export type BuildWorkspaceHeadArgsInput = {
+  /** Workspace path that should be checked out at the requested commit. */
+  readonly workspacePath: string;
+};
+
 /** Input for constructing a mirror-only worktree command. */
 export type BuildMirrorWorktreeArgsInput = {
   /** Bare mirror path. */
@@ -771,6 +777,7 @@ export async function createRepositoryWorktreeLease(
   await mkdir(layout.worktreesRoot, { recursive: true });
 
   const git = dependencies.gitRunner ?? runGit;
+  let worktreeCreated = false;
   try {
     await withRepoSyncLock(
       {
@@ -790,7 +797,23 @@ export async function createRepositoryWorktreeLease(
         );
       },
     );
+    worktreeCreated = true;
+    await verifyRepositoryWorktreeHead({
+      commitSha: input.commitSha,
+      gitRunner: git,
+      timeoutMs: input.config.defaultWorktreeTimeoutMs,
+      workspacePath,
+    });
   } catch (error) {
+    if (worktreeCreated) {
+      await cleanupFailedRepositoryWorktreeLease({
+        config: input.config,
+        gitRunner: git,
+        mirrorPath: input.mirrorPath,
+        repoId: input.repoId,
+        workspacePath,
+      });
+    }
     await rm(workspacePath, { force: true, recursive: true });
     throw error;
   }
@@ -861,6 +884,77 @@ export async function acquireRepositoryWorkspace(
     fetched: commit.fetched,
     mirrorCreated: commit.created,
   };
+}
+
+/** Input used to verify the exact commit checked out in a worktree. */
+type VerifyRepositoryWorktreeHeadInput = {
+  /** Expected exact commit SHA. */
+  readonly commitSha: string;
+  /** Git runner used to inspect the workspace. */
+  readonly gitRunner: GitCommandRunner;
+  /** Timeout applied to the verification command. */
+  readonly timeoutMs: number;
+  /** Worktree path that should be pinned to the expected commit. */
+  readonly workspacePath: string;
+};
+
+/** Verifies that a checked-out worktree resolves to the requested commit SHA. */
+async function verifyRepositoryWorktreeHead(
+  input: VerifyRepositoryWorktreeHeadInput,
+): Promise<void> {
+  const checkedOutSha = (
+    await input.gitRunner(buildWorkspaceHeadArgs({ workspacePath: input.workspacePath }), {
+      timeoutMs: input.timeoutMs,
+    })
+  ).trim();
+
+  if (checkedOutSha !== input.commitSha) {
+    throw new Error(`Repository worktree resolved ${checkedOutSha} instead of ${input.commitSha}.`);
+  }
+}
+
+/** Input used when removing a worktree that failed validation. */
+type CleanupFailedRepositoryWorktreeLeaseInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Git runner used to remove worktree metadata. */
+  readonly gitRunner: GitCommandRunner;
+  /** Bare mirror path that owns the worktree. */
+  readonly mirrorPath: string;
+  /** Stable product repository ID used in the worktree lock key. */
+  readonly repoId: string;
+  /** Worktree path to remove after validation failure. */
+  readonly workspacePath: string;
+};
+
+/** Best-effort cleanup for a worktree whose checkout validation failed. */
+async function cleanupFailedRepositoryWorktreeLease(
+  input: CleanupFailedRepositoryWorktreeLeaseInput,
+): Promise<void> {
+  try {
+    await withRepoSyncLock(
+      {
+        config: input.config,
+        operation: "worktree",
+        repoId: input.repoId,
+        timeoutMs: input.config.defaultWorktreeTimeoutMs,
+      },
+      async () => {
+        await input.gitRunner(
+          buildWorktreeRemoveArgs({
+            mirrorPath: input.mirrorPath,
+            workspacePath: input.workspacePath,
+          }),
+          { timeoutMs: input.config.defaultWorktreeTimeoutMs },
+        );
+        await input.gitRunner(buildWorktreePruneArgs({ mirrorPath: input.mirrorPath }), {
+          timeoutMs: input.config.defaultWorktreeTimeoutMs,
+        });
+      },
+    );
+  } catch {
+    await rm(input.workspacePath, { force: true, recursive: true });
+  }
 }
 
 /** Cleans expired cached worktree paths and prunes stale mirror metadata. */
@@ -1397,6 +1491,13 @@ export function buildWorktreeAddArgs(input: BuildWorktreeAddArgsInput): readonly
     input.workspacePath,
     input.commitSha,
   ];
+}
+
+/** Builds argv for reading the checked-out commit from a workspace. */
+export function buildWorkspaceHeadArgs(input: BuildWorkspaceHeadArgsInput): readonly string[] {
+  assertSafeGitCommandArgument("workspacePath", input.workspacePath);
+
+  return ["-C", input.workspacePath, "rev-parse", "HEAD"];
 }
 
 /** Builds argv for removing a worktree from a mirror. */

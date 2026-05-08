@@ -21,6 +21,7 @@ import {
   buildBareCloneArgs,
   buildCommitExistsArgs,
   buildFetchRefArgs,
+  buildWorkspaceHeadArgs,
   buildWorktreeAddArgs,
   buildWorktreePruneArgs,
   buildWorktreeRemoveArgs,
@@ -231,6 +232,12 @@ describe("repo sync workspace", () => {
       "--detach",
       worktreePath,
       commitSha,
+    ]);
+    expect(buildWorkspaceHeadArgs({ workspacePath: worktreePath })).toEqual([
+      "-C",
+      worktreePath,
+      "rev-parse",
+      "HEAD",
     ]);
     expect(buildWorktreeRemoveArgs({ mirrorPath, workspacePath: worktreePath })).toEqual([
       "-C",
@@ -623,6 +630,9 @@ describe("repo sync workspace", () => {
       if (args[2] === "worktree" && args[3] === "remove") {
         await rm(worktreePath, { force: true, recursive: true });
       }
+      if (args[2] === "rev-parse") {
+        return `${commitSha}\n`;
+      }
       return "";
     };
 
@@ -659,6 +669,7 @@ describe("repo sync workspace", () => {
     await expect(access(worktreePath)).rejects.toThrow();
     expect(mutableCommands).toEqual([
       ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", worktreePath, "rev-parse", "HEAD"],
       ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
       ["-C", mirrorPath, "worktree", "prune"],
     ]);
@@ -695,6 +706,52 @@ describe("repo sync workspace", () => {
     await expect(access(worktreePath)).rejects.toThrow();
   });
 
+  it("removes worktree leases when checkout validation fails", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-worktree-head-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const wrongCommitSha = "1111111111111111111111111111111111111111";
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[2] === "worktree" && args[3] === "add") {
+        await mkdir(worktreePath, { recursive: true });
+        return "";
+      }
+      if (args[2] === "rev-parse") {
+        return `${wrongCommitSha}\n`;
+      }
+      if (args[2] === "worktree" && args[3] === "remove") {
+        await rm(worktreePath, { force: true, recursive: true });
+      }
+      return "";
+    };
+
+    await expect(
+      createRepositoryWorktreeLease(
+        {
+          commitSha,
+          config,
+          leaseId: "lease_123",
+          mirrorPath,
+          purpose: "review",
+          repoId: "repo_123",
+        },
+        { gitRunner },
+      ),
+    ).rejects.toThrow(`Repository worktree resolved ${wrongCommitSha} instead of ${commitSha}.`);
+
+    await expect(access(worktreePath)).rejects.toThrow();
+    expect(mutableCommands).toEqual([
+      ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", worktreePath, "rev-parse", "HEAD"],
+      ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+      ["-C", mirrorPath, "worktree", "prune"],
+    ]);
+  });
+
   it("acquires a cached exact-commit workspace and releases its lease", async () => {
     const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-acquire-test-"));
     workspaceRoots.push(cacheRoot);
@@ -727,6 +784,9 @@ describe("repo sync workspace", () => {
       if (args[2] === "worktree" && args[3] === "remove") {
         await rm(worktreePath, { force: true, recursive: true });
         return "";
+      }
+      if (args[2] === "rev-parse") {
+        return `${commitSha}\n`;
       }
       return "";
     };
@@ -780,6 +840,7 @@ describe("repo sync workspace", () => {
       ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/1/head"],
       ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
       ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", worktreePath, "rev-parse", "HEAD"],
       ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
       ["-C", mirrorPath, "worktree", "prune"],
     ]);

@@ -198,6 +198,9 @@ describe("acquireWorkerRepositoryWorkspace", () => {
               commitExists = true;
               return "";
             }
+            if (args[2] === "rev-parse") {
+              return `${commitSha}\n`;
+            }
             return "";
           },
           leaseIdFactory: () => "lease_123",
@@ -232,6 +235,7 @@ describe("acquireWorkerRepositoryWorkspace", () => {
         ["-C", mirrorPath, "fetch", "--no-tags", "origin", commitSha],
         ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
         ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+        ["-C", worktreePath, "rev-parse", "HEAD"],
         ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
         ["-C", mirrorPath, "worktree", "prune"],
       ]);
