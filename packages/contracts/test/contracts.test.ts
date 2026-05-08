@@ -41,6 +41,7 @@ import {
 } from "#contracts/fixtures/index-artifact.fixture";
 import {
   validBillingReconcileJobPayloadFixture,
+  validDataDeletionPlanJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
   validEmbeddingRepairJobPayloadFixture,
   validIndexRepoCommitJobPayloadFixture,
@@ -106,6 +107,7 @@ import {
 import { JobEnvelopeSchema } from "#contracts/jobs/envelope";
 import {
   BillingReconcileJobPayloadSchema,
+  DataDeletionPlanJobPayloadSchema,
   EmbeddingBatchJobPayloadSchema,
   EmbeddingRepairJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
@@ -427,6 +429,13 @@ describe("contract validation", () => {
         validBillingReconcileJobPayloadFixture,
       ),
     ).toEqual(validBillingReconcileJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "DataDeletionPlanJobPayload",
+        DataDeletionPlanJobPayloadSchema,
+        validDataDeletionPlanJobPayloadFixture,
+      ),
+    ).toEqual(validDataDeletionPlanJobPayloadFixture);
     expect(
       parseWithSchema(
         "SandboxCleanupJobPayload",

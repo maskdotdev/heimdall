@@ -6,6 +6,7 @@ import { REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY } from "@repo/artifacts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
   validBillingReconcileJobPayloadFixture,
+  validDataDeletionPlanJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
   validEmbeddingRepairJobPayloadFixture,
   validReviewArtifactCleanupJobPayloadFixture,
@@ -627,6 +628,7 @@ describe("createWorkerQueueNamesFromEnvironment", () => {
       QUEUE_NAMES.memory,
       QUEUE_NAMES.publishing,
       QUEUE_NAMES.billing,
+      QUEUE_NAMES.security,
     ]);
   });
 
@@ -645,6 +647,14 @@ describe("createWorkerQueueNamesFromEnvironment", () => {
         WORKER_ROLE: "review",
       }),
     ).toEqual([QUEUE_NAMES.indexing]);
+  });
+
+  it("selects security queue consumers for security workers", () => {
+    expect(
+      createWorkerQueueNamesFromEnvironment({
+        WORKER_ROLE: "security",
+      }),
+    ).toEqual([QUEUE_NAMES.security]);
   });
 
   it("supports a maintenance-only worker with no queue consumers", () => {
@@ -914,6 +924,30 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validBillingReconcileJobPayloadFixture]);
+  });
+
+  it("dispatches data deletion planning jobs through the configured planner", async () => {
+    const payloads: unknown[] = [];
+    const handlers = createWorkerHandlers({
+      dataDeletionPlanner: async (payload) => {
+        payloads.push(payload);
+      },
+      db: {} as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.DataDeletionPlan]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "data-deletion:plan:ddr_01HXAMPLE",
+      jobId: "job_data_deletion_plan",
+      jobType: JOB_TYPES.DataDeletionPlan,
+      maxAttempts: 3,
+      payload: validDataDeletionPlanJobPayloadFixture,
+      schemaVersion: "data_deletion_plan_job.v1",
+    });
+
+    expect(payloads).toEqual([validDataDeletionPlanJobPayloadFixture]);
   });
 
   it("dispatches embedding repair jobs through the configured repairer", async () => {

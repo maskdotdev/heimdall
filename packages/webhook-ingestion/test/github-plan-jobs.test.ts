@@ -41,6 +41,38 @@ describe("GitHub webhook job planning", () => {
     });
   });
 
+  it("plans security deletion jobs for installation removals", () => {
+    const installation = normalizeGitHubInstallation(installationPayload);
+    const [job] = planGitHubWebhookJobs({
+      action: "deleted",
+      deliveryId: "delivery-delete-1",
+      eventName: "installation",
+      installation,
+      repositories: normalizeGitHubRepositories(installationPayload),
+      traceContext: {
+        parentEventId: "webhook_delete_1",
+        requestId: "delivery-delete-1",
+      },
+    });
+
+    expect(job?.queueName).toBe(QUEUE_NAMES.security);
+    expect(job?.envelope.jobType).toBe(JOB_TYPES.DataDeletionPlan);
+    expect(job?.envelope.idempotencyKey).toContain("github:data-deletion:");
+    expect(job?.envelope.payload).toMatchObject({
+      orgId: installation.orgId,
+      reason: "app_uninstalled",
+      requestedBy: "system:github_webhook",
+      scope: "organization",
+    });
+    expect(
+      String((job?.envelope.payload as { dataDeletionRequestId?: unknown }).dataDeletionRequestId),
+    ).toMatch(/^ddr_/u);
+    expect(job?.envelope.traceContext).toEqual({
+      parentEventId: "webhook_delete_1",
+      requestId: "delivery-delete-1",
+    });
+  });
+
   it("plans index and review jobs for pull request openings", () => {
     const jobs = planGitHubWebhookJobs({
       deliveryId: "delivery-2",

@@ -171,7 +171,7 @@ export class GitHubWebhookHandler {
       }
 
       if (normalized.installation) {
-        await persistInstallation(tx, normalized.payload, normalized.installation);
+        await persistInstallation(tx, normalized.payload, normalized.installation, action);
       }
 
       for (const repository of normalized.repositories) {
@@ -321,9 +321,11 @@ async function persistInstallation(
   tx: Transaction,
   payload: Record<string, unknown>,
   installation: NormalizedGitHubInstallation,
+  action: string | undefined,
 ): Promise<void> {
   const account = normalizeGitHubAccount(payload);
   const now = new Date();
+  const deletedAt = action === "deleted" ? now : null;
 
   await tx
     .insert(orgs)
@@ -356,6 +358,7 @@ async function persistInstallation(
       accountType: installation.accountType,
       permissions: installation.permissions,
       installedAt: new Date(installation.installedAt),
+      deletedAt,
       metadata: installation.metadata,
     })
     .onConflictDoUpdate({
@@ -363,6 +366,7 @@ async function persistInstallation(
       set: {
         accountLogin: installation.accountLogin,
         accountType: installation.accountType,
+        deletedAt,
         permissions: installation.permissions,
         metadata: installation.metadata,
       },

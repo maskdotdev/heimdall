@@ -18,6 +18,9 @@ import {
 import { type IndexerConfig, loadIndexerConfig, loadRuntimeConfig } from "@repo/config";
 import {
   type BillingReconcileJobPayload,
+  type DataDeletionManifest,
+  type DataDeletionPlanJobPayload,
+  DataDeletionPlanJobPayloadSchema,
   type EmbeddingBatchJobPayload,
   type EmbeddingRepairJobPayload,
   type IndexRepoCommitJobPayload,
@@ -41,6 +44,7 @@ import {
   type CreateFeedbackSignalInput,
   type CreateMemoryCandidateInput,
   createDatabaseClient,
+  DataDeletionRepository,
   FeedbackRepository,
   type FindingOutcomeRecord,
   type HeimdallDatabase,
@@ -206,6 +210,7 @@ const ALL_WORKER_QUEUE_NAMES = [
   QUEUE_NAMES.memory,
   QUEUE_NAMES.publishing,
   QUEUE_NAMES.billing,
+  QUEUE_NAMES.security,
 ] as const satisfies readonly QueueName[];
 /** BullMQ statuses that contribute queue depth gauges. */
 const WORKER_QUEUE_METRIC_STATUSES = [
@@ -231,6 +236,7 @@ export type WorkerRuntimeRole =
   | "memory"
   | "publishing"
   | "billing"
+  | "security"
   | "maintenance";
 
 /** Environment values used to select worker runtime queue roles. */
@@ -301,6 +307,8 @@ export type CreateWorkerHandlersOptions = {
   readonly billingProvider?: BillingProvider;
   /** Optional test hook for billing reconciliation jobs. */
   readonly billingReconciler?: (payload: BillingReconcileJobPayload) => Promise<void>;
+  /** Optional test hook for data-deletion planning jobs. */
+  readonly dataDeletionPlanner?: (payload: DataDeletionPlanJobPayload) => Promise<void>;
   /** Optional test hook for embedding repair jobs. */
   readonly embeddingRepairer?: (payload: EmbeddingRepairJobPayload) => Promise<void>;
   /** Optional test hook for sandbox cleanup jobs. */
@@ -995,6 +1003,16 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         ...payload,
       });
     },
+    [JOB_TYPES.DataDeletionPlan]: async (envelope, context) => {
+      const payload = asDataDeletionPlanPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
+      if (options.dataDeletionPlanner) {
+        await options.dataDeletionPlanner(payload);
+        return;
+      }
+
+      await planDataDeletionRequest(options.db, payload);
+    },
     [JOB_TYPES.SandboxCleanup]: async (envelope, context) => {
       const payload = asSandboxCleanupPayload(envelope.payload);
       await throwIfWorkerJobCanceled(context);
@@ -1240,6 +1258,122 @@ async function enqueueEmbeddingRepairBatches(
       repoId: payload.repoId,
     });
   }
+}
+
+/** Persists a planned data-deletion request and product-safe deletion manifest. */
+async function planDataDeletionRequest(
+  db: HeimdallDatabase,
+  payload: DataDeletionPlanJobPayload,
+): Promise<void> {
+  const repository = new DataDeletionRepository(db);
+  const manifest = createDataDeletionManifest(payload);
+  const metadata = {
+    ...(payload.dryRun === undefined ? {} : { dryRun: payload.dryRun }),
+    plannedBy: "worker",
+    ...(payload.sourceWebhookEventId ? { sourceWebhookEventId: payload.sourceWebhookEventId } : {}),
+  };
+
+  await repository.createDataDeletionRequest({
+    dataDeletionRequestId: payload.dataDeletionRequestId,
+    ...(payload.orgId ? { orgId: payload.orgId } : {}),
+    reason: payload.reason,
+    ...(payload.repoId ? { repoId: payload.repoId } : {}),
+    requestedAt: payload.requestedAt,
+    requestedBy: payload.requestedBy,
+    scope: payload.scope,
+    status: "requested",
+    ...(payload.userId ? { userId: payload.userId } : {}),
+    metadata,
+  });
+  await repository.updateDataDeletionRequestStatus({
+    dataDeletionRequestId: payload.dataDeletionRequestId,
+    manifest,
+    metadata,
+    status: "planned",
+  });
+}
+
+/** Builds an initial product-safe manifest for a data-deletion request. */
+function createDataDeletionManifest(payload: DataDeletionPlanJobPayload): DataDeletionManifest {
+  const predicateDescription = dataDeletionPredicateDescription(payload);
+
+  return {
+    dbTables: dataDeletionTablesForScope(payload.scope).map((table) => ({
+      predicateDescription,
+      rowCountEstimate: 0,
+      table,
+    })),
+    externalProviders: [
+      ...(payload.reason === "app_uninstalled"
+        ? [{ action: "revoke_installation_state", provider: "github" }]
+        : []),
+    ],
+    objectKeys: [],
+    queueKeys: [],
+    requestId: payload.dataDeletionRequestId,
+    vectorNamespaces: payload.repoId ? [payload.repoId] : [],
+    ...(payload.orgId ? { orgId: payload.orgId } : {}),
+    ...(payload.repoId ? { repoId: payload.repoId } : {}),
+    ...(payload.userId ? { userId: payload.userId } : {}),
+  };
+}
+
+/** Returns tables that need inspection for one deletion scope. */
+function dataDeletionTablesForScope(scope: DataDeletionPlanJobPayload["scope"]): readonly string[] {
+  switch (scope) {
+    case "organization":
+      return [
+        "provider_installations",
+        "repositories",
+        "background_jobs",
+        "review_artifacts",
+        "sandbox_runs",
+        "code_chunk_embeddings",
+        "memory_facts",
+        "repo_rules",
+      ];
+    case "repository":
+      return [
+        "repositories",
+        "repository_settings",
+        "background_jobs",
+        "pull_request_snapshots",
+        "review_runs",
+        "review_artifacts",
+        "sandbox_runs",
+        "code_chunk_embeddings",
+        "memory_facts",
+        "repo_rules",
+      ];
+    case "user":
+      return ["users", "user_provider_accounts", "user_sessions", "org_memberships", "audit_logs"];
+    case "review_run":
+      return [
+        "review_runs",
+        "review_run_stage_events",
+        "review_artifacts",
+        "candidate_findings",
+        "llm_calls",
+        "sandbox_runs",
+      ];
+    case "artifact_class":
+      return ["review_artifacts", "sandbox_artifacts", "llm_call_artifacts"];
+  }
+}
+
+/** Returns the manifest predicate description for one deletion request. */
+function dataDeletionPredicateDescription(payload: DataDeletionPlanJobPayload): string {
+  if (payload.repoId) {
+    return `repo_id = ${payload.repoId}`;
+  }
+  if (payload.orgId) {
+    return `org_id = ${payload.orgId}`;
+  }
+  if (payload.userId) {
+    return `user_id = ${payload.userId}`;
+  }
+
+  return `request_id = ${payload.dataDeletionRequestId}`;
 }
 
 /** Resolves the GitHub App private key through the security secret boundary. */
@@ -2434,6 +2568,9 @@ function normalizeWorkerRuntimeRole(value: string): WorkerRuntimeRole {
   if (normalized === "billing") {
     return "billing";
   }
+  if (normalized === "security") {
+    return "security";
+  }
   if (normalized === "maintenance" || normalized === "maint") {
     return "maintenance";
   }
@@ -2460,6 +2597,8 @@ function queueNamesForWorkerRole(role: WorkerRuntimeRole): readonly QueueName[] 
       return [QUEUE_NAMES.publishing];
     case "billing":
       return [QUEUE_NAMES.billing];
+    case "security":
+      return [QUEUE_NAMES.security];
     case "maintenance":
       return [];
   }
@@ -3749,6 +3888,11 @@ function asUpdateMemoryPayload(payload: JobPayload): UpdateMemoryJobPayload {
 
 function asBillingReconcilePayload(payload: JobPayload): BillingReconcileJobPayload {
   return payload as BillingReconcileJobPayload;
+}
+
+/** Narrows a generic job payload to a data-deletion planning payload. */
+function asDataDeletionPlanPayload(payload: JobPayload): DataDeletionPlanJobPayload {
+  return parseWithSchema("DataDeletionPlanJobPayload", DataDeletionPlanJobPayloadSchema, payload);
 }
 
 /** Narrows a generic job payload to a sandbox cleanup payload. */
