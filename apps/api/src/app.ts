@@ -2587,6 +2587,24 @@ const DEFAULT_ADMIN_RATE_LIMIT_WINDOW_SECONDS = 60;
 const DEFAULT_PRODUCT_RATE_LIMIT_MAX_REQUESTS = 600;
 /** Default product rate-limit window in seconds. */
 const DEFAULT_PRODUCT_RATE_LIMIT_WINDOW_SECONDS = 60;
+/** Public OpenAPI HTML documentation path. */
+const OPENAPI_DOCUMENTATION_PATH = "/openapi";
+/** Public OpenAPI JSON specification path. */
+const OPENAPI_SPECIFICATION_PATH = "/openapi/json";
+/** HSTS policy sent only for production HTTPS requests. */
+const STRICT_TRANSPORT_SECURITY_VALUE = "max-age=31536000; includeSubDomains; preload";
+/** Restrictive CSP that still permits the generated Scalar OpenAPI page to run. */
+const OPENAPI_DOCUMENTATION_CONTENT_SECURITY_POLICY = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "img-src data: https:",
+  "font-src https: data:",
+  "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "connect-src 'self'",
+].join("; ");
 /** Default lifetime for object-store artifact download URLs. */
 const DEFAULT_REVIEW_ARTIFACT_SIGNED_URL_EXPIRES_SECONDS = 300;
 /** Default maximum number of tracked admin rate-limit client keys. */
@@ -3239,6 +3257,9 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
   const apiRequestTelemetry = new WeakMap<Request, ApiRequestTelemetryState>();
 
   return new Elysia()
+    .onAfterHandle(({ request, set }) => {
+      applyGlobalApiSecurityHeaders(request, set);
+    })
     .use(
       openapi({
         documentation: {
@@ -3263,8 +3284,8 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
           },
         },
         enabled: openApiDocsEnabled(),
-        path: "/openapi",
-        specPath: "/openapi/json",
+        path: OPENAPI_DOCUMENTATION_PATH,
+        specPath: OPENAPI_SPECIFICATION_PATH,
       }),
     )
     .onRequest(({ request }) => {
@@ -3292,6 +3313,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
       });
     })
     .onError(({ code, error, request, route, set }) => {
+      applyGlobalApiSecurityHeaders(request, set);
       finishApiRequestTelemetry(apiRequestTelemetry, metrics, {
         error,
         method: request.method,
@@ -13763,6 +13785,66 @@ function setResponseHeader(set: AdminResponseSet, key: string, value: string | n
     ...(set.headers ?? {}),
     [key]: value,
   };
+}
+
+/** Sets one response header only when a route has not already assigned it. */
+function setDefaultResponseHeader(
+  set: AdminResponseSet,
+  key: string,
+  value: string | number,
+): void {
+  if (set.headers?.[key] !== undefined) {
+    return;
+  }
+
+  setResponseHeader(set, key, value);
+}
+
+/** Applies global browser-facing API hardening headers. */
+function applyGlobalApiSecurityHeaders(request: Request, set: AdminResponseSet): void {
+  setDefaultResponseHeader(set, "referrer-policy", "no-referrer");
+  setDefaultResponseHeader(set, "x-content-type-options", "nosniff");
+  setDefaultResponseHeader(set, "x-frame-options", "DENY");
+
+  if (shouldSendStrictTransportSecurity(request)) {
+    setDefaultResponseHeader(set, "strict-transport-security", STRICT_TRANSPORT_SECURITY_VALUE);
+  }
+
+  if (isOpenApiDocumentationRequest(request)) {
+    setDefaultResponseHeader(set, "cache-control", "no-store");
+    setDefaultResponseHeader(
+      set,
+      "content-security-policy",
+      OPENAPI_DOCUMENTATION_CONTENT_SECURITY_POLICY,
+    );
+  }
+}
+
+/** Returns whether one request should receive the HSTS policy. */
+function shouldSendStrictTransportSecurity(request: Request): boolean {
+  return (
+    (process.env.NODE_ENV ?? "development") === "production" &&
+    requestOriginalProtocol(request) === "https:"
+  );
+}
+
+/** Returns the client-facing request protocol when a trusted proxy forwards it. */
+function requestOriginalProtocol(request: Request): "http:" | "https:" {
+  const forwardedProtocol = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim()
+    .toLowerCase();
+  if (forwardedProtocol === "https") {
+    return "https:";
+  }
+
+  return new URL(request.url).protocol === "https:" ? "https:" : "http:";
+}
+
+/** Returns whether the request targets the generated OpenAPI HTML documentation page. */
+function isOpenApiDocumentationRequest(request: Request): boolean {
+  return new URL(request.url).pathname === OPENAPI_DOCUMENTATION_PATH;
 }
 
 /** Returns whether a path belongs to the product session API surface. */

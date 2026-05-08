@@ -631,6 +631,39 @@ describe("api app", () => {
     }
   });
 
+  it("serves OpenAPI HTML with hardened browser headers", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousOpenApiEnabled = process.env.HEIMDALL_OPENAPI_ENABLED;
+    process.env.NODE_ENV = "development";
+    delete process.env.HEIMDALL_OPENAPI_ENABLED;
+    try {
+      const app = createApiApp({
+        githubWebhookHandler: noopWebhookHandler(),
+      });
+
+      const response = await app.handle(new Request("http://localhost/openapi"));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("x-frame-options")).toBe("DENY");
+      expect(await response.text()).toContain("<!doctype html>");
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
+      }
+      if (previousOpenApiEnabled === undefined) {
+        delete process.env.HEIMDALL_OPENAPI_ENABLED;
+      } else {
+        process.env.HEIMDALL_OPENAPI_ENABLED = previousOpenApiEnabled;
+      }
+    }
+  });
+
   it("keeps OpenAPI disabled by default in production", async () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousOpenApiEnabled = process.env.HEIMDALL_OPENAPI_ENABLED;
@@ -654,6 +687,39 @@ describe("api app", () => {
         delete process.env.HEIMDALL_OPENAPI_ENABLED;
       } else {
         process.env.HEIMDALL_OPENAPI_ENABLED = previousOpenApiEnabled;
+      }
+    }
+  });
+
+  it("sends HSTS only for production HTTPS responses", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      const app = createApiApp({
+        githubWebhookHandler: noopWebhookHandler(),
+        productDashboardService: createMockProductDashboardService(),
+      });
+
+      const httpsResponse = await app.handle(new Request("https://api.example/app/onboarding"));
+      const forwardedHttpsResponse = await app.handle(
+        new Request("http://api.example/app/onboarding", {
+          headers: { "x-forwarded-proto": "https" },
+        }),
+      );
+      const httpResponse = await app.handle(new Request("http://api.example/app/onboarding"));
+
+      expect(httpsResponse.headers.get("strict-transport-security")).toBe(
+        "max-age=31536000; includeSubDomains; preload",
+      );
+      expect(forwardedHttpsResponse.headers.get("strict-transport-security")).toBe(
+        "max-age=31536000; includeSubDomains; preload",
+      );
+      expect(httpResponse.headers.get("strict-transport-security")).toBeNull();
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
       }
     }
   });
