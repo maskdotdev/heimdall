@@ -324,17 +324,35 @@ pnpm admin:export-debug-bundle <reviewRunId>
 pnpm admin:replay-review <reviewRunId>
 pnpm admin:replay-retrieval <reviewRunId>
 pnpm admin:replay-validation <reviewRunId>
+pnpm admin:import-eval-draft <reviewRunId> --reason "<reason>"
+pnpm admin:inspect-webhook <webhookEventId>
+pnpm admin:retry-webhook <webhookEventId>
+pnpm admin:inspect-job <backgroundJobId>
+pnpm admin:retry-job <backgroundJobId>
 pnpm admin:publisher-dry-run <reviewRunId>
+pnpm admin:inspect-publisher <reviewRunId>
+pnpm admin:replay-publisher <reviewRunId>
+pnpm admin:inspect-memory-rules <repoId>
+pnpm admin:inspect-index <indexVersionId>
+pnpm dev:import-artifact --artifact <uri> --repo-id <repoId> --commit <sha>
+pnpm dev:cleanup-import <indexVersionId>
 ```
 
-The replay command prints a confirmation token by default. Dispatch requires the explicit
+Replay and retry commands print a confirmation token by default. Dispatch requires the explicit
 `--execute --confirmation-token <token>` flags, and dispatch writes `admin_actions`, `replay_runs`,
-`replay_stage_runs`, and `audit_logs` rows. The retrieval replay command is a dry-run that
-re-runs deterministic context retrieval against the stored pull request snapshot and compares the
-result with the stored context bundle without mutating review state. The validation replay command
-is a dry-run that re-runs deterministic finding validation against the stored pull request snapshot
-and persisted candidate findings, then compares the result with stored validated findings without
-mutating review state. The review inspector dashboard exposes the same dry-runs through
+`replay_stage_runs`, and `audit_logs` rows. Retrieval and validation replay commands are dry-runs.
+Retrieval replay re-runs deterministic context retrieval against the stored pull request snapshot
+and compares the result with the stored context bundle without mutating review state. Validation
+replay re-runs deterministic finding validation against the stored pull request snapshot and
+persisted candidate findings, then compares the result with stored validated findings without
+mutating review state.
+
+The eval import command creates an audited draft for later human review. It does not commit fixture
+files. Pass `--include-context-bundle`, `--include-raw-diff`, and `--redaction-level <level>` only
+when the support ticket requires those draft artifacts. The index import commands validate artifact
+manifest scope before writing rows and can clean failed imports for local recovery drills.
+
+The review inspector dashboard exposes the same retrieval and validation dry-runs through
 **Retrieve Dry-Run** and **Validate Dry-Run** for scoped operators with replay planning permission.
 The direct database CLI refuses production mode unless `HEIMDALL_ADMIN_CLI_ALLOW_PRODUCTION_DB=true`
 is set for a documented break-glass operation.
