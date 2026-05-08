@@ -54,6 +54,31 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("emits canonical record type ordering across source files", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await Promise.all([
+      writeFile(join(workspacePath, "a.ts"), "export function a() { return true; }\n"),
+      writeFile(
+        join(workspacePath, "b.ts"),
+        ['import { a } from "./a";', "export function b() { return a(); }", ""].join("\n"),
+      ),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+    const orderByType: Record<string, number> = { chunk: 2, edge: 3, file: 0, symbol: 1 };
+    const orderIndexes = artifact.records.map((record) => orderByType[record.type] ?? 99);
+
+    expect(orderIndexes).toEqual([...orderIndexes].sort((left, right) => left - right));
+    expect(
+      artifact.records.flatMap((record) => (record.type === "file" ? [record.path] : [])),
+    ).toEqual(["a.ts", "b.ts"]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("indexes Node JavaScript modules and skips TypeScript declaration files", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await Promise.all([

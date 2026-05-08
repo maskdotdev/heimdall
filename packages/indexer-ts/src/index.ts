@@ -42,6 +42,18 @@ const vendoredPathSegments = new Set([
   "vendors",
 ]);
 
+/** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
+type TypeScriptIndexRecordGroups = {
+  /** Chunk records discovered from indexed files. */
+  readonly chunks: ChunkRecord[];
+  /** Edge records discovered from imports, definitions, and calls. */
+  readonly edges: EdgeRecord[];
+  /** File records discovered from workspace source files. */
+  readonly files: FileRecord[];
+  /** Symbol records discovered from parsed source files. */
+  readonly symbols: SymbolRecord[];
+};
+
 /** Creates a TypeScript and JavaScript artifact indexer. */
 export function createTypeScriptIndexerDriver(): CodeIndexerDriver {
   return {
@@ -104,7 +116,12 @@ export async function indexTypeScriptRepository(input: {
 }): Promise<IndexArtifact> {
   await validateWorkspacePath(input.workspacePath);
   const paths = await findSourceFiles(input.workspacePath);
-  const records: IndexRecord[] = [];
+  const recordGroups: TypeScriptIndexRecordGroups = {
+    chunks: [],
+    edges: [],
+    files: [],
+    symbols: [],
+  };
   const languages = new Set<CodeLanguage>();
 
   for (const path of paths) {
@@ -130,12 +147,16 @@ export async function indexTypeScriptRepository(input: {
     );
     const symbols = collectSymbols(sourceFile, file, content);
 
-    records.push(file, ...symbols, ...chunkRecordsForFile(file, content, symbols));
-    records.push(
+    recordGroups.files.push(file);
+    recordGroups.symbols.push(...symbols);
+    recordGroups.chunks.push(...chunkRecordsForFile(file, content, symbols));
+    recordGroups.edges.push(
       ...edgeRecordsForFile(input.repoId, input.commitSha, file.fileId, path, sourceFile, symbols),
     );
     languages.add(language);
   }
+
+  const records = orderedIndexRecords(recordGroups);
 
   return {
     manifest: {
@@ -159,6 +180,11 @@ export async function indexTypeScriptRepository(input: {
     },
     records,
   };
+}
+
+/** Returns records in the canonical artifact type order required by the schema spec. */
+function orderedIndexRecords(groups: TypeScriptIndexRecordGroups): IndexRecord[] {
+  return [...groups.files, ...groups.symbols, ...groups.chunks, ...groups.edges];
 }
 
 /** Validates a workspace root before recursively reading repository files. */
