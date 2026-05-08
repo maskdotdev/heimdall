@@ -12,6 +12,7 @@ import {
   validEmbeddingRepairJobPayloadFixture,
   validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
+  validSyncInstallationJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
 import { GitHubPermissionError, type GitHubRepositoryRef } from "@repo/github";
 import type { IndexArtifact } from "@repo/index-schema";
@@ -1019,6 +1020,77 @@ describe("createWorkerEmbeddingProviderFromEnvironment", () => {
 });
 
 describe("createWorkerHandlers", () => {
+  it("records GitHub provider security events when installation sync fails", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+    const handlers = createWorkerHandlers({
+      db: createWorkerProviderInstallationDatabaseStub([
+        {
+          accountLogin: "acme",
+          accountType: "organization",
+          deletedAt: null,
+          installationId: validSyncInstallationJobPayloadFixture.installationId,
+          installedAt: new Date("2026-05-08T00:00:00.000Z"),
+          metadata: null,
+          orgId: "org_worker_sync",
+          permissions: {},
+          provider: "github",
+          providerInstallationId: "12345",
+          suspendedAt: null,
+        },
+      ]),
+      gitProvider: {
+        syncInstallation: async () => {
+          throw new GitHubPermissionError("Resource not accessible by integration.", {
+            rateLimit: { remaining: 42, resource: "core" },
+            requestId: "github_request_sync_installation",
+            retryAfterSeconds: 12,
+            status: 403,
+          });
+        },
+      } as never,
+      securityEventSink,
+    });
+
+    await expect(
+      handlers[JOB_TYPES.SyncInstallation]?.({
+        attempt: 0,
+        createdAt: "2026-05-08T12:00:00.000Z",
+        idempotencyKey: "github:sync-installation:inst_01HXAMPLE",
+        jobId: "job_sync_installation",
+        jobType: JOB_TYPES.SyncInstallation,
+        maxAttempts: 3,
+        payload: validSyncInstallationJobPayloadFixture,
+        schemaVersion: "sync_installation_job.v1",
+      }),
+    ).rejects.toThrow("Resource not accessible by integration.");
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: {
+          githubReason: "github_permission",
+          githubRequestId: "github_request_sync_installation",
+          githubStatus: 403,
+          installationId: validSyncInstallationJobPayloadFixture.installationId,
+          operation: "sync_installation",
+          providerInstallationId: "12345",
+          rateLimitBucket: "core",
+          rateLimitRemaining: 42,
+          retryAfterSeconds: 12,
+        },
+        orgId: "org_worker_sync",
+        resourceId: validSyncInstallationJobPayloadFixture.installationId,
+        resourceType: "github_installation",
+        severity: "high",
+        source: "github",
+        status: "new",
+        type: "github_worker_sync_installation_permission_denied",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain(
+      "Resource not accessible by integration.",
+    );
+  });
+
   it("records embedding usage events through the configured ledger", async () => {
     const usageEvents: unknown[] = [];
     const payload = validEmbeddingBatchJobPayloadFixture;

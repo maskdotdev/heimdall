@@ -1316,7 +1316,10 @@ tracked milestone.
   reason, scope, and deletion counters without raw payload data. Provider-side GitHub cleanup
   failures during data deletion now emit product-safe security events with request, artifact-row,
   status, and rate-limit metadata while excluding remote provider resource IDs. Worker tests cover
-  failed deletion planning and provider-cleanup event emission through the sink boundary.
+  failed deletion planning and provider-cleanup event emission through the sink boundary. Worker
+  installation-sync jobs now also record product-safe GitHub security events for provider
+  permission, installation-suspended, token, rate-limit, unavailable, and validation failures
+  through the same durable sink.
 - Latest admin-gateway security-event milestone: `@repo/security` now recognizes
   `admin_gateway` as a security-event source, and the standalone GitHub admin gateway records
   product-safe events for OAuth-state, GitHub org/login, CORS, and scoped assertion denials through
