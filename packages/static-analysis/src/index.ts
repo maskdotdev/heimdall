@@ -589,6 +589,34 @@ const BiomeJsonOutputSchema = Type.Object(
 /** Biome JSON reporter diagnostic. */
 type BiomeJsonDiagnostic = Static<typeof BiomeJsonDiagnosticSchema>;
 
+/** Ruff JSON formatter location. */
+const RuffJsonLocationSchema = Type.Object(
+  {
+    column: Type.Optional(Type.Integer({ minimum: 0 })),
+    row: Type.Optional(Type.Integer({ minimum: 0 })),
+  },
+  { additionalProperties: true },
+);
+
+/** Ruff JSON formatter diagnostic. */
+const RuffJsonDiagnosticSchema = Type.Object(
+  {
+    code: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    end_location: Type.Optional(RuffJsonLocationSchema),
+    filename: Type.String(),
+    location: Type.Optional(RuffJsonLocationSchema),
+    message: Type.String(),
+    url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  },
+  { additionalProperties: true },
+);
+
+/** Ruff JSON formatter output. */
+const RuffJsonOutputSchema = Type.Array(RuffJsonDiagnosticSchema);
+
+/** Ruff JSON formatter diagnostic. */
+type RuffJsonDiagnostic = Static<typeof RuffJsonDiagnosticSchema>;
+
 type TypeScriptTextDiagnostic = {
   /** TypeScript diagnostic code without the `TS` prefix. */
   readonly code: string;
@@ -730,6 +758,9 @@ export function parseToolOutputDiagnostics(
   }
   if (input.tool === "biome") {
     return parseBiomeJsonDiagnostics(input);
+  }
+  if (input.tool === "ruff") {
+    return parseRuffJsonDiagnostics(input);
   }
   if (input.tool === "typescript") {
     return parseTypeScriptTextDiagnostics(input);
@@ -1329,6 +1360,68 @@ function parseBiomeJsonDiagnostics(
   return { diagnostics, warnings };
 }
 
+/** Parses Ruff JSON formatter output into normalized diagnostics. */
+function parseRuffJsonDiagnostics(
+  input: ParseToolOutputDiagnosticsInput,
+): ParseToolOutputDiagnosticsResult {
+  const rawOutput = input.result.stdout.trim();
+  if (rawOutput.length === 0) {
+    return { diagnostics: [], warnings: [] };
+  }
+
+  const parsedOutput = parseJson(rawOutput);
+  if (!parsedOutput.ok) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning("tool_output_parse_failed", "Static analysis could not parse tool output.", {
+          format: "ruff_json",
+          tool: input.tool,
+          toolRunId: input.toolRunId,
+        }),
+      ],
+    };
+  }
+  if (!Value.Check(RuffJsonOutputSchema, parsedOutput.value)) {
+    return {
+      diagnostics: [],
+      warnings: [
+        warning(
+          "tool_output_schema_mismatch",
+          "Static analysis tool output did not match the expected schema.",
+          {
+            format: "ruff_json",
+            tool: input.tool,
+            toolRunId: input.toolRunId,
+          },
+        ),
+      ],
+    };
+  }
+
+  const parsedDiagnostics = (parsedOutput.value as readonly RuffJsonDiagnostic[])
+    .map((diagnostic) => ruffDiagnosticToNormalizedDiagnostic({ diagnostic, input }))
+    .filter(isPresent);
+  const diagnostics = parsedDiagnostics.slice(0, input.maxDiagnostics);
+  const warnings =
+    parsedDiagnostics.length > diagnostics.length
+      ? [
+          warning(
+            "tool_output_diagnostic_budget_truncated",
+            "Static analysis tool output diagnostics were truncated.",
+            {
+              diagnosticCount: parsedDiagnostics.length,
+              maxDiagnostics: input.maxDiagnostics,
+              tool: input.tool,
+              toolRunId: input.toolRunId,
+            },
+          ),
+        ]
+      : [];
+
+  return { diagnostics, warnings };
+}
+
 /** Parses `tsc --pretty false` output into normalized diagnostics. */
 function parseTypeScriptTextDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
@@ -1513,6 +1606,53 @@ function biomeDiagnosticToNormalizedDiagnostic(input: {
   });
 }
 
+/** Converts one Ruff JSON diagnostic into the normalized report shape. */
+function ruffDiagnosticToNormalizedDiagnostic(input: {
+  /** Static-analysis parser input. */
+  readonly input: ParseToolOutputDiagnosticsInput;
+  /** Ruff diagnostic emitted by the JSON formatter. */
+  readonly diagnostic: RuffJsonDiagnostic;
+}): NormalizedToolDiagnostic | undefined {
+  const message = input.diagnostic.message.trim();
+  const originalPath = input.diagnostic.filename.trim();
+  const startLine = input.diagnostic.location?.row ?? 0;
+  if (originalPath.length === 0 || message.length === 0 || startLine < 1) {
+    return undefined;
+  }
+
+  const filePath = normalizeToolFilePath(originalPath, input.input.workspacePath);
+  const ruleId = input.diagnostic.code?.trim();
+  const ruleUrl = input.diagnostic.url?.trim();
+
+  return createNormalizedToolDiagnostic({
+    category: categoryForRuffRule(ruleId),
+    location: {
+      filePath,
+      ...(input.diagnostic.location?.column !== undefined
+        ? { startColumn: Math.max(1, input.diagnostic.location.column) }
+        : {}),
+      startLine,
+      ...(input.diagnostic.end_location?.column !== undefined
+        ? { endColumn: Math.max(1, input.diagnostic.end_location.column) }
+        : {}),
+      ...(input.diagnostic.end_location?.row !== undefined && input.diagnostic.end_location.row > 0
+        ? { endLine: input.diagnostic.end_location.row }
+        : {}),
+      ...(filePath === originalPath ? {} : { originalPath }),
+    },
+    message,
+    metadata: ruffDiagnosticMetadata(input.diagnostic),
+    rawMessage: input.diagnostic.message,
+    ...(ruleId ? { ruleId } : {}),
+    ...(ruleUrl ? { ruleUrl } : {}),
+    severity: "warning",
+    snapshot: input.input.snapshot,
+    sourceTrust: "tool_output",
+    tool: "ruff",
+    toolRunId: input.input.toolRunId,
+  });
+}
+
 /** Parses JSON without throwing into the report builder. */
 function parseJson(
   value: string,
@@ -1565,6 +1705,36 @@ function categoryForEslintRule(
   return categoryForSeverity(severity);
 }
 
+/** Returns a product category for a Ruff rule code. */
+function categoryForRuffRule(ruleId: string | undefined): FindingCategory {
+  const normalizedRule = ruleId?.toUpperCase() ?? "";
+  if (normalizedRule.startsWith("S")) return "security";
+  if (normalizedRule.startsWith("PERF")) return "performance";
+  if (normalizedRule.startsWith("D")) return "documentation";
+  if (normalizedRule.startsWith("I")) return "style";
+  if (
+    normalizedRule.startsWith("E") ||
+    normalizedRule.startsWith("W") ||
+    normalizedRule.startsWith("Q") ||
+    normalizedRule.startsWith("COM") ||
+    normalizedRule.startsWith("ISC")
+  ) {
+    return "style";
+  }
+  if (
+    normalizedRule.startsWith("F") ||
+    normalizedRule.startsWith("B") ||
+    normalizedRule.startsWith("PLW") ||
+    normalizedRule.startsWith("PLE") ||
+    normalizedRule.startsWith("TRY") ||
+    normalizedRule.startsWith("RET")
+  ) {
+    return "correctness";
+  }
+
+  return "maintainability";
+}
+
 /** Returns a product category for a Biome diagnostic category. */
 function categoryForBiomeDiagnostic(
   category: string | undefined,
@@ -1613,6 +1783,14 @@ function biomeDiagnosticMetadata(
 ): Readonly<Record<string, unknown>> {
   return {
     ...(diagnostic.category ? { category: diagnostic.category } : {}),
+  };
+}
+
+/** Returns product-safe metadata for a Ruff diagnostic. */
+function ruffDiagnosticMetadata(diagnostic: RuffJsonDiagnostic): Readonly<Record<string, unknown>> {
+  const code = diagnostic.code?.trim();
+  return {
+    ...(code ? { code } : {}),
   };
 }
 
@@ -1755,6 +1933,9 @@ function toolCommandArgs(tool: StaticToolName, paths: readonly string[]): readon
   }
   if (tool === "biome") {
     return ["check", "--reporter=json", ...paths];
+  }
+  if (tool === "ruff") {
+    return ["check", "--output-format", "json", ...paths];
   }
   if (tool === "typescript") {
     return ["--noEmit", "--pretty", "false"];

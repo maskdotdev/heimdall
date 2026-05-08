@@ -1,4 +1,9 @@
-import { validPullRequestSnapshotFixture } from "@repo/contracts/fixtures/pull-request.fixture";
+import type { ChangedFile, PullRequestSnapshot } from "@repo/contracts";
+import {
+  validChangedFileFixture,
+  validDiffHunkFixture,
+  validPullRequestSnapshotFixture,
+} from "@repo/contracts/fixtures/pull-request.fixture";
 import {
   OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
@@ -36,6 +41,42 @@ const request = {
   createdAt: "2026-05-06T00:00:00.000Z",
 } satisfies StaticAnalysisRequest;
 
+const pythonChangedFile = {
+  ...validChangedFileFixture,
+  language: "python",
+  path: "src/app.py",
+  patch: "@@ -1,3 +1,5 @@",
+  hunks: [
+    {
+      ...validDiffHunkFixture,
+      lines: [
+        {
+          kind: "context",
+          content: "import os",
+          oldLine: 1,
+          newLine: 1,
+        },
+        {
+          kind: "addition",
+          content: "print(os.getcwd())",
+          newLine: 2,
+        },
+      ],
+    },
+  ],
+} satisfies ChangedFile;
+
+const pythonPullRequestSnapshotFixture = {
+  ...validPullRequestSnapshotFixture,
+  changedFiles: [pythonChangedFile],
+  changedFileCount: 1,
+} satisfies PullRequestSnapshot;
+
+const pythonRequest = {
+  ...request,
+  snapshot: pythonPullRequestSnapshotFixture,
+} satisfies StaticAnalysisRequest;
+
 describe("static analysis", () => {
   it("plans bounded changed-file tool runs", () => {
     const plan = planStaticAnalysis(request);
@@ -56,12 +97,18 @@ describe("static analysis", () => {
 
   it("plans runnable commands for supported local tools", () => {
     const biomePlan = planStaticAnalysis({ ...request, requestedTools: ["biome"] });
+    const ruffPlan = planStaticAnalysis({ ...pythonRequest, requestedTools: ["ruff"] });
     const typeScriptPlan = planStaticAnalysis({ ...request, requestedTools: ["typescript"] });
 
     expect(biomePlan.toolRuns[0]?.command).toMatchObject({
       args: ["check", "--reporter=json", "src/math.ts"],
       displayCommand: "biome check --reporter=json src/math.ts",
       executable: "biome",
+    });
+    expect(ruffPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["check", "--output-format", "json", "src/app.py"],
+      displayCommand: "ruff check --output-format json src/app.py",
+      executable: "ruff",
     });
     expect(typeScriptPlan.toolRuns[0]?.command).toMatchObject({
       args: ["--noEmit", "--pretty", "false"],
@@ -359,6 +406,60 @@ describe("static analysis", () => {
       severity: "error",
       sourceTrust: "tool_output",
       tool: "biome",
+    });
+  });
+
+  it("parses Ruff JSON output into normalized diagnostics", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: "",
+        stderrBytes: 0,
+        stdout: JSON.stringify([
+          {
+            code: "F401",
+            end_location: { column: 10, row: 2 },
+            filename: "/workspace/repo/src/app.py",
+            location: { column: 8, row: 2 },
+            message: "`os` imported but unused",
+            url: "https://docs.astral.sh/ruff/rules/unused-import",
+          },
+        ]),
+        stdoutBytes: 220,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: pythonPullRequestSnapshotFixture,
+      tool: "ruff",
+      toolRunId: "str_ruff",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      category: "correctness",
+      isOnChangedLine: true,
+      location: {
+        endColumn: 10,
+        endLine: 2,
+        filePath: "src/app.py",
+        originalPath: "/workspace/repo/src/app.py",
+        startColumn: 8,
+        startLine: 2,
+      },
+      metadata: { code: "F401" },
+      ruleId: "F401",
+      ruleUrl: "https://docs.astral.sh/ruff/rules/unused-import",
+      severity: "warning",
+      sourceTrust: "tool_output",
+      tool: "ruff",
     });
   });
 
