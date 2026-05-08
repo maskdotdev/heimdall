@@ -36,6 +36,7 @@ import {
   createIndexArtifactResolverFromEnvironment,
   createIndexArtifactStoreFromEnvironment,
   createIndexImportLimitsFromEnvironment,
+  createIndexImportRecordBatchSizeFromEnvironment,
   createS3CompatibleIndexArtifactResolver,
   createS3CompatibleIndexArtifactStore,
   importIndexArtifact,
@@ -426,6 +427,24 @@ describe("importIndexArtifact telemetry", () => {
       maxRecords: 2,
       maxSymbols: 5,
     });
+  });
+
+  it("creates bounded import record batch sizes from environment values", () => {
+    expect(
+      createIndexImportRecordBatchSizeFromEnvironment({
+        INDEX_IMPORT_RECORD_BATCH_SIZE: "64",
+      }),
+    ).toBe(64);
+    expect(
+      createIndexImportRecordBatchSizeFromEnvironment({
+        HEIMDALL_INDEX_IMPORT_RECORD_BATCH_SIZE: "999999",
+      }),
+    ).toBe(5000);
+    expect(
+      createIndexImportRecordBatchSizeFromEnvironment({
+        INDEX_IMPORT_RECORD_BATCH_SIZE: "not-a-number",
+      }),
+    ).toBe(1000);
   });
 
   it("records product-safe successful import metrics and spans", async () => {

@@ -173,6 +173,9 @@ export type IndexImportLimits = {
 /** Environment values used to configure index import limits. */
 export type IndexImportLimitsEnvironment = Readonly<Record<string, string | undefined>>;
 
+/** Environment values used to configure index import writer batching. */
+export type IndexImportRecordBatchSizeEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Options for importing a validated artifact. */
 export type ImportIndexArtifactOptions = {
   /** Database used for idempotent persistence. */
@@ -535,6 +538,17 @@ export function createIndexImportLimitsFromEnvironment(
   assignOptionalLimit(limits, "maxSymbols", env.INDEX_IMPORT_MAX_SYMBOLS);
 
   return resolveIndexImportLimits(limits);
+}
+
+/** Creates the normalized index import record batch size from environment variables. */
+export function createIndexImportRecordBatchSizeFromEnvironment(
+  env: IndexImportRecordBatchSizeEnvironment,
+): number {
+  return boundedImportRecordBatchSize(
+    parseOptionalPositiveInteger(
+      env.HEIMDALL_INDEX_IMPORT_RECORD_BATCH_SIZE ?? env.INDEX_IMPORT_RECORD_BATCH_SIZE,
+    ),
+  );
 }
 
 /** Reads a filesystem-backed index artifact from a file URL or local path. */
