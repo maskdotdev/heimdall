@@ -5,7 +5,7 @@ import type {
   ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
-import { and, desc, eq, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, ne, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
@@ -14,6 +14,7 @@ import {
   memoryFacts,
   publishedFindings,
   publishPlans,
+  repositories,
   reviewArtifacts,
   reviewRunMetrics,
   reviewRunStageEvents,
@@ -229,6 +230,76 @@ export type PublishedFindingForValidation = {
   readonly location: ValidatedFinding["location"];
 };
 
+/** Joined review finding row used by inspection APIs. */
+export type ReviewFindingInspectionRecord = {
+  /** Validated finding ID. */
+  readonly findingId: string;
+  /** Candidate finding ID. */
+  readonly candidateFindingId: string;
+  /** Review run ID. */
+  readonly reviewRunId: string;
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Validation decision. */
+  readonly decision: string;
+  /** Finding category. */
+  readonly category: string;
+  /** Finding severity. */
+  readonly severity: string;
+  /** Finding title. */
+  readonly title: string;
+  /** Finding body. */
+  readonly body: string;
+  /** Finding location. */
+  readonly location: unknown;
+  /** Finding evidence. */
+  readonly evidence: unknown;
+  /** Confidence score. */
+  readonly confidence: number;
+  /** Validation metadata. */
+  readonly validation: unknown;
+  /** Rank within the review. */
+  readonly rank: number | null;
+  /** Finding fingerprint. */
+  readonly fingerprint: string;
+  /** Finding metadata. */
+  readonly metadata: unknown;
+  /** Published finding ID. */
+  readonly publishedFindingId: string | null;
+  /** Publication provider. */
+  readonly publicationProvider: string | null;
+  /** Provider comment ID. */
+  readonly providerCommentId: string | null;
+  /** Provider review ID. */
+  readonly providerReviewId: string | null;
+  /** Provider check-run ID. */
+  readonly providerCheckRunId: string | null;
+  /** Publication status. */
+  readonly publicationStatus: string | null;
+  /** Publication timestamp. */
+  readonly publishedAt: Date | null;
+  /** Publication error payload. */
+  readonly publicationError: unknown;
+  /** Publication metadata. */
+  readonly publicationMetadata: unknown;
+};
+
+/** Input used to list validated review findings for inspection. */
+export type ListReviewFindingsInput = {
+  /** Review run that owns the findings. */
+  readonly reviewRunId: string;
+  /** Optional validation decision filter. */
+  readonly decision?: string | undefined;
+  /** Optional severity filter. */
+  readonly severity?: string | undefined;
+  /** Maximum number of rows to return. */
+  readonly limit?: number | undefined;
+};
+
 /** Query helper for review runs and candidate findings. */
 export class ReviewRepository {
   /** Creates a review query helper. */
@@ -317,6 +388,56 @@ export class ReviewRepository {
       .where(eq(validatedFindings.reviewRunId, reviewRunId));
 
     return rows.map(toValidatedFinding);
+  }
+
+  /** Lists validated findings with repository and publication state for inspection. */
+  public async listReviewFindings(
+    input: ListReviewFindingsInput,
+  ): Promise<readonly ReviewFindingInspectionRecord[]> {
+    const rows = await this.db
+      .select(reviewFindingInspectionSelect())
+      .from(validatedFindings)
+      .innerJoin(reviewRuns, eq(validatedFindings.reviewRunId, reviewRuns.reviewRunId))
+      .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+      .leftJoin(
+        publishedFindings,
+        eq(publishedFindings.validatedFindingId, validatedFindings.findingId),
+      )
+      .where(
+        and(
+          eq(validatedFindings.reviewRunId, input.reviewRunId),
+          ...reviewFindingListFilters(input),
+        ),
+      )
+      .orderBy(asc(validatedFindings.rank), asc(validatedFindings.findingId))
+      .limit(repositoryInspectionLimit(input.limit));
+
+    return rows;
+  }
+
+  /** Gets one inspection finding by validated, candidate, or published finding ID. */
+  public async getReviewFindingByAnyId(
+    findingId: string,
+  ): Promise<ReviewFindingInspectionRecord | undefined> {
+    const [row] = await this.db
+      .select(reviewFindingInspectionSelect())
+      .from(validatedFindings)
+      .innerJoin(reviewRuns, eq(validatedFindings.reviewRunId, reviewRuns.reviewRunId))
+      .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+      .leftJoin(
+        publishedFindings,
+        eq(publishedFindings.validatedFindingId, validatedFindings.findingId),
+      )
+      .where(
+        or(
+          eq(validatedFindings.findingId, findingId),
+          eq(validatedFindings.candidateFindingId, findingId),
+          eq(publishedFindings.findingId, findingId),
+        ),
+      )
+      .limit(1);
+
+    return row;
   }
 
   /** Lists previously published findings for a pull request. */
@@ -626,6 +747,64 @@ function repositorySuppressionMatchLimit(limit: number | undefined): number {
   }
   if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
     throw new Error("Suppression match list limit must be an integer between 1 and 500.");
+  }
+
+  return limit;
+}
+
+/** Selects joined review finding inspection columns. */
+function reviewFindingInspectionSelect() {
+  return {
+    body: validatedFindings.body,
+    candidateFindingId: validatedFindings.candidateFindingId,
+    category: validatedFindings.category,
+    confidence: validatedFindings.confidence,
+    decision: validatedFindings.decision,
+    evidence: validatedFindings.evidence,
+    findingId: validatedFindings.findingId,
+    fingerprint: validatedFindings.fingerprint,
+    location: validatedFindings.location,
+    metadata: validatedFindings.metadata,
+    orgId: repositories.orgId,
+    providerCheckRunId: publishedFindings.providerCheckRunId,
+    providerCommentId: publishedFindings.providerCommentId,
+    providerReviewId: publishedFindings.providerReviewId,
+    publicationError: publishedFindings.error,
+    publicationMetadata: publishedFindings.metadata,
+    publicationProvider: publishedFindings.provider,
+    publicationStatus: publishedFindings.status,
+    publishedAt: publishedFindings.publishedAt,
+    publishedFindingId: publishedFindings.findingId,
+    rank: validatedFindings.rank,
+    repoFullName: repositories.fullName,
+    repoId: reviewRuns.repoId,
+    reviewRunId: validatedFindings.reviewRunId,
+    severity: validatedFindings.severity,
+    title: validatedFindings.title,
+    validation: validatedFindings.validation,
+  };
+}
+
+/** Builds SQL predicates for review finding inspection. */
+function reviewFindingListFilters(input: ListReviewFindingsInput): SQL[] {
+  const conditions: SQL[] = [];
+  if (input.decision) {
+    conditions.push(eq(validatedFindings.decision, input.decision));
+  }
+  if (input.severity) {
+    conditions.push(eq(validatedFindings.severity, input.severity));
+  }
+
+  return conditions;
+}
+
+/** Validates a bounded review inspection list limit. */
+function repositoryInspectionLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return 100;
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error("Review inspection list limit must be an integer between 1 and 500.");
   }
 
   return limit;

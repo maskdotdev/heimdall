@@ -112,6 +112,90 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
       "fnd_review_repository_validated",
     ]);
 
+    await sql`
+      INSERT INTO published_findings (
+        finding_id,
+        validated_finding_id,
+        review_run_id,
+        provider,
+        provider_comment_id,
+        provider_review_id,
+        provider_check_run_id,
+        location,
+        title,
+        body,
+        published_at,
+        status,
+        error,
+        fingerprint,
+        metadata
+      )
+      VALUES (
+        'pub_review_repository_validated',
+        'fnd_review_repository_validated',
+        'rrn_review_repository',
+        'github',
+        'comment-review-repository',
+        'review-review-repository',
+        'check-review-repository',
+        ${JSON.stringify({ path: "src/service.ts", line: 12, side: "RIGHT" })}::jsonb,
+        'Validate user input before saving',
+        'The new code stores unvalidated input.',
+        '2026-05-08T00:04:00.000Z',
+        'published',
+        null,
+        'review-repository-fingerprint',
+        ${JSON.stringify({ provider: "fake" })}::jsonb
+      )
+    `;
+    const inspectionRows = await reviewRepository.listReviewFindings({
+      decision: "publish",
+      limit: 10,
+      reviewRunId: "rrn_review_repository",
+      severity: "medium",
+    });
+    expect(inspectionRows).toEqual([
+      expect.objectContaining({
+        candidateFindingId: "fnd_review_repository_candidate",
+        decision: "publish",
+        findingId: "fnd_review_repository_validated",
+        orgId: "org_review_repository_test",
+        providerCheckRunId: "check-review-repository",
+        providerCommentId: "comment-review-repository",
+        providerReviewId: "review-review-repository",
+        publicationMetadata: { provider: "fake" },
+        publicationProvider: "github",
+        publicationStatus: "published",
+        publishedAt: new Date("2026-05-08T00:04:00.000Z"),
+        publishedFindingId: "pub_review_repository_validated",
+        repoFullName: "acme/heimdall",
+        repoId: "repo_review_repository_test",
+        reviewRunId: "rrn_review_repository",
+        title: "Validate user input before saving",
+      }),
+    ]);
+    await expect(
+      reviewRepository.getReviewFindingByAnyId("pub_review_repository_validated"),
+    ).resolves.toMatchObject({
+      findingId: "fnd_review_repository_validated",
+      publishedFindingId: "pub_review_repository_validated",
+    });
+    await expect(
+      reviewRepository.getReviewFindingByAnyId("fnd_review_repository_candidate"),
+    ).resolves.toMatchObject({
+      candidateFindingId: "fnd_review_repository_candidate",
+      findingId: "fnd_review_repository_validated",
+    });
+    await expect(
+      reviewRepository.listReviewFindings({
+        limit: 0,
+        reviewRunId: "rrn_review_repository",
+      }),
+    ).rejects.toThrow(/limit must be an integer/u);
+    await expect(
+      reviewRepository.getReviewFindingByAnyId("fnd_review_repository_missing"),
+    ).resolves.toBeUndefined();
+
     await reviewRepository.insertSuppressionMatches([
       {
         candidateFindingId: "fnd_review_repository_candidate",

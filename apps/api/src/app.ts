@@ -111,12 +111,12 @@ import {
   orgs,
   ProviderInstallationRepository,
   providerInstallations,
-  publishedFindings,
   pullRequestSnapshots,
   quotaCounters,
   RepoRuleRepository,
   RepositoryRepository,
   type RepositorySuppressionMatchRecord,
+  type ReviewFindingInspectionRecord,
   ReviewRepository,
   repoRuleScope,
   repoRuleType,
@@ -130,7 +130,6 @@ import {
   userProviderAccounts,
   userSessions,
   users,
-  validatedFindings,
   webhookEvents,
 } from "@repo/db";
 import {
@@ -1352,62 +1351,7 @@ type AdminReviewFindingSummary = {
 };
 
 /** Joined finding row selected from review, repository, validation, and publication tables. */
-type AdminReviewFindingRow = {
-  /** Validated finding ID. */
-  readonly findingId: string;
-  /** Candidate finding ID. */
-  readonly candidateFindingId: string;
-  /** Review run ID. */
-  readonly reviewRunId: string;
-  /** Repository ID. */
-  readonly repoId: string;
-  /** Organization ID. */
-  readonly orgId: string;
-  /** Repository full name. */
-  readonly repoFullName: string;
-  /** Validation decision. */
-  readonly decision: string;
-  /** Finding category. */
-  readonly category: string;
-  /** Finding severity. */
-  readonly severity: string;
-  /** Finding title. */
-  readonly title: string;
-  /** Finding body. */
-  readonly body: string;
-  /** Finding location. */
-  readonly location: unknown;
-  /** Finding evidence. */
-  readonly evidence: unknown;
-  /** Confidence score. */
-  readonly confidence: number;
-  /** Validation metadata. */
-  readonly validation: unknown;
-  /** Rank within the review. */
-  readonly rank: number | null;
-  /** Finding fingerprint. */
-  readonly fingerprint: string;
-  /** Finding metadata. */
-  readonly metadata: unknown;
-  /** Published finding ID. */
-  readonly publishedFindingId: string | null;
-  /** Publication provider. */
-  readonly publicationProvider: string | null;
-  /** Provider comment ID. */
-  readonly providerCommentId: string | null;
-  /** Provider review ID. */
-  readonly providerReviewId: string | null;
-  /** Provider check-run ID. */
-  readonly providerCheckRunId: string | null;
-  /** Publication status. */
-  readonly publicationStatus: string | null;
-  /** Publication timestamp. */
-  readonly publishedAt: Date | null;
-  /** Publication error payload. */
-  readonly publicationError: unknown;
-  /** Publication metadata. */
-  readonly publicationMetadata: unknown;
-};
+type AdminReviewFindingRow = ReviewFindingInspectionRecord;
 
 /** Latest finding outcomes indexed by candidate and publication IDs. */
 type AdminReviewFindingOutcomeLookup = {
@@ -9886,20 +9830,12 @@ async function listReviewFindings(
   reviewRunId: string,
   query: AdminReviewFindingListQuery,
 ): Promise<readonly AdminReviewFindingSummary[]> {
-  const rows = await db
-    .select(adminReviewFindingSelect())
-    .from(validatedFindings)
-    .innerJoin(reviewRuns, eq(validatedFindings.reviewRunId, reviewRuns.reviewRunId))
-    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
-    .leftJoin(
-      publishedFindings,
-      eq(publishedFindings.validatedFindingId, validatedFindings.findingId),
-    )
-    .where(
-      and(eq(validatedFindings.reviewRunId, reviewRunId), ...reviewFindingListConditions(query)),
-    )
-    .orderBy(asc(validatedFindings.rank), asc(validatedFindings.findingId))
-    .limit(boundedListLimit(query.limit));
+  const rows = await new ReviewRepository(db).listReviewFindings({
+    decision: query.decision,
+    limit: boundedListLimit(query.limit),
+    reviewRunId,
+    severity: query.severity,
+  });
 
   const outcomes = await latestFindingOutcomesForRows(db, rows);
   return rows.map((row) => toAdminReviewFindingSummary(row, outcomes));
@@ -9910,23 +9846,7 @@ async function getReviewFinding(
   db: HeimdallDatabase,
   findingId: string,
 ): Promise<AdminReviewFindingSummary> {
-  const [row] = await db
-    .select(adminReviewFindingSelect())
-    .from(validatedFindings)
-    .innerJoin(reviewRuns, eq(validatedFindings.reviewRunId, reviewRuns.reviewRunId))
-    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
-    .leftJoin(
-      publishedFindings,
-      eq(publishedFindings.validatedFindingId, validatedFindings.findingId),
-    )
-    .where(
-      or(
-        eq(validatedFindings.findingId, findingId),
-        eq(validatedFindings.candidateFindingId, findingId),
-        eq(publishedFindings.findingId, findingId),
-      ),
-    )
-    .limit(1);
+  const row = await new ReviewRepository(db).getReviewFindingByAnyId(findingId);
 
   if (!row) {
     throw new AdminControlPlaneNotFoundError("finding", findingId);
@@ -9972,52 +9892,6 @@ async function listFindingFeedbackEvents(
     .orderBy(desc(feedbackEvents.receivedAt), asc(feedbackSignals.createdAt));
 
   return feedbackTimelineFromRows(rows);
-}
-
-/** Selects the joined columns used by review finding DTO mappers. */
-function adminReviewFindingSelect() {
-  return {
-    body: validatedFindings.body,
-    candidateFindingId: validatedFindings.candidateFindingId,
-    category: validatedFindings.category,
-    confidence: validatedFindings.confidence,
-    decision: validatedFindings.decision,
-    evidence: validatedFindings.evidence,
-    findingId: validatedFindings.findingId,
-    fingerprint: validatedFindings.fingerprint,
-    location: validatedFindings.location,
-    metadata: validatedFindings.metadata,
-    orgId: repositories.orgId,
-    providerCheckRunId: publishedFindings.providerCheckRunId,
-    providerCommentId: publishedFindings.providerCommentId,
-    providerReviewId: publishedFindings.providerReviewId,
-    publicationError: publishedFindings.error,
-    publicationMetadata: publishedFindings.metadata,
-    publicationProvider: publishedFindings.provider,
-    publicationStatus: publishedFindings.status,
-    publishedAt: publishedFindings.publishedAt,
-    publishedFindingId: publishedFindings.findingId,
-    rank: validatedFindings.rank,
-    repoFullName: repositories.fullName,
-    repoId: reviewRuns.repoId,
-    reviewRunId: validatedFindings.reviewRunId,
-    severity: validatedFindings.severity,
-    title: validatedFindings.title,
-    validation: validatedFindings.validation,
-  };
-}
-
-/** Builds SQL predicates for review finding discovery. */
-function reviewFindingListConditions(query: AdminReviewFindingListQuery): SQL[] {
-  const conditions: SQL[] = [];
-  if (query.decision) {
-    conditions.push(eq(validatedFindings.decision, query.decision));
-  }
-  if (query.severity) {
-    conditions.push(eq(validatedFindings.severity, query.severity));
-  }
-
-  return conditions;
 }
 
 /** Loads latest outcome rows for a set of finding rows. */
