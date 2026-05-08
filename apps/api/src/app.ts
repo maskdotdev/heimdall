@@ -174,7 +174,7 @@ import {
   actorHasPermission,
   adminCapabilities,
   createAdminSessionManager,
-  createLocalEnvSecretsManager,
+  createSecretsManagerFromEnvironment,
   isCsrfSafeMethod,
   isProductRole,
   type ProductActor,
@@ -3135,7 +3135,7 @@ class SecretResolvingGitHubWebhookHandler implements GitHubWebhookRequestHandler
 /** Resolves GitHub webhook secrets through SecretRef/SecretsManager configuration. */
 export async function resolveApiGitHubWebhookSecrets(
   env: ApiSecretEnvironment,
-  secretsManager: SecretsManager = createLocalEnvSecretsManager({ env }),
+  secretsManager: SecretsManager = createSecretsManagerFromEnvironment({ env }),
 ): Promise<ApiGitHubWebhookSecrets | undefined> {
   const currentRef = secretRefFromEnvironment({
     directValue: env.GITHUB_WEBHOOK_SECRET,
@@ -3238,7 +3238,7 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
   const traces = options.traces ?? createNoopTelemetrySpanRecorder();
   const secretEnvironment = options.secretEnvironment ?? process.env;
   const secretsManager =
-    options.secretsManager ?? createLocalEnvSecretsManager({ env: secretEnvironment });
+    options.secretsManager ?? createSecretsManagerFromEnvironment({ env: secretEnvironment });
   let environmentGithubWebhookHandler: GitHubWebhookRequestHandler | undefined;
   const getGithubWebhookHandler = () => {
     if (options.githubWebhookHandler) {

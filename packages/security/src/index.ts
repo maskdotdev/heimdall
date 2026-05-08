@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 /** Admin control-plane permissions enforced by API routes. */
 export const ADMIN_PERMISSIONS = [
@@ -339,6 +339,9 @@ export type RedactedString = {
   readonly matchKinds: readonly RedactionMatchKind[];
 };
 
+/** Environment record used by secret-manager factories. */
+export type SecretsManagerEnvironment = Readonly<Record<string, string | undefined>>;
+
 /** Boundary used to resolve secrets from provider-specific storage. */
 export type SecretsManager = {
   /** Resolves one secret reference for a service context. */
@@ -351,6 +354,7 @@ export type SecretsManager = {
 /** Error codes returned by secret resolution boundaries. */
 export type SecretResolutionErrorCode =
   | "secret_ref_invalid"
+  | "secret_provider_error"
   | "secret_provider_unsupported"
   | "secret_not_found";
 
@@ -378,7 +382,7 @@ export class SecretResolutionError extends Error {
 /** Options used to construct a local environment-backed secrets manager. */
 export type LocalEnvSecretsManagerOptions = {
   /** Environment map used to look up secret names. Defaults to process.env. */
-  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+  readonly env?: SecretsManagerEnvironment | undefined;
   /** Current time provider used by tests. */
   readonly now?: (() => Date) | undefined;
 };
@@ -386,7 +390,7 @@ export type LocalEnvSecretsManagerOptions = {
 /** Local development secrets manager that resolves `env:` secret references. */
 export class LocalEnvSecretsManager implements SecretsManager {
   /** Environment map used to look up secret names. */
-  private readonly env: Readonly<Record<string, string | undefined>>;
+  private readonly env: SecretsManagerEnvironment;
 
   /** Current time provider. */
   private readonly now: () => Date;
@@ -426,6 +430,198 @@ export class LocalEnvSecretsManager implements SecretsManager {
   }
 }
 
+/** AWS credentials used by the AWS Secrets Manager adapter. */
+export type AwsSecretsManagerCredentials = {
+  /** AWS access key ID used for SigV4 signing. */
+  readonly accessKeyId: string;
+  /** AWS secret access key used for SigV4 signing. */
+  readonly secretAccessKey: string;
+  /** Optional AWS session token for temporary credentials. */
+  readonly sessionToken?: string | undefined;
+};
+
+/** Minimal fetch response surface used by the AWS Secrets Manager adapter. */
+export type AwsSecretsManagerFetchResponse = {
+  /** Whether the HTTP status is in the successful range. */
+  readonly ok: boolean;
+  /** HTTP status code returned by AWS. */
+  readonly status: number;
+  /** Reads the response body as text. */
+  readonly text: () => Promise<string>;
+};
+
+/** Minimal fetch function used by the AWS Secrets Manager adapter. */
+export type AwsSecretsManagerFetch = (
+  url: string,
+  init: {
+    /** Request body sent to AWS. */
+    readonly body: string;
+    /** Request headers sent to AWS. */
+    readonly headers: Readonly<Record<string, string>>;
+    /** HTTP method used for the request. */
+    readonly method: "POST";
+  },
+) => Promise<AwsSecretsManagerFetchResponse>;
+
+/** Options used to construct an AWS Secrets Manager adapter. */
+export type AwsSecretsManagerOptions = {
+  /** AWS credentials used for SigV4 signing. */
+  readonly credentials: AwsSecretsManagerCredentials;
+  /** Optional endpoint override for tests and private endpoints. */
+  readonly endpoint?: string | undefined;
+  /** Fetch implementation used for AWS requests. Defaults to global fetch. */
+  readonly fetch?: AwsSecretsManagerFetch | undefined;
+  /** Current time provider used for deterministic SigV4 tests. */
+  readonly now?: (() => Date) | undefined;
+  /** AWS region that hosts Secrets Manager. */
+  readonly region: string;
+};
+
+/** Options used to construct an AWS adapter from environment variables. */
+export type AwsSecretsManagerFromEnvironmentOptions = {
+  /** Optional endpoint override for tests and private endpoints. */
+  readonly endpoint?: string | undefined;
+  /** Environment map used to read AWS configuration. Defaults to process.env. */
+  readonly env?: SecretsManagerEnvironment | undefined;
+  /** Fetch implementation used for AWS requests. Defaults to global fetch. */
+  readonly fetch?: AwsSecretsManagerFetch | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+};
+
+/** Options used to construct a provider-routing secrets manager from environment variables. */
+export type SecretsManagerFromEnvironmentOptions = {
+  /** Optional AWS endpoint override for tests and private endpoints. */
+  readonly awsEndpoint?: string | undefined;
+  /** Environment map used to read provider configuration. Defaults to process.env. */
+  readonly env?: SecretsManagerEnvironment | undefined;
+  /** Fetch implementation used for AWS requests. Defaults to global fetch. */
+  readonly fetch?: AwsSecretsManagerFetch | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+};
+
+/** AWS Secrets Manager adapter for production secret references. */
+export class AwsSecretsManager implements SecretsManager {
+  /** AWS credentials used for SigV4 signing. */
+  private readonly credentials: AwsSecretsManagerCredentials;
+  /** AWS Secrets Manager endpoint. */
+  private readonly endpoint: string;
+  /** Fetch implementation used for AWS requests. */
+  private readonly fetch: AwsSecretsManagerFetch;
+  /** Current time provider. */
+  private readonly now: () => Date;
+  /** AWS region that hosts Secrets Manager. */
+  private readonly region: string;
+
+  /** Creates an AWS Secrets Manager adapter. */
+  public constructor(options: AwsSecretsManagerOptions) {
+    const region = options.region.trim();
+    const accessKeyId = options.credentials.accessKeyId.trim();
+    const secretAccessKey = options.credentials.secretAccessKey.trim();
+    if (!region || !accessKeyId || !secretAccessKey) {
+      throw new SecretResolutionError(
+        "secret_provider_error",
+        "AWS Secrets Manager requires a non-empty region, access key ID, and secret access key.",
+      );
+    }
+
+    this.credentials = {
+      accessKeyId,
+      secretAccessKey,
+      ...(options.credentials.sessionToken?.trim()
+        ? { sessionToken: options.credentials.sessionToken.trim() }
+        : {}),
+    };
+    this.endpoint = options.endpoint ?? `https://secretsmanager.${region}.amazonaws.com/`;
+    this.fetch = options.fetch ?? defaultAwsSecretsManagerFetch;
+    this.now = options.now ?? (() => new Date());
+    this.region = region;
+  }
+
+  /** Resolves an `aws_secrets_manager:` reference through AWS Secrets Manager. */
+  public async resolveSecret(ref: SecretRef): Promise<ResolvedSecret> {
+    assertValidSecretRef(ref);
+    if (ref.provider !== "aws_secrets_manager") {
+      throw new SecretResolutionError(
+        "secret_provider_unsupported",
+        `AwsSecretsManager can only resolve aws_secrets_manager secret refs, not ${ref.provider}.`,
+        ref,
+      );
+    }
+
+    const body = JSON.stringify({
+      SecretId: ref.name,
+      ...(ref.version ? { VersionId: ref.version } : {}),
+    });
+    const signedRequest = createAwsSecretsManagerSignedRequest({
+      body,
+      credentials: this.credentials,
+      endpoint: this.endpoint,
+      now: this.now(),
+      region: this.region,
+    });
+    let response: AwsSecretsManagerFetchResponse;
+    try {
+      response = await this.fetch(this.endpoint, {
+        body,
+        headers: signedRequest.headers,
+        method: "POST",
+      });
+    } catch (error) {
+      if (error instanceof SecretResolutionError) {
+        throw error;
+      }
+      throw new SecretResolutionError(
+        "secret_provider_error",
+        `AWS Secrets Manager request failed with ${safeErrorName(error)}.`,
+        ref,
+      );
+    }
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw awsSecretResolutionError(response.status, responseText, ref);
+    }
+
+    const parsed = parseAwsGetSecretValueResponse(responseText, ref);
+    return {
+      ref,
+      resolvedAt: this.now().toISOString(),
+      value: parsed.value,
+      ...(parsed.version ? { version: parsed.version } : {}),
+    };
+  }
+}
+
+/** Secrets manager that routes refs to provider-specific managers. */
+export class ProviderRoutingSecretsManager implements SecretsManager {
+  /** Managers keyed by canonical secret ref provider. */
+  private readonly managers: Readonly<Partial<Record<SecretRefProvider, SecretsManager>>>;
+
+  /** Creates a provider-routing secrets manager. */
+  public constructor(managers: Readonly<Partial<Record<SecretRefProvider, SecretsManager>>>) {
+    this.managers = managers;
+  }
+
+  /** Resolves a secret through the manager registered for the ref provider. */
+  public async resolveSecret(
+    ref: SecretRef,
+    context?: SecretAccessContext,
+  ): Promise<ResolvedSecret> {
+    const validated = assertValidSecretRef(ref);
+    const manager = this.managers[validated.provider];
+    if (!manager) {
+      throw new SecretResolutionError(
+        "secret_provider_unsupported",
+        `Secret provider ${validated.provider} is not configured in this runtime.`,
+        validated,
+      );
+    }
+
+    return manager.resolveSecret(validated, context);
+  }
+}
+
 /** Secrets manager placeholder for production providers that are not wired yet. */
 export class UnsupportedProductionSecretsManager implements SecretsManager {
   /** Provider represented by this placeholder. */
@@ -452,6 +648,69 @@ export function createLocalEnvSecretsManager(
   options: LocalEnvSecretsManagerOptions = {},
 ): SecretsManager {
   return new LocalEnvSecretsManager(options);
+}
+
+/** Creates an AWS Secrets Manager-backed secrets manager. */
+export function createAwsSecretsManager(options: AwsSecretsManagerOptions): SecretsManager {
+  return new AwsSecretsManager(options);
+}
+
+/** Creates an AWS Secrets Manager adapter when environment configuration is complete. */
+export function createAwsSecretsManagerFromEnvironment(
+  options: AwsSecretsManagerFromEnvironmentOptions = {},
+): SecretsManager | undefined {
+  const env = options.env ?? process.env;
+  const region =
+    optionalEnvironmentString(env.HEIMDALL_AWS_SECRETS_MANAGER_REGION) ??
+    optionalEnvironmentString(env.AWS_SECRETS_MANAGER_REGION) ??
+    optionalEnvironmentString(env.AWS_REGION) ??
+    optionalEnvironmentString(env.AWS_DEFAULT_REGION);
+  const accessKeyId = optionalEnvironmentString(env.AWS_ACCESS_KEY_ID);
+  const secretAccessKey = optionalEnvironmentString(env.AWS_SECRET_ACCESS_KEY);
+  if (!region || !accessKeyId || !secretAccessKey) {
+    return undefined;
+  }
+
+  const endpoint =
+    options.endpoint ??
+    optionalEnvironmentString(env.HEIMDALL_AWS_SECRETS_MANAGER_ENDPOINT) ??
+    optionalEnvironmentString(env.AWS_SECRETS_MANAGER_ENDPOINT);
+  const sessionToken = optionalEnvironmentString(env.AWS_SESSION_TOKEN);
+  return createAwsSecretsManager({
+    credentials: {
+      accessKeyId,
+      secretAccessKey,
+      ...(sessionToken ? { sessionToken } : {}),
+    },
+    ...(endpoint ? { endpoint } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.now ? { now: options.now } : {}),
+    region,
+  });
+}
+
+/** Creates a provider-routing secrets manager from runtime environment variables. */
+export function createSecretsManagerFromEnvironment(
+  options: SecretsManagerFromEnvironmentOptions = {},
+): SecretsManager {
+  const env = options.env ?? process.env;
+  const managers: Partial<Record<SecretRefProvider, SecretsManager>> = {
+    env: createLocalEnvSecretsManager({
+      env,
+      ...(options.now ? { now: options.now } : {}),
+    }),
+  };
+  const awsSecretsManager = createAwsSecretsManagerFromEnvironment({
+    ...(options.awsEndpoint ? { endpoint: options.awsEndpoint } : {}),
+    env,
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
+  if (awsSecretsManager) {
+    managers.aws_secrets_manager = awsSecretsManager;
+  }
+
+  return new ProviderRoutingSecretsManager(managers);
 }
 
 /** Creates a production provider placeholder that rejects resolution. */
@@ -1902,6 +2161,256 @@ function parseIdentityAssertion(encodedAssertion: string): AdminIdentityAssertio
 /** Returns a canonical secret provider for a user-facing provider string. */
 function secretProviderFromString(value: string): SecretRefProvider | undefined {
   return SECRET_REF_PROVIDER_ALIASES[value.trim().toLowerCase()];
+}
+
+/** Returns a fetch implementation backed by the runtime global fetch function. */
+async function defaultAwsSecretsManagerFetch(
+  url: string,
+  init: {
+    readonly body: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly method: "POST";
+  },
+): Promise<AwsSecretsManagerFetchResponse> {
+  if (typeof fetch !== "function") {
+    throw new SecretResolutionError(
+      "secret_provider_unsupported",
+      "AWS Secrets Manager resolution requires a runtime fetch implementation.",
+    );
+  }
+
+  const response = await fetch(url, {
+    body: init.body,
+    headers: init.headers,
+    method: init.method,
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
+  };
+}
+
+/** Signed AWS Secrets Manager request data. */
+type AwsSecretsManagerSignedRequest = {
+  /** Headers required for the signed AWS request. */
+  readonly headers: Readonly<Record<string, string>>;
+};
+
+/** Input used to create a signed AWS Secrets Manager request. */
+type CreateAwsSecretsManagerSignedRequestInput = {
+  /** JSON request body. */
+  readonly body: string;
+  /** AWS credentials used for signing. */
+  readonly credentials: AwsSecretsManagerCredentials;
+  /** AWS endpoint URL. */
+  readonly endpoint: string;
+  /** Request time used for SigV4. */
+  readonly now: Date;
+  /** AWS region used for SigV4 scope. */
+  readonly region: string;
+};
+
+/** Creates SigV4 headers for one AWS Secrets Manager JSON request. */
+function createAwsSecretsManagerSignedRequest(
+  input: CreateAwsSecretsManagerSignedRequestInput,
+): AwsSecretsManagerSignedRequest {
+  const endpoint = new URL(input.endpoint);
+  const { amzDate, dateStamp } = awsRequestDateParts(input.now);
+  const scope = `${dateStamp}/${input.region}/secretsmanager/aws4_request`;
+  const payloadHash = sha256Hex(input.body);
+  const headers: Record<string, string> = {
+    "content-type": "application/x-amz-json-1.1",
+    host: endpoint.host,
+    "x-amz-date": amzDate,
+    "x-amz-target": "secretsmanager.GetSecretValue",
+  };
+  if (input.credentials.sessionToken) {
+    headers["x-amz-security-token"] = input.credentials.sessionToken;
+  }
+
+  const signedHeaders = Object.keys(headers).sort();
+  const canonicalRequest = [
+    "POST",
+    awsCanonicalUri(endpoint),
+    awsCanonicalQueryString(endpoint),
+    signedHeaders.map((key) => `${key}:${awsCanonicalHeaderValue(headers[key] ?? "")}`).join("\n"),
+    "",
+    signedHeaders.join(";"),
+    payloadHash,
+  ].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, sha256Hex(canonicalRequest)].join("\n");
+  const signature = createHmac("sha256", awsSigningKey(input.credentials.secretAccessKey, input))
+    .update(stringToSign)
+    .digest("hex");
+  headers.authorization = [
+    `AWS4-HMAC-SHA256 Credential=${input.credentials.accessKeyId}/${scope}`,
+    `SignedHeaders=${signedHeaders.join(";")}`,
+    `Signature=${signature}`,
+  ].join(", ");
+
+  return { headers };
+}
+
+/** Returns the AWS date stamp and timestamp for SigV4 signing. */
+function awsRequestDateParts(date: Date): { readonly amzDate: string; readonly dateStamp: string } {
+  const iso = date.toISOString();
+  const dateStamp = iso.slice(0, 10).replaceAll("-", "");
+  const timeStamp = iso.slice(11, 19).replaceAll(":", "");
+  return { amzDate: `${dateStamp}T${timeStamp}Z`, dateStamp };
+}
+
+/** Returns the canonical URI used in an AWS SigV4 canonical request. */
+function awsCanonicalUri(endpoint: URL): string {
+  return endpoint.pathname.length > 0 ? endpoint.pathname : "/";
+}
+
+/** Returns the canonical query string used in an AWS SigV4 canonical request. */
+function awsCanonicalQueryString(endpoint: URL): string {
+  return [...endpoint.searchParams.entries()]
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey === rightKey ? leftValue.localeCompare(rightValue) : leftKey.localeCompare(rightKey),
+    )
+    .map(([key, value]) => `${awsUriEncode(key)}=${awsUriEncode(value)}`)
+    .join("&");
+}
+
+/** Encodes a URI part using AWS SigV4 percent-encoding rules. */
+function awsUriEncode(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/** Normalizes one HTTP header value for AWS SigV4 canonicalization. */
+function awsCanonicalHeaderValue(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+/** Creates the derived AWS SigV4 signing key. */
+function awsSigningKey(
+  secretAccessKey: string,
+  input: Pick<CreateAwsSecretsManagerSignedRequestInput, "now" | "region">,
+): Buffer {
+  const { dateStamp } = awsRequestDateParts(input.now);
+  const dateKey = awsHmac(`AWS4${secretAccessKey}`, dateStamp);
+  const regionKey = awsHmac(dateKey, input.region);
+  const serviceKey = awsHmac(regionKey, "secretsmanager");
+  return awsHmac(serviceKey, "aws4_request");
+}
+
+/** Returns an AWS SigV4 HMAC digest. */
+function awsHmac(key: string | Buffer, value: string): Buffer {
+  return createHmac("sha256", key).update(value).digest();
+}
+
+/** Returns a SHA-256 digest as lowercase hexadecimal text. */
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+/** Product-safe parsed AWS GetSecretValue response data. */
+type ParsedAwsSecretValueResponse = {
+  /** Resolved secret value. */
+  readonly value: string;
+  /** Provider version identifier when returned by AWS. */
+  readonly version?: string | undefined;
+};
+
+/** Parses an AWS GetSecretValue response body into product-safe resolved data. */
+function parseAwsGetSecretValueResponse(
+  responseText: string,
+  ref: SecretRef,
+): ParsedAwsSecretValueResponse {
+  const record = parseJsonRecord(responseText);
+  if (!record) {
+    throw new SecretResolutionError(
+      "secret_provider_error",
+      "AWS Secrets Manager returned an invalid response envelope.",
+      ref,
+    );
+  }
+
+  const secretString = stringField(record, "SecretString");
+  const secretBinary = stringField(record, "SecretBinary");
+  const version = stringField(record, "VersionId") ?? ref.version;
+  if (secretString) {
+    return {
+      value: secretString,
+      ...(version ? { version } : {}),
+    };
+  }
+  if (secretBinary) {
+    return {
+      value: Buffer.from(secretBinary, "base64").toString("utf8"),
+      ...(version ? { version } : {}),
+    };
+  }
+
+  throw new SecretResolutionError(
+    "secret_provider_error",
+    "AWS Secrets Manager response did not include a secret value.",
+    ref,
+  );
+}
+
+/** Creates a product-safe secret resolution error from an AWS error response. */
+function awsSecretResolutionError(
+  status: number,
+  responseText: string,
+  ref: SecretRef,
+): SecretResolutionError {
+  const record = parseJsonRecord(responseText);
+  const errorType = normalizeAwsErrorType(
+    stringField(record, "__type") ?? stringField(record, "code"),
+  );
+  if (errorType === "ResourceNotFoundException") {
+    return new SecretResolutionError(
+      "secret_not_found",
+      `AWS Secrets Manager could not find secret ref ${secretRefLabel(ref)}.`,
+      ref,
+    );
+  }
+
+  return new SecretResolutionError(
+    "secret_provider_error",
+    `AWS Secrets Manager returned HTTP ${status}${errorType ? ` (${errorType})` : ""}.`,
+    ref,
+  );
+}
+
+/** Parses JSON text as an object record. */
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Normalizes AWS JSON error type names. */
+function normalizeAwsErrorType(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const hashIndex = value.lastIndexOf("#");
+  const withoutNamespace = hashIndex === -1 ? value : value.slice(hashIndex + 1);
+  const colonIndex = withoutNamespace.indexOf(":");
+  const normalized = colonIndex === -1 ? withoutNamespace : withoutNamespace.slice(0, colonIndex);
+  return normalized.trim() || undefined;
+}
+
+/** Reads a non-empty environment value. */
+function optionalEnvironmentString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/** Returns a product-safe error class name. */
+function safeErrorName(error: unknown): string {
+  return error instanceof Error && error.name.trim() ? error.name : "UnknownError";
 }
 
 /** Returns unique literal secrets that are long enough to redact safely. */

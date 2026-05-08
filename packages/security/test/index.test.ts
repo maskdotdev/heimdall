@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  type AwsSecretsManagerFetch,
   actorCanAccessRepo,
   COMPLIANCE_CONTROL_IDS,
   COMPLIANCE_EVIDENCE_TYPES,
   classifyArtifact,
   createAdminSessionManager,
+  createAwsSecretsManager,
   createComplianceEvidenceDescriptor,
   createLocalEnvSecretsManager,
   createMemorySecurityEventSink,
   createNoopSecurityEventSink,
+  createSecretsManagerFromEnvironment,
   createSecurityEvent,
   createUnsupportedProductionSecretsManager,
   DEFAULT_RETENTION_POLICY,
@@ -290,6 +293,159 @@ describe("admin security", () => {
 
     await expect(
       manager.resolveSecret(parseSecretRef("aws:prod/github-app/private-key")),
+    ).rejects.toMatchObject({
+      code: "secret_provider_unsupported",
+    });
+  });
+
+  it("resolves AWS Secrets Manager string secrets with signed requests", async () => {
+    let requestedUrl: string | undefined;
+    let requestedInit: Parameters<AwsSecretsManagerFetch>[1] | undefined;
+    const fetch: AwsSecretsManagerFetch = async (url, init) => {
+      requestedUrl = url;
+      requestedInit = init;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            SecretString: "aws-secret-value",
+            VersionId: "version-1",
+          }),
+      };
+    };
+    const manager = createAwsSecretsManager({
+      credentials: {
+        accessKeyId: "AKIDEXAMPLE",
+        secretAccessKey: "secret-access-key",
+        sessionToken: "session-token",
+      },
+      fetch,
+      now: () => new Date("2026-05-08T14:15:16.000Z"),
+      region: "us-east-1",
+    });
+
+    const resolved = await manager.resolveSecret(parseSecretRef("aws:prod/github-app/private-key"));
+
+    expect(resolved).toEqual({
+      ref: {
+        name: "prod/github-app/private-key",
+        provider: "aws_secrets_manager",
+      },
+      resolvedAt: "2026-05-08T14:15:16.000Z",
+      value: "aws-secret-value",
+      version: "version-1",
+    });
+    if (!requestedInit) {
+      throw new Error("Expected AWS Secrets Manager request.");
+    }
+    expect(requestedUrl).toBe("https://secretsmanager.us-east-1.amazonaws.com/");
+    expect(JSON.parse(requestedInit.body)).toEqual({
+      SecretId: "prod/github-app/private-key",
+    });
+    expect(requestedInit.headers["x-amz-date"]).toBe("20260508T141516Z");
+    expect(requestedInit.headers["x-amz-target"]).toBe("secretsmanager.GetSecretValue");
+    expect(requestedInit.headers["x-amz-security-token"]).toBe("session-token");
+    expect(requestedInit.headers.authorization).toContain(
+      "Credential=AKIDEXAMPLE/20260508/us-east-1/secretsmanager/aws4_request",
+    );
+    expect(requestedInit.headers.authorization).toContain(
+      "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target",
+    );
+    expect(requestedInit.headers.authorization).toContain("Signature=");
+  });
+
+  it("maps AWS Secrets Manager provider failures to product-safe resolution errors", async () => {
+    const fetchNotFound: AwsSecretsManagerFetch = async () => ({
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({
+          __type: "ResourceNotFoundException",
+          message: "secret not found",
+        }),
+    });
+    const notFoundManager = createAwsSecretsManager({
+      credentials: {
+        accessKeyId: "AKIDEXAMPLE",
+        secretAccessKey: "secret-access-key",
+      },
+      fetch: fetchNotFound,
+      now: () => new Date("2026-05-08T14:15:16.000Z"),
+      region: "us-east-1",
+    });
+
+    await expect(
+      notFoundManager.resolveSecret(parseSecretRef("aws:prod/missing")),
+    ).rejects.toMatchObject({
+      code: "secret_not_found",
+    });
+
+    const fetchDenied: AwsSecretsManagerFetch = async () => ({
+      ok: false,
+      status: 403,
+      text: async () =>
+        JSON.stringify({
+          __type: "com.amazonaws.secretsmanager#AccessDeniedException",
+          message: "access denied",
+        }),
+    });
+    const deniedManager = createAwsSecretsManager({
+      credentials: {
+        accessKeyId: "AKIDEXAMPLE",
+        secretAccessKey: "secret-access-key",
+      },
+      fetch: fetchDenied,
+      now: () => new Date("2026-05-08T14:15:16.000Z"),
+      region: "us-east-1",
+    });
+
+    await expect(
+      deniedManager.resolveSecret(parseSecretRef("aws:prod/denied")),
+    ).rejects.toMatchObject({
+      code: "secret_provider_error",
+    });
+  });
+
+  it("routes environment and AWS secret refs from runtime environment configuration", async () => {
+    const fetch: AwsSecretsManagerFetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          SecretBinary: Buffer.from("aws-binary-secret", "utf8").toString("base64"),
+          VersionId: "binary-version",
+        }),
+    });
+    const manager = createSecretsManagerFromEnvironment({
+      env: {
+        AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
+        AWS_REGION: "us-east-1",
+        AWS_SECRET_ACCESS_KEY: "secret-access-key",
+        LOCAL_SECRET: "local-secret",
+      },
+      fetch,
+      now: () => new Date("2026-05-08T14:15:16.000Z"),
+    });
+
+    await expect(manager.resolveSecret(parseSecretRef("env:LOCAL_SECRET"))).resolves.toMatchObject({
+      value: "local-secret",
+    });
+    await expect(
+      manager.resolveSecret(parseSecretRef("aws:prod/binary-secret")),
+    ).resolves.toMatchObject({
+      value: "aws-binary-secret",
+      version: "binary-version",
+    });
+
+    const envOnlyManager = createSecretsManagerFromEnvironment({
+      env: {
+        LOCAL_SECRET: "local-secret",
+      },
+      fetch,
+    });
+    await expect(
+      envOnlyManager.resolveSecret(parseSecretRef("aws:prod/missing-config")),
     ).rejects.toMatchObject({
       code: "secret_provider_unsupported",
     });
