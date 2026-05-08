@@ -534,6 +534,53 @@ export type GcpSecretManagerFromEnvironmentOptions = {
   readonly now?: (() => Date) | undefined;
 };
 
+/** Minimal fetch response surface used by the Vault adapter. */
+export type VaultSecretsManagerFetchResponse = {
+  /** Whether the HTTP status is in the successful range. */
+  readonly ok: boolean;
+  /** HTTP status code returned by Vault. */
+  readonly status: number;
+  /** Reads the response body as text. */
+  readonly text: () => Promise<string>;
+};
+
+/** Minimal fetch function used by the Vault adapter. */
+export type VaultSecretsManagerFetch = (
+  url: string,
+  init: {
+    /** Request headers sent to Vault. */
+    readonly headers: Readonly<Record<string, string>>;
+    /** HTTP method used for the request. */
+    readonly method: "GET";
+  },
+) => Promise<VaultSecretsManagerFetchResponse>;
+
+/** Options used to construct a Vault secrets adapter. */
+export type VaultSecretsManagerOptions = {
+  /** Vault API endpoint such as `https://vault.example.com`. */
+  readonly endpoint: string;
+  /** Fetch implementation used for Vault requests. Defaults to global fetch. */
+  readonly fetch?: VaultSecretsManagerFetch | undefined;
+  /** Optional Vault Enterprise namespace. */
+  readonly namespace?: string | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+  /** Vault token used to read the configured secret path. */
+  readonly token: string;
+};
+
+/** Options used to construct a Vault adapter from environment variables. */
+export type VaultSecretsManagerFromEnvironmentOptions = {
+  /** Optional endpoint override for tests and private endpoints. */
+  readonly endpoint?: string | undefined;
+  /** Environment map used to read Vault configuration. Defaults to process.env. */
+  readonly env?: SecretsManagerEnvironment | undefined;
+  /** Fetch implementation used for Vault requests. Defaults to global fetch. */
+  readonly fetch?: VaultSecretsManagerFetch | undefined;
+  /** Current time provider used by tests. */
+  readonly now?: (() => Date) | undefined;
+};
+
 /** Options used to construct a provider-routing secrets manager from environment variables. */
 export type SecretsManagerFromEnvironmentOptions = {
   /** Optional AWS endpoint override for tests and private endpoints. */
@@ -548,6 +595,10 @@ export type SecretsManagerFromEnvironmentOptions = {
   readonly gcpFetch?: GcpSecretManagerFetch | undefined;
   /** Current time provider used by tests. */
   readonly now?: (() => Date) | undefined;
+  /** Optional Vault endpoint override for tests and private endpoints. */
+  readonly vaultEndpoint?: string | undefined;
+  /** Fetch implementation used for Vault requests. Defaults to global fetch. */
+  readonly vaultFetch?: VaultSecretsManagerFetch | undefined;
 };
 
 /** AWS Secrets Manager adapter for production secret references. */
@@ -715,6 +766,79 @@ export class GcpSecretManager implements SecretsManager {
   }
 }
 
+/** Vault adapter for production secret references. */
+export class VaultSecretsManager implements SecretsManager {
+  /** Vault API endpoint. */
+  private readonly endpoint: string;
+  /** Fetch implementation used for provider requests. */
+  private readonly fetch: VaultSecretsManagerFetch;
+  /** Optional Vault Enterprise namespace. */
+  private readonly namespace: string | undefined;
+  /** Current time provider. */
+  private readonly now: () => Date;
+  /** Vault token used for reads. */
+  private readonly token: string;
+
+  /** Creates a Vault secrets adapter. */
+  public constructor(options: VaultSecretsManagerOptions) {
+    const endpoint = options.endpoint.trim();
+    const token = options.token.trim();
+    if (!endpoint || !token) {
+      throw new SecretResolutionError(
+        "secret_provider_error",
+        "Vault secrets resolution requires a non-empty endpoint and token.",
+      );
+    }
+
+    this.endpoint = endpoint;
+    this.fetch = options.fetch ?? defaultVaultSecretsManagerFetch;
+    this.namespace = options.namespace?.trim() || undefined;
+    this.now = options.now ?? (() => new Date());
+    this.token = token;
+  }
+
+  /** Resolves a `vault:` reference through the Vault HTTP API. */
+  public async resolveSecret(ref: SecretRef): Promise<ResolvedSecret> {
+    assertValidSecretRef(ref);
+    if (ref.provider !== "vault") {
+      throw new SecretResolutionError(
+        "secret_provider_unsupported",
+        `VaultSecretsManager can only resolve vault secret refs, not ${ref.provider}.`,
+        ref,
+      );
+    }
+
+    let response: VaultSecretsManagerFetchResponse;
+    try {
+      response = await this.fetch(vaultSecretReadUrl(this.endpoint, ref), {
+        headers: vaultSecretReadHeaders(this.token, this.namespace),
+        method: "GET",
+      });
+    } catch (error) {
+      if (error instanceof SecretResolutionError) {
+        throw error;
+      }
+      throw new SecretResolutionError(
+        "secret_provider_error",
+        `Vault secret request failed with ${safeErrorName(error)}.`,
+        ref,
+      );
+    }
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw vaultSecretResolutionError(response.status, ref);
+    }
+
+    const parsed = parseVaultSecretReadResponse(responseText, ref);
+    return {
+      ref,
+      resolvedAt: this.now().toISOString(),
+      value: parsed.value,
+      ...(parsed.version ? { version: parsed.version } : {}),
+    };
+  }
+}
+
 /** Secrets manager that routes refs to provider-specific managers. */
 export class ProviderRoutingSecretsManager implements SecretsManager {
   /** Managers keyed by canonical secret ref provider. */
@@ -782,6 +906,11 @@ export function createGcpSecretManager(options: GcpSecretManagerOptions): Secret
   return new GcpSecretManager(options);
 }
 
+/** Creates a Vault-backed secrets manager. */
+export function createVaultSecretsManager(options: VaultSecretsManagerOptions): SecretsManager {
+  return new VaultSecretsManager(options);
+}
+
 /** Creates an AWS Secrets Manager adapter when environment configuration is complete. */
 export function createAwsSecretsManagerFromEnvironment(
   options: AwsSecretsManagerFromEnvironmentOptions = {},
@@ -842,6 +971,34 @@ export function createGcpSecretManagerFromEnvironment(
   });
 }
 
+/** Creates a Vault adapter when environment configuration is complete. */
+export function createVaultSecretsManagerFromEnvironment(
+  options: VaultSecretsManagerFromEnvironmentOptions = {},
+): SecretsManager | undefined {
+  const env = options.env ?? process.env;
+  const endpoint =
+    options.endpoint ??
+    optionalEnvironmentString(env.HEIMDALL_VAULT_ADDR) ??
+    optionalEnvironmentString(env.VAULT_ADDR);
+  const token =
+    optionalEnvironmentString(env.HEIMDALL_VAULT_TOKEN) ??
+    optionalEnvironmentString(env.VAULT_TOKEN);
+  if (!endpoint || !token) {
+    return undefined;
+  }
+
+  const namespace =
+    optionalEnvironmentString(env.HEIMDALL_VAULT_NAMESPACE) ??
+    optionalEnvironmentString(env.VAULT_NAMESPACE);
+  return createVaultSecretsManager({
+    endpoint,
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(namespace ? { namespace } : {}),
+    ...(options.now ? { now: options.now } : {}),
+    token,
+  });
+}
+
 /** Creates a provider-routing secrets manager from runtime environment variables. */
 export function createSecretsManagerFromEnvironment(
   options: SecretsManagerFromEnvironmentOptions = {},
@@ -870,6 +1027,15 @@ export function createSecretsManagerFromEnvironment(
   });
   if (gcpSecretsManager) {
     managers.gcp_secret_manager = gcpSecretsManager;
+  }
+  const vaultSecretsManager = createVaultSecretsManagerFromEnvironment({
+    env,
+    ...(options.vaultEndpoint ? { endpoint: options.vaultEndpoint } : {}),
+    ...(options.vaultFetch ? { fetch: options.vaultFetch } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
+  if (vaultSecretsManager) {
+    managers.vault = vaultSecretsManager;
   }
 
   return new ProviderRoutingSecretsManager(managers);
@@ -2379,6 +2545,32 @@ async function defaultGcpSecretManagerFetch(
   };
 }
 
+/** Returns a fetch implementation backed by the runtime global fetch function. */
+async function defaultVaultSecretsManagerFetch(
+  url: string,
+  init: {
+    readonly headers: Readonly<Record<string, string>>;
+    readonly method: "GET";
+  },
+): Promise<VaultSecretsManagerFetchResponse> {
+  if (typeof fetch !== "function") {
+    throw new SecretResolutionError(
+      "secret_provider_unsupported",
+      "Vault secret resolution requires a runtime fetch implementation.",
+    );
+  }
+
+  const response = await fetch(url, {
+    headers: init.headers,
+    method: init.method,
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
+  };
+}
+
 /** Signed AWS Secrets Manager request data. */
 type AwsSecretsManagerSignedRequest = {
   /** Headers required for the signed AWS request. */
@@ -2666,6 +2858,132 @@ function gcpSecretResolutionError(
 function gcpVersionFromResourceName(name: string | undefined): string | undefined {
   const match = /^projects\/[^/]+\/secrets\/[^/]+\/versions\/(?<version>[^/]+)$/u.exec(name ?? "");
   return match?.groups?.version;
+}
+
+/** Product-safe parsed Vault read response data. */
+type ParsedVaultSecretReadResponse = {
+  /** Resolved secret value. */
+  readonly value: string;
+  /** Provider version identifier when returned by Vault. */
+  readonly version?: string | undefined;
+};
+
+/** Builds the Vault read URL for one secret reference. */
+function vaultSecretReadUrl(endpoint: string, ref: SecretRef): string {
+  const path = ref.name.trim().replace(/^\/+|\/+$/gu, "");
+  if (!path) {
+    throw new SecretResolutionError(
+      "secret_ref_invalid",
+      "Vault secret path must not be empty.",
+      ref,
+    );
+  }
+
+  const normalizedEndpoint = endpoint.replace(/\/+$/u, "");
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const url = new URL(`${normalizedEndpoint}/v1/${encodedPath}`);
+  if (ref.version) {
+    url.searchParams.set("version", ref.version);
+  }
+  return url.toString();
+}
+
+/** Creates product-safe Vault read request headers. */
+function vaultSecretReadHeaders(
+  token: string,
+  namespace: string | undefined,
+): Readonly<Record<string, string>> {
+  return {
+    accept: "application/json",
+    ...(namespace ? { "x-vault-namespace": namespace } : {}),
+    "x-vault-token": token,
+  };
+}
+
+/** Parses a Vault read response body into product-safe resolved data. */
+function parseVaultSecretReadResponse(
+  responseText: string,
+  ref: SecretRef,
+): ParsedVaultSecretReadResponse {
+  const record = parseJsonRecord(responseText);
+  const data = asRecord(record?.data);
+  if (!record || !data) {
+    throw new SecretResolutionError(
+      "secret_provider_error",
+      "Vault returned an invalid response envelope.",
+      ref,
+    );
+  }
+
+  const kvV2Data = asRecord(data.data);
+  if (kvV2Data) {
+    const metadata = asRecord(data.metadata);
+    const version = vaultVersionFromMetadata(metadata, ref);
+    return {
+      value: vaultSecretStringValue(kvV2Data, ref),
+      ...(version ? { version } : {}),
+    };
+  }
+
+  return {
+    value: vaultSecretStringValue(data, ref),
+    ...(ref.version ? { version: ref.version } : {}),
+  };
+}
+
+/** Extracts a single string secret value from a Vault data object. */
+function vaultSecretStringValue(record: Record<string, unknown>, ref: SecretRef): string {
+  const commonFieldValue =
+    stringField(record, "value") ??
+    stringField(record, "secret") ??
+    stringField(record, "private_key") ??
+    stringField(record, "api_key") ??
+    stringField(record, "token");
+  if (commonFieldValue) {
+    return commonFieldValue;
+  }
+
+  const stringValues = Object.values(record).filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  const [onlyValue] = stringValues;
+  if (stringValues.length === 1 && onlyValue) {
+    return onlyValue;
+  }
+
+  throw new SecretResolutionError(
+    "secret_provider_error",
+    "Vault response did not include a single string secret value.",
+    ref,
+  );
+}
+
+/** Reads a Vault KV v2 version from response metadata. */
+function vaultVersionFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  ref: SecretRef,
+): string | undefined {
+  const version = metadata?.version;
+  if (typeof version === "number" && Number.isInteger(version) && version > 0) {
+    return String(version);
+  }
+  if (typeof version === "string" && version.trim()) {
+    return version.trim();
+  }
+  return ref.version;
+}
+
+/** Creates a product-safe secret resolution error from a Vault error response. */
+function vaultSecretResolutionError(status: number, ref: SecretRef): SecretResolutionError {
+  if (status === 404) {
+    return new SecretResolutionError(
+      "secret_not_found",
+      `Vault could not find secret ref ${secretRefLabel(ref)}.`,
+      ref,
+    );
+  }
+
+  return new SecretResolutionError("secret_provider_error", `Vault returned HTTP ${status}.`, ref);
 }
 
 /** Parses JSON text as an object record. */
