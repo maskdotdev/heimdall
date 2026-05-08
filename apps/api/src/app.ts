@@ -3,6 +3,7 @@ import { openapi } from "@elysia/openapi";
 import {
   AdminDebugConfirmationError,
   AdminDebugNotFoundError,
+  AdminDebugOperationError,
   type AdminDebugService,
   type AdminFailureDetail,
   type AdminFailureSource,
@@ -5908,6 +5909,57 @@ export function createApiApp(options: CreateApiAppOptions = {}) {
         });
 
         return { data: replay };
+      } catch (error) {
+        return handleAdminDebugError(error, set);
+      }
+    })
+    .post("/admin/debug/jobs/:backgroundJobId/cancel", async ({ params, request, set }) => {
+      const guardResult = guardAdminSession(
+        request,
+        set,
+        adminAuth,
+        observabilitySink,
+        "admin.replay.execute",
+      );
+      if ("response" in guardResult) {
+        return guardResult.response;
+      }
+
+      try {
+        const reason = await readBackgroundJobCancelReason(request);
+        const details = await getAdminDebugService().getBackgroundJobDebugDetails(
+          params.backgroundJobId,
+        );
+        const authorizationResponse = await guardJobsScopedAccess(
+          guardResult.actor,
+          [details.job],
+          set,
+          getAdminControlPlaneService(),
+        );
+        if (authorizationResponse) {
+          return authorizationResponse;
+        }
+
+        const cancellation = await getAdminDebugService().cancelBackgroundJob(
+          params.backgroundJobId,
+          reason,
+          replayAuditActor(guardResult),
+        );
+        recordAdminTelemetry(observabilitySink, request, {
+          actorUserId: guardResult.actor.actorUserId,
+          attributes: {
+            actionKind: "job.cancel",
+            resourceId: params.backgroundJobId,
+            status: "completed",
+          },
+          name: "admin.action.completed",
+          orgId: cancellation.job.orgId,
+          repoId: cancellation.job.repoId,
+          requestId: guardResult.requestId,
+          statusCode: 200,
+        });
+
+        return { data: cancellation };
       } catch (error) {
         return handleAdminDebugError(error, set);
       }
@@ -15283,6 +15335,29 @@ async function readConfirmationToken(request: Request): Promise<string | undefin
     : undefined;
 }
 
+/** Extracts and validates a background-job cancellation reason from a JSON request body. */
+async function readBackgroundJobCancelReason(request: Request): Promise<string> {
+  const body = await request.json().catch(() => undefined);
+  const record = asRecord(body);
+  const reason = stringRecordValue(record, "reason")?.trim();
+  if (!reason) {
+    throw new AdminRequestValidationError(
+      "admin.reason_required",
+      "Background job cancellation requires a non-empty reason.",
+      400,
+    );
+  }
+  if (reason.length > 1000) {
+    throw new AdminRequestValidationError(
+      "admin.reason_too_long",
+      "Background job cancellation reason must be at most 1000 characters.",
+      400,
+    );
+  }
+
+  return reason;
+}
+
 /** Extracts a repository reindex command body from JSON with validation. */
 async function readRepositoryReindexBody(request: Request): Promise<RepositoryReindexBody> {
   const body = await request.json().catch(() => undefined);
@@ -15795,6 +15870,16 @@ function handleAdminDebugError(error: unknown, set: AdminStatusSet) {
     return {
       error: {
         code: "admin_debug.confirmation_mismatch",
+        message: error.message,
+      },
+    };
+  }
+
+  if (error instanceof AdminDebugOperationError) {
+    set.status = error.status;
+    return {
+      error: {
+        code: error.code,
         message: error.message,
       },
     };

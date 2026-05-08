@@ -371,6 +371,26 @@ describe("durable worker processor", () => {
     ).rejects.toThrow("was not found or is not runnable");
     expect(handled).toEqual([]);
   });
+
+  it("skips canceled durable jobs without running handlers", async () => {
+    const store = new InMemoryDurableJobStore([durableJob({ status: "canceled" })]);
+    const handled: string[] = [];
+    const processor = createDurableJobProcessor({
+      store,
+      handlers: {
+        [JOB_TYPES.SyncInstallation]: async (envelope) => {
+          handled.push(envelope.idempotencyKey);
+        },
+      },
+    });
+
+    await expect(
+      processor({ data: syncInstallationEnvelope, attemptsMade: 0 } as never),
+    ).resolves.toBeUndefined();
+
+    expect(handled).toEqual([]);
+    expect(store.list()[0]).toMatchObject({ attempts: 0, status: "canceled" });
+  });
 });
 
 const redisUrl = process.env.HEIMDALL_REDIS_TEST_URL;

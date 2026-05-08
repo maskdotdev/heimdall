@@ -157,7 +157,27 @@ export type RecoverStaleBackgroundJobsResult = {
 };
 
 /** Durable job lifecycle state returned when marking a worker run. */
-export type BackgroundJobRunState = "running" | "already_completed" | "missing";
+export type BackgroundJobRunState = "running" | "already_completed" | "canceled" | "missing";
+
+/** Input for canceling one durable background job. */
+export type CancelBackgroundJobInput = {
+  /** Durable background job row ID to cancel. */
+  readonly backgroundJobId: string;
+  /** Product-safe operator reason stored with the canceled row. */
+  readonly reason: string;
+  /** Current time used for deterministic tests. */
+  readonly now?: Date;
+};
+
+/** Result returned after attempting to cancel one durable background job. */
+export type CancelBackgroundJobResult = {
+  /** Whether this request moved the job into the canceled state. */
+  readonly canceled: boolean;
+  /** Durable job row after the cancellation attempt, when found. */
+  readonly job?: BackgroundJobRecord;
+  /** Status observed before cancellation was attempted, when found. */
+  readonly previousStatus?: JobStatus;
+};
 
 const jobEnvelopeSchema = JobEnvelopeSchema(JobPayloadSchema);
 const defaultStaleRunningJobRecoveryLimit = 100;
@@ -350,6 +370,60 @@ export class BackgroundJobRepository {
     };
   }
 
+  /** Cancels a pending, queued, or running durable job by row ID. */
+  public async cancelBackgroundJobById(
+    input: CancelBackgroundJobInput,
+  ): Promise<CancelBackgroundJobResult> {
+    const existing = await this.getBackgroundJobById(input.backgroundJobId);
+    if (!existing) {
+      return { canceled: false };
+    }
+    if (!isCancelableBackgroundJobStatus(existing.status)) {
+      return {
+        canceled: false,
+        job: existing,
+        previousStatus: existing.status,
+      };
+    }
+
+    const now = input.now ?? new Date();
+    const [row] = await this.db
+      .update(backgroundJobs)
+      .set({
+        completedAt: now,
+        error: {
+          message: input.reason,
+          name: "CanceledDurableJobError",
+        },
+        metadata: {
+          ...(existing.metadata ?? {}),
+          cancellation: {
+            canceledAt: now.toISOString(),
+            reason: input.reason,
+          },
+        },
+        startedAt: null,
+        status: "canceled",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(backgroundJobs.backgroundJobId, input.backgroundJobId),
+          inArray(backgroundJobs.status, ["pending", "queued", "running"]),
+        ),
+      )
+      .returning();
+
+    const job = row
+      ? toBackgroundJobRecord(row)
+      : await this.getBackgroundJobById(input.backgroundJobId);
+    return {
+      canceled: row !== undefined,
+      ...(job ? { job } : {}),
+      previousStatus: existing.status,
+    };
+  }
+
   /** Marks a pending durable job as queued after Redis accepts it. */
   public async markQueued(input: BackgroundJobQueueIdentity): Promise<void> {
     await this.db
@@ -396,12 +470,18 @@ export class BackgroundJobRepository {
       )
       .limit(1);
 
-    return existing?.status === "completed" ? "already_completed" : "missing";
+    if (!existing) {
+      return "missing";
+    }
+    if (existing.status === "canceled") {
+      return "canceled";
+    }
+    return isTerminalBackgroundJobStatus(existing.status) ? "already_completed" : "missing";
   }
 
   /** Marks a durable job as completed. */
   public async markCompleted(input: BackgroundJobTypeIdentity): Promise<void> {
-    await this.updateByTypeAndKey(input, {
+    await this.updateActiveByTypeAndKey(input, {
       completedAt: new Date(),
       error: null,
       status: "completed",
@@ -414,7 +494,7 @@ export class BackgroundJobRepository {
     input: BackgroundJobTypeIdentity,
     error: BackgroundJobError,
   ): Promise<void> {
-    await this.updateByTypeAndKey(input, {
+    await this.updateActiveByTypeAndKey(input, {
       error,
       status: "queued",
       updatedAt: new Date(),
@@ -426,7 +506,7 @@ export class BackgroundJobRepository {
     input: BackgroundJobTypeIdentity,
     error: BackgroundJobError,
   ): Promise<void> {
-    await this.updateByTypeAndKey(input, {
+    await this.updateActiveByTypeAndKey(input, {
       completedAt: new Date(),
       error,
       status: "failed",
@@ -434,8 +514,8 @@ export class BackgroundJobRepository {
     });
   }
 
-  /** Applies a partial update by durable job type and key. */
-  private async updateByTypeAndKey(
+  /** Applies a partial update to a non-terminal durable job by type and key. */
+  private async updateActiveByTypeAndKey(
     input: BackgroundJobTypeIdentity,
     values: Partial<typeof backgroundJobs.$inferInsert>,
   ): Promise<void> {
@@ -443,7 +523,11 @@ export class BackgroundJobRepository {
       .update(backgroundJobs)
       .set(values)
       .where(
-        and(eq(backgroundJobs.jobType, input.jobType), eq(backgroundJobs.jobKey, input.jobKey)),
+        and(
+          eq(backgroundJobs.jobType, input.jobType),
+          eq(backgroundJobs.jobKey, input.jobKey),
+          inArray(backgroundJobs.status, ["pending", "queued", "running"]),
+        ),
       );
   }
 
@@ -505,6 +589,21 @@ export class BackgroundJobRepository {
 
     return rows.map((row) => row.backgroundJobId);
   }
+}
+
+/** Returns whether an operator may cancel a durable background job in this state. */
+function isCancelableBackgroundJobStatus(status: string): boolean {
+  return status === "pending" || status === "queued" || status === "running";
+}
+
+/** Returns whether a durable background job status is terminal for worker dispatch. */
+function isTerminalBackgroundJobStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "dead_lettered" ||
+    status === "canceled"
+  );
 }
 
 /** Maps a database row to the durable background job record contract. */

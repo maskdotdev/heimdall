@@ -7,6 +7,7 @@ export const JobStatusSchema = Type.Union([
   Type.Literal("completed"),
   Type.Literal("failed"),
   Type.Literal("dead_lettered"),
+  Type.Literal("canceled"),
 ]);
 export type JobStatus = Static<typeof JobStatusSchema>;
 

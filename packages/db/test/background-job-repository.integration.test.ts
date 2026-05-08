@@ -157,6 +157,59 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
     ).resolves.toBe("missing");
   });
 
+  it("cancels queued jobs and prevents later lifecycle updates", async () => {
+    const now = new Date("2026-05-08T00:20:00.000Z");
+    const envelope = syncInstallationEnvelope("sync:background:cancel");
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: "job_background_cancel",
+      queueName: "repo-sync",
+      envelope,
+      metadata: { source: "background_job_cancel_test" },
+      status: "queued",
+    });
+
+    const result = await backgroundJobRepository.cancelBackgroundJobById({
+      backgroundJobId: "job_background_cancel",
+      now,
+      reason: "Operator canceled duplicate work.",
+    });
+
+    expect(result).toMatchObject({
+      canceled: true,
+      job: {
+        backgroundJobId: "job_background_cancel",
+        completedAt: now,
+        error: {
+          message: "Operator canceled duplicate work.",
+          name: "CanceledDurableJobError",
+        },
+        metadata: {
+          cancellation: {
+            canceledAt: now.toISOString(),
+            reason: "Operator canceled duplicate work.",
+          },
+          source: "background_job_cancel_test",
+        },
+        status: "canceled",
+      },
+      previousStatus: "queued",
+    });
+    await expect(
+      backgroundJobRepository.markRunning({
+        jobKey: envelope.idempotencyKey,
+        jobType: envelope.jobType,
+      }),
+    ).resolves.toBe("canceled");
+
+    await backgroundJobRepository.markCompleted({
+      jobKey: envelope.idempotencyKey,
+      jobType: envelope.jobType,
+    });
+    await expect(
+      backgroundJobRepository.getBackgroundJobById("job_background_cancel"),
+    ).resolves.toMatchObject({ status: "canceled" });
+  });
+
   it("recovers stale running jobs without touching fresh running jobs", async () => {
     const now = new Date("2026-05-08T02:00:00.000Z");
     const staleTimestamp = new Date("2026-05-08T01:00:00.000Z");

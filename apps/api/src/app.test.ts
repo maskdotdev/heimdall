@@ -125,6 +125,9 @@ type AdminBackgroundJobReplayPlanFixture = Awaited<
 type AdminReplayExecutionFixture = Awaited<
   ReturnType<AdminDebugService["executeBackgroundJobReplay"]>
 >;
+type AdminBackgroundJobCancelFixture = Awaited<
+  ReturnType<AdminDebugService["cancelBackgroundJob"]>
+>;
 type AdminReviewDebugFixture = Awaited<ReturnType<AdminDebugService["getReviewDebugDetails"]>>;
 type AdminDebugBundleFixture = Awaited<ReturnType<AdminDebugService["exportReviewRunDebugBundle"]>>;
 type AdminEvalImportDraftFixture = Awaited<
@@ -4880,6 +4883,58 @@ describe("api app", () => {
     });
   });
 
+  it("cancels background jobs through scoped replay sessions", async () => {
+    const cancellations: { readonly backgroundJobId: string; readonly reason: string }[] = [];
+    const app = createApiApp({
+      adminControlPlaneAuth: auth,
+      adminControlPlaneService: createMockControlPlaneService({}),
+      adminDebugService: createMockAdminDebugService({
+        getBackgroundJobDebugDetails: async (backgroundJobId: string) =>
+          backgroundJobDebugFixture({ backgroundJobId, status: "queued" }),
+        cancelBackgroundJob: async (backgroundJobId: string, reason: string) => {
+          cancellations.push({ backgroundJobId, reason });
+          return backgroundJobCancelFixture({
+            backgroundJobId,
+            job: backgroundJobSummaryFixture({ backgroundJobId, status: "canceled" }),
+            reason,
+          });
+        },
+      }),
+      githubWebhookHandler: noopWebhookHandler(),
+    });
+    const login = await loginSession(app, {
+      orgIds: ["org_1"],
+      permissions: ["admin.replay.execute"],
+      providerSubject: "usr_admin",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/admin/debug/jobs/job_1/cancel", {
+        method: "POST",
+        body: JSON.stringify({ reason: "Duplicate operator replay." }),
+        headers: {
+          cookie: login.cookie,
+          "content-type": "application/json",
+          origin: adminOrigin,
+          "x-csrf-token": login.csrfToken,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(cancellations).toEqual([
+      { backgroundJobId: "job_1", reason: "Duplicate operator replay." },
+    ]);
+    await expect(response.json()).resolves.toMatchObject({
+      data: {
+        action: "job.cancel",
+        backgroundJobId: "job_1",
+        currentStatus: "canceled",
+        previousStatus: "queued",
+      },
+    });
+  });
+
   it("blocks cross-tenant background job replay plans before replaying jobs", async () => {
     let replayCalled = false;
     const app = createApiApp({
@@ -6415,6 +6470,7 @@ function createMockAdminDebugService(overrides: Partial<AdminDebugService>): Adm
     getIndexVersionInspection: unexpectedCall,
     createBackgroundJobReplayPlan: unexpectedCall,
     executeBackgroundJobReplay: unexpectedReplayCall,
+    cancelBackgroundJob: unexpectedCancelCall,
     getReviewDebugDetails: unexpectedCall,
     createReviewReplayPlan: unexpectedCall,
     replayRetrievalDryRun: unexpectedCall,
@@ -7324,6 +7380,24 @@ function replayExecutionFixture(
   };
 }
 
+/** Creates a background job cancel result fixture. */
+function backgroundJobCancelFixture(
+  overrides: Partial<AdminBackgroundJobCancelFixture> = {},
+): AdminBackgroundJobCancelFixture {
+  return {
+    action: "job.cancel",
+    adminActionId: "admact_cancel",
+    auditLogId: "audit_cancel",
+    backgroundJobId: "job_1",
+    canceledAt: "2026-05-07T12:10:00.000Z",
+    currentStatus: "canceled",
+    job: backgroundJobSummaryFixture({ status: "canceled" }),
+    previousStatus: "queued",
+    reason: "Duplicate operator replay.",
+    ...overrides,
+  };
+}
+
 /** Creates a review debug details fixture. */
 function reviewDebugDetailsFixture(
   overrides: Partial<AdminReviewDebugFixture["reviewRun"]> = {},
@@ -7745,6 +7819,15 @@ async function unexpectedReplayCall(
   _actor: AdminReplayAuditActor,
 ): Promise<never> {
   throw new Error("Unexpected admin replay service call.");
+}
+
+/** Unexpected cancellation method used by mock debug services. */
+async function unexpectedCancelCall(
+  _id: string,
+  _reason: string,
+  _actor: AdminReplayAuditActor,
+): Promise<never> {
+  throw new Error("Unexpected admin cancel service call.");
 }
 
 /** Unexpected debug bundle method used by mock debug services. */

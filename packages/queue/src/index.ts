@@ -100,7 +100,7 @@ export type RecoverStaleRunningJobsResult = {
 };
 
 /** Durable lifecycle state returned when a worker starts a job. */
-export type DurableJobRunState = "running" | "already_completed" | "missing";
+export type DurableJobRunState = "running" | "already_completed" | "canceled" | "missing";
 
 /** Durable job state store used by dispatchers and workers. */
 export type DurableJobStore = {
@@ -297,7 +297,10 @@ export class InMemoryDurableJobStore implements DurableJobStore {
     if (!existing) {
       return "missing";
     }
-    if (existing.status === "completed") {
+    if (existing.status === "canceled") {
+      return "canceled";
+    }
+    if (isTerminalDurableJobStatus(existing.status)) {
       return "already_completed";
     }
 
@@ -315,7 +318,7 @@ export class InMemoryDurableJobStore implements DurableJobStore {
   /** Marks a durable job as completed. */
   public async markCompleted(envelope: JobEnvelope<JobPayload>): Promise<void> {
     const existing = this.jobs.get(this.key(envelope));
-    if (existing) {
+    if (existing && isActiveDurableJobStatus(existing.status)) {
       const now = new Date();
       this.jobs.set(this.key(envelope), {
         ...existing,
@@ -332,7 +335,7 @@ export class InMemoryDurableJobStore implements DurableJobStore {
     error: SerializedJobError,
   ): Promise<void> {
     const existing = this.jobs.get(this.key(envelope));
-    if (existing) {
+    if (existing && isActiveDurableJobStatus(existing.status)) {
       this.jobs.set(this.key(envelope), {
         ...existing,
         error,
@@ -348,7 +351,7 @@ export class InMemoryDurableJobStore implements DurableJobStore {
     error: SerializedJobError,
   ): Promise<void> {
     const existing = this.jobs.get(this.key(envelope));
-    if (existing) {
+    if (existing && isActiveDurableJobStatus(existing.status)) {
       this.jobs.set(this.key(envelope), {
         ...existing,
         completedAt: new Date(),
@@ -550,7 +553,7 @@ export function createDurableJobProcessor(options: DurableJobProcessorOptions) {
       span?.end({ attributes: { "job.run_state": "mark_running_failed" }, error });
       throw error;
     }
-    if (runState === "already_completed") {
+    if (runState === "already_completed" || runState === "canceled") {
       span?.end({ attributes: { "job.run_state": runState } });
       return;
     }
@@ -733,6 +736,21 @@ function queueNameFromBullMqJob(job: BullMqJob<unknown>): QueueName | "unknown" 
   }
 
   return "unknown";
+}
+
+/** Returns whether a durable job status can still receive lifecycle updates. */
+function isActiveDurableJobStatus(status: JobStatus): boolean {
+  return status === "pending" || status === "queued" || status === "running";
+}
+
+/** Returns whether a durable job status is terminal for handler dispatch. */
+function isTerminalDurableJobStatus(status: JobStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "dead_lettered" ||
+    status === "canceled"
+  );
 }
 
 /** Returns whether a durable job is running beyond the configured cutoff. */
