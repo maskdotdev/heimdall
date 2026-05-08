@@ -1,9 +1,25 @@
 import { and, asc, eq, inArray, lt } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
-import { sandboxArtifacts, sandboxRuns } from "../schema";
+import { sandboxArtifacts, sandboxPolicyDecisions, sandboxRuns } from "../schema";
 
-/** Database surface required by sandbox repository methods. */
-type SandboxRepositoryDatabase = Pick<HeimdallDatabase, "delete" | "select">;
+/** Insert row accepted for a persisted sandbox run. */
+export type SandboxRunInsert = typeof sandboxRuns.$inferInsert;
+
+/** Insert row accepted for a persisted sandbox artifact. */
+export type SandboxArtifactInsert = typeof sandboxArtifacts.$inferInsert;
+
+/** Insert row accepted for a persisted sandbox policy decision. */
+export type SandboxPolicyDecisionInsert = typeof sandboxPolicyDecisions.$inferInsert;
+
+/** Input used to upsert a sandbox run and replace its child rows. */
+export type UpsertSandboxRunWithChildrenInput = {
+  /** Parent sandbox run row. */
+  readonly run: SandboxRunInsert;
+  /** Artifact rows attached to the sandbox run. */
+  readonly artifacts?: readonly SandboxArtifactInsert[] | undefined;
+  /** Policy decision rows attached to the sandbox run. */
+  readonly policyDecisions?: readonly SandboxPolicyDecisionInsert[] | undefined;
+};
 
 /** Input used to list old sandbox runs for retention cleanup. */
 export type ListSandboxRunCleanupTargetsInput = {
@@ -30,7 +46,35 @@ export type SandboxArtifactUriRecord = {
 /** Query helper for sandbox run persistence and retention cleanup. */
 export class SandboxRepository {
   /** Creates a sandbox query helper. */
-  public constructor(private readonly db: SandboxRepositoryDatabase) {}
+  public constructor(private readonly db: HeimdallDatabase) {}
+
+  /** Upserts one sandbox run and replaces child artifact and policy decision rows. */
+  public async upsertSandboxRunWithChildren(
+    input: UpsertSandboxRunWithChildrenInput,
+  ): Promise<void> {
+    await this.db.transaction(async (transaction) => {
+      await transaction
+        .insert(sandboxRuns)
+        .values(input.run)
+        .onConflictDoUpdate({
+          target: sandboxRuns.sandboxRunId,
+          set: sandboxRunUpdateFromInsert(input.run),
+        });
+      await transaction
+        .delete(sandboxArtifacts)
+        .where(eq(sandboxArtifacts.sandboxRunId, input.run.sandboxRunId));
+      await transaction
+        .delete(sandboxPolicyDecisions)
+        .where(eq(sandboxPolicyDecisions.sandboxRunId, input.run.sandboxRunId));
+
+      if (input.artifacts && input.artifacts.length > 0) {
+        await transaction.insert(sandboxArtifacts).values([...input.artifacts]);
+      }
+      if (input.policyDecisions && input.policyDecisions.length > 0) {
+        await transaction.insert(sandboxPolicyDecisions).values([...input.policyDecisions]);
+      }
+    });
+  }
 
   /** Lists old sandbox runs eligible for retention cleanup. */
   public async listSandboxRunCleanupTargets(
@@ -93,4 +137,34 @@ function sandboxCleanupLimit(limit: number | undefined): number {
 /** Returns stable unique string values while preserving caller order. */
 function uniqueStableStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+/** Builds the mutable update payload for sandbox run upsert conflicts. */
+function sandboxRunUpdateFromInsert(run: SandboxRunInsert): Partial<SandboxRunInsert> {
+  return {
+    category: run.category,
+    commandJson: run.commandJson,
+    errorJson: run.errorJson,
+    exitCode: run.exitCode,
+    finishedAt: run.finishedAt,
+    image: run.image,
+    imageDigest: run.imageDigest,
+    limitsJson: run.limitsJson,
+    policyJson: run.policyJson,
+    resourceUsageJson: run.resourceUsageJson,
+    reviewRunId: run.reviewRunId,
+    runnerKind: run.runnerKind,
+    signal: run.signal,
+    startedAt: run.startedAt,
+    staticAnalysisRunId: run.staticAnalysisRunId,
+    status: run.status,
+    stderrHash: run.stderrHash,
+    stderrTruncated: run.stderrTruncated,
+    stdoutHash: run.stdoutHash,
+    stdoutTruncated: run.stdoutTruncated,
+    toolRunId: run.toolRunId,
+    trustLevel: run.trustLevel,
+    updatedAt: run.updatedAt,
+    warningsJson: run.warningsJson,
+  };
 }

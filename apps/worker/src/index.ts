@@ -50,10 +50,10 @@ import {
   type PublishedSummaryFeedbackTargetRecord,
   RepositoryRepository,
   ReviewRepository,
+  type SandboxArtifactInsert,
+  type SandboxPolicyDecisionInsert,
   SandboxRepository,
-  sandboxArtifacts,
-  sandboxPolicyDecisions,
-  sandboxRuns,
+  type SandboxRunInsert,
 } from "@repo/db";
 import {
   createEmbeddingProviderFromEnvironment,
@@ -155,7 +155,6 @@ import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } fro
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Worker } from "bullmq";
-import { eq } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -1493,54 +1492,12 @@ async function persistSandboxRun(
   request: SandboxRunRequest,
   result: SandboxRunResult,
 ): Promise<void> {
-  await db.transaction(async (transaction) => {
-    await transaction
-      .insert(sandboxRuns)
-      .values(sandboxRunRowFromRequestResult(request, result))
-      .onConflictDoUpdate({
-        target: sandboxRuns.sandboxRunId,
-        set: sandboxRunUpdateFromRequestResult(request, result),
-      });
-    await transaction
-      .delete(sandboxArtifacts)
-      .where(eq(sandboxArtifacts.sandboxRunId, result.runId));
-    await transaction
-      .delete(sandboxPolicyDecisions)
-      .where(eq(sandboxPolicyDecisions.sandboxRunId, result.runId));
+  const sandboxRepository = new SandboxRepository(db);
 
-    const artifactRows = result.artifacts.map((artifact) => ({
-      contentType: artifact.contentType ?? null,
-      name: artifact.name,
-      sandboxArtifactId: stableWorkerId("sart", [result.runId, artifact.name]),
-      sandboxRunId: result.runId,
-      sha256: artifact.sha256,
-      sizeBytes: artifact.sizeBytes,
-      truncated: artifact.truncated,
-      uri: artifact.uri,
-    }));
-    if (artifactRows.length > 0) {
-      await transaction.insert(sandboxArtifacts).values(artifactRows);
-    }
-
-    const policyDecisionRows = result.policyDecisions.map((decision, index) => ({
-      code: decision.code,
-      details: {
-        index,
-        requestId: request.requestId,
-      },
-      message: decision.message,
-      sandboxPolicyDecisionId: stableWorkerId("spol", [
-        result.runId,
-        index,
-        decision.status,
-        decision.code,
-      ]),
-      sandboxRunId: result.runId,
-      status: decision.status,
-    }));
-    if (policyDecisionRows.length > 0) {
-      await transaction.insert(sandboxPolicyDecisions).values(policyDecisionRows);
-    }
+  await sandboxRepository.upsertSandboxRunWithChildren({
+    artifacts: sandboxArtifactRowsFromResult(result),
+    policyDecisions: sandboxPolicyDecisionRowsFromRequestResult(request, result),
+    run: sandboxRunRowFromRequestResult(request, result),
   });
 }
 
@@ -1770,8 +1727,11 @@ function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.Errn
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-/** Creates the insert row for a sandbox run. */
-function sandboxRunRowFromRequestResult(request: SandboxRunRequest, result: SandboxRunResult) {
+/** Creates the persisted row for a sandbox run. */
+function sandboxRunRowFromRequestResult(
+  request: SandboxRunRequest,
+  result: SandboxRunResult,
+): SandboxRunInsert {
   return {
     category: request.category,
     commandJson: request.command,
@@ -1805,36 +1765,41 @@ function sandboxRunRowFromRequestResult(request: SandboxRunRequest, result: Sand
   };
 }
 
-/** Creates the update row for a sandbox run conflict. */
-function sandboxRunUpdateFromRequestResult(request: SandboxRunRequest, result: SandboxRunResult) {
-  const row = sandboxRunRowFromRequestResult(request, result);
+/** Creates persisted artifact rows for a sandbox run result. */
+function sandboxArtifactRowsFromResult(result: SandboxRunResult): readonly SandboxArtifactInsert[] {
+  return result.artifacts.map((artifact) => ({
+    contentType: artifact.contentType ?? null,
+    name: artifact.name,
+    sandboxArtifactId: stableWorkerId("sart", [result.runId, artifact.name]),
+    sandboxRunId: result.runId,
+    sha256: artifact.sha256,
+    sizeBytes: artifact.sizeBytes,
+    truncated: artifact.truncated,
+    uri: artifact.uri,
+  }));
+}
 
-  return {
-    category: row.category,
-    commandJson: row.commandJson,
-    errorJson: row.errorJson,
-    exitCode: row.exitCode,
-    finishedAt: row.finishedAt,
-    image: row.image,
-    imageDigest: row.imageDigest,
-    limitsJson: row.limitsJson,
-    policyJson: row.policyJson,
-    resourceUsageJson: row.resourceUsageJson,
-    reviewRunId: row.reviewRunId,
-    runnerKind: row.runnerKind,
-    signal: row.signal,
-    startedAt: row.startedAt,
-    staticAnalysisRunId: row.staticAnalysisRunId,
-    status: row.status,
-    stderrHash: row.stderrHash,
-    stderrTruncated: row.stderrTruncated,
-    stdoutHash: row.stdoutHash,
-    stdoutTruncated: row.stdoutTruncated,
-    toolRunId: row.toolRunId,
-    trustLevel: row.trustLevel,
-    updatedAt: row.updatedAt,
-    warningsJson: row.warningsJson,
-  };
+/** Creates persisted policy decision rows for a sandbox run result. */
+function sandboxPolicyDecisionRowsFromRequestResult(
+  request: SandboxRunRequest,
+  result: SandboxRunResult,
+): readonly SandboxPolicyDecisionInsert[] {
+  return result.policyDecisions.map((decision, index) => ({
+    code: decision.code,
+    details: {
+      index,
+      requestId: request.requestId,
+    },
+    message: decision.message,
+    sandboxPolicyDecisionId: stableWorkerId("spol", [
+      result.runId,
+      index,
+      decision.status,
+      decision.code,
+    ]),
+    sandboxRunId: result.runId,
+    status: decision.status,
+  }));
 }
 
 /** Returns product-safe sandbox policy metadata without environment values. */

@@ -5,7 +5,12 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { HeimdallDatabase } from "../src/client";
-import { SandboxRepository } from "../src/index";
+import {
+  type SandboxArtifactInsert,
+  type SandboxPolicyDecisionInsert,
+  SandboxRepository,
+  type SandboxRunInsert,
+} from "../src/index";
 
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 const testDirectory = fileURLToPath(new URL(".", import.meta.url));
@@ -33,6 +38,86 @@ describe.runIf(integrationDatabaseUrl)("SandboxRepository integration", () => {
   afterAll(async () => {
     await sql.unsafe(`DROP SCHEMA IF EXISTS ${quoteIdentifier(schemaName)} CASCADE`);
     await sql.end();
+  });
+
+  it("upserts sandbox runs and replaces child rows", async () => {
+    await sandboxRepository.upsertSandboxRunWithChildren({
+      artifacts: [sandboxArtifactInsertFixture()],
+      policyDecisions: [sandboxPolicyDecisionInsertFixture()],
+      run: sandboxRunInsertFixture(),
+    });
+
+    const [created] = await sql`
+      SELECT
+        status,
+        stdout_hash,
+        (
+          SELECT count(*)::int
+          FROM sandbox_artifacts
+          WHERE sandbox_run_id = 'srun_sandbox_persisted'
+        ) AS artifact_count,
+        (
+          SELECT count(*)::int
+          FROM sandbox_policy_decisions
+          WHERE sandbox_run_id = 'srun_sandbox_persisted'
+        ) AS policy_decision_count
+      FROM sandbox_runs
+      WHERE sandbox_run_id = 'srun_sandbox_persisted'
+    `;
+    expect(created).toMatchObject({
+      artifact_count: 1,
+      policy_decision_count: 1,
+      status: "completed",
+      stdout_hash: "sha256:initial-stdout",
+    });
+
+    await sandboxRepository.upsertSandboxRunWithChildren({
+      artifacts: [
+        sandboxArtifactInsertFixture({
+          name: "replacement-log.json",
+          sandboxArtifactId: "sart_sandbox_persisted_replacement_log",
+          uri: "file:///tmp/sandbox-persisted-replacement-log.json",
+        }),
+      ],
+      policyDecisions: [],
+      run: sandboxRunInsertFixture({
+        errorJson: { message: "Sandbox command failed." },
+        exitCode: 1,
+        finishedAt: new Date("2026-05-08T00:12:00.000Z"),
+        status: "failed",
+        stdoutHash: "sha256:updated-stdout",
+        updatedAt: new Date("2026-05-08T00:12:00.000Z"),
+      }),
+    });
+
+    const [updated] = await sql`
+      SELECT
+        status,
+        stdout_hash,
+        error_json,
+        (
+          SELECT count(*)::int
+          FROM sandbox_artifacts
+          WHERE sandbox_run_id = 'srun_sandbox_persisted'
+        ) AS artifact_count,
+        (
+          SELECT count(*)::int
+          FROM sandbox_policy_decisions
+          WHERE sandbox_run_id = 'srun_sandbox_persisted'
+        ) AS policy_decision_count
+      FROM sandbox_runs
+      WHERE sandbox_run_id = 'srun_sandbox_persisted'
+    `;
+    expect(updated).toMatchObject({
+      artifact_count: 1,
+      error_json: { message: "Sandbox command failed." },
+      policy_decision_count: 0,
+      status: "failed",
+      stdout_hash: "sha256:updated-stdout",
+    });
+    await expect(
+      sandboxRepository.listSandboxArtifactUrisForRuns(["srun_sandbox_persisted"]),
+    ).resolves.toEqual([{ uri: "file:///tmp/sandbox-persisted-replacement-log.json" }]);
   });
 
   it("lists cleanup targets and deletes sandbox runs with cascaded children", async () => {
@@ -348,6 +433,76 @@ async function seedSandboxRuns(sql: postgres.Sql): Promise<void> {
       '{"source":"integration_test"}'::jsonb
     )
   `;
+}
+
+/** Builds a sandbox run insert row for repository tests. */
+function sandboxRunInsertFixture(overrides: Partial<SandboxRunInsert> = {}): SandboxRunInsert {
+  return {
+    category: "static_analysis",
+    commandJson: ["bun", "test"],
+    createdAt: new Date("2026-05-08T00:10:00.000Z"),
+    errorJson: null,
+    exitCode: 0,
+    finishedAt: new Date("2026-05-08T00:11:00.000Z"),
+    image: "node:22",
+    imageDigest: null,
+    limitsJson: { timeoutMs: 30_000 },
+    orgId: "org_sandbox_repository_test",
+    policyJson: { network: "deny" },
+    repoId: "repo_sandbox_repository_test",
+    requestId: "sandbox-request-persisted",
+    resourceUsageJson: { durationMs: 1_000 },
+    reviewRunId: null,
+    runnerKind: "docker",
+    sandboxRunId: "srun_sandbox_persisted",
+    signal: null,
+    startedAt: new Date("2026-05-08T00:10:00.000Z"),
+    staticAnalysisRunId: null,
+    status: "completed",
+    stderrHash: "sha256:initial-stderr",
+    stderrTruncated: false,
+    stdoutHash: "sha256:initial-stdout",
+    stdoutTruncated: false,
+    toolRunId: null,
+    trustLevel: "untrusted",
+    updatedAt: new Date("2026-05-08T00:11:00.000Z"),
+    warningsJson: [],
+    ...overrides,
+  };
+}
+
+/** Builds a sandbox artifact insert row for repository tests. */
+function sandboxArtifactInsertFixture(
+  overrides: Partial<SandboxArtifactInsert> = {},
+): SandboxArtifactInsert {
+  return {
+    contentType: "application/json",
+    createdAt: new Date("2026-05-08T00:11:05.000Z"),
+    name: "log.json",
+    sandboxArtifactId: "sart_sandbox_persisted_log",
+    sandboxRunId: "srun_sandbox_persisted",
+    sha256: "d".repeat(64),
+    sizeBytes: 64,
+    truncated: false,
+    uri: "file:///tmp/sandbox-persisted-log.json",
+    ...overrides,
+  };
+}
+
+/** Builds a sandbox policy decision insert row for repository tests. */
+function sandboxPolicyDecisionInsertFixture(
+  overrides: Partial<SandboxPolicyDecisionInsert> = {},
+): SandboxPolicyDecisionInsert {
+  return {
+    code: "sandbox.allowed",
+    createdAt: new Date("2026-05-08T00:10:01.000Z"),
+    details: { source: "integration_test" },
+    message: "Sandbox execution was allowed.",
+    sandboxPolicyDecisionId: "spol_sandbox_persisted_allowed",
+    sandboxRunId: "srun_sandbox_persisted",
+    status: "allowed",
+    ...overrides,
+  };
 }
 
 /** Quotes a trusted Postgres identifier after validating its shape. */
