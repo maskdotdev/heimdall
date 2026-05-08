@@ -15,6 +15,23 @@ const REQUIRED_REVIEW_ARTIFACT_ENV = [
   "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY",
 ];
 
+/** Required AWS environment variables for production SecretRef resolution. */
+const REQUIRED_AWS_SECRET_RESOLUTION_ENV = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_REGION",
+  "AWS_SECRET_ACCESS_KEY",
+];
+
+/** Required worker environment variables shared by role-specific worker services. */
+const REQUIRED_WORKER_ENV = [
+  "DATABASE_URL",
+  "REDIS_URL",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY_SECRET_REF",
+  ...REQUIRED_AWS_SECRET_RESOLUTION_ENV,
+  ...REQUIRED_REVIEW_ARTIFACT_ENV,
+];
+
 describe("production deployment manifest", () => {
   it("accepts a complete Railway production manifest", () => {
     const report = buildProductionDeploymentAuditReport(productionDeploymentInput());
@@ -24,7 +41,12 @@ describe("production deployment manifest", () => {
       "api",
       "dashboard",
       "admin-gateway",
-      "worker",
+      "worker-general",
+      "worker-index",
+      "worker-review",
+      "worker-embedding",
+      "worker-publisher",
+      "worker-maintenance",
       "postgres",
       "redis",
     ]);
@@ -76,7 +98,7 @@ describe("production deployment manifest", () => {
           if (serviceRecord.name === "api") {
             return removeRequiredEnv(serviceRecord, "HEIMDALL_REVIEW_ARTIFACT_BUCKET");
           }
-          if (serviceRecord.name === "worker") {
+          if (serviceRecord.name === "worker-index") {
             return removeRequiredEnv(
               removeRequiredEnv(serviceRecord, "GITHUB_APP_ID"),
               "HEIMDALL_REVIEW_ARTIFACT_BUCKET",
@@ -91,9 +113,26 @@ describe("production deployment manifest", () => {
     expect(productionDeploymentIssues(input)).toEqual(
       expect.arrayContaining([
         "api requiredEnv must include HEIMDALL_REVIEW_ARTIFACT_BUCKET",
-        "worker requiredEnv must include GITHUB_APP_ID",
-        "worker requiredEnv must include HEIMDALL_REVIEW_ARTIFACT_BUCKET",
+        "worker-index requiredEnv must include GITHUB_APP_ID",
+        "worker-index requiredEnv must include HEIMDALL_REVIEW_ARTIFACT_BUCKET",
       ]),
+    );
+  });
+
+  it("reports missing role-specific worker deployment coverage", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        services: validManifest().services.map((serviceRecord) =>
+          serviceRecord.name === "worker-review"
+            ? { ...serviceRecord, workerRole: "embedding" }
+            : serviceRecord,
+        ),
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining(["worker-review workerRole must be review"]),
     );
   });
 
@@ -194,7 +233,7 @@ function validManifest() {
         [
           "DATABASE_URL",
           "REDIS_URL",
-          "GITHUB_WEBHOOK_SECRET",
+          "GITHUB_WEBHOOK_SECRET_REF",
           "HEIMDALL_ADMIN_ENABLED",
           "HEIMDALL_ADMIN_ROUTE_EXPOSURE",
           "HEIMDALL_ADMIN_IDENTITY_PROVIDER",
@@ -203,6 +242,7 @@ function validManifest() {
           "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
           "HEIMDALL_ADMIN_GITHUB_ORG",
           "WEB_URL",
+          ...REQUIRED_AWS_SECRET_RESOLUTION_ENV,
           ...REQUIRED_REVIEW_ARTIFACT_ENV,
         ],
         "infra/staging/Dockerfile.api",
@@ -231,18 +271,32 @@ function validManifest() {
         "infra/staging/Dockerfile.admin-gateway",
         "infra/railway/admin-gateway.railway.json",
       ),
-      service(
-        "worker",
+      workerService(
+        "worker-general",
+        "repo-sync,memory,billing,security",
+        "infra/railway/worker-general.railway.json",
+      ),
+      workerService("worker-index", "index", "infra/railway/worker-index.railway.json"),
+      workerService("worker-review", "review", "infra/railway/worker-review.railway.json", [
+        "HEIMDALL_LLM_MODEL",
+        "HEIMDALL_LLM_PROVIDER",
+        "HEIMDALL_LLM_PROVIDER_API_KEY_SECRET_REF",
+      ]),
+      workerService(
+        "worker-embedding",
+        "embedding",
+        "infra/railway/worker-embedding.railway.json",
         [
-          "DATABASE_URL",
-          "REDIS_URL",
-          "GITHUB_APP_ID",
-          "GITHUB_PRIVATE_KEY",
-          "GITHUB_WEBHOOK_SECRET",
-          ...REQUIRED_REVIEW_ARTIFACT_ENV,
+          "HEIMDALL_EMBEDDING_API_KEY_SECRET_REF",
+          "HEIMDALL_EMBEDDING_MODEL",
+          "HEIMDALL_EMBEDDING_PROVIDER",
         ],
-        "infra/staging/Dockerfile.worker",
-        "infra/railway/worker.railway.json",
+      ),
+      workerService("worker-publisher", "publisher", "infra/railway/worker-publisher.railway.json"),
+      workerService(
+        "worker-maintenance",
+        "maintenance",
+        "infra/railway/worker-maintenance.railway.json",
       ),
       service("postgres", ["DATABASE_URL"]),
       service("redis", ["REDIS_URL"]),
@@ -281,6 +335,7 @@ function service(
   requiredEnv: readonly string[],
   dockerfile?: string,
   railwayConfig?: string,
+  workerRole?: string,
 ) {
   return {
     ...(dockerfile ? { dockerfile } : {}),
@@ -289,7 +344,24 @@ function service(
     package: name,
     ...(railwayConfig ? { railwayConfig } : {}),
     requiredEnv,
+    ...(workerRole ? { workerRole } : {}),
   };
+}
+
+/** Creates a role-specific worker service fixture. */
+function workerService(
+  name: string,
+  workerRole: string,
+  railwayConfig: string,
+  extraRequiredEnv: readonly string[] = [],
+) {
+  return service(
+    name,
+    [...REQUIRED_WORKER_ENV, ...extraRequiredEnv],
+    "infra/staging/Dockerfile.worker",
+    railwayConfig,
+    workerRole,
+  );
 }
 
 /** Removes one required environment variable from a service fixture. */

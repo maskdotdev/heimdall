@@ -17,6 +17,6 @@
   "deploy": {
     "restartPolicyMaxRetries": 3,
     "restartPolicyType": "ON_FAILURE",
-    "startCommand": "pnpm --filter @app/worker start"
+    "startCommand": "HEIMDALL_WORKER_ROLE=review pnpm --filter @app/worker start"
   }
 }
