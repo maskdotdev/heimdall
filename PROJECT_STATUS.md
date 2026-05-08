@@ -559,6 +559,8 @@ tracked milestone.
   client IP before session reads or OAuth provider calls, returning `product_auth.rate_limited`
   with `Retry-After` when exceeded. Product and admin surfaces now share hardened response headers
   for no-store caching, content-type sniffing prevention, frame denial, and no-referrer behavior.
+  The root env examples and README now document the product session, OAuth, and product rate-limit
+  configuration knobs.
 - Latest repository API milestone: `/api/v1/orgs/:orgId/repositories` and
   `/api/v1/repositories/:repoId` now reuse scoped repository discovery/settings reads.
   `/api/v1/repositories/:repoId/settings`, `enable`, `disable`, `sync`, and `reindex` authorize

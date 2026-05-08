@@ -177,6 +177,19 @@ VITE_HEIMDALL_API_BASE_URL="https://api.example.com"
 installation URL. The dashboard reads `/app/onboarding` without an admin session and uses the
 configured install URL as the primary call to action.
 
+Product sign-in uses GitHub OAuth and opaque DB-backed sessions:
+
+```bash
+HEIMDALL_PRODUCT_AUTH_ENABLED=true
+HEIMDALL_PRODUCT_SESSION_PEPPER="<32+ character session pepper>"
+HEIMDALL_PRODUCT_SESSION_TTL_DAYS=14
+HEIMDALL_PRODUCT_RATE_LIMIT_MAX_REQUESTS=600
+HEIMDALL_PRODUCT_RATE_LIMIT_WINDOW_SECONDS=60
+HEIMDALL_GITHUB_OAUTH_CLIENT_ID="<oauth client id>"
+HEIMDALL_GITHUB_OAUTH_CLIENT_SECRET="<oauth client secret>"
+HEIMDALL_GITHUB_OAUTH_CALLBACK_URL="https://api.example.com/api/v1/auth/github/callback"
+```
+
 Use `docs/runbooks/github-dev-app.md` to create a development GitHub App and run the guarded live
 publisher and webhook-to-publish smoke checks against a disposable test repository.
 
