@@ -12,6 +12,9 @@ const WEB_APP_DIR = resolve(WEB_SRC_DIR, "..");
 /** Dashboard API client file that owns direct browser fetch calls. */
 const API_CLIENT_FILE = resolve(WEB_SRC_DIR, "api-client.ts");
 
+/** Dashboard entrypoint that owns the rendered product and operator UI. */
+const DASHBOARD_MAIN_FILE = resolve(WEB_SRC_DIR, "main.ts");
+
 /** Source file extensions checked by dashboard boundary tests. */
 const SOURCE_FILE_PATTERN = /\.ts$/u;
 
@@ -42,6 +45,11 @@ type DashboardSourceFile = {
   /** Source text. */
   readonly source: string;
 };
+
+/** Reads the dashboard entrypoint source. */
+function readDashboardMainSource(): string {
+  return readFileSync(DASHBOARD_MAIN_FILE, "utf8");
+}
 
 /** Recursively collects production dashboard TypeScript source files. */
 function readDashboardSourceFiles(directory = WEB_SRC_DIR): readonly DashboardSourceFile[] {
@@ -85,5 +93,67 @@ describe("dashboard source boundaries", () => {
     );
 
     expect(violations).toEqual([]);
+  });
+
+  it("keeps primary MVP views and renderers wired into the dashboard", () => {
+    const source = readDashboardMainSource();
+    const requiredSnippets = [
+      "function renderProductDashboard",
+      "function renderProductOrgSwitcher",
+      "function renderProductRepositorySettingsPanel",
+      "function renderProductReviewDetailPanel",
+      "function renderProductFindingList",
+      "function renderProductFindingDetail",
+      "function renderProductReviewArtifacts",
+      "function renderOverviewView",
+      "function renderSettingsView",
+      "function renderRepositoryRules",
+      "function renderUsageView",
+      "function renderAuditView",
+      "function renderSecurityEventView",
+      "function renderInspector",
+      "function renderInspectorNotice",
+      "function renderEmptyState",
+      "data-view=",
+      "view.kind",
+      'data-action="select-product-org"',
+      'data-action="toggle-product-repository"',
+      'data-action="save-product-settings"',
+      'data-action="preview-product-policy"',
+      'saveRuleAction: "save-product-rule"',
+      'data-action="open-product-review-detail"',
+      'data-action="rerun-product-review"',
+      'data-action="select-product-finding"',
+      'data-action="set-product-finding-outcome"',
+      'data-action="suppress-product-finding-similar"',
+      'data-action="load-product-review-artifacts"',
+      'data-action="load-product-review-artifact-payload"',
+      'data-action="download-product-review-artifact-payload"',
+      'data-action="load-usage"',
+    ];
+
+    expect(requiredSnippets.filter((snippet) => !source.includes(snippet))).toEqual([]);
+  });
+
+  it("keeps dashboard state affordances for loading, empty, error, and dangerous actions", () => {
+    const source = readDashboardMainSource();
+    const requiredSnippets = [
+      "renderProductLoadingState",
+      "renderOverviewNotice",
+      "renderSettingsNotice",
+      "renderUsageNotice",
+      "renderInspectorNotice",
+      "renderEmptyState",
+      "inline-empty",
+      "error-line",
+      "notice",
+      "window.confirm(`Delete repository rule",
+      "Confirmation token does not match the current plan.",
+      "Cancellation requires a reason.",
+      "Enter an access reason before viewing an artifact payload.",
+      "Enter an access reason before downloading an artifact payload.",
+    ];
+
+    expect(requiredSnippets.filter((snippet) => !source.includes(snippet))).toEqual([]);
   });
 });
