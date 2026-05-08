@@ -1,4 +1,5 @@
 import "./styles.css";
+import { requestDashboardBlob, requestDashboardData, requestGatewayJson } from "./api-client";
 
 /** Structured failure detail shown by admin inspectors. */
 type AdminFailureDetail = {
@@ -1225,12 +1226,6 @@ type DashboardRouteState = {
   readonly billingMeterStatus?: string | undefined;
   /** Requested billing meter period key filter. */
   readonly billingMeterPeriodKey?: string | undefined;
-};
-
-/** API envelope returned by the admin API for successful requests. */
-type ApiEnvelope<T> = {
-  /** Response data payload. */
-  readonly data: T;
 };
 
 /** API envelope returned by the admin API for failed requests. */
@@ -6044,100 +6039,58 @@ async function runBillingReconciliation(): Promise<void> {
 
 /** Requests a typed data payload from the admin API. */
 async function requestAdminData<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const method = init.method ?? "GET";
-  const headers = new Headers(init.headers);
-  if (init.body && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-  if (!isSafeMethod(method) && state.session?.csrfToken) {
-    headers.set("x-csrf-token", state.session.csrfToken);
-  }
-
-  const response = await fetch(adminUrl(path), {
-    ...init,
-    credentials: "include",
-    headers,
+  return requestDashboardData<T>({
+    csrfToken: state.session?.csrfToken,
+    errorMessage: apiErrorMessage,
+    includeCsrf: true,
+    init,
+    onUnauthorized: clearAdminSession,
+    url: adminUrl(path),
   });
-  const body = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    if (response.status === 401) {
-      state.session = undefined;
-    }
-    throw new Error(apiErrorMessage(body, response.status));
-  }
-
-  return (body as ApiEnvelope<T>).data;
 }
 
 /** Requests a typed data payload from the product API. */
 async function requestProductData<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const method = init.method ?? "GET";
-  const headers = new Headers(init.headers);
-  if (init.body && !headers.has("content-type")) {
-    headers.set("content-type", "application/json");
-  }
-
-  const response = await fetch(adminUrl(path), {
-    ...init,
-    credentials: "include",
-    headers,
-    method,
+  return requestDashboardData<T>({
+    errorMessage: apiErrorMessage,
+    init,
+    onUnauthorized: clearProductSession,
+    url: adminUrl(path),
   });
-  const body = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    if (response.status === 401) {
-      state.product.session = undefined;
-      state.product.resources = undefined;
-      state.product.orgSettings = undefined;
-      state.product.repositorySettings = undefined;
-      state.product.reviewDetail = undefined;
-    }
-    throw new Error(apiErrorMessage(body, response.status));
-  }
-
-  const envelope = body as ApiEnvelope<T> | undefined;
-  if (!envelope || !("data" in envelope)) {
-    throw new Error("Product API response did not include data.");
-  }
-
-  return envelope.data;
 }
 
 /** Requests a blob payload from the product API. */
 async function requestProductBlob(path: string): Promise<Blob> {
-  const response = await fetch(adminUrl(path), {
-    credentials: "include",
-    method: "GET",
+  return requestDashboardBlob({
+    errorMessage: apiErrorMessage,
+    onUnauthorized: clearProductSession,
+    url: adminUrl(path),
   });
-  if (!response.ok) {
-    const body = await response.json().catch(() => undefined);
-    if (response.status === 401) {
-      state.product.session = undefined;
-      state.product.resources = undefined;
-      state.product.orgSettings = undefined;
-      state.product.repositorySettings = undefined;
-      state.product.reviewDetail = undefined;
-    }
-    throw new Error(apiErrorMessage(body, response.status));
-  }
-
-  return response.blob();
 }
 
 /** Requests a signed identity assertion from the configured admin gateway. */
 async function requestGatewayAssertion(): Promise<AdminIdentityRequestHeaders> {
-  const response = await fetch(gatewayAssertionUrl(), {
-    body: JSON.stringify({ purpose: "dashboard-login" }),
-    credentials: "include",
-    headers: { "content-type": "application/json" },
-    method: "POST",
+  const body = await requestGatewayJson<unknown>({
+    body: { purpose: "dashboard-login" },
+    errorMessage: apiErrorMessage,
+    url: gatewayAssertionUrl(),
   });
-  const body = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    throw new Error(apiErrorMessage(body, response.status));
-  }
 
   return identityAssertionFromGatewayBody(body);
+}
+
+/** Clears the cached admin session after an authenticated admin request is rejected. */
+function clearAdminSession(): void {
+  state.session = undefined;
+}
+
+/** Clears cached product session-scoped data after a product request is rejected. */
+function clearProductSession(): void {
+  state.product.session = undefined;
+  state.product.resources = undefined;
+  state.product.orgSettings = undefined;
+  state.product.repositorySettings = undefined;
+  state.product.reviewDetail = undefined;
 }
 
 /** Returns a complete admin API URL for a route path. */
@@ -13518,11 +13471,6 @@ function requiredDatasetValue(element: HTMLElement, key: string): string {
   }
 
   return value;
-}
-
-/** Returns whether a request method is safe from CSRF. */
-function isSafeMethod(method: string): boolean {
-  return method === "GET" || method === "HEAD" || method === "OPTIONS";
 }
 
 /** Reads the audit request ID from metadata. */
