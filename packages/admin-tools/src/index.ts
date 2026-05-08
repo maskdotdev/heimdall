@@ -17,7 +17,7 @@ import {
   adminActions,
   type BackgroundJobRecord,
   BackgroundJobRepository,
-  candidateFindings,
+  type CandidateFindingRecord,
   codeChunkEmbeddings,
   codeChunks,
   codeDependencies,
@@ -50,19 +50,19 @@ import {
   quotaReservations,
   RepoRuleRepository,
   RepositoryRepository,
+  type ReviewArtifactRecord,
+  type ReviewDependencyRecord,
   ReviewRepository,
+  type ReviewStageEventRecord,
   replayRuns,
   replayStageRuns,
-  reviewArtifacts,
-  reviewRunDependencies,
-  reviewRunStageEvents,
   SecurityAuditRepository,
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
   symbols,
   usageEvents,
-  validatedFindings,
+  type ValidatedFindingRecord,
   webhookEvents,
 } from "@repo/db";
 import {
@@ -2252,29 +2252,11 @@ export async function getReviewDebugDetails(
       .from(pullRequestSnapshots)
       .where(eq(pullRequestSnapshots.snapshotId, reviewRun.pullRequestSnapshotId))
       .limit(1),
-    dependencies.db
-      .select()
-      .from(reviewRunStageEvents)
-      .where(eq(reviewRunStageEvents.reviewRunId, reviewRunId))
-      .orderBy(asc(reviewRunStageEvents.occurredAt)),
-    dependencies.db
-      .select()
-      .from(reviewRunDependencies)
-      .where(eq(reviewRunDependencies.reviewRunId, reviewRunId)),
-    dependencies.db
-      .select()
-      .from(reviewArtifacts)
-      .where(eq(reviewArtifacts.reviewRunId, reviewRunId))
-      .orderBy(asc(reviewArtifacts.createdAt)),
-    dependencies.db
-      .select()
-      .from(candidateFindings)
-      .where(eq(candidateFindings.reviewRunId, reviewRunId))
-      .orderBy(asc(candidateFindings.createdAt)),
-    dependencies.db
-      .select()
-      .from(validatedFindings)
-      .where(eq(validatedFindings.reviewRunId, reviewRunId)),
+    reviewRepository.listReviewStageEventsForRun(reviewRunId),
+    reviewRepository.listReviewDependenciesForRun(reviewRunId),
+    reviewRepository.listReviewArtifactsForRun(reviewRunId),
+    reviewRepository.listCandidateFindingRecordsForRun(reviewRunId),
+    reviewRepository.listValidatedFindingRecordsForRun(reviewRunId),
     dependencies.db
       .select()
       .from(llmCalls)
@@ -3626,14 +3608,14 @@ type WebhookEventRow = typeof webhookEvents.$inferSelect;
 type BackgroundJobRow = BackgroundJobRecord;
 type AuditLogRow = AuditLogRecord;
 type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
-type ReviewStageEventRow = typeof reviewRunStageEvents.$inferSelect;
-type ReviewDependencyRow = typeof reviewRunDependencies.$inferSelect;
-type ReviewArtifactRow = typeof reviewArtifacts.$inferSelect;
+type ReviewStageEventRow = ReviewStageEventRecord;
+type ReviewDependencyRow = ReviewDependencyRecord;
+type ReviewArtifactRow = ReviewArtifactRecord;
 type SandboxRunRow = typeof sandboxRuns.$inferSelect;
 type SandboxArtifactRow = typeof sandboxArtifacts.$inferSelect;
 type SandboxPolicyDecisionRow = typeof sandboxPolicyDecisions.$inferSelect;
-type CandidateFindingRow = typeof candidateFindings.$inferSelect;
-type ValidatedFindingRow = typeof validatedFindings.$inferSelect;
+type CandidateFindingRow = CandidateFindingRecord;
+type ValidatedFindingRow = ValidatedFindingRecord;
 type LlmCallRow = typeof llmCalls.$inferSelect;
 type UsageEventRow = typeof usageEvents.$inferSelect;
 type QuotaReservationRow = typeof quotaReservations.$inferSelect;
@@ -4944,14 +4926,10 @@ async function loadOriginalContextBundle(
   reviewRunId: string,
   warnings: string[],
 ): Promise<ContextBundle | undefined> {
-  const [row] = await db
-    .select()
-    .from(reviewArtifacts)
-    .where(
-      and(eq(reviewArtifacts.reviewRunId, reviewRunId), eq(reviewArtifacts.kind, "context_bundle")),
-    )
-    .orderBy(desc(reviewArtifacts.createdAt))
-    .limit(1);
+  const row = await new ReviewRepository(db).getLatestReviewArtifactForKind({
+    kind: "context_bundle",
+    reviewRunId,
+  });
   const payload = asRecord(row?.metadata)?.payload;
   if (!payload) {
     return undefined;
@@ -5113,17 +5091,10 @@ async function loadValidationReplayPolicy(
   reviewRunId: string,
   warnings: string[],
 ): Promise<EffectiveReviewPolicy | undefined> {
-  const [row] = await db
-    .select()
-    .from(reviewArtifacts)
-    .where(
-      and(
-        eq(reviewArtifacts.reviewRunId, reviewRunId),
-        eq(reviewArtifacts.kind, "policy_snapshot"),
-      ),
-    )
-    .orderBy(desc(reviewArtifacts.createdAt))
-    .limit(1);
+  const row = await new ReviewRepository(db).getLatestReviewArtifactForKind({
+    kind: "policy_snapshot",
+    reviewRunId,
+  });
 
   const payload = asRecord(asRecord(row?.metadata)?.payload);
   const snapshotPayload = payload?.snapshot;
