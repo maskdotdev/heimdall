@@ -43,7 +43,7 @@ import {
   findingOutcomes,
   type HeimdallDatabase,
   memoryCandidates,
-  providerInstallations,
+  ProviderInstallationRepository,
   publishedFindings,
   publishedSummaryComments,
   RepositoryRepository,
@@ -2239,22 +2239,11 @@ export async function loadGitHubInstallationRef(
   db: HeimdallDatabase,
   installationId: string,
 ): Promise<GitHubInstallationRuntimeRef> {
-  const [installation] = await db
-    .select({
-      installationId: providerInstallations.installationId,
-      providerInstallationId: providerInstallations.providerInstallationId,
-      orgId: providerInstallations.orgId,
-    })
-    .from(providerInstallations)
-    .where(
-      and(
-        eq(providerInstallations.provider, "github"),
-        eq(providerInstallations.installationId, installationId),
-      ),
-    )
-    .limit(1);
+  const installation = await new ProviderInstallationRepository(db).getProviderInstallation(
+    installationId,
+  );
 
-  if (!installation) {
+  if (!installation || installation.provider !== "github") {
     throw new Error(`GitHub installation ${installationId} was not found.`);
   }
 

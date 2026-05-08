@@ -27,6 +27,7 @@ import {
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
   enqueueWaitingReviewRunsForIndex,
+  loadGitHubInstallationRef,
   type RedisPublishThrottleClient,
   resolveWorkerEmbeddingApiKey,
   resolveWorkerGitHubPrivateKey,
@@ -67,6 +68,62 @@ describe("createWorkerReviewSmokeGateway", () => {
         title: "Live PR review smoke test",
       }),
     ]);
+  });
+});
+
+describe("loadGitHubInstallationRef", () => {
+  it("maps a GitHub provider installation through the DB boundary", async () => {
+    await expect(
+      loadGitHubInstallationRef(
+        createWorkerProviderInstallationDatabaseStub([
+          {
+            accountLogin: "acme",
+            accountType: "organization",
+            deletedAt: null,
+            installationId: "inst_worker",
+            installedAt: new Date("2026-05-08T00:00:00.000Z"),
+            metadata: null,
+            orgId: "org_worker",
+            permissions: {},
+            provider: "github",
+            providerInstallationId: "12345",
+            suspendedAt: null,
+          },
+        ]),
+        "inst_worker",
+      ),
+    ).resolves.toEqual({
+      installationId: "inst_worker",
+      orgId: "org_worker",
+      provider: "github",
+      providerInstallationId: "12345",
+    });
+  });
+
+  it("rejects missing or non-GitHub installations", async () => {
+    await expect(
+      loadGitHubInstallationRef(createWorkerProviderInstallationDatabaseStub([]), "inst_missing"),
+    ).rejects.toThrow(/GitHub installation inst_missing was not found/u);
+    await expect(
+      loadGitHubInstallationRef(
+        createWorkerProviderInstallationDatabaseStub([
+          {
+            accountLogin: "acme",
+            accountType: "organization",
+            deletedAt: null,
+            installationId: "inst_gitlab",
+            installedAt: new Date("2026-05-08T00:00:00.000Z"),
+            metadata: null,
+            orgId: "org_worker",
+            permissions: {},
+            provider: "gitlab",
+            providerInstallationId: "12345",
+            suspendedAt: null,
+          },
+        ]),
+        "inst_gitlab",
+      ),
+    ).rejects.toThrow(/GitHub installation inst_gitlab was not found/u);
   });
 });
 
@@ -1839,6 +1896,49 @@ function createWorkerRecordingMetrics(records: WorkerRecordedMetric[]): Telemetr
       });
     },
   };
+}
+
+/** Provider installation row shape used by the worker installation lookup stub. */
+type WorkerProviderInstallationRow = {
+  /** Durable installation ID. */
+  readonly installationId: string;
+  /** Owning organization ID. */
+  readonly orgId: string;
+  /** Git provider. */
+  readonly provider: string;
+  /** Provider-native installation ID. */
+  readonly providerInstallationId: string;
+  /** Provider account login. */
+  readonly accountLogin: string;
+  /** Provider account type. */
+  readonly accountType: string;
+  /** Provider permission map. */
+  readonly permissions: Record<string, unknown>;
+  /** Installation creation timestamp. */
+  readonly installedAt: Date;
+  /** Optional suspension timestamp. */
+  readonly suspendedAt: Date | null;
+  /** Optional deletion timestamp. */
+  readonly deletedAt: Date | null;
+  /** Optional metadata payload. */
+  readonly metadata: Record<string, unknown> | null;
+};
+
+/** Creates a database stub that supports provider installation lookup. */
+function createWorkerProviderInstallationDatabaseStub(
+  rows: readonly WorkerProviderInstallationRow[],
+): never {
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async (count: number) => rows.slice(0, count),
+        }),
+      }),
+    }),
+  };
+
+  return db as never;
 }
 
 /** Creates a database stub that supports the embedding handler path. */
