@@ -37,6 +37,7 @@ const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
 const GENERATED_CONTENT_HEADER_BYTES = 8_192;
 const PACKAGE_JSON_FILE_NAME = "package.json";
 const httpRouteMethods = new Set(["delete", "get", "head", "options", "patch", "post", "put"]);
+const moduleResolutionExtensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
 const nextJsRouteMethods = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const generatedPathSegments = new Set(["generated", "__generated__"]);
 const vendoredPathSegments = new Set([
@@ -153,6 +154,40 @@ type TestTargetCandidate = {
   readonly heuristic: string;
 };
 
+/** TypeScript or JavaScript source file retained for repository-level resolution. */
+type TypeScriptSourceExtraction = {
+  /** File record for the parsed source. */
+  readonly file: FileRecord;
+  /** Parsed TypeScript compiler source file. */
+  readonly sourceFile: ts.SourceFile;
+  /** Symbols extracted from the source file. */
+  readonly symbols: readonly SymbolRecord[];
+};
+
+/** Import module specifier fact from a TS/JS import declaration. */
+type TypeScriptImportModuleFact = {
+  /** Import module specifier exactly as declared. */
+  readonly moduleSpecifier: string;
+  /** 1-based line where the import declaration starts. */
+  readonly lineNumber: number;
+};
+
+/** Named import binding fact from a TS/JS import declaration. */
+type TypeScriptImportBindingFact = TypeScriptImportModuleFact & {
+  /** Exported name requested from the imported module. */
+  readonly importedName: string;
+  /** Local binding name used in the importing file. */
+  readonly localName: string;
+};
+
+/** Direct identifier call fact from a TS/JS call expression. */
+type TypeScriptCallFact = {
+  /** Direct callee identifier used at the call site. */
+  readonly calleeName: string;
+  /** 1-based line where the call expression starts. */
+  readonly lineNumber: number;
+};
+
 /** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
 type TypeScriptIndexRecordGroups = {
   /** Chunk records discovered from indexed files. */
@@ -251,6 +286,7 @@ export async function indexTypeScriptRepository(input: {
     testMappings: [],
   };
   const languages = new Set<CodeLanguage>();
+  const typeScriptSources: TypeScriptSourceExtraction[] = [];
 
   for (const path of paths) {
     const rawContent = await readFile(join(input.workspacePath, path));
@@ -303,9 +339,15 @@ export async function indexTypeScriptRepository(input: {
     recordGroups.edges.push(
       ...edgeRecordsForFile(input.repoId, input.commitSha, file.fileId, path, sourceFile, symbols),
     );
+    typeScriptSources.push({ file, sourceFile, symbols });
     languages.add(language);
   }
 
+  const filesByPath = new Map(recordGroups.files.map((file) => [file.path, file]));
+  recordGroups.edges.push(
+    ...resolvedImportEdgesForSources(input.repoId, input.commitSha, typeScriptSources, filesByPath),
+    ...importedCallEdgesForSources(input.repoId, input.commitSha, typeScriptSources, filesByPath),
+  );
   recordGroups.testMappings.push(
     ...testMappingRecordsForFiles(input.repoId, input.commitSha, recordGroups.files),
   );
@@ -782,6 +824,291 @@ function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Emits file-to-file import edges for relative imports that resolve to indexed files. */
+function resolvedImportEdgesForSources(
+  repoId: string,
+  commitSha: string,
+  sources: readonly TypeScriptSourceExtraction[],
+  filesByPath: ReadonlyMap<string, FileRecord>,
+): EdgeRecord[] {
+  return uniqueEdges(
+    sources.flatMap((source) =>
+      typeScriptImportModuleFacts(source.sourceFile).flatMap((fact) => {
+        const targetFile = resolveRelativeModuleFile(
+          source.file.path,
+          fact.moduleSpecifier,
+          filesByPath,
+        );
+        if (!targetFile) {
+          return [];
+        }
+
+        return [
+          {
+            type: "edge" as const,
+            schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+            edgeId: createStableId("edge", [
+              repoId,
+              commitSha,
+              source.file.fileId,
+              "imports",
+              targetFile.fileId,
+              fact.lineNumber,
+            ]),
+            repoId,
+            commitSha,
+            fromId: source.file.fileId,
+            toId: targetFile.fileId,
+            fromKind: "file" as const,
+            toKind: "file" as const,
+            kind: "imports" as const,
+            confidence: 0.9,
+            metadata: {
+              importPath: fact.moduleSpecifier,
+              lineNumber: fact.lineNumber,
+              resolvedPath: targetFile.path,
+            },
+          },
+        ];
+      }),
+    ),
+  );
+}
+
+/** Emits symbol call edges for direct calls through simple named relative imports. */
+function importedCallEdgesForSources(
+  repoId: string,
+  commitSha: string,
+  sources: readonly TypeScriptSourceExtraction[],
+  filesByPath: ReadonlyMap<string, FileRecord>,
+): EdgeRecord[] {
+  const symbolsByPathAndName = symbolsByFilePathAndName(
+    sources.flatMap((source) => source.symbols),
+  );
+
+  return uniqueEdges(
+    sources.flatMap((source) => {
+      const importsByLocalName = new Map(
+        typeScriptImportBindingFacts(source.sourceFile).map((fact) => [fact.localName, fact]),
+      );
+
+      return typeScriptDirectCallFacts(source.sourceFile).flatMap((fact) => {
+        const importFact = importsByLocalName.get(fact.calleeName);
+        if (!importFact) {
+          return [];
+        }
+
+        const targetFile = resolveRelativeModuleFile(
+          source.file.path,
+          importFact.moduleSpecifier,
+          filesByPath,
+        );
+        if (!targetFile) {
+          return [];
+        }
+
+        const callee = symbolsByPathAndName.get(targetFile.path)?.get(importFact.importedName);
+        const caller = symbolContainingLine(source.symbols, fact.lineNumber);
+        if (!caller || !callee || caller.symbolId === callee.symbolId) {
+          return [];
+        }
+
+        return [
+          {
+            type: "edge" as const,
+            schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+            edgeId: createStableId("edge", [
+              repoId,
+              commitSha,
+              caller.symbolId,
+              "calls",
+              callee.symbolId,
+              "imported",
+              fact.lineNumber,
+            ]),
+            repoId,
+            commitSha,
+            fromId: caller.symbolId,
+            toId: callee.symbolId,
+            fromKind: "symbol" as const,
+            toKind: "symbol" as const,
+            kind: "calls" as const,
+            confidence: 0.9,
+            metadata: {
+              importedName: importFact.importedName,
+              importPath: importFact.moduleSpecifier,
+              lineNumber: fact.lineNumber,
+              localName: importFact.localName,
+              resolvedPath: targetFile.path,
+            },
+          },
+        ];
+      });
+    }),
+  );
+}
+
+/** Extracts module specifier facts from TS/JS import declarations. */
+function typeScriptImportModuleFacts(sourceFile: ts.SourceFile): TypeScriptImportModuleFact[] {
+  return sourceFile.statements.flatMap((statement) => {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) {
+      return [];
+    }
+
+    return [
+      {
+        lineNumber: lineRange(sourceFile, statement).startLine,
+        moduleSpecifier: statement.moduleSpecifier.text,
+      },
+    ];
+  });
+}
+
+/** Extracts named import bindings from TS/JS import declarations. */
+function typeScriptImportBindingFacts(sourceFile: ts.SourceFile): TypeScriptImportBindingFact[] {
+  return sourceFile.statements.flatMap((statement) => {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.importClause?.isTypeOnly
+    ) {
+      return [];
+    }
+
+    const namedBindings = statement.importClause?.namedBindings;
+    if (!namedBindings || !ts.isNamedImports(namedBindings)) {
+      return [];
+    }
+
+    const lineNumber = lineRange(sourceFile, statement).startLine;
+    const moduleSpecifier = statement.moduleSpecifier.text;
+    return namedBindings.elements.flatMap((specifier) => {
+      if (specifier.isTypeOnly) {
+        return [];
+      }
+
+      return [
+        {
+          importedName: specifier.propertyName?.text ?? specifier.name.text,
+          lineNumber,
+          localName: specifier.name.text,
+          moduleSpecifier,
+        },
+      ];
+    });
+  });
+}
+
+/** Extracts direct identifier call facts from TS/JS source. */
+function typeScriptDirectCallFacts(sourceFile: ts.SourceFile): TypeScriptCallFact[] {
+  const facts: TypeScriptCallFact[] = [];
+
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      facts.push({
+        calleeName: node.expression.text,
+        lineNumber: lineRange(sourceFile, node).startLine,
+      });
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return facts;
+}
+
+/** Builds a nested lookup of extracted symbols by file path and local symbol name. */
+function symbolsByFilePathAndName(
+  symbols: readonly SymbolRecord[],
+): ReadonlyMap<string, ReadonlyMap<string, SymbolRecord>> {
+  const symbolsByPath = new Map<string, Map<string, SymbolRecord>>();
+  for (const symbol of symbols) {
+    const symbolsByName = symbolsByPath.get(symbol.path) ?? new Map<string, SymbolRecord>();
+    if (!symbolsByPath.has(symbol.path)) {
+      symbolsByPath.set(symbol.path, symbolsByName);
+    }
+    if (!symbolsByName.has(symbol.name)) {
+      symbolsByName.set(symbol.name, symbol);
+    }
+  }
+
+  return symbolsByPath;
+}
+
+/** Resolves a relative TS/JS module specifier to an indexed source file. */
+function resolveRelativeModuleFile(
+  importerPath: string,
+  moduleSpecifier: string,
+  filesByPath: ReadonlyMap<string, FileRecord>,
+): FileRecord | undefined {
+  const resolvedPath = resolveRelativeModulePath(importerPath, moduleSpecifier);
+  if (!resolvedPath) {
+    return undefined;
+  }
+
+  for (const candidate of relativeModulePathCandidates(resolvedPath)) {
+    const file = filesByPath.get(candidate);
+    if (file && isSupportedSourcePath(file.path)) {
+      return file;
+    }
+  }
+
+  return undefined;
+}
+
+/** Resolves a relative import path against a POSIX repository path. */
+function resolveRelativeModulePath(
+  importerPath: string,
+  moduleSpecifier: string,
+): string | undefined {
+  if (!isRelativeModuleSpecifier(moduleSpecifier)) {
+    return undefined;
+  }
+
+  const normalized = normalizeRepoPath(joinRepoPath(pathDirectory(importerPath), moduleSpecifier));
+  return normalized && !normalized.startsWith("../") && normalized !== ".."
+    ? normalized
+    : undefined;
+}
+
+/** Returns candidate source paths for a resolved extensionless module path. */
+function relativeModulePathCandidates(path: string): readonly string[] {
+  if (sourceExtension(path)) {
+    return [path];
+  }
+
+  return [
+    ...moduleResolutionExtensions.map((extension) => `${path}${extension}`),
+    ...moduleResolutionExtensions.map((extension) => `${path}/index${extension}`),
+  ];
+}
+
+/** Returns whether a module specifier points to a relative module path. */
+function isRelativeModuleSpecifier(moduleSpecifier: string): boolean {
+  return moduleSpecifier.startsWith("./") || moduleSpecifier.startsWith("../");
+}
+
+/** Normalizes a POSIX repository path without allowing an absolute result. */
+function normalizeRepoPath(path: string): string | undefined {
+  const segments: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment.length === 0 || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      if (segments.length === 0) {
+        return undefined;
+      }
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return segments.length > 0 ? segments.join("/") : undefined;
+}
+
 /** Emits route records for clear TypeScript and JavaScript framework patterns. */
 function routeRecordsForFile(
   file: FileRecord,
@@ -1252,7 +1579,11 @@ function edgeRecordsForFile(
   const edges: EdgeRecord[] = [];
 
   for (const statement of sourceFile.statements) {
-    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+    if (
+      ts.isImportDeclaration(statement) &&
+      ts.isStringLiteral(statement.moduleSpecifier) &&
+      !isRelativeModuleSpecifier(statement.moduleSpecifier.text)
+    ) {
       const toId = `external:${statement.moduleSpecifier.text}`;
       edges.push({
         type: "edge",

@@ -185,6 +185,101 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("resolves simple calls through named relative imports", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await mkdir(join(workspacePath, "src"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(workspacePath, "src", "math.ts"),
+        ["export function add(left: number, right: number) {", "  return left + right;", "}"].join(
+          "\n",
+        ),
+      ),
+      writeFile(
+        join(workspacePath, "src", "service.ts"),
+        [
+          'import { add as sum } from "./math";',
+          'import { readFile } from "node:fs/promises";',
+          "",
+          "export function total() {",
+          "  return sum(1, 2);",
+          "}",
+          "",
+          "export async function load(path: string) {",
+          "  return readFile(path, 'utf8');",
+          "}",
+          "",
+        ].join("\n"),
+      ),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const fileIdsByPath = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "file" ? [[record.path, record.fileId] as const] : [],
+      ),
+    );
+    const symbolIdsByPathAndName = new Map(
+      artifact.records.flatMap((record) =>
+        record.type === "symbol"
+          ? [[`${record.path}:${record.name}`, record.symbolId] as const]
+          : [],
+      ),
+    );
+    const importEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" && record.kind === "imports"
+        ? [
+            {
+              fromId: record.fromId,
+              toId: record.toId,
+              toKind: record.toKind,
+            },
+          ]
+        : [],
+    );
+    const importedCallEdges = artifact.records.flatMap((record) =>
+      record.type === "edge" && record.kind === "calls" && record.metadata?.importPath === "./math"
+        ? [
+            {
+              fromId: record.fromId,
+              importedName: record.metadata.importedName,
+              localName: record.metadata.localName,
+              resolvedPath: record.metadata.resolvedPath,
+              toId: record.toId,
+            },
+          ]
+        : [],
+    );
+
+    expect(importEdges).toEqual([
+      {
+        fromId: fileIdsByPath.get("src/service.ts"),
+        toId: "external:node:fs/promises",
+        toKind: "external",
+      },
+      {
+        fromId: fileIdsByPath.get("src/service.ts"),
+        toId: fileIdsByPath.get("src/math.ts"),
+        toKind: "file",
+      },
+    ]);
+    expect(importedCallEdges).toEqual([
+      {
+        fromId: symbolIdsByPathAndName.get("src/service.ts:total"),
+        importedName: "add",
+        localName: "sum",
+        resolvedPath: "src/math.ts",
+        toId: symbolIdsByPathAndName.get("src/math.ts:add"),
+      },
+    ]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
   it("emits files, symbols, and chunks for Python sources", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await writeFile(
