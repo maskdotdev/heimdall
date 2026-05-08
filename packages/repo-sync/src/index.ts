@@ -17,6 +17,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 const defaultAllowedGitHosts = ["github.com", "www.github.com"] as const;
+const defaultGitCommandTimeoutMs = 120_000;
+const defaultGitOutputBufferBytes = 256 * 1024;
 const managedWorkspacePrefix = "heimdall-repo-";
 const redactedSecret = "***";
 const githubTokenPattern = /\bgh[opsu]_[A-Za-z0-9_]+\b/gu;
@@ -43,7 +45,84 @@ export type GitCommandRunnerOptions = {
   readonly cwd?: string;
   /** Environment overrides for the Git command. */
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Secrets that must be redacted from command failure details. */
+  readonly redact?: readonly string[];
+  /** Command timeout in milliseconds. */
+  readonly timeoutMs?: number;
 };
+
+/** Options used when creating the default Git command runner. */
+export type CreateGitRunnerOptions = {
+  /** Git binary path, or another binary in tests. */
+  readonly gitBinaryPath?: string;
+  /** Default command timeout in milliseconds. */
+  readonly defaultTimeoutMs?: number;
+  /** Maximum stdout or stderr bytes captured by Node. */
+  readonly maxBufferBytes?: number;
+};
+
+/** Product-safe captured Git command output attached to failures. */
+export type CapturedGitOutput = {
+  /** Redacted captured text, truncated when needed. */
+  readonly text: string;
+  /** True when captured text was truncated. */
+  readonly truncated: boolean;
+  /** Original UTF-8 byte length before truncation. */
+  readonly originalBytes: number;
+};
+
+/** Git command failure classification. */
+export type RepoSyncGitCommandErrorCode = "GIT_COMMAND_FAILED" | "GIT_TIMEOUT";
+
+/** Product-safe Git command failure with redacted command and output details. */
+export class RepoSyncGitCommandError extends Error {
+  /** Stable error code for retry and telemetry classification. */
+  public readonly code: RepoSyncGitCommandErrorCode;
+  /** Redacted command line that failed. */
+  public readonly command: string;
+  /** Process exit code when available. */
+  public readonly exitCode: number | undefined;
+  /** Process signal when available. */
+  public readonly signal: string | undefined;
+  /** Redacted stderr captured from the failed command. */
+  public readonly stderr: CapturedGitOutput;
+  /** Redacted stdout captured from the failed command. */
+  public readonly stdout: CapturedGitOutput;
+  /** Command timeout in milliseconds. */
+  public readonly timeoutMs: number;
+
+  /** Creates a Git command error with product-safe details. */
+  public constructor(input: {
+    /** Stable error code for retry and telemetry classification. */
+    readonly code: RepoSyncGitCommandErrorCode;
+    /** Redacted command line that failed. */
+    readonly command: string;
+    /** Process exit code when available. */
+    readonly exitCode?: number | undefined;
+    /** Error message to expose to callers. */
+    readonly message: string;
+    /** Process signal when available. */
+    readonly signal?: string | undefined;
+    /** Redacted stderr captured from the failed command. */
+    readonly stderr: CapturedGitOutput;
+    /** Redacted stdout captured from the failed command. */
+    readonly stdout: CapturedGitOutput;
+    /** Command timeout in milliseconds. */
+    readonly timeoutMs: number;
+    /** Original command failure. */
+    readonly cause?: unknown;
+  }) {
+    super(input.message, { cause: input.cause });
+    this.name = "RepoSyncGitCommandError";
+    this.code = input.code;
+    this.command = input.command;
+    this.exitCode = input.exitCode;
+    this.signal = input.signal;
+    this.stderr = input.stderr;
+    this.stdout = input.stdout;
+    this.timeoutMs = input.timeoutMs;
+  }
+}
 
 /** Input required to sync one repository workspace. */
 export type SyncRepositoryWorkspaceInput = GitHubRepositoryRef & {
@@ -138,6 +217,7 @@ export async function syncRepositoryWorkspace(
     await git(["fetch", "--depth=1", "origin", input.commitSha], {
       cwd: workspacePath,
       env: gitAskPassEnvironment(cloneAuth, askPassPath),
+      redact: [cloneAuth.password],
     });
     await removeGitAskPassScript(askPassPath);
     askPassPath = undefined;
@@ -301,6 +381,35 @@ export function createAuthenticatedCloneUrl(input: {
   return url.toString();
 }
 
+/** Creates a Git command runner with timeout and redacted failure handling. */
+export function createGitRunner(options: CreateGitRunnerOptions = {}): GitCommandRunner {
+  const gitBinaryPath = options.gitBinaryPath ?? "git";
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? defaultGitCommandTimeoutMs;
+  const maxBufferBytes = options.maxBufferBytes ?? defaultGitOutputBufferBytes;
+
+  return async (args, commandOptions) => {
+    const timeoutMs = commandOptions.timeoutMs ?? defaultTimeoutMs;
+    try {
+      const { stdout } = await execFileAsync(gitBinaryPath, [...args], {
+        cwd: commandOptions.cwd,
+        env: commandOptions.env ? { ...process.env, ...commandOptions.env } : process.env,
+        maxBuffer: maxBufferBytes,
+        timeout: timeoutMs,
+      });
+      return stdout;
+    } catch (error) {
+      throw createGitCommandError({
+        args,
+        commandOptions,
+        error,
+        gitBinaryPath,
+        maxOutputBytes: maxBufferBytes,
+        timeoutMs,
+      });
+    }
+  };
+}
+
 /** Returns a clone URL with credentials, query strings, and fragments removed. */
 export function sanitizeGitUrl(input: string): string {
   const url = new URL(input);
@@ -437,6 +546,109 @@ function normalizeGitHost(host: string): string {
   return host.toLowerCase().replace(/\.$/u, "");
 }
 
+/** Creates a product-safe Git command failure from a Node process error. */
+function createGitCommandError(input: {
+  /** Git command arguments. */
+  readonly args: readonly string[];
+  /** Git command options. */
+  readonly commandOptions: GitCommandRunnerOptions;
+  /** Original process error. */
+  readonly error: unknown;
+  /** Git binary path. */
+  readonly gitBinaryPath: string;
+  /** Maximum output bytes exposed on the error. */
+  readonly maxOutputBytes: number;
+  /** Command timeout in milliseconds. */
+  readonly timeoutMs: number;
+}): RepoSyncGitCommandError {
+  const processError = extractProcessError(input.error);
+  const redactions = input.commandOptions.redact ?? [];
+  const command = redactSecrets([input.gitBinaryPath, ...input.args].join(" "), redactions);
+  const stdout = captureOutput(processError.stdout, redactions, input.maxOutputBytes);
+  const stderr = captureOutput(processError.stderr, redactions, input.maxOutputBytes);
+  const timedOut = processError.killed === true && input.timeoutMs > 0;
+  const code: RepoSyncGitCommandErrorCode = timedOut ? "GIT_TIMEOUT" : "GIT_COMMAND_FAILED";
+  const message = timedOut
+    ? `Git command timed out after ${input.timeoutMs}ms: ${command}`
+    : `Git command failed: ${command}`;
+
+  return new RepoSyncGitCommandError({
+    cause: input.error,
+    code,
+    command,
+    exitCode: processError.exitCode,
+    message,
+    signal: processError.signal,
+    stderr,
+    stdout,
+    timeoutMs: input.timeoutMs,
+  });
+}
+
+/** Process error details returned by child_process helpers. */
+type ProcessErrorDetails = {
+  /** Process exit code when available. */
+  readonly exitCode?: number | undefined;
+  /** True when Node killed the process. */
+  readonly killed?: boolean | undefined;
+  /** Process signal when available. */
+  readonly signal?: string | undefined;
+  /** Raw stderr captured from the process. */
+  readonly stderr?: unknown;
+  /** Raw stdout captured from the process. */
+  readonly stdout?: unknown;
+};
+
+/** Extracts typed process details from an unknown Node execFile error. */
+function extractProcessError(error: unknown): ProcessErrorDetails {
+  if (typeof error !== "object" || error === null) {
+    return {};
+  }
+
+  const record = error as Record<string, unknown>;
+  return {
+    ...(typeof record.code === "number" ? { exitCode: record.code } : {}),
+    ...(typeof record.killed === "boolean" ? { killed: record.killed } : {}),
+    ...(typeof record.signal === "string" ? { signal: record.signal } : {}),
+    stderr: record.stderr,
+    stdout: record.stdout,
+  };
+}
+
+/** Captures and redacts a command output value with a byte limit. */
+function captureOutput(
+  value: unknown,
+  redactions: readonly string[],
+  maxOutputBytes: number,
+): CapturedGitOutput {
+  const text = redactSecrets(outputValueToString(value), redactions);
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.byteLength <= maxOutputBytes) {
+    return {
+      originalBytes: buffer.byteLength,
+      text,
+      truncated: false,
+    };
+  }
+
+  return {
+    originalBytes: buffer.byteLength,
+    text: buffer.subarray(0, maxOutputBytes).toString("utf8"),
+    truncated: true,
+  };
+}
+
+/** Converts a Node command output value to text. */
+function outputValueToString(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return "";
+}
+
 /** Creates a temporary Git askpass helper that reads credentials from process environment. */
 async function createGitAskPassScript(workspacePath: string): Promise<string> {
   const askPassPath = join(workspacePath, ".heimdall-git-askpass.sh");
@@ -476,10 +688,5 @@ function gitAskPassEnvironment(
 }
 
 async function runGit(args: readonly string[], options: GitCommandRunnerOptions): Promise<string> {
-  const { stdout } = await execFileAsync("git", [...args], {
-    cwd: options.cwd,
-    env: options.env ? { ...process.env, ...options.env } : process.env,
-    maxBuffer: 1024 * 1024 * 50,
-  });
-  return stdout;
+  return createGitRunner()(args, options);
 }

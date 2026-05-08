@@ -17,9 +17,11 @@ import {
   assertSafeRepositoryWorkspaceCleanupPath,
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
+  createGitRunner,
   type GitCommandRunner,
   hashGitUrl,
   normalizeRepoPath,
+  RepoSyncGitCommandError,
   redactGitRemoteUrl,
   redactSecrets,
   safeJoin,
@@ -288,6 +290,59 @@ describe("repo sync workspace", () => {
     ).toBe("https://x-access-token:token%3Awith%40chars@github.com/acme/api.git");
   });
 
+  it("runs commands through the timeout-aware Git runner", async () => {
+    const runner = createGitRunner({
+      defaultTimeoutMs: 1_000,
+      gitBinaryPath: process.execPath,
+    });
+
+    await expect(runner(["-e", "process.stdout.write('ok')"], {})).resolves.toBe("ok");
+  });
+
+  it("redacts command failures from the Git runner", async () => {
+    const runner = createGitRunner({
+      defaultTimeoutMs: 1_000,
+      gitBinaryPath: process.execPath,
+    });
+
+    const error = await expectGitCommandError(
+      runner(
+        [
+          "-e",
+          [
+            "console.error('manual-secret ghs_provider_token');",
+            "console.log('manual-secret');",
+            "process.exit(7);",
+          ].join(" "),
+        ],
+        { redact: ["manual-secret"] },
+      ),
+    );
+
+    expect(error.code).toBe("GIT_COMMAND_FAILED");
+    expect(error.exitCode).toBe(7);
+    expect(error.command).not.toContain("manual-secret");
+    expect(error.command).not.toContain("ghs_provider_token");
+    expect(error.stderr.text).toContain("***");
+    expect(error.stderr.text).not.toContain("manual-secret");
+    expect(error.stderr.text).not.toContain("ghs_provider_token");
+    expect(error.stdout.text).toContain("***");
+  });
+
+  it("times out long-running Git runner commands", async () => {
+    const runner = createGitRunner({
+      defaultTimeoutMs: 100,
+      gitBinaryPath: process.execPath,
+    });
+
+    const error = await expectGitCommandError(
+      runner(["-e", "setTimeout(() => undefined, 1_000)"], {}),
+    );
+
+    expect(error.code).toBe("GIT_TIMEOUT");
+    expect(error.message).toContain("timed out after 100ms");
+  });
+
   it("sanitizes and allowlists Git clone URLs", () => {
     const credentialedUrl = "https://x-access-token:secret@github.com/acme/api.git?token=1#main";
 
@@ -417,6 +472,18 @@ describe("repo sync workspace", () => {
     await expect(access(outsideRoot)).resolves.toBeUndefined();
   });
 });
+
+/** Expects a promise to reject with a repo-sync Git command error. */
+async function expectGitCommandError(promise: Promise<string>): Promise<RepoSyncGitCommandError> {
+  try {
+    await promise;
+  } catch (error) {
+    expect(error).toBeInstanceOf(RepoSyncGitCommandError);
+    return error as RepoSyncGitCommandError;
+  }
+
+  throw new Error("Expected command to fail.");
+}
 
 function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
   return {
