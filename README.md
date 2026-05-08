@@ -105,8 +105,35 @@ pnpm lint
 pnpm test
 pnpm eval run --suite smoke-full-pipeline-v1 --variant local --no-live-models
 pnpm smoke:sandbox:docker
+pnpm smoke:observability:config
 pnpm infra:up
+pnpm dev:observability
 pnpm infra:down
+```
+
+## Local Observability
+
+Start the local OpenTelemetry Collector, Prometheus, Tempo, and Grafana stack:
+
+```bash
+pnpm dev:observability
+```
+
+Grafana listens on `http://localhost:3001`, Prometheus on `http://localhost:9090`, Tempo on
+`http://localhost:3200`, and the OTLP HTTP endpoint on `http://localhost:4318`.
+
+To emit local OTLP telemetry from a service, set:
+
+```bash
+OBSERVABILITY_ENABLED=true
+OBSERVABILITY_EXPORTER=otlp
+OBSERVABILITY_OTLP_ENDPOINT=http://localhost:4318
+```
+
+Validate the composed observability stack without starting containers:
+
+```bash
+pnpm smoke:observability:config
 ```
 
 ## Evaluation Gate
