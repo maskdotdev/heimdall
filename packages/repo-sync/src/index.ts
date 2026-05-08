@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, posix, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import {
@@ -19,6 +19,12 @@ const execFileAsync = promisify(execFile);
 const defaultAllowedGitHosts = ["github.com", "www.github.com"] as const;
 const defaultGitCommandTimeoutMs = 120_000;
 const defaultGitOutputBufferBytes = 256 * 1024;
+const defaultRepoSyncCacheRoot = ".local/git-cache";
+const defaultRepoSyncCacheNodeId = "local";
+const defaultRepoSyncLeaseTtlSeconds = 60 * 30;
+const defaultRepoSyncMaxTotalCacheBytes = 100 * 1024 * 1024 * 1024;
+const defaultRepoSyncMaxMirrorBytes = 20 * 1024 * 1024 * 1024;
+const defaultRepoSyncMaxWorkspaceBytes = 5 * 1024 * 1024 * 1024;
 const managedWorkspacePrefix = "heimdall-repo-";
 const redactedSecret = "***";
 const githubTokenPattern = /\bgh[opsu]_[A-Za-z0-9_]+\b/gu;
@@ -27,12 +33,69 @@ const bearerTokenPattern = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu;
 const authorizationHeaderPattern = /\bAuthorization:\s*[^\r\n]+/giu;
 const xAccessTokenPattern = /(x-access-token:)[^@\s/]+/giu;
 const fullCommitShaPattern = /^[0-9a-f]{40}$/u;
+const safeCachePathSegmentPattern = /^[A-Za-z0-9][A-Za-z0-9_-]*$/u;
 const windowsDrivePathPattern = /^[A-Za-z]:($|[\\/])/u;
 
 declare const repoPathBrand: unique symbol;
 
 /** Repository-relative path normalized to forward slashes. */
 export type RepoPath = string & { readonly [repoPathBrand]: "RepoPath" };
+
+/** Environment record used when loading repo-sync configuration. */
+export type RepoSyncEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Runtime configuration for repo-sync cache and Git behavior. */
+export type RepoSyncConfig = {
+  /** Root directory that contains mirror, worktree, temp, and lock subdirectories. */
+  readonly cacheRoot: string;
+  /** Stable identifier for the worker cache node. */
+  readonly cacheNodeId: string;
+  /** Git executable used by the command runner. */
+  readonly gitBinaryPath: string;
+  /** Maximum concurrent mirror fetch operations. */
+  readonly maxConcurrentFetches: number;
+  /** Maximum concurrent worktree operations. */
+  readonly maxConcurrentWorktrees: number;
+  /** Default fetch timeout in milliseconds. */
+  readonly defaultFetchTimeoutMs: number;
+  /** Default worktree operation timeout in milliseconds. */
+  readonly defaultWorktreeTimeoutMs: number;
+  /** Default workspace lease lifetime in seconds. */
+  readonly defaultLeaseTtlSeconds: number;
+  /** Maximum total cache bytes for one node. */
+  readonly maxTotalCacheBytes: number;
+  /** Maximum mirror bytes for one repository mirror. */
+  readonly maxMirrorBytes: number;
+  /** Maximum workspace bytes for one checked-out workspace. */
+  readonly maxWorkspaceBytes: number;
+  /** Clone URL hosts allowed for this repo-sync instance. */
+  readonly allowedGitHosts: readonly string[];
+  /** Enables partial clone command construction when true. */
+  readonly enablePartialClone: boolean;
+  /** Enables sparse checkout support when true. */
+  readonly enableSparseCheckout: boolean;
+  /** Enables explicit Git LFS content fetching when true. */
+  readonly enableLfsFetch: boolean;
+  /** Enables submodule initialization when true. */
+  readonly enableSubmodules: boolean;
+};
+
+/** Partial repo-sync configuration accepted from apps and tests. */
+export type CreateRepoSyncConfigInput = Partial<RepoSyncConfig>;
+
+/** Physical cache layout derived from a repo-sync cache root. */
+export type RepoSyncCacheLayout = {
+  /** Root directory that contains all repo-sync cache paths. */
+  readonly cacheRoot: string;
+  /** Directory containing bare repository mirrors. */
+  readonly mirrorsRoot: string;
+  /** Directory containing checked-out worktrees. */
+  readonly worktreesRoot: string;
+  /** Directory containing temporary clone and staging paths. */
+  readonly tmpRoot: string;
+  /** Directory containing local lock files. */
+  readonly locksRoot: string;
+};
 
 /** Git command runner used by repo sync and tests. */
 export type GitCommandRunner = (
@@ -125,6 +188,99 @@ export class RepoSyncGitCommandError extends Error {
   }
 }
 
+/** Creates repo-sync configuration with production-safe defaults. */
+export function createRepoSyncConfig(input: CreateRepoSyncConfigInput = {}): RepoSyncConfig {
+  return {
+    allowedGitHosts: normalizeAllowedGitHosts(input.allowedGitHosts ?? defaultAllowedGitHosts),
+    cacheNodeId: input.cacheNodeId ?? defaultRepoSyncCacheNodeId,
+    cacheRoot: normalizeRepoSyncCacheRoot(input.cacheRoot ?? defaultRepoSyncCacheRoot),
+    defaultFetchTimeoutMs: input.defaultFetchTimeoutMs ?? defaultGitCommandTimeoutMs,
+    defaultLeaseTtlSeconds: input.defaultLeaseTtlSeconds ?? defaultRepoSyncLeaseTtlSeconds,
+    defaultWorktreeTimeoutMs: input.defaultWorktreeTimeoutMs ?? defaultGitCommandTimeoutMs,
+    enableLfsFetch: input.enableLfsFetch ?? false,
+    enablePartialClone: input.enablePartialClone ?? true,
+    enableSparseCheckout: input.enableSparseCheckout ?? true,
+    enableSubmodules: input.enableSubmodules ?? false,
+    gitBinaryPath: input.gitBinaryPath ?? "git",
+    maxConcurrentFetches: input.maxConcurrentFetches ?? 4,
+    maxConcurrentWorktrees: input.maxConcurrentWorktrees ?? 16,
+    maxMirrorBytes: input.maxMirrorBytes ?? defaultRepoSyncMaxMirrorBytes,
+    maxTotalCacheBytes: input.maxTotalCacheBytes ?? defaultRepoSyncMaxTotalCacheBytes,
+    maxWorkspaceBytes: input.maxWorkspaceBytes ?? defaultRepoSyncMaxWorkspaceBytes,
+  };
+}
+
+/** Loads repo-sync configuration from REPO_SYNC_* environment variables. */
+export function loadRepoSyncConfigFromEnvironment(env: RepoSyncEnvironment): RepoSyncConfig {
+  return createRepoSyncConfig({
+    ...optionalString("cacheRoot", env.REPO_SYNC_CACHE_ROOT),
+    ...optionalString("cacheNodeId", env.REPO_SYNC_CACHE_NODE_ID),
+    ...optionalString("gitBinaryPath", env.REPO_SYNC_GIT_BINARY),
+    ...optionalInteger("defaultFetchTimeoutMs", env.REPO_SYNC_FETCH_TIMEOUT_MS),
+    ...optionalInteger("defaultWorktreeTimeoutMs", env.REPO_SYNC_WORKTREE_TIMEOUT_MS),
+    ...optionalInteger("defaultLeaseTtlSeconds", env.REPO_SYNC_DEFAULT_LEASE_TTL_SECONDS),
+    ...optionalInteger("maxConcurrentFetches", env.REPO_SYNC_MAX_CONCURRENT_FETCHES),
+    ...optionalInteger("maxConcurrentWorktrees", env.REPO_SYNC_MAX_CONCURRENT_WORKTREES),
+    ...optionalInteger("maxMirrorBytes", env.REPO_SYNC_MAX_MIRROR_BYTES),
+    ...optionalInteger("maxTotalCacheBytes", env.REPO_SYNC_MAX_TOTAL_CACHE_BYTES),
+    ...optionalInteger("maxWorkspaceBytes", env.REPO_SYNC_MAX_WORKSPACE_BYTES),
+    ...optionalStringList("allowedGitHosts", env.REPO_SYNC_ALLOWED_GIT_HOSTS),
+    ...optionalBoolean("enablePartialClone", env.REPO_SYNC_ENABLE_PARTIAL_CLONE),
+    ...optionalBoolean("enableSparseCheckout", env.REPO_SYNC_ENABLE_SPARSE_CHECKOUT),
+    ...optionalBoolean("enableLfsFetch", env.REPO_SYNC_ENABLE_LFS_FETCH),
+    ...optionalBoolean("enableSubmodules", env.REPO_SYNC_ENABLE_SUBMODULES),
+  });
+}
+
+/** Returns the physical cache directory layout for a repo-sync cache root. */
+export function getRepoSyncCacheLayout(input: RepoSyncCachePathInput): RepoSyncCacheLayout {
+  const cacheRoot = normalizeRepoSyncCacheRoot(cacheRootFromPathInput(input));
+
+  return {
+    cacheRoot,
+    locksRoot: join(cacheRoot, "locks"),
+    mirrorsRoot: join(cacheRoot, "mirrors"),
+    tmpRoot: join(cacheRoot, "tmp"),
+    worktreesRoot: join(cacheRoot, "worktrees"),
+  };
+}
+
+/** Returns the bare mirror path for one repository ID. */
+export function getRepoSyncMirrorPath(input: RepoSyncCachePathInput, repoId: string): string {
+  return join(
+    getRepoSyncCacheLayout(input).mirrorsRoot,
+    `${safeCachePathSegment("repoId", repoId)}.git`,
+  );
+}
+
+/** Returns the temporary mirror path for one clone attempt. */
+export function getRepoSyncTempMirrorPath(
+  input: RepoSyncCachePathInput,
+  repoId: string,
+  tempId: string,
+): string {
+  return join(
+    getRepoSyncCacheLayout(input).tmpRoot,
+    `clone_${safeCachePathSegment("repoId", repoId)}_${safeCachePathSegment("tempId", tempId)}.git`,
+  );
+}
+
+/** Returns the checked-out worktree path for one lease ID. */
+export function getRepoSyncWorktreePath(input: RepoSyncCachePathInput, leaseId: string): string {
+  return join(
+    getRepoSyncCacheLayout(input).worktreesRoot,
+    safeCachePathSegment("leaseId", leaseId),
+  );
+}
+
+/** Returns the lock file path for a repo-sync lock ID. */
+export function getRepoSyncLockPath(input: RepoSyncCachePathInput, lockId: string): string {
+  return join(
+    getRepoSyncCacheLayout(input).locksRoot,
+    `${safeCachePathSegment("lockId", lockId)}.lock`,
+  );
+}
+
 /** Input required to sync one repository workspace. */
 export type SyncRepositoryWorkspaceInput = GitHubRepositoryRef & {
   /** Heimdall repository ID used for product-safe span correlation. */
@@ -168,6 +324,9 @@ export type AssertAllowedGitUrlOptions = {
   /** Allows SSH clone URLs when explicitly enabled. */
   readonly allowSsh?: boolean;
 };
+
+/** Input accepted by repo-sync cache path builders. */
+export type RepoSyncCachePathInput = Pick<RepoSyncConfig, "cacheRoot"> | string;
 
 /** Result returned after a repository workspace sync finishes. */
 export type SyncRepositoryWorkspaceResult = {
@@ -553,6 +712,97 @@ export function assertInsideRoot(root: string, targetPath: string): void {
 /** Normalizes a Git hostname for allowlist comparisons. */
 function normalizeGitHost(host: string): string {
   return host.toLowerCase().replace(/\.$/u, "");
+}
+
+/** Normalizes and validates a repo-sync cache root. */
+function normalizeRepoSyncCacheRoot(input: string): string {
+  if (input.trim().length === 0) {
+    throw new Error("Repo sync cache root must not be empty.");
+  }
+
+  const cacheRoot = resolve(input);
+  if (parse(cacheRoot).root === cacheRoot) {
+    throw new Error("Repo sync cache root must not be a filesystem root.");
+  }
+
+  return cacheRoot;
+}
+
+/** Normalizes allowed Git host entries. */
+function normalizeAllowedGitHosts(input: readonly string[]): readonly string[] {
+  const hosts = [...new Set(input.map((host) => normalizeGitHost(host.trim())).filter(Boolean))];
+  if (hosts.length === 0) {
+    throw new Error("Repo sync allowed Git hosts must not be empty.");
+  }
+
+  return hosts;
+}
+
+/** Returns the cache root from a path-builder input. */
+function cacheRootFromPathInput(input: RepoSyncCachePathInput): string {
+  return typeof input === "string" ? input : input.cacheRoot;
+}
+
+/** Validates one path segment used in cache paths. */
+function safeCachePathSegment(label: string, value: string): string {
+  if (!safeCachePathSegmentPattern.test(value)) {
+    throw new Error(`${label} must be a safe cache path segment.`);
+  }
+
+  return value;
+}
+
+/** Returns an optional string config property when an environment value is present. */
+function optionalString(key: keyof CreateRepoSyncConfigInput, value: string | undefined) {
+  if (!value || value.trim().length === 0) {
+    return {};
+  }
+
+  return { [key]: value.trim() } as CreateRepoSyncConfigInput;
+}
+
+/** Returns an optional string-list config property from a comma-separated environment value. */
+function optionalStringList(key: keyof CreateRepoSyncConfigInput, value: string | undefined) {
+  if (!value || value.trim().length === 0) {
+    return {};
+  }
+
+  return {
+    [key]: value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  } as CreateRepoSyncConfigInput;
+}
+
+/** Returns an optional positive integer config property when an environment value is present. */
+function optionalInteger(key: keyof CreateRepoSyncConfigInput, value: string | undefined) {
+  if (!value || value.trim().length === 0) {
+    return {};
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${String(key)} must be a positive integer.`);
+  }
+
+  return { [key]: parsed } as CreateRepoSyncConfigInput;
+}
+
+/** Returns an optional boolean config property when an environment value is present. */
+function optionalBoolean(key: keyof CreateRepoSyncConfigInput, value: string | undefined) {
+  if (!value || value.trim().length === 0) {
+    return {};
+  }
+
+  if (value === "true") {
+    return { [key]: true } as CreateRepoSyncConfigInput;
+  }
+  if (value === "false") {
+    return { [key]: false } as CreateRepoSyncConfigInput;
+  }
+
+  throw new Error(`${String(key)} must be true or false.`);
 }
 
 /** Builds the narrow environment used for Git subprocesses. */

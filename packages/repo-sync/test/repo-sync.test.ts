@@ -19,8 +19,15 @@ import {
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   createGitRunner,
+  createRepoSyncConfig,
   type GitCommandRunner,
+  getRepoSyncCacheLayout,
+  getRepoSyncLockPath,
+  getRepoSyncMirrorPath,
+  getRepoSyncTempMirrorPath,
+  getRepoSyncWorktreePath,
   hashGitUrl,
+  loadRepoSyncConfigFromEnvironment,
   normalizeRepoPath,
   RepoSyncGitCommandError,
   redactGitRemoteUrl,
@@ -64,6 +71,101 @@ describe("repo sync workspace", () => {
     for (const root of workspaceRoots.splice(0)) {
       await rm(root, { force: true, recursive: true });
     }
+  });
+
+  it("loads repo-sync cache configuration with safe defaults and environment overrides", () => {
+    const cacheRoot = join(tmpdir(), "heimdall-repo-sync-cache-config-test");
+
+    expect(createRepoSyncConfig({ cacheRoot })).toMatchObject({
+      allowedGitHosts: ["github.com", "www.github.com"],
+      cacheNodeId: "local",
+      cacheRoot,
+      defaultFetchTimeoutMs: 120_000,
+      defaultLeaseTtlSeconds: 1_800,
+      enableLfsFetch: false,
+      enablePartialClone: true,
+      enableSparseCheckout: true,
+      enableSubmodules: false,
+      gitBinaryPath: "git",
+      maxConcurrentFetches: 4,
+      maxConcurrentWorktrees: 16,
+    });
+
+    expect(
+      loadRepoSyncConfigFromEnvironment({
+        REPO_SYNC_ALLOWED_GIT_HOSTS: "github.com,github.example",
+        REPO_SYNC_CACHE_NODE_ID: "worker-a",
+        REPO_SYNC_CACHE_ROOT: cacheRoot,
+        REPO_SYNC_DEFAULT_LEASE_TTL_SECONDS: "900",
+        REPO_SYNC_ENABLE_LFS_FETCH: "true",
+        REPO_SYNC_ENABLE_PARTIAL_CLONE: "false",
+        REPO_SYNC_ENABLE_SPARSE_CHECKOUT: "false",
+        REPO_SYNC_ENABLE_SUBMODULES: "true",
+        REPO_SYNC_FETCH_TIMEOUT_MS: "30000",
+        REPO_SYNC_GIT_BINARY: "/usr/bin/git",
+        REPO_SYNC_MAX_CONCURRENT_FETCHES: "2",
+        REPO_SYNC_MAX_CONCURRENT_WORKTREES: "8",
+        REPO_SYNC_MAX_MIRROR_BYTES: "2048",
+        REPO_SYNC_MAX_TOTAL_CACHE_BYTES: "4096",
+        REPO_SYNC_MAX_WORKSPACE_BYTES: "1024",
+        REPO_SYNC_WORKTREE_TIMEOUT_MS: "45000",
+      }),
+    ).toMatchObject({
+      allowedGitHosts: ["github.com", "github.example"],
+      cacheNodeId: "worker-a",
+      cacheRoot,
+      defaultFetchTimeoutMs: 30_000,
+      defaultLeaseTtlSeconds: 900,
+      defaultWorktreeTimeoutMs: 45_000,
+      enableLfsFetch: true,
+      enablePartialClone: false,
+      enableSparseCheckout: false,
+      enableSubmodules: true,
+      gitBinaryPath: "/usr/bin/git",
+      maxConcurrentFetches: 2,
+      maxConcurrentWorktrees: 8,
+      maxMirrorBytes: 2_048,
+      maxTotalCacheBytes: 4_096,
+      maxWorkspaceBytes: 1_024,
+    });
+
+    expect(() => createRepoSyncConfig({ allowedGitHosts: [], cacheRoot })).toThrow(
+      "allowed Git hosts",
+    );
+    expect(() => createRepoSyncConfig({ cacheRoot: "/" })).toThrow("filesystem root");
+    expect(() => loadRepoSyncConfigFromEnvironment({ REPO_SYNC_FETCH_TIMEOUT_MS: "0" })).toThrow(
+      "positive integer",
+    );
+    expect(() => loadRepoSyncConfigFromEnvironment({ REPO_SYNC_ENABLE_LFS_FETCH: "yes" })).toThrow(
+      "true or false",
+    );
+  });
+
+  it("builds safe repo-sync cache paths", () => {
+    const cacheRoot = join(tmpdir(), "heimdall-repo-sync-cache-path-test");
+    const config = createRepoSyncConfig({ cacheRoot });
+
+    expect(getRepoSyncCacheLayout(config)).toEqual({
+      cacheRoot,
+      locksRoot: join(cacheRoot, "locks"),
+      mirrorsRoot: join(cacheRoot, "mirrors"),
+      tmpRoot: join(cacheRoot, "tmp"),
+      worktreesRoot: join(cacheRoot, "worktrees"),
+    });
+    expect(getRepoSyncMirrorPath(config, "repo_123")).toBe(
+      join(cacheRoot, "mirrors", "repo_123.git"),
+    );
+    expect(getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456")).toBe(
+      join(cacheRoot, "tmp", "clone_repo_123_tmp_456.git"),
+    );
+    expect(getRepoSyncWorktreePath(config, "lease_123")).toBe(
+      join(cacheRoot, "worktrees", "lease_123"),
+    );
+    expect(getRepoSyncLockPath(config, "fetch_repo_123")).toBe(
+      join(cacheRoot, "locks", "fetch_repo_123.lock"),
+    );
+    expect(() => getRepoSyncMirrorPath(config, "../repo")).toThrow("safe cache path segment");
+    expect(() => getRepoSyncWorktreePath(config, "lease/123")).toThrow("safe cache path segment");
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {
