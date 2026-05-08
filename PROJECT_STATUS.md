@@ -226,8 +226,10 @@ tracked milestone.
 - Latest DB LLM-call milestone: `LlmCallRepository` now owns idempotent LLM call row writes and
   prompt/response artifact link inserts. Review orchestration records successful review-model calls
   through this repository boundary instead of importing raw `llm_calls` or `llm_call_artifacts`
-  tables, while preserving existing token usage ledger writes and artifact persistence. The
-  Postgres-backed integration test verifies conflict-safe call and artifact-link inserts.
+  tables, while admin review-debug inspection reads review-run LLM calls through the same
+  repository boundary. This preserves existing token usage ledger writes and artifact persistence.
+  The Postgres-backed integration test verifies conflict-safe call and artifact-link inserts plus
+  ordered review-run debug reads.
 - Latest DB provider-installation milestone: `ProviderInstallationRepository` now owns provider
   account organization upserts plus provider-installation create/update writes. GitHub webhook
   ingestion records installation events through this repository boundary instead of importing raw
