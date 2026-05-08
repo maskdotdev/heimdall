@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 /** Main CI workflow file path. */
 const CI_WORKFLOW_FILE = resolve(".github/workflows/ci.yml");
 
+/** Scheduled eval history workflow file path. */
+const EVAL_HISTORY_WORKFLOW_FILE = resolve(".github/workflows/evaluation-history.yml");
+
 /** Root package manifest file path. */
 const PACKAGE_JSON_FILE = resolve("package.json");
 
@@ -29,6 +32,14 @@ const OBSERVABILITY_TEST_FILE = resolve("packages/observability/test/index.test.
 const EVAL_REPORT_PATHS = [
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.md",
   ".tmp/eval-runs/smoke-full-pipeline-v1/report.json",
+];
+
+/** Scheduled evaluation history report files that should be retained. */
+const SCHEDULED_EVAL_REPORT_PATHS = [
+  ".tmp/eval-runs/smoke-full-pipeline-v1/report.md",
+  ".tmp/eval-runs/smoke-full-pipeline-v1/report.html",
+  ".tmp/eval-runs/smoke-full-pipeline-v1/report.json",
+  ".tmp/eval-runs/smoke-full-pipeline-v1/report.junit.xml",
 ];
 
 /** Representative cross-tenant API tests that the release gate must keep running. */
@@ -91,5 +102,30 @@ describe("CI workflow", () => {
     expect(observabilityTests).toContain(
       "redacts Phase 25 secret and source-code regression fixtures",
     );
+  });
+
+  it("keeps scheduled eval history persistence wired", () => {
+    const workflow = readFileSync(EVAL_HISTORY_WORKFLOW_FILE, "utf8");
+
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("schedule:");
+    expect(workflow).toContain('cron: "17 8 * * *"');
+    expect(workflow).toContain("EVAL_HISTORY_DATABASE_URL:");
+    expect(workflow).toContain("secrets.EVAL_HISTORY_DATABASE_URL");
+    expect(workflow).toContain("pnpm eval:ci");
+    expect(workflow).toContain("pnpm eval run");
+    expect(workflow).toContain("--suite smoke-full-pipeline-v1");
+    expect(workflow).toContain("--variant scheduled");
+    expect(workflow).toContain("--no-live-models");
+    expect(workflow).toContain('--database-url "$EVAL_HISTORY_DATABASE_URL"');
+    expect(workflow).toContain("--triggered-by github-actions.schedule");
+    expect(workflow).toContain("--history-environment scheduled-ci");
+    expect(workflow).toContain('--git-commit "$GITHUB_SHA"');
+    expect(workflow).toContain('--branch "$GITHUB_REF_NAME"');
+    expect(workflow).toContain("name: scheduled-smoke-full-pipeline-v1-eval-report");
+
+    for (const reportPath of SCHEDULED_EVAL_REPORT_PATHS) {
+      expect(workflow).toContain(reportPath);
+    }
   });
 });
