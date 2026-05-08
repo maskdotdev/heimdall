@@ -2952,6 +2952,10 @@ function createWorkerSandboxRunnerFromEnvironment(
     return undefined;
   }
 
+  if (isProductionNodeEnvironment(env.NODE_ENV) && isUnsafeProductionSandboxRunner(runnerName)) {
+    throw new Error(`${runnerName} sandbox runner is forbidden in production.`);
+  }
+
   if (runnerName === "fake") {
     return createFakeSandboxRunner();
   }
@@ -2969,6 +2973,16 @@ function createWorkerSandboxRunnerFromEnvironment(
   }
 
   throw new Error(`Unsupported SANDBOX_RUNNER: ${runnerName}`);
+}
+
+/** Returns whether the worker is running with production Node.js semantics. */
+function isProductionNodeEnvironment(nodeEnv: string | undefined): boolean {
+  return nodeEnv === "production";
+}
+
+/** Returns whether a sandbox runner kind is forbidden for production workers. */
+function isUnsafeProductionSandboxRunner(runnerName: string): boolean {
+  return runnerName === "fake" || runnerName === "local_process";
 }
 
 /** Creates Docker sandbox runner options from non-secret worker environment values. */
