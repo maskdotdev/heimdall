@@ -33,7 +33,8 @@ import {
   IndexVersionRepository,
   indexedFiles,
   indexImportBatches,
-  llmCalls,
+  type LlmCallRecord,
+  LlmCallRepository,
   type MemoryCandidateRecord,
   MemoryCandidateRepository,
   type MemoryFactRecord,
@@ -2230,6 +2231,7 @@ export async function getReviewDebugDetails(
   dependencies: AdminDebugServiceDependencies,
 ): Promise<AdminReviewDebugDetails> {
   const reviewRepository = new ReviewRepository(dependencies.db);
+  const llmCallRepository = new LlmCallRepository(dependencies.db);
   const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
   if (!reviewRun) {
     throw new AdminDebugNotFoundError("review_run", reviewRunId);
@@ -2257,11 +2259,7 @@ export async function getReviewDebugDetails(
     reviewRepository.listReviewArtifactsForRun(reviewRunId),
     reviewRepository.listCandidateFindingRecordsForRun(reviewRunId),
     reviewRepository.listValidatedFindingRecordsForRun(reviewRunId),
-    dependencies.db
-      .select()
-      .from(llmCalls)
-      .where(eq(llmCalls.reviewRunId, reviewRunId))
-      .orderBy(asc(llmCalls.startedAt)),
+    llmCallRepository.listLlmCallsForReviewRun(reviewRunId),
     dependencies.db
       .select()
       .from(sandboxRuns)
@@ -3616,7 +3614,7 @@ type SandboxArtifactRow = typeof sandboxArtifacts.$inferSelect;
 type SandboxPolicyDecisionRow = typeof sandboxPolicyDecisions.$inferSelect;
 type CandidateFindingRow = CandidateFindingRecord;
 type ValidatedFindingRow = ValidatedFindingRecord;
-type LlmCallRow = typeof llmCalls.$inferSelect;
+type LlmCallRow = LlmCallRecord;
 type UsageEventRow = typeof usageEvents.$inferSelect;
 type QuotaReservationRow = typeof quotaReservations.$inferSelect;
 type QuotaCounterRow = typeof quotaCounters.$inferSelect;

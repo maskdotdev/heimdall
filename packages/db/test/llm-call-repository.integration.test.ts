@@ -137,6 +137,16 @@ describe.runIf(integrationDatabaseUrl)("LlmCallRepository integration", () => {
       totalRows: 1,
     });
 
+    await expect(
+      llmCallRepository.listLlmCallsForReviewRun("rrn_llm_call_repository"),
+    ).resolves.toMatchObject([
+      {
+        inputTokens: 37,
+        llmCallId: "llm_call_repository_test",
+        reviewRunId: "rrn_llm_call_repository",
+      },
+    ]);
+
     const artifactLinks = await sql<LlmCallArtifactLinkRow[]>`
       SELECT
         review_artifact_id AS "reviewArtifactId",

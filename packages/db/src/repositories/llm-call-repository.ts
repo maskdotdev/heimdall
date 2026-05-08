@@ -1,8 +1,9 @@
+import { asc, eq } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { llmCallArtifacts, llmCalls } from "../schema";
 
 /** Database surface required by the LLM call repository. */
-type LlmCallRepositoryDatabase = Pick<HeimdallDatabase, "insert">;
+type LlmCallRepositoryDatabase = Pick<HeimdallDatabase, "insert" | "select">;
 
 /** Durable LLM call row inserted through the database boundary. */
 export type LlmCallInsert = {
@@ -52,6 +53,9 @@ export type LlmCallArtifactLinkInsert = {
   readonly artifactRole: string;
 };
 
+/** Durable LLM call row returned for review debug inspection. */
+export type LlmCallRecord = typeof llmCalls.$inferSelect;
+
 /** Input used to insert one LLM call and its artifact links idempotently. */
 export type InsertLlmCallInput = {
   /** Durable LLM call row. */
@@ -64,6 +68,15 @@ export type InsertLlmCallInput = {
 export class LlmCallRepository {
   /** Creates an LLM call query helper. */
   public constructor(private readonly db: LlmCallRepositoryDatabase) {}
+
+  /** Lists LLM call rows for one review run in call start order. */
+  public async listLlmCallsForReviewRun(reviewRunId: string): Promise<readonly LlmCallRecord[]> {
+    return this.db
+      .select()
+      .from(llmCalls)
+      .where(eq(llmCalls.reviewRunId, reviewRunId))
+      .orderBy(asc(llmCalls.startedAt), asc(llmCalls.llmCallId));
+  }
 
   /** Inserts one LLM call and its artifact links without duplicating stable IDs. */
   public async insertLlmCall(input: InsertLlmCallInput): Promise<void> {
