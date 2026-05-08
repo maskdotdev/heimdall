@@ -22,7 +22,7 @@ import {
   type HeimdallDatabase,
   indexedFiles,
   indexImportBatches,
-  repositories,
+  RepositoryRepository,
   symbols,
 } from "@repo/db";
 import {
@@ -1815,17 +1815,13 @@ async function enqueueEmbeddingRepairJob(input: {
 
 /** Loads a repository owner org for embedding planner rows. */
 async function loadRepositoryOrgId(db: HeimdallDatabase, repoId: string): Promise<string> {
-  const [repository] = await db
-    .select({ orgId: repositories.orgId })
-    .from(repositories)
-    .where(eq(repositories.repoId, repoId))
-    .limit(1);
+  const orgId = await new RepositoryRepository(db).getRepositoryOrgId(repoId);
 
-  if (!repository) {
+  if (!orgId) {
     throw new Error(`Repository ${repoId} was not found for embedding planning.`);
   }
 
-  return repository.orgId;
+  return orgId;
 }
 
 /** Resolves and bounds a local artifact path against an optional root directory. */
