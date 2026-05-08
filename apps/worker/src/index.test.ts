@@ -222,6 +222,7 @@ describe("acquireWorkerRepositoryWorkspace", () => {
         },
       );
 
+      expect(lease.leaseId).toBe("lease_123");
       expect(lease.workspacePath).toBe(worktreePath);
       await lease.release();
 

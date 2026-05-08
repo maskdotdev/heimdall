@@ -213,6 +213,8 @@ export type WorkerRepositoryWorkspaceAcquireInput = {
 
 /** Leased workspace shape consumed by the worker index job. */
 export type WorkerRepositoryWorkspaceLease = {
+  /** Repo-sync worktree lease ID used for product-safe job traceability. */
+  readonly leaseId: string;
   /** Checked-out workspace path passed to the indexer. */
   readonly workspacePath: string;
   /** Releases the workspace lease. */
@@ -618,6 +620,16 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         repoSyncConfig,
         repository,
       });
+      options.logger?.info("repo-sync workspace lease acquired", {
+        attributes: {
+          "event.name": "worker.repo_sync.workspace_acquired",
+          "job.id": envelope.jobId,
+          "repo.id": payload.repoId,
+          "repo_sync.lease_id": workspace.leaseId,
+          "repo_sync.workspace_purpose": "index",
+        },
+        target: "worker",
+      });
       try {
         const driver = withIndexerTelemetry(
           withIndexerTimeout(options.indexerDriver ?? createTypeScriptIndexerDriver(), {
@@ -673,6 +685,16 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         });
       } finally {
         await workspace.release();
+        options.logger?.info("repo-sync workspace lease released", {
+          attributes: {
+            "event.name": "worker.repo_sync.workspace_released",
+            "job.id": envelope.jobId,
+            "repo.id": payload.repoId,
+            "repo_sync.lease_id": workspace.leaseId,
+            "repo_sync.workspace_purpose": "index",
+          },
+          target: "worker",
+        });
       }
     },
     [JOB_TYPES.EmbeddingBatch]: async (envelope) => {
@@ -862,6 +884,7 @@ export async function acquireWorkerRepositoryWorkspace(
   );
 
   return {
+    leaseId: lease.leaseId,
     release: lease.release,
     workspacePath: lease.path,
   };

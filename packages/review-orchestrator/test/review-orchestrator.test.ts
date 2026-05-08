@@ -554,6 +554,7 @@ describe("reviewStageLogAttributes", () => {
       reviewStageLogAttributes({
         attributes: {
           "review.context_item_count": 3,
+          "repo_sync.lease_id": "lease_review",
           "review.optional": undefined,
         },
         context: {
@@ -571,6 +572,7 @@ describe("reviewStageLogAttributes", () => {
       "job.id": "job_review",
       "pull_request.number": reviewInput.pullRequestNumber,
       "repo.id": reviewInput.repoId,
+      "repo_sync.lease_id": "lease_review",
       "review.context_item_count": 3,
       "review.head_sha": reviewInput.headSha,
       "review.run_id": "rrn_review",
@@ -813,6 +815,7 @@ describe("acquireReviewRepositoryWorkspace", () => {
         },
       );
 
+      expect(lease.leaseId).toBe("lease_review");
       expect(lease.workspacePath).toBe(worktreePath);
       expect(lease.checkedOutSha).toBe(commitSha);
       await lease.release();

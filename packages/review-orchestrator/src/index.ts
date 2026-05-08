@@ -413,6 +413,8 @@ export type RetrievalTraceArtifactItem = {
 
 /** Workspace acquired for review orchestration. */
 export type ReviewRepositoryWorkspace = SyncRepositoryWorkspaceResult & {
+  /** Repo-sync worktree lease ID when the workspace came from the cached lease manager. */
+  readonly leaseId?: string | undefined;
   /** Releases the workspace lease idempotently when the workspace was retained for tools. */
   readonly release?: () => Promise<void>;
 };
@@ -437,6 +439,8 @@ export type ReviewRepositoryWorkspaceAcquireInput = {
 
 /** Workspace lease shape consumed by review orchestration. */
 export type ReviewRepositoryWorkspaceLease = {
+  /** Repo-sync worktree lease ID used for product-safe job traceability. */
+  readonly leaseId: string;
   /** Checked-out workspace path passed to downstream tools. */
   readonly workspacePath: string;
   /** Commit SHA checked out in the workspace. */
@@ -988,6 +992,7 @@ export async function runPullRequestReview(
       {
         logContext: reviewStageLogContext,
         endAttributes: (syncedWorkspace) => ({
+          ...(syncedWorkspace.leaseId ? { "repo_sync.lease_id": syncedWorkspace.leaseId } : {}),
           "review.workspace_cleaned_up": syncedWorkspace.cleanedUp,
         }),
       },
@@ -1002,6 +1007,7 @@ export async function runPullRequestReview(
       metadata: {
         checkedOutSha: workspace.checkedOutSha,
         cleanedUp: workspace.cleanedUp,
+        ...(workspace.leaseId ? { leaseId: workspace.leaseId } : {}),
         workspacePath: workspace.workspacePath,
       },
     });
@@ -1028,6 +1034,7 @@ export async function runPullRequestReview(
             },
             logContext: reviewStageLogContext,
             endAttributes: (syncedWorkspace) => ({
+              ...(syncedWorkspace.leaseId ? { "repo_sync.lease_id": syncedWorkspace.leaseId } : {}),
               "review.workspace_cleaned_up": syncedWorkspace.cleanedUp,
             }),
           },
@@ -1044,6 +1051,9 @@ export async function runPullRequestReview(
         metadata: {
           checkedOutSha: staticAnalysisBaselineWorkspace.checkedOutSha,
           cleanedUp: staticAnalysisBaselineWorkspace.cleanedUp,
+          ...(staticAnalysisBaselineWorkspace.leaseId
+            ? { leaseId: staticAnalysisBaselineWorkspace.leaseId }
+            : {}),
           purpose: "static_analysis_baseline",
           workspacePath: staticAnalysisBaselineWorkspace.workspacePath,
         },
@@ -2181,6 +2191,7 @@ export async function acquireReviewRepositoryWorkspace(
 
   return {
     checkedOutSha: lease.commitSha,
+    leaseId: lease.leaseId,
     release: lease.release,
     workspacePath: lease.path,
   };
@@ -2211,6 +2222,7 @@ function createReviewWorkspaceSync(input: CreateReviewWorkspaceSyncInput): SyncW
     const workspace = {
       checkedOutSha: lease.checkedOutSha,
       cleanedUp: false,
+      leaseId: lease.leaseId,
       release: lease.release,
       workspacePath: lease.workspacePath,
     } satisfies ReviewRepositoryWorkspace;
