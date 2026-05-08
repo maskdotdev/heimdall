@@ -362,6 +362,10 @@ describe("structured telemetry metrics", () => {
       webhookDeliveryDurationMs: "code_review_agent.webhook.delivery_duration_ms",
       webhookDuplicateDeliveriesTotal: "code_review_agent.webhook.duplicate_deliveries_total",
       webhookRejectionsTotal: "code_review_agent.webhook.rejections_total",
+      workerMaintenanceJobsScheduledTotal:
+        "code_review_agent.worker.maintenance_jobs_scheduled_total",
+      workerMaintenanceSchedulerFailuresTotal:
+        "code_review_agent.worker.maintenance_scheduler_failures_total",
     });
   });
 
