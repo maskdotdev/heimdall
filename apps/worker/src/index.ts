@@ -214,6 +214,12 @@ const DEFAULT_STALE_INDEX_IMPORT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE = 50;
 /** Default filesystem root for scheduled compliance evidence artifacts. */
 const DEFAULT_COMPLIANCE_EVIDENCE_ARTIFACT_ROOT = ".heimdall/compliance-evidence";
+/** Default delay between scheduled compliance evidence enqueue attempts. */
+const DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Default row limit used by scheduled compliance evidence exports. */
+const DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_LIMIT = 100;
+/** Default actor label for scheduled compliance evidence jobs. */
+const DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_ACTOR = "worker:scheduled_compliance_evidence";
 /** Default delay between queue health metric samples. */
 const DEFAULT_QUEUE_METRICS_INTERVAL_MS = 30_000;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
@@ -423,6 +429,36 @@ type WorkerQueueMaintenanceConfig = {
   readonly recoveryIntervalMs: number;
   /** Running duration after which a durable job is considered stale. */
   readonly staleRunningTimeoutMs: number;
+};
+
+/** Worker-level settings for recurring compliance evidence collection. */
+export type WorkerComplianceEvidenceSchedulerConfig = {
+  /** Filesystem root where collection jobs write product-safe evidence artifacts. */
+  readonly artifactRootDir: string;
+  /** Actor label stamped onto scheduled evidence rows. */
+  readonly collectedBy: string;
+  /** Whether this scheduler should enqueue recurring collection jobs. */
+  readonly enabled: boolean;
+  /** Milliseconds represented by one idempotent scheduler bucket. */
+  readonly intervalMs: number;
+  /** Maximum rows each export collector should inspect. */
+  readonly limit: number;
+  /** Optional organization scope for evidence collection. */
+  readonly orgId?: string | undefined;
+  /** Evidence collection target requested by the scheduler. */
+  readonly target: ComplianceEvidenceCollectJobPayload["target"];
+};
+
+/** Result returned after one scheduled compliance evidence enqueue attempt. */
+export type EnqueueScheduledComplianceEvidenceCollectionResult = {
+  /** Durable background job row ID for the collection job. */
+  readonly backgroundJobId: string;
+  /** Whether this call inserted a new durable job row. */
+  readonly inserted: boolean;
+  /** Idempotency key used for the scheduled collection job. */
+  readonly jobKey: string;
+  /** ISO timestamp for the scheduler bucket represented by the job. */
+  readonly scheduledFor: string;
 };
 
 /** Runtime dependencies used while creating a worker static-analysis runner. */
@@ -1170,6 +1206,69 @@ function expandedComplianceEvidenceJobTargets(
   }
 
   return ["access_review_export", "audit_log_export", "security_event_export", "config_snapshot"];
+}
+
+/** Enqueues one idempotent scheduled compliance evidence collection job for the current bucket. */
+export async function enqueueScheduledComplianceEvidenceCollection(
+  db: HeimdallDatabase,
+  config: WorkerComplianceEvidenceSchedulerConfig,
+  options: {
+    /** Current time used to calculate the scheduler bucket. */
+    readonly now?: Date;
+  } = {},
+): Promise<EnqueueScheduledComplianceEvidenceCollectionResult> {
+  const now = options.now ?? new Date();
+  const scheduledFor = complianceEvidenceSchedulerBucketStart(now, config.intervalMs).toISOString();
+  const scope = config.orgId ?? "global";
+  const jobKey = `compliance-evidence:collect:${config.target}:${scope}:${scheduledFor}`;
+  const payload = parseWithSchema(
+    "ComplianceEvidenceCollectJobPayload",
+    ComplianceEvidenceCollectJobPayloadSchema,
+    {
+      artifactRootDir: config.artifactRootDir,
+      collectedBy: config.collectedBy,
+      limit: config.limit,
+      ...(config.orgId ? { orgId: config.orgId } : {}),
+      reason: "scheduled",
+      target: config.target,
+    },
+  );
+  const envelope: JobEnvelope<ComplianceEvidenceCollectJobPayload> = {
+    attempt: 0,
+    createdAt: now.toISOString(),
+    idempotencyKey: jobKey,
+    jobId: stableWorkerId("job", ["compliance_evidence_collect", jobKey, "envelope"]),
+    jobType: JOB_TYPES.ComplianceEvidenceCollect,
+    maxAttempts: 3,
+    payload,
+    scheduledFor,
+    schemaVersion: "compliance_evidence_collect_job.v1",
+  };
+  const { inserted, job } = await new BackgroundJobRepository(db).insertBackgroundJob({
+    backgroundJobId: stableWorkerId("job", ["compliance_evidence_collect", jobKey]),
+    envelope,
+    metadata: {
+      intervalMs: config.intervalMs,
+      scheduledBucket: scheduledFor,
+      source: "compliance_evidence_scheduler",
+      target: config.target,
+    },
+    ...(config.orgId ? { orgId: config.orgId } : {}),
+    queueName: QUEUE_NAMES.security,
+    scheduledAt: scheduledFor,
+  });
+
+  return {
+    backgroundJobId: job.backgroundJobId,
+    inserted,
+    jobKey,
+    scheduledFor,
+  };
+}
+
+/** Returns the start of the idempotent scheduler bucket for a compliance evidence run. */
+function complianceEvidenceSchedulerBucketStart(now: Date, intervalMs: number): Date {
+  return new Date(Math.floor(now.getTime() / intervalMs) * intervalMs);
 }
 
 /** Runs an optional durable cancellation checkpoint for direct and wrapped handler calls. */
@@ -2356,6 +2455,11 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   });
   const indexArtifactRoot = indexerConfig.artifactRootPath;
   const queueMaintenance = createWorkerQueueMaintenanceConfig(process.env);
+  const complianceEvidenceScheduler = createWorkerComplianceEvidenceSchedulerConfigFromEnvironment(
+    process.env,
+  );
+  const shouldRunComplianceEvidenceScheduler =
+    shouldRunWorkerMaintenance(process.env) && complianceEvidenceScheduler.enabled;
   const workerQueueNames = createWorkerQueueNamesFromEnvironment(process.env);
   const workerRoleLabel = createWorkerRoleLabelFromEnvironment(process.env);
   const queueMetricsClients = createWorkerQueueMetricsClients(process.env, workerConnection);
@@ -2448,6 +2552,21 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       snapshotStore: queueHealthRepository,
     });
   };
+  const enqueueComplianceEvidenceCollection = async () => {
+    const result = await enqueueScheduledComplianceEvidenceCollection(
+      databaseClient.db,
+      complianceEvidenceScheduler,
+    );
+    if (result.inserted) {
+      observability.logger.info("scheduled compliance evidence collection enqueued", {
+        attributes: {
+          "compliance_evidence.job_key": result.jobKey,
+          "compliance_evidence.scheduled_for": result.scheduledFor,
+          "event.name": "worker.compliance_evidence.scheduled",
+        },
+      });
+    }
+  };
   const dispatchInterval = setInterval(() => {
     dispatch().catch((error: unknown) => {
       observability.logger.error("outbox dispatch failed", {
@@ -2475,8 +2594,21 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
             });
           });
         }, queueMaintenance.metricsIntervalMs);
+  const complianceEvidenceSchedulerInterval = shouldRunComplianceEvidenceScheduler
+    ? setInterval(() => {
+        enqueueComplianceEvidenceCollection().catch((error: unknown) => {
+          observability.logger.error("compliance evidence scheduler failed", {
+            error,
+            target: "worker.compliance_evidence_scheduler",
+          });
+        });
+      }, complianceEvidenceScheduler.intervalMs)
+    : undefined;
 
   await recoverStaleRunningJobs();
+  if (shouldRunComplianceEvidenceScheduler) {
+    await enqueueComplianceEvidenceCollection();
+  }
   await dispatch();
   if (queueMetricsClients.length > 0) {
     await recordQueueMetrics();
@@ -2500,6 +2632,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       clearInterval(staleRunningRecoveryInterval);
       if (queueMetricsInterval) {
         clearInterval(queueMetricsInterval);
+      }
+      if (complianceEvidenceSchedulerInterval) {
+        clearInterval(complianceEvidenceSchedulerInterval);
       }
       observability.logger.info("worker service stopping", {
         attributes: { "event.name": "worker.service.stopping" },
@@ -3134,6 +3269,11 @@ function createWorkerQueueMetricsClients(
 
 /** Returns whether this worker runtime should emit global queue health gauges. */
 function shouldRecordWorkerQueueMetrics(env: WorkerRuntimeRoleEnvironment): boolean {
+  return shouldRunWorkerMaintenance(env);
+}
+
+/** Returns whether this worker runtime owns global maintenance responsibilities. */
+function shouldRunWorkerMaintenance(env: WorkerRuntimeRoleEnvironment): boolean {
   const roles = createWorkerRolesFromEnvironment(env);
   return roles.includes("all") || roles.includes("maintenance");
 }
@@ -3284,6 +3424,34 @@ function createWorkerQueueMaintenanceConfig(
   };
 }
 
+/** Creates recurring compliance evidence scheduler settings from worker environment values. */
+export function createWorkerComplianceEvidenceSchedulerConfigFromEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+): WorkerComplianceEvidenceSchedulerConfig {
+  const orgId = optionalEnvString(env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_ORG_ID);
+
+  return {
+    artifactRootDir:
+      optionalEnvString(env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_ARTIFACT_ROOT) ??
+      optionalEnvString(env.HEIMDALL_COMPLIANCE_EVIDENCE_ARTIFACT_ROOT) ??
+      DEFAULT_COMPLIANCE_EVIDENCE_ARTIFACT_ROOT,
+    collectedBy:
+      optionalEnvString(env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_COLLECTED_BY) ??
+      DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_ACTOR,
+    enabled: optionalEnvBoolean(env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_ENABLED) ?? true,
+    intervalMs:
+      optionalPositiveInteger(env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_INTERVAL_MS) ??
+      DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_INTERVAL_MS,
+    limit:
+      optionalPositiveInteger(env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_LIMIT) ??
+      DEFAULT_COMPLIANCE_EVIDENCE_SCHEDULER_LIMIT,
+    ...(orgId ? { orgId } : {}),
+    target: complianceEvidenceCollectTargetFromEnvironment(
+      env.HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_TARGET,
+    ),
+  };
+}
+
 /** Parses a positive integer environment value. */
 function optionalPositiveInteger(value: string | undefined): number | undefined {
   if (!value) {
@@ -3292,6 +3460,56 @@ function optionalPositiveInteger(value: string | undefined): number | undefined 
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Parses an optional boolean environment value. */
+function optionalEnvBoolean(value: string | undefined): boolean | undefined {
+  const normalized = optionalEnvString(value)?.toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return undefined;
+}
+
+/** Parses the scheduled compliance evidence target from an environment value. */
+function complianceEvidenceCollectTargetFromEnvironment(
+  value: string | undefined,
+): ComplianceEvidenceCollectJobPayload["target"] {
+  const normalized = optionalEnvString(value)?.toLowerCase();
+  switch (normalized) {
+    case undefined:
+    case "all":
+      return "all";
+    case "access-review":
+    case "access_review":
+    case "access_review_export":
+      return "access_review_export";
+    case "audit-log":
+    case "audit_log":
+    case "audit_log_export":
+      return "audit_log_export";
+    case "security-event":
+    case "security-events":
+    case "security_event":
+    case "security_events":
+    case "security_event_export":
+      return "security_event_export";
+    case "config":
+    case "config-snapshot":
+    case "config_snapshot":
+      return "config_snapshot";
+    default:
+      throw new Error(`Unsupported HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_TARGET: ${value}`);
+  }
 }
 
 /** Reads a non-empty environment string. */

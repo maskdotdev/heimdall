@@ -37,6 +37,7 @@ import {
   cleanupExpiredReviewArtifacts,
   cleanupWorkerRepoSyncWorktrees,
   createRedisPublishThrottle,
+  createWorkerComplianceEvidenceSchedulerConfigFromEnvironment,
   createWorkerEmbeddingProviderFromEnvironment,
   createWorkerHandlers,
   createWorkerIndexerDriverFromEnvironment,
@@ -47,6 +48,7 @@ import {
   createWorkerReviewIndexDependencyModeFromEnvironment,
   createWorkerReviewSmokeGateway,
   createWorkerStaticAnalysisRunnerFromEnvironment,
+  enqueueScheduledComplianceEvidenceCollection,
   enqueueWaitingReviewRunsForIndex,
   loadGitHubInstallationRef,
   persistIndexArtifactForImport,
@@ -673,6 +675,97 @@ describe("createWorkerQueueNamesFromEnvironment", () => {
         WORKER_ROLE: "not-a-role",
       }),
     ).toThrow("Unsupported worker role: not-a-role");
+  });
+});
+
+describe("createWorkerComplianceEvidenceSchedulerConfigFromEnvironment", () => {
+  it("uses bounded scheduled evidence defaults", () => {
+    expect(createWorkerComplianceEvidenceSchedulerConfigFromEnvironment({})).toEqual({
+      artifactRootDir: ".heimdall/compliance-evidence",
+      collectedBy: "worker:scheduled_compliance_evidence",
+      enabled: true,
+      intervalMs: 86_400_000,
+      limit: 100,
+      target: "all",
+    });
+  });
+
+  it("parses scheduled evidence overrides", () => {
+    expect(
+      createWorkerComplianceEvidenceSchedulerConfigFromEnvironment({
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_ARTIFACT_ROOT: "/var/lib/heimdall/evidence",
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_COLLECTED_BY: "worker:security",
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_ENABLED: "false",
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_INTERVAL_MS: "3600000",
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_LIMIT: "25",
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_ORG_ID: "org_01HXAMPLE",
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_TARGET: "security-events",
+      }),
+    ).toEqual({
+      artifactRootDir: "/var/lib/heimdall/evidence",
+      collectedBy: "worker:security",
+      enabled: false,
+      intervalMs: 3_600_000,
+      limit: 25,
+      orgId: "org_01HXAMPLE",
+      target: "security_event_export",
+    });
+  });
+
+  it("rejects unsupported scheduled evidence targets", () => {
+    expect(() =>
+      createWorkerComplianceEvidenceSchedulerConfigFromEnvironment({
+        HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_TARGET: "unknown",
+      }),
+    ).toThrow("Unsupported HEIMDALL_COMPLIANCE_EVIDENCE_SCHEDULER_TARGET: unknown");
+  });
+});
+
+describe("enqueueScheduledComplianceEvidenceCollection", () => {
+  it("creates one idempotent security-queue job for the current schedule bucket", async () => {
+    const insertedRows: unknown[] = [];
+    const now = new Date("2026-05-08T14:24:00.000Z");
+    const result = await enqueueScheduledComplianceEvidenceCollection(
+      createBackgroundJobInsertDatabaseStub(insertedRows),
+      {
+        artifactRootDir: ".heimdall/compliance-evidence",
+        collectedBy: "worker:scheduled_compliance_evidence",
+        enabled: true,
+        intervalMs: 86_400_000,
+        limit: 100,
+        orgId: "org_01HXAMPLE",
+        target: "all",
+      },
+      { now },
+    );
+
+    expect(result).toMatchObject({
+      inserted: true,
+      jobKey: "compliance-evidence:collect:all:org_01HXAMPLE:2026-05-08T00:00:00.000Z",
+      scheduledFor: "2026-05-08T00:00:00.000Z",
+    });
+    expect(insertedRows).toMatchObject([
+      {
+        jobKey: result.jobKey,
+        jobType: JOB_TYPES.ComplianceEvidenceCollect,
+        metadata: {
+          intervalMs: 86_400_000,
+          scheduledBucket: "2026-05-08T00:00:00.000Z",
+          source: "compliance_evidence_scheduler",
+          target: "all",
+        },
+        orgId: "org_01HXAMPLE",
+        payload: {
+          idempotencyKey: result.jobKey,
+          jobType: JOB_TYPES.ComplianceEvidenceCollect,
+          payload: validComplianceEvidenceCollectJobPayloadFixture,
+          scheduledFor: "2026-05-08T00:00:00.000Z",
+          schemaVersion: "compliance_evidence_collect_job.v1",
+        },
+        queueName: QUEUE_NAMES.security,
+        scheduledAt: new Date("2026-05-08T00:00:00.000Z"),
+      },
+    ]);
   });
 });
 
@@ -2683,6 +2776,25 @@ function createWorkerEmbeddingRepairDatabaseStub(options: {
 
         return {
           where: async (_condition: unknown) => undefined,
+        };
+      },
+    }),
+  };
+
+  return db as never;
+}
+
+/** Creates a database stub that records durable background job insert values. */
+function createBackgroundJobInsertDatabaseStub(insertedRows: unknown[]): never {
+  const db = {
+    insert: (_table: unknown) => ({
+      values: (values: unknown) => {
+        insertedRows.push(values);
+
+        return {
+          onConflictDoNothing: () => ({
+            returning: async () => [createBackgroundJobInsertedRow(values)],
+          }),
         };
       },
     }),
