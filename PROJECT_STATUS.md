@@ -170,9 +170,11 @@ tracked milestone.
   inspector reads, and the Postgres-backed integration test verifies conflict-safe inserts,
   status/error updates, durable row reads, and activity summary counts.
 - Latest DB pull request milestone: `PullRequestRepository` now upserts immutable pull request
-  snapshots and mutable PR state together. GitHub webhook ingestion now uses this repository
-  boundary for PR persistence, and the Postgres-backed integration test verifies snapshot refresh,
-  mutable state updates, provider lookup, and repo/number idempotency.
+  snapshots and mutable PR state together, and exposes durable snapshot row reads for admin review
+  debug inspection. GitHub webhook ingestion now uses this repository boundary for PR persistence,
+  admin tooling uses it for review inspector snapshot reads, and the Postgres-backed integration
+  test verifies snapshot refresh, mutable state updates, provider lookup, durable snapshot row reads,
+  and repo/number idempotency.
 - Latest DB index-version milestone: `IndexVersionRepository` now supports ready index lookup by
   repo/commit/index key, latest-ready lookup by repo/commit, idempotent create/update, and
   importing, ready, and failed state transitions, plus DB-only inspection records with extended

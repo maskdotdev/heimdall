@@ -108,6 +108,13 @@ describe.runIf(integrationDatabaseUrl)("PullRequestRepository integration", () =
       snapshotId: "prs_pull_request_repository_refreshed",
       title: "Refresh duplicate snapshot payload",
     });
+    await expect(
+      pullRequestRepository.getSnapshotRecord("prs_pull_request_repository_refreshed"),
+    ).resolves.toMatchObject({
+      fetchedAt: new Date("2026-05-08T00:04:00.000Z"),
+      snapshotId: "prs_pull_request_repository_refreshed",
+      title: "Refresh duplicate snapshot payload",
+    });
   });
 });
 
