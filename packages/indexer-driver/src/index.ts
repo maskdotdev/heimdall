@@ -6,7 +6,11 @@ import {
   type CodeLanguage,
   INDEX_ARTIFACT_SCHEMA_VERSION,
   type IndexArtifact,
+  type IndexManifest,
+  IndexManifestSchema,
   type IndexRecord,
+  IndexRecordSchema,
+  isSupportedIndexArtifactFeature,
   validateIndexArtifact,
 } from "@repo/index-schema";
 import {
@@ -17,6 +21,7 @@ import {
   type TelemetrySpanRecorder,
   type TelemetryTraceContextInput,
 } from "@repo/observability";
+import { Value } from "@sinclair/typebox/value";
 
 export const packageName = "@repo/indexer-driver" as const;
 
@@ -178,6 +183,10 @@ export type CliIndexerDriverOptions = {
   readonly timeoutMs?: number;
   /** Time to wait after SIGTERM before sending SIGKILL. */
   readonly killGraceMs?: number;
+  /** Validation mode used before returning a successful artifact. */
+  readonly validationMode?: IndexArtifactValidationMode;
+  /** Number of records checked when validationMode is `sample`. */
+  readonly validationSampleSize?: number;
 };
 
 /** Options for creating an HTTP remote indexer driver. */
@@ -196,6 +205,10 @@ export type RemoteIndexerDriverOptions = {
   readonly pollIntervalMs?: number;
   /** Maximum time to poll one remote job before returning timeout. */
   readonly maxPollMs?: number;
+  /** Validation mode used before returning a successful artifact. */
+  readonly validationMode?: IndexArtifactValidationMode;
+  /** Number of records checked when validationMode is `sample`. */
+  readonly validationSampleSize?: number;
 };
 
 /** Fetch implementation consumed by the remote indexer driver. */
@@ -239,12 +252,27 @@ export type IndexerTelemetryOptions = {
   readonly traceContext?: TelemetryTraceContextInput;
 };
 
+/** Artifact validation depth used at the indexer-driver boundary. */
+export type IndexArtifactValidationMode = "full" | "manifest_only" | "sample";
+
+/** Options for validating an artifact at the indexer-driver boundary. */
+export type IndexArtifactValidationOptions = {
+  /** Validation depth to apply before returning a successful artifact. */
+  readonly mode?: IndexArtifactValidationMode;
+  /** Number of records checked when validation mode is `sample`. */
+  readonly sampleSize?: number;
+};
+
 /** Telemetry context for validating an artifact at an indexer boundary. */
 export type IndexArtifactValidationTelemetryInput = IndexerTelemetryOptions & {
   /** Stable driver name attached to validation spans. */
   readonly driverName: string;
   /** Driver implementation version attached to validation spans. */
   readonly driverVersion: string;
+  /** Validation depth applied to the artifact. */
+  readonly mode?: IndexArtifactValidationMode;
+  /** Number of records checked when validation mode is `sample`. */
+  readonly sampleSize?: number;
 };
 
 /** Input used to validate CLI indexer filesystem boundaries. */
@@ -415,18 +443,28 @@ export function validateIndexArtifactWithTelemetry(
   artifact: IndexArtifact,
   input: IndexArtifactValidationTelemetryInput,
 ): readonly string[] {
+  const validationMode = input.mode ?? "full";
+  const attributes: Record<string, TelemetryAttributeValue> = {
+    ...indexArtifactValidationAttributes(artifact),
+    "indexer_driver.driver": normalizeTelemetryLabel(input.driverName),
+    "indexer_driver.validation_mode": validationMode,
+    "indexer_driver.version": input.driverVersion,
+  };
+  if (validationMode === "sample") {
+    addNumberAttribute(attributes, "indexer_driver.validation_sample_size", input.sampleSize);
+  }
+
   const span = input.traces?.startSpan(OBSERVABILITY_SPAN_NAMES.indexerDriverValidateResult, {
-    attributes: {
-      ...indexArtifactValidationAttributes(artifact),
-      "indexer_driver.driver": normalizeTelemetryLabel(input.driverName),
-      "indexer_driver.version": input.driverVersion,
-    },
+    attributes,
     kind: "internal",
     ...(input.traceContext ? { traceContext: input.traceContext } : {}),
   });
 
   try {
-    const validationErrors = validateIndexArtifact(artifact);
+    const validationErrors = validateIndexArtifactForMode(artifact, {
+      mode: validationMode,
+      ...(input.sampleSize ? { sampleSize: input.sampleSize } : {}),
+    });
     span?.end({
       attributes: {
         "indexer_driver.status": validationErrors.length === 0 ? "succeeded" : "failed",
@@ -445,6 +483,121 @@ export function validateIndexArtifactWithTelemetry(
       status: "error",
     });
     throw error;
+  }
+}
+
+/** Validates an index artifact at the requested boundary depth. */
+export function validateIndexArtifactForMode(
+  value: unknown,
+  options: IndexArtifactValidationOptions = {},
+): readonly string[] {
+  const mode = options.mode ?? "full";
+  if (mode === "full") {
+    return validateIndexArtifact(value);
+  }
+
+  const errors: string[] = [];
+  if (!isRecord(value)) {
+    return ["artifact must be a JSON object"];
+  }
+
+  const manifest = value.manifest;
+  if (!Value.Check(IndexManifestSchema, manifest)) {
+    errors.push(...[...Value.Errors(IndexManifestSchema, manifest)].map((error) => error.message));
+    return errors;
+  }
+
+  validateRequiredManifestFeatures(errors, manifest.requiredFeatures);
+  if (mode === "manifest_only") {
+    return errors;
+  }
+
+  const records = value.records;
+  if (!Array.isArray(records)) {
+    errors.push("records must be an array");
+    return errors;
+  }
+  if (manifest.recordCount !== records.length) {
+    errors.push(
+      `manifest.recordCount ${manifest.recordCount} does not match ${records.length} records`,
+    );
+  }
+
+  const sampleSize = Math.max(1, Math.floor(options.sampleSize ?? 1_000));
+  for (const [index, record] of records.slice(0, sampleSize).entries()) {
+    if (!Value.Check(IndexRecordSchema, record)) {
+      errors.push(
+        ...[...Value.Errors(IndexRecordSchema, record)].map(
+          (error) => `records[${index}] ${error.path}: ${error.message}`,
+        ),
+      );
+      continue;
+    }
+
+    validateSampledRecord(errors, manifest, record, index);
+  }
+
+  return errors;
+}
+
+/** Validates required manifest features without walking artifact records. */
+function validateRequiredManifestFeatures(
+  errors: string[],
+  requiredFeatures: readonly string[] | undefined,
+): void {
+  const seen = new Set<string>();
+  for (const feature of requiredFeatures ?? []) {
+    if (seen.has(feature)) {
+      errors.push(`manifest.requiredFeatures duplicates ${feature}`);
+      continue;
+    }
+    seen.add(feature);
+    if (!isSupportedIndexArtifactFeature(feature)) {
+      errors.push(`manifest.requiredFeatures includes unsupported feature ${feature}`);
+    }
+  }
+}
+
+/** Validates record-level invariants that do not require a full artifact graph walk. */
+function validateSampledRecord(
+  errors: string[],
+  manifest: IndexManifest,
+  record: IndexRecord,
+  index: number,
+): void {
+  if (record.repoId !== manifest.repoId) {
+    errors.push(`records[${index}].repoId ${record.repoId} does not match ${manifest.repoId}`);
+  }
+  if (record.commitSha !== manifest.commitSha) {
+    errors.push(
+      `records[${index}].commitSha ${record.commitSha} does not match ${manifest.commitSha}`,
+    );
+  }
+  validateSampledRecordRanges(errors, record, index);
+}
+
+/** Validates sampled line ranges that TypeBox cannot express. */
+function validateSampledRecordRanges(errors: string[], record: IndexRecord, index: number): void {
+  if ("range" in record && record.range) {
+    collectSampledRangeOrderError(errors, record.range, `records[${index}].range`);
+  }
+  if (record.type === "symbol" && record.selectionRange) {
+    collectSampledRangeOrderError(
+      errors,
+      record.selectionRange,
+      `records[${index}].selectionRange`,
+    );
+  }
+}
+
+/** Records a sampled range ordering error when the range moves backward. */
+function collectSampledRangeOrderError(
+  errors: string[],
+  range: { readonly endLine: number; readonly startLine: number },
+  label: string,
+): void {
+  if (range.endLine < range.startLine) {
+    errors.push(`${label}.endLine ${range.endLine} is before startLine ${range.startLine}`);
   }
 }
 
@@ -584,6 +737,8 @@ export function createRemoteIndexerDriver(options: RemoteIndexerDriverOptions): 
     DEFAULT_REMOTE_POLL_INTERVAL_MS,
   );
   const maxPollMs = normalizedPositiveInteger(options.maxPollMs, DEFAULT_REMOTE_MAX_POLL_MS);
+  const validationMode = options.validationMode ?? "full";
+  const validationSampleSize = normalizedPositiveInteger(options.validationSampleSize, 1_000);
 
   return {
     name,
@@ -650,6 +805,8 @@ export function createRemoteIndexerDriver(options: RemoteIndexerDriverOptions): 
           driverVersion: version,
           fetcher,
           run: current,
+          validationMode,
+          validationSampleSize,
           ...(input.signal ? { signal: input.signal } : {}),
           ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
           ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
@@ -694,6 +851,8 @@ export function createCliIndexerDriver(options: CliIndexerDriverOptions): CodeIn
   );
   const timeoutMs = normalizedPositiveInteger(options.timeoutMs, DEFAULT_CLI_TIMEOUT_MS);
   const killGraceMs = normalizedPositiveInteger(options.killGraceMs, DEFAULT_CLI_KILL_GRACE_MS);
+  const validationMode = options.validationMode ?? "full";
+  const validationSampleSize = normalizedPositiveInteger(options.validationSampleSize, 1_000);
 
   return {
     name,
@@ -819,6 +978,8 @@ export function createCliIndexerDriver(options: CliIndexerDriverOptions): CodeIn
         const validationErrors = validateIndexArtifactWithTelemetry(artifact, {
           driverName: name,
           driverVersion: version,
+          mode: validationMode,
+          ...(validationMode === "sample" ? { sampleSize: validationSampleSize } : {}),
           ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
           ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
         });
@@ -925,6 +1086,10 @@ async function remoteTerminalResult(input: {
   readonly fetcher: RemoteIndexerFetch;
   /** Optional cancellation signal. */
   readonly signal?: AbortSignal;
+  /** Validation depth used before returning a successful artifact. */
+  readonly validationMode: IndexArtifactValidationMode;
+  /** Number of records checked when validation mode is `sample`. */
+  readonly validationSampleSize: number;
   /** Optional span recorder for product-safe validation traces. */
   readonly traces?: TelemetrySpanRecorder;
   /** Optional trace context propagated from durable job boundaries. */
@@ -950,6 +1115,8 @@ async function remoteTerminalResult(input: {
   const validationErrors = validateIndexArtifactWithTelemetry(artifactResult.artifact, {
     driverName: input.driverName,
     driverVersion: input.driverVersion,
+    mode: input.validationMode,
+    ...(input.validationMode === "sample" ? { sampleSize: input.validationSampleSize } : {}),
     ...(input.traceContext ? { traceContext: input.traceContext } : {}),
     ...(input.traces ? { traces: input.traces } : {}),
   });

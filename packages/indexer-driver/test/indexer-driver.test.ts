@@ -17,6 +17,7 @@ import {
   createIndexerDriverRegistry,
   createRemoteIndexerDriver,
   validateIndexArtifact,
+  validateIndexArtifactForMode,
   withIndexerTelemetry,
   withIndexerTimeout,
 } from "../src";
@@ -85,6 +86,49 @@ describe("validateIndexArtifact", () => {
     );
     expect(errors.join("\n")).not.toContain("super-secret-token");
   });
+
+  it("supports manifest-only boundary validation", () => {
+    expect(
+      validateIndexArtifactForMode(invalidSemanticArtifact(), { mode: "manifest_only" }),
+    ).toEqual([]);
+  });
+
+  it("supports sampled boundary validation without walking unsampled record text", () => {
+    const errors = validateIndexArtifactForMode(invalidSemanticArtifact(), {
+      mode: "sample",
+      sampleSize: 3,
+    });
+
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        "records[2].repoId repo_2 does not match repo_1",
+        "records[2].commitSha def5678 does not match abc1234",
+        "records[2].range.endLine 2 is before startLine 4",
+        "records[2].selectionRange.endLine 3 is before startLine 5",
+      ]),
+    );
+    expect(errors.join("\n")).not.toContain("super-secret-token");
+  });
+
+  it("rejects unsupported required features in manifest-only validation", () => {
+    const artifact = validSemanticArtifact();
+
+    expect(
+      validateIndexArtifactForMode(
+        {
+          ...artifact,
+          manifest: {
+            ...artifact.manifest,
+            requiredFeatures: ["future_feature.v1", "future_feature.v1"],
+          },
+        },
+        { mode: "manifest_only" },
+      ),
+    ).toEqual([
+      "manifest.requiredFeatures includes unsupported feature future_feature.v1",
+      "manifest.requiredFeatures duplicates future_feature.v1",
+    ]);
+  });
 });
 
 describe("createCliIndexerDriver", () => {
@@ -146,6 +190,34 @@ describe("createCliIndexerDriver", () => {
     });
     await expect(readFile(stdoutLogs[0] ?? "", "utf8")).resolves.toBe("cli stdout\n");
     await expect(readFile(stderrLogs[0] ?? "", "utf8")).resolves.toBe("cli stderr\n");
+  });
+
+  it("honors manifest-only validation mode for CLI artifacts", async () => {
+    const artifactRoot = await createTempRoot();
+    const workspacePath = await createTempRoot();
+    const driver = createCliIndexerDriver({
+      artifactRootPath: artifactRoot,
+      args: ["-e", artifactCliScript(invalidSemanticArtifact())],
+      command: process.execPath,
+      timeoutMs: 1_000,
+      validationMode: "manifest_only",
+    });
+
+    await expect(
+      driver.indexRepository({
+        commitSha: "abc1234",
+        repoId: "repo_1",
+        workspacePath,
+      }),
+    ).resolves.toMatchObject({
+      artifact: {
+        manifest: {
+          artifactId: "art_repo_1_abc1234_semantic",
+          recordCount: 7,
+        },
+      },
+      ok: true,
+    });
   });
 
   it("returns normalized failures for non-zero exits with truncated logs", async () => {
@@ -258,6 +330,32 @@ describe("createRemoteIndexerDriver", () => {
       ok: true,
     });
     expect(calls).toEqual(["POST https://indexer.example/v1/index-runs"]);
+  });
+
+  it("honors manifest-only validation mode for inline remote artifacts", async () => {
+    const artifact = invalidSemanticArtifact();
+    const driver = createRemoteIndexerDriver({
+      baseUrl: "https://indexer.example/",
+      fetch: async () =>
+        jsonResponse({
+          artifact,
+          diagnostics: ["remote complete"],
+          status: "succeeded",
+        }),
+      validationMode: "manifest_only",
+    });
+
+    await expect(
+      driver.indexRepository({
+        commitSha: "abc1234",
+        repoId: "repo_1",
+        workspacePath: "/tmp/repo",
+      }),
+    ).resolves.toMatchObject({
+      artifact,
+      diagnostics: ["remote complete"],
+      ok: true,
+    });
   });
 
   it("polls pending remote runs and downloads artifact JSON", async () => {
@@ -1077,6 +1175,18 @@ fs.writeFileSync(outputPath, JSON.stringify({
   },
   records: []
 }));
+`;
+}
+
+/** Returns a fake CLI script that writes the provided artifact JSON. */
+function artifactCliScript(artifact: IndexArtifact): string {
+  return `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(1);
+const outputPath = args[args.indexOf("--output") + 1];
+fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+fs.writeFileSync(outputPath, ${JSON.stringify(JSON.stringify(artifact))});
 `;
 }
 

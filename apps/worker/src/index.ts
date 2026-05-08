@@ -2022,6 +2022,10 @@ export function createWorkerIndexerDriverFromEnvironment(
         : {}),
       maxPollMs: indexerConfig.remote.maxPollMs,
       pollIntervalMs: indexerConfig.remote.pollIntervalMs,
+      validationMode: indexerConfig.validateArtifacts
+        ? indexerConfig.validateRecordMode
+        : "manifest_only",
+      validationSampleSize: indexerConfig.validationSampleSize,
     });
   }
 
@@ -2034,6 +2038,10 @@ export function createWorkerIndexerDriverFromEnvironment(
     stderrMaxBytes: indexerConfig.cli.stderrMaxBytes,
     stdoutMaxBytes: indexerConfig.cli.stdoutMaxBytes,
     timeoutMs: Math.min(indexerConfig.defaultTimeoutMs, indexerConfig.maxTimeoutMs),
+    validationMode: indexerConfig.validateArtifacts
+      ? indexerConfig.validateRecordMode
+      : "manifest_only",
+    validationSampleSize: indexerConfig.validationSampleSize,
     ...(options.workspaceRoot ? { workspaceRootPath: options.workspaceRoot } : {}),
   });
 }
