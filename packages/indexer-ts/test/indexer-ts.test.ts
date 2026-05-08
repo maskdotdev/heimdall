@@ -8,6 +8,7 @@ import { getTypeScriptIndexerCapabilities, indexTypeScriptRepository } from "../
 describe("getTypeScriptIndexerCapabilities", () => {
   it("does not advertise incremental indexing before previous-artifact reuse exists", () => {
     expect(getTypeScriptIndexerCapabilities()).toMatchObject({
+      supportedRecordTypes: expect.arrayContaining(["dependency"]),
       supportsIncremental: false,
       supportsPreviousArtifact: false,
     });
@@ -76,6 +77,101 @@ describe("indexTypeScriptRepository", () => {
     expect(
       artifact.records.flatMap((record) => (record.type === "file" ? [record.path] : [])),
     ).toEqual(["a.ts", "b.ts"]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("emits dependency records from package.json manifests", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await writeFile(
+      join(workspacePath, "package.json"),
+      JSON.stringify(
+        {
+          dependencies: {
+            "@scope/runtime": "^1.0.0",
+            react: "^19.0.0",
+          },
+          devDependencies: {
+            typescript: "^5.0.0",
+            vitest: "^4.0.0",
+          },
+          optionalDependencies: {
+            sharp: "^0.33.0",
+          },
+          packageManager: "pnpm@10.0.0",
+          peerDependencies: {
+            vite: "^7.0.0",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const dependencies = artifact.records.flatMap((record) =>
+      record.type === "dependency"
+        ? [
+            {
+              dependencyType: record.dependencyType,
+              manifestPath: record.manifestPath,
+              name: record.name,
+              packageManager: record.packageManager,
+              versionSpec: record.versionSpec,
+            },
+          ]
+        : [],
+    );
+
+    expect(dependencies).toEqual([
+      {
+        dependencyType: "prod",
+        manifestPath: "package.json",
+        name: "@scope/runtime",
+        packageManager: "pnpm",
+        versionSpec: "^1.0.0",
+      },
+      {
+        dependencyType: "prod",
+        manifestPath: "package.json",
+        name: "react",
+        packageManager: "pnpm",
+        versionSpec: "^19.0.0",
+      },
+      {
+        dependencyType: "dev",
+        manifestPath: "package.json",
+        name: "typescript",
+        packageManager: "pnpm",
+        versionSpec: "^5.0.0",
+      },
+      {
+        dependencyType: "dev",
+        manifestPath: "package.json",
+        name: "vitest",
+        packageManager: "pnpm",
+        versionSpec: "^4.0.0",
+      },
+      {
+        dependencyType: "peer",
+        manifestPath: "package.json",
+        name: "vite",
+        packageManager: "pnpm",
+        versionSpec: "^7.0.0",
+      },
+      {
+        dependencyType: "optional",
+        manifestPath: "package.json",
+        name: "sharp",
+        packageManager: "pnpm",
+        versionSpec: "^0.33.0",
+      },
+    ]);
+    expect(artifact.manifest.recordCount).toBe(6);
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 

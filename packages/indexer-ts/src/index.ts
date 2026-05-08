@@ -6,6 +6,7 @@ import {
   type ChunkRecord,
   type CodeLanguage,
   createStableId,
+  type DependencyRecord,
   type EdgeRecord,
   type FileRecord,
   INDEX_ARTIFACT_SCHEMA_VERSION,
@@ -31,6 +32,7 @@ const MAX_FILE_BYTES = 1_000_000;
 const BINARY_CONTENT_SAMPLE_BYTES = 8_192;
 const MAX_BINARY_CONTROL_CHARACTER_RATIO = 0.3;
 const GENERATED_CONTENT_HEADER_BYTES = 8_192;
+const PACKAGE_JSON_FILE_NAME = "package.json";
 const generatedPathSegments = new Set(["generated", "__generated__"]);
 const vendoredPathSegments = new Set([
   "bower_components",
@@ -43,10 +45,28 @@ const vendoredPathSegments = new Set([
   "vendors",
 ]);
 
+/** package.json fields that the indexer converts into dependency records. */
+const packageDependencySections = [
+  { dependencyType: "prod", fieldName: "dependencies" },
+  { dependencyType: "dev", fieldName: "devDependencies" },
+  { dependencyType: "peer", fieldName: "peerDependencies" },
+  { dependencyType: "optional", fieldName: "optionalDependencies" },
+] as const satisfies readonly PackageDependencySection[];
+
+/** package.json dependency section mapping. */
+type PackageDependencySection = {
+  /** Artifact dependency type emitted for dependencies in this section. */
+  readonly dependencyType: NonNullable<DependencyRecord["dependencyType"]>;
+  /** package.json object field containing dependency names and version ranges. */
+  readonly fieldName: string;
+};
+
 /** Record groups emitted by the TypeScript indexer before canonical artifact ordering. */
 type TypeScriptIndexRecordGroups = {
   /** Chunk records discovered from indexed files. */
   readonly chunks: ChunkRecord[];
+  /** Dependency records discovered from package manifests. */
+  readonly dependencies: DependencyRecord[];
   /** Edge records discovered from imports, definitions, and calls. */
   readonly edges: EdgeRecord[];
   /** File records discovered from workspace source files. */
@@ -98,7 +118,7 @@ export function getTypeScriptIndexerCapabilities(): IndexerCapabilities {
     maxFileBytes: MAX_FILE_BYTES,
     supportedArtifactSchemaVersions: [INDEX_ARTIFACT_SCHEMA_VERSION],
     supportedLanguages: ["typescript", "javascript", "tsx", "jsx"],
-    supportedRecordTypes: ["file", "symbol", "edge", "chunk"],
+    supportedRecordTypes: ["file", "symbol", "edge", "chunk", "dependency"],
     supportedRequestSchemaVersions: [INDEX_REQUEST_SCHEMA_VERSION],
     supportsCancellation: false,
     supportsIncremental: false,
@@ -116,9 +136,10 @@ export async function indexTypeScriptRepository(input: {
   readonly previousIndexVersionId?: string;
 }): Promise<IndexArtifact> {
   await validateWorkspacePath(input.workspacePath);
-  const paths = await findSourceFiles(input.workspacePath);
+  const paths = await findIndexablePaths(input.workspacePath);
   const recordGroups: TypeScriptIndexRecordGroups = {
     chunks: [],
+    dependencies: [],
     edges: [],
     files: [],
     symbols: [],
@@ -137,6 +158,13 @@ export async function indexTypeScriptRepository(input: {
     }
 
     const content = normalizeSourceText(rawText);
+    if (isPackageJsonPath(path)) {
+      recordGroups.dependencies.push(
+        ...dependencyRecordsForPackageJson(input.repoId, input.commitSha, path, content),
+      );
+      continue;
+    }
+
     const language = languageForPath(path);
     const file = fileRecord(input.repoId, input.commitSha, path, language, content);
     const sourceFile = ts.createSourceFile(
@@ -190,7 +218,13 @@ export async function indexTypeScriptRepository(input: {
 
 /** Returns records in the canonical artifact type order required by the schema spec. */
 function orderedIndexRecords(groups: TypeScriptIndexRecordGroups): IndexRecord[] {
-  return [...groups.files, ...groups.symbols, ...groups.chunks, ...groups.edges];
+  return [
+    ...groups.files,
+    ...groups.symbols,
+    ...groups.chunks,
+    ...groups.dependencies,
+    ...groups.edges,
+  ];
 }
 
 /** Validates a workspace root before recursively reading repository files. */
@@ -218,7 +252,8 @@ async function validateWorkspacePath(workspacePath: string): Promise<void> {
   }
 }
 
-async function findSourceFiles(root: string, directory = ""): Promise<string[]> {
+/** Finds source and package manifest paths that can produce index records. */
+async function findIndexablePaths(root: string, directory = ""): Promise<string[]> {
   const entries = await readdir(join(root, directory), { withFileTypes: true });
   const files = await Promise.all(
     entries.map(async (entry) => {
@@ -227,9 +262,9 @@ async function findSourceFiles(root: string, directory = ""): Promise<string[]> 
         return [];
       }
       if (entry.isDirectory()) {
-        return shouldSkipDirectory(path) ? [] : findSourceFiles(root, path);
+        return shouldSkipDirectory(path) ? [] : findIndexablePaths(root, path);
       }
-      if (!isIndexableSourcePath(path)) {
+      if (!isIndexablePath(path)) {
         return [];
       }
       const info = await stat(join(root, path));
@@ -380,6 +415,95 @@ function chunkForRange(
     contentHash: sha256(text),
     tokenEstimate: estimateTokens(text),
   };
+}
+
+/** Extracts dependency records from a package.json document. */
+function dependencyRecordsForPackageJson(
+  repoId: string,
+  commitSha: string,
+  manifestPath: string,
+  content: string,
+): DependencyRecord[] {
+  const manifest = parseJsonObject(content);
+  if (!manifest) {
+    return [];
+  }
+
+  const packageManager = packageManagerName(manifest);
+
+  return packageDependencySections.flatMap(({ dependencyType, fieldName }) => {
+    const dependencies = stringRecord(manifest[fieldName]);
+    if (!dependencies) {
+      return [];
+    }
+
+    return Object.entries(dependencies)
+      .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+      .map(([name, versionSpec]) => ({
+        commitSha,
+        dependencyId: createStableId("dep", [
+          repoId,
+          commitSha,
+          manifestPath,
+          dependencyType,
+          name,
+        ]),
+        dependencyType,
+        manifestPath,
+        metadata: { packageJsonField: fieldName },
+        name,
+        ...(packageManager ? { packageManager } : {}),
+        repoId,
+        schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+        type: "dependency" as const,
+        versionSpec,
+      }));
+  });
+}
+
+/** Parses a JSON document into an object without throwing for malformed input. */
+function parseJsonObject(content: string): Readonly<Record<string, unknown>> | undefined {
+  try {
+    const value = JSON.parse(content) as unknown;
+    return isJsonObject(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Returns a package manager name declared by package.json when present. */
+function packageManagerName(manifest: Readonly<Record<string, unknown>>): string | undefined {
+  const packageManager = manifest.packageManager;
+  if (typeof packageManager !== "string") {
+    return undefined;
+  }
+
+  const trimmed = packageManager.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  const versionDelimiter = trimmed.lastIndexOf("@");
+  return versionDelimiter > 0 ? trimmed.slice(0, versionDelimiter) : trimmed;
+}
+
+/** Reads a package.json dependency field as a string-to-string map. */
+function stringRecord(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .map(([key, entryValue]) => [key, entryValue.trim()] as const)
+    .filter(([, entryValue]) => entryValue.length > 0);
+
+  return Object.fromEntries(entries);
+}
+
+/** Returns whether a JSON value is a non-array object. */
+function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function edgeRecordsForFile(
@@ -548,13 +672,22 @@ function lineRange(
   return { startLine, endLine: Math.max(startLine, endLine) };
 }
 
-function isSupportedPath(path: string): boolean {
+function isSupportedSourcePath(path: string): boolean {
   return /\.(cjs|cts|js|jsx|mjs|mts|ts|tsx)$/.test(path) && !/\.d\.[cm]?ts$/.test(path);
 }
 
-/** Returns whether a source file should be considered for indexing. */
-function isIndexableSourcePath(path: string): boolean {
-  return isSupportedPath(path) && !isGeneratedPath(path) && !isVendoredPath(path);
+/** Returns whether a source or package manifest path should be considered for indexing. */
+function isIndexablePath(path: string): boolean {
+  return (
+    (isSupportedSourcePath(path) || isPackageJsonPath(path)) &&
+    !isGeneratedPath(path) &&
+    !isVendoredPath(path)
+  );
+}
+
+/** Returns whether a path points to a package.json manifest. */
+function isPackageJsonPath(path: string): boolean {
+  return path === PACKAGE_JSON_FILE_NAME || path.endsWith(`/${PACKAGE_JSON_FILE_NAME}`);
 }
 
 function languageForPath(path: string): CodeLanguage {
