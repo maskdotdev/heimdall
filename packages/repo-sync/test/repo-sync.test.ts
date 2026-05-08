@@ -299,6 +299,57 @@ describe("repo sync workspace", () => {
     await expect(runner(["-e", "process.stdout.write('ok')"], {})).resolves.toBe("ok");
   });
 
+  it("runs Git commands with a narrow safe environment", async () => {
+    const previousLeakedValue = process.env.HEIMDALL_REPO_SYNC_SHOULD_NOT_LEAK;
+    process.env.HEIMDALL_REPO_SYNC_SHOULD_NOT_LEAK = "process-secret";
+    const runner = createGitRunner({
+      defaultTimeoutMs: 1_000,
+      gitBinaryPath: process.execPath,
+    });
+
+    try {
+      const output = await runner(
+        [
+          "-e",
+          [
+            "process.stdout.write(JSON.stringify({",
+            "custom: process.env.CUSTOM_REPO_SYNC_ENV ?? null,",
+            "lfs: process.env.GIT_LFS_SKIP_SMUDGE ?? null,",
+            "leaked: process.env.HEIMDALL_REPO_SYNC_SHOULD_NOT_LEAK ?? null,",
+            "locale: process.env.LC_ALL ?? null,",
+            "prompt: process.env.GIT_TERMINAL_PROMPT ?? null,",
+            "systemConfig: process.env.GIT_CONFIG_NOSYSTEM ?? null",
+            "}));",
+          ].join(" "),
+        ],
+        { env: { CUSTOM_REPO_SYNC_ENV: "custom-value" } },
+      );
+      const environment = JSON.parse(output) as {
+        readonly custom: string | null;
+        readonly leaked: string | null;
+        readonly lfs: string | null;
+        readonly locale: string | null;
+        readonly prompt: string | null;
+        readonly systemConfig: string | null;
+      };
+
+      expect(environment).toEqual({
+        custom: "custom-value",
+        leaked: null,
+        lfs: "1",
+        locale: "C",
+        prompt: "0",
+        systemConfig: "1",
+      });
+    } finally {
+      if (previousLeakedValue === undefined) {
+        delete process.env.HEIMDALL_REPO_SYNC_SHOULD_NOT_LEAK;
+      } else {
+        process.env.HEIMDALL_REPO_SYNC_SHOULD_NOT_LEAK = previousLeakedValue;
+      }
+    }
+  });
+
   it("redacts command failures from the Git runner", async () => {
     const runner = createGitRunner({
       defaultTimeoutMs: 1_000,

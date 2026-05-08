@@ -799,7 +799,10 @@ tracked milestone.
 - Latest repo-sync Git runner milestone: `@repo/repo-sync` now exports a timeout-aware Git runner
   factory plus a product-safe `RepoSyncGitCommandError` that carries stable failure codes,
   redacted command text, bounded captured stdout/stderr, exit code, signal, and timeout metadata.
-  Authenticated fetches pass the clone token as a redaction secret for runner failure handling.
+  Authenticated fetches pass the clone token as a redaction secret for runner failure handling, and
+  Git subprocesses now run with a narrow environment that sets non-interactive prompt behavior,
+  disables system Git config, skips LFS smudge by default, pins `LC_ALL=C`, preserves required
+  platform basics, and only includes explicit command-specific overrides.
 - Latest repo rules/configuration milestone: Phase #22 now compiles an explicit memory policy into
   immutable review policy snapshots. `@repo/rules` exposes default memory context/suppression
   limits, trusted feedback roles, approval requirements, and `evaluateMemoryPolicy` decisions for

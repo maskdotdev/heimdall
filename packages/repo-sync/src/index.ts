@@ -392,7 +392,7 @@ export function createGitRunner(options: CreateGitRunnerOptions = {}): GitComman
     try {
       const { stdout } = await execFileAsync(gitBinaryPath, [...args], {
         cwd: commandOptions.cwd,
-        env: commandOptions.env ? { ...process.env, ...commandOptions.env } : process.env,
+        env: createGitProcessEnvironment(commandOptions.env),
         maxBuffer: maxBufferBytes,
         timeout: timeoutMs,
       });
@@ -544,6 +544,22 @@ export function assertInsideRoot(root: string, targetPath: string): void {
 /** Normalizes a Git hostname for allowlist comparisons. */
 function normalizeGitHost(host: string): string {
   return host.toLowerCase().replace(/\.$/u, "");
+}
+
+/** Builds the narrow environment used for Git subprocesses. */
+function createGitProcessEnvironment(
+  overrides: Readonly<Record<string, string | undefined>> | undefined,
+): NodeJS.ProcessEnv {
+  return {
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_LFS_SKIP_SMUDGE: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    LC_ALL: "C",
+    ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
+    ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+    ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+    ...overrides,
+  };
 }
 
 /** Creates a product-safe Git command failure from a Node process error. */
