@@ -66,9 +66,9 @@ HEIMDALL_REVIEW_ARTIFACT_FORCE_PATH_STYLE=true
 `infra/production/railway-admin-control-plane.json` codifies the initial Railway production
 deployment for the admin control plane. It lists the API, dashboard, admin gateway, role-specific
 worker, Postgres, and Redis services; required environment variable names; release gates; rollback
-checks; alert coverage; and the review artifact storage policy. Production review artifact storage
-must use a private S3-compatible bucket with public access blocked, provider-managed encryption,
-and support-session-gated raw download access.
+checks; dashboard and alert coverage; and the review artifact storage policy. Production review
+artifact storage must use a private S3-compatible bucket with public access blocked,
+provider-managed encryption, and support-session-gated raw download access.
 
 The deployable Railway services use config-as-code files under `infra/railway/`. In each Railway
 service, set the custom config path to the corresponding absolute repository path:

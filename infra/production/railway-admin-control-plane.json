@@ -45,6 +45,85 @@
         "severity": "critical"
       }
     ],
+    "dashboards": [
+      {
+        "id": "admin_control_plane_health",
+        "owner": "operations",
+        "signals": [
+          "api /healthz",
+          "admin gateway /healthz",
+          "dashboard root",
+          "production API URL in dashboard bundle"
+        ],
+        "title": "Admin Control-Plane Health"
+      },
+      {
+        "id": "admin_auth_access",
+        "owner": "security",
+        "signals": [
+          "admin.access.denied telemetry",
+          "admin.auth.success telemetry",
+          "admin gateway rejection logs",
+          "allowed-login changes"
+        ],
+        "title": "Admin Auth and Access"
+      },
+      {
+        "id": "admin_actions_audit",
+        "owner": "api-dashboard",
+        "signals": [
+          "admin.action.completed telemetry",
+          "admin.replay.dispatched telemetry",
+          "repo.settings.updated audit rows",
+          "debug export and eval import audit rows"
+        ],
+        "title": "Admin Actions and Audit"
+      },
+      {
+        "id": "admin_worker_queues",
+        "owner": "operations",
+        "signals": [
+          "worker heartbeat logs",
+          "background job queue depth",
+          "oldest pending job age",
+          "role-specific worker failures"
+        ],
+        "title": "Admin Worker Queues"
+      },
+      {
+        "id": "admin_data_services",
+        "owner": "operations",
+        "signals": [
+          "Postgres connection health",
+          "Redis connection health",
+          "database migration gate status",
+          "queue recovery checks"
+        ],
+        "title": "Admin Data Services"
+      },
+      {
+        "id": "admin_artifact_security",
+        "owner": "security",
+        "signals": [
+          "review artifact storage errors",
+          "support-session raw access denials",
+          "artifact access audit rows",
+          "object storage policy checks"
+        ],
+        "title": "Admin Artifact Security"
+      },
+      {
+        "id": "admin_release_rollback",
+        "owner": "release-owner",
+        "signals": [
+          "Railway deployment revisions",
+          "release gate results",
+          "emergency disable verification",
+          "rollback command output"
+        ],
+        "title": "Admin Release and Rollback"
+      }
+    ],
     "telemetryEvents": [
       "admin.access.denied",
       "admin.auth.success",

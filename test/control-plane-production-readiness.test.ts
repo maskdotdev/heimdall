@@ -138,6 +138,7 @@ function validRunbookText(): string {
     "## Gateway Hardening Checklist",
     "## Secret Rotation Procedure",
     "## Monitoring and Rollback Checks",
+    "### Post-Release Monitoring and Follow-Up Tracking",
     "### Emergency Disable Path",
     "### Rollback Checks",
     "webhook.requeue_jobs",
