@@ -14,6 +14,7 @@ import {
   findingValidationEvents,
   memoryFacts,
   publishedFindings,
+  publishedSummaryComments,
   publishPlans,
   repositories,
   reviewArtifacts,
@@ -301,6 +302,61 @@ export type ListReviewFindingsInput = {
   readonly limit?: number | undefined;
 };
 
+/** Published finding target used to correlate provider feedback events. */
+export type PublishedFindingFeedbackTargetRecord = {
+  /** Candidate finding linked to the published finding. */
+  readonly candidateFindingId: string;
+  /** Validated finding details needed for provider-feedback memory updates. */
+  readonly finding: {
+    /** Validated finding body. */
+    readonly body: string;
+    /** Validated finding category. */
+    readonly category: string;
+    /** Validated finding confidence score. */
+    readonly confidence: number;
+    /** Validated finding ID. */
+    readonly findingId: string;
+    /** Stable finding fingerprint. */
+    readonly fingerprint: string;
+    /** Validated finding location payload. */
+    readonly location: unknown;
+    /** Review run that produced the validated finding. */
+    readonly reviewRunId: string;
+    /** Validated finding severity. */
+    readonly severity: string;
+    /** Validated finding title. */
+    readonly title: string;
+  };
+  /** Organization that owns the published finding. */
+  readonly orgId: string;
+  /** Published finding row ID. */
+  readonly publishedFindingId: string;
+  /** Repository that owns the published finding. */
+  readonly repoId: string;
+};
+
+/** Published summary comment target used to correlate provider feedback events. */
+export type PublishedSummaryFeedbackTargetRecord = {
+  /** Organization that owns the summary comment. */
+  readonly orgId: string;
+  /** Provider comment ID for the summary comment. */
+  readonly providerCommentId: string;
+  /** Published summary comment row ID. */
+  readonly publishedSummaryCommentId: string;
+  /** Repository that owns the summary comment. */
+  readonly repoId: string;
+  /** Review run that produced the summary comment. */
+  readonly reviewRunId: string;
+};
+
+/** Input used to find provider-feedback targets by provider comment IDs. */
+export type ProviderFeedbackTargetLookupInput = {
+  /** Provider that emitted the feedback. */
+  readonly provider: string;
+  /** Provider comment IDs to test in caller-preferred order. */
+  readonly commentIds: readonly string[];
+};
+
 /** Durable finding outcome row used by review inspection APIs. */
 export type FindingOutcomeRecord = {
   /** Finding outcome row ID. */
@@ -495,6 +551,68 @@ export class ReviewRepository {
       .limit(1);
 
     return row;
+  }
+
+  /** Finds a published finding target by provider comment IDs in input order. */
+  public async getPublishedFindingFeedbackTarget(
+    input: ProviderFeedbackTargetLookupInput,
+  ): Promise<PublishedFindingFeedbackTargetRecord | undefined> {
+    for (const commentId of input.commentIds) {
+      const [row] = await this.db
+        .select(publishedFindingFeedbackTargetSelect())
+        .from(publishedFindings)
+        .innerJoin(
+          validatedFindings,
+          eq(validatedFindings.findingId, publishedFindings.validatedFindingId),
+        )
+        .innerJoin(reviewRuns, eq(reviewRuns.reviewRunId, publishedFindings.reviewRunId))
+        .innerJoin(repositories, eq(repositories.repoId, reviewRuns.repoId))
+        .where(
+          and(
+            eq(publishedFindings.provider, input.provider),
+            eq(publishedFindings.providerCommentId, commentId),
+          ),
+        )
+        .limit(1);
+
+      if (row) {
+        return toPublishedFindingFeedbackTargetRecord(row);
+      }
+    }
+
+    return undefined;
+  }
+
+  /** Finds a published summary comment target by provider comment IDs in input order. */
+  public async getPublishedSummaryFeedbackTarget(
+    input: ProviderFeedbackTargetLookupInput,
+  ): Promise<PublishedSummaryFeedbackTargetRecord | undefined> {
+    for (const commentId of input.commentIds) {
+      const [row] = await this.db
+        .select({
+          orgId: repositories.orgId,
+          providerCommentId: publishedSummaryComments.providerCommentId,
+          publishedSummaryCommentId: publishedSummaryComments.publishedSummaryCommentId,
+          repoId: reviewRuns.repoId,
+          reviewRunId: publishedSummaryComments.reviewRunId,
+        })
+        .from(publishedSummaryComments)
+        .innerJoin(reviewRuns, eq(reviewRuns.reviewRunId, publishedSummaryComments.reviewRunId))
+        .innerJoin(repositories, eq(repositories.repoId, reviewRuns.repoId))
+        .where(
+          and(
+            eq(publishedSummaryComments.provider, input.provider),
+            eq(publishedSummaryComments.providerCommentId, commentId),
+          ),
+        )
+        .limit(1);
+
+      if (row) {
+        return row;
+      }
+    }
+
+    return undefined;
   }
 
   /** Creates one finding outcome or returns the existing row for the same stable ID. */
@@ -908,6 +1026,78 @@ function reviewFindingInspectionSelect() {
     severity: validatedFindings.severity,
     title: validatedFindings.title,
     validation: validatedFindings.validation,
+  };
+}
+
+/** Flat row selected while correlating provider feedback to published findings. */
+type PublishedFindingFeedbackTargetRow = {
+  /** Validated finding body. */
+  readonly body: string;
+  /** Candidate finding linked to the published finding. */
+  readonly candidateFindingId: string;
+  /** Validated finding category. */
+  readonly category: string;
+  /** Validated finding confidence score. */
+  readonly confidence: number;
+  /** Validated finding ID. */
+  readonly findingId: string;
+  /** Stable finding fingerprint. */
+  readonly fingerprint: string;
+  /** Validated finding location payload. */
+  readonly location: unknown;
+  /** Organization that owns the published finding. */
+  readonly orgId: string;
+  /** Published finding row ID. */
+  readonly publishedFindingId: string;
+  /** Repository that owns the published finding. */
+  readonly repoId: string;
+  /** Review run that produced the validated finding. */
+  readonly reviewRunId: string;
+  /** Validated finding severity. */
+  readonly severity: string;
+  /** Validated finding title. */
+  readonly title: string;
+};
+
+/** Selects flat provider-feedback target fields for published findings. */
+function publishedFindingFeedbackTargetSelect() {
+  return {
+    body: validatedFindings.body,
+    candidateFindingId: validatedFindings.candidateFindingId,
+    category: validatedFindings.category,
+    confidence: validatedFindings.confidence,
+    findingId: validatedFindings.findingId,
+    fingerprint: validatedFindings.fingerprint,
+    location: validatedFindings.location,
+    orgId: repositories.orgId,
+    publishedFindingId: publishedFindings.findingId,
+    repoId: reviewRuns.repoId,
+    reviewRunId: validatedFindings.reviewRunId,
+    severity: validatedFindings.severity,
+    title: validatedFindings.title,
+  };
+}
+
+/** Converts a flat provider-feedback target row into the repository record shape. */
+function toPublishedFindingFeedbackTargetRecord(
+  row: PublishedFindingFeedbackTargetRow,
+): PublishedFindingFeedbackTargetRecord {
+  return {
+    candidateFindingId: row.candidateFindingId,
+    finding: {
+      body: row.body,
+      category: row.category,
+      confidence: row.confidence,
+      findingId: row.findingId,
+      fingerprint: row.fingerprint,
+      location: row.location,
+      reviewRunId: row.reviewRunId,
+      severity: row.severity,
+      title: row.title,
+    },
+    orgId: row.orgId,
+    publishedFindingId: row.publishedFindingId,
+    repoId: row.repoId,
   };
 }
 

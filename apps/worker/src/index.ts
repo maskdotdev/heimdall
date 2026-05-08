@@ -46,8 +46,8 @@ import {
   type HeimdallDatabase,
   MemoryCandidateRepository,
   ProviderInstallationRepository,
-  publishedFindings,
-  publishedSummaryComments,
+  type PublishedFindingFeedbackTargetRecord,
+  type PublishedSummaryFeedbackTargetRecord,
   RepositoryRepository,
   ReviewRepository,
   reviewArtifacts,
@@ -55,7 +55,6 @@ import {
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
-  validatedFindings,
 } from "@repo/db";
 import {
   createEmbeddingProviderFromEnvironment,
@@ -2582,161 +2581,24 @@ async function recordSummaryFeedbackCommand(
 async function findPublishedFindingForProviderFeedback(
   db: HeimdallDatabase,
   payload: UpdateMemoryJobPayload,
-): Promise<
-  | {
-      readonly candidateFindingId: string;
-      readonly finding: {
-        readonly body: string;
-        readonly category: string;
-        readonly confidence: number;
-        readonly findingId: string;
-        readonly fingerprint: string;
-        readonly location: unknown;
-        readonly reviewRunId: string;
-        readonly severity: string;
-        readonly title: string;
-      };
-      readonly orgId: string;
-      readonly publishedFindingId: string;
-      readonly repoId: string;
-    }
-  | undefined
-> {
+): Promise<PublishedFindingFeedbackTargetRecord | undefined> {
   const commentIds = uniqueStrings([payload.externalParentCommentId, payload.externalCommentId]);
-
-  for (const commentId of commentIds) {
-    const [published] = await db
-      .select({
-        publishedFindingId: publishedFindings.findingId,
-        reviewRunId: publishedFindings.reviewRunId,
-        validatedFindingId: publishedFindings.validatedFindingId,
-      })
-      .from(publishedFindings)
-      .where(
-        and(
-          eq(publishedFindings.provider, payload.provider ?? "github"),
-          eq(publishedFindings.providerCommentId, commentId),
-        ),
-      )
-      .limit(1);
-
-    if (!published) {
-      continue;
-    }
-
-    const [finding] = await db
-      .select({
-        body: validatedFindings.body,
-        candidateFindingId: validatedFindings.candidateFindingId,
-        category: validatedFindings.category,
-        confidence: validatedFindings.confidence,
-        findingId: validatedFindings.findingId,
-        fingerprint: validatedFindings.fingerprint,
-        location: validatedFindings.location,
-        reviewRunId: validatedFindings.reviewRunId,
-        severity: validatedFindings.severity,
-        title: validatedFindings.title,
-      })
-      .from(validatedFindings)
-      .where(eq(validatedFindings.findingId, published.validatedFindingId))
-      .limit(1);
-    const [reviewRun] = await db
-      .select({ repoId: reviewRuns.repoId })
-      .from(reviewRuns)
-      .where(eq(reviewRuns.reviewRunId, published.reviewRunId))
-      .limit(1);
-
-    if (!finding || !reviewRun) {
-      return undefined;
-    }
-
-    const orgId = await new RepositoryRepository(db).getRepositoryOrgId(reviewRun.repoId);
-
-    if (!orgId) {
-      return undefined;
-    }
-
-    return {
-      candidateFindingId: finding.candidateFindingId,
-      finding: {
-        body: finding.body,
-        category: finding.category,
-        confidence: finding.confidence,
-        findingId: finding.findingId,
-        fingerprint: finding.fingerprint,
-        location: finding.location,
-        reviewRunId: finding.reviewRunId,
-        severity: finding.severity,
-        title: finding.title,
-      },
-      orgId,
-      publishedFindingId: published.publishedFindingId,
-      repoId: reviewRun.repoId,
-    };
-  }
-
-  return undefined;
+  return new ReviewRepository(db).getPublishedFindingFeedbackTarget({
+    commentIds,
+    provider: payload.provider ?? "github",
+  });
 }
 
 /** Finds a published PR summary comment row from provider feedback metadata. */
 async function findPublishedSummaryForProviderFeedback(
   db: HeimdallDatabase,
   payload: UpdateMemoryJobPayload,
-): Promise<
-  | {
-      readonly orgId: string;
-      readonly providerCommentId: string;
-      readonly publishedSummaryCommentId: string;
-      readonly repoId: string;
-      readonly reviewRunId: string;
-    }
-  | undefined
-> {
+): Promise<PublishedSummaryFeedbackTargetRecord | undefined> {
   const commentIds = uniqueStrings([payload.externalCommentId]);
-
-  for (const commentId of commentIds) {
-    const [summary] = await db
-      .select({
-        providerCommentId: publishedSummaryComments.providerCommentId,
-        publishedSummaryCommentId: publishedSummaryComments.publishedSummaryCommentId,
-        reviewRunId: publishedSummaryComments.reviewRunId,
-      })
-      .from(publishedSummaryComments)
-      .where(
-        and(
-          eq(publishedSummaryComments.provider, payload.provider ?? "github"),
-          eq(publishedSummaryComments.providerCommentId, commentId),
-        ),
-      )
-      .limit(1);
-    if (!summary) {
-      continue;
-    }
-
-    const [reviewRun] = await db
-      .select({ repoId: reviewRuns.repoId })
-      .from(reviewRuns)
-      .where(eq(reviewRuns.reviewRunId, summary.reviewRunId))
-      .limit(1);
-    if (!reviewRun) {
-      return undefined;
-    }
-
-    const orgId = await new RepositoryRepository(db).getRepositoryOrgId(reviewRun.repoId);
-    if (!orgId) {
-      return undefined;
-    }
-
-    return {
-      orgId,
-      providerCommentId: summary.providerCommentId,
-      publishedSummaryCommentId: summary.publishedSummaryCommentId,
-      repoId: reviewRun.repoId,
-      reviewRunId: summary.reviewRunId,
-    };
-  }
-
-  return undefined;
+  return new ReviewRepository(db).getPublishedSummaryFeedbackTarget({
+    commentIds,
+    provider: payload.provider ?? "github",
+  });
 }
 
 /** Provider feedback context used to build normalized feedback events. */

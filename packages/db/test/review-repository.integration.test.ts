@@ -149,6 +149,44 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         ${JSON.stringify({ provider: "fake" })}::jsonb
       )
     `;
+    await sql`
+      INSERT INTO publish_runs (
+        publish_run_id,
+        review_run_id,
+        repo_id,
+        idempotency_key,
+        status
+      )
+      VALUES (
+        'prun_review_repository',
+        'rrn_review_repository',
+        'repo_review_repository_test',
+        'review-repository-publish',
+        'completed'
+      )
+    `;
+    await sql`
+      INSERT INTO published_summary_comments (
+        published_summary_comment_id,
+        publish_run_id,
+        review_run_id,
+        provider,
+        provider_comment_id,
+        body_hash,
+        status,
+        metadata
+      )
+      VALUES (
+        'psum_review_repository',
+        'prun_review_repository',
+        'rrn_review_repository',
+        'github',
+        'summary-review-repository',
+        'sha256:summary',
+        'published',
+        ${JSON.stringify({ provider: "fake" })}::jsonb
+      )
+    `;
     const inspectionRows = await reviewRepository.listReviewFindings({
       decision: "publish",
       limit: 10,
@@ -195,6 +233,47 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
     ).rejects.toThrow(/limit must be an integer/u);
     await expect(
       reviewRepository.getReviewFindingByAnyId("fnd_review_repository_missing"),
+    ).resolves.toBeUndefined();
+    await expect(
+      reviewRepository.getPublishedFindingFeedbackTarget({
+        commentIds: ["missing-review-repository", "comment-review-repository"],
+        provider: "github",
+      }),
+    ).resolves.toMatchObject({
+      candidateFindingId: "fnd_review_repository_candidate",
+      finding: {
+        findingId: "fnd_review_repository_validated",
+        fingerprint: "review-repository-fingerprint",
+        reviewRunId: "rrn_review_repository",
+        title: "Validate user input before saving",
+      },
+      orgId: "org_review_repository_test",
+      publishedFindingId: "pub_review_repository_validated",
+      repoId: "repo_review_repository_test",
+    });
+    await expect(
+      reviewRepository.getPublishedFindingFeedbackTarget({
+        commentIds: ["missing-review-repository"],
+        provider: "github",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      reviewRepository.getPublishedSummaryFeedbackTarget({
+        commentIds: ["summary-review-repository"],
+        provider: "github",
+      }),
+    ).resolves.toMatchObject({
+      orgId: "org_review_repository_test",
+      providerCommentId: "summary-review-repository",
+      publishedSummaryCommentId: "psum_review_repository",
+      repoId: "repo_review_repository_test",
+      reviewRunId: "rrn_review_repository",
+    });
+    await expect(
+      reviewRepository.getPublishedSummaryFeedbackTarget({
+        commentIds: ["missing-review-repository"],
+        provider: "github",
+      }),
     ).resolves.toBeUndefined();
 
     await feedbackRepository.createFeedbackEventIfAbsent({

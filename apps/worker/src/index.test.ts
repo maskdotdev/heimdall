@@ -934,33 +934,24 @@ describe("createWorkerHandlers", () => {
     const selectRows: unknown[][] = [
       [
         {
+          body: "Leaked debug output should not be committed.",
+          candidateFindingId: "cf_1",
+          category: "correctness",
+          confidence: 0.93,
+          findingId: "vf_1",
+          fingerprint: "fp_feedback_1",
+          location: { path: "src/debug.ts", startLine: 12 },
+          orgId: "org_1",
           publishedFindingId: "pub_1",
+          repoId: "repo_1",
           reviewRunId: "rrn_1",
-          validatedFindingId: "vf_1",
+          severity: "medium",
+          title: "Debug output is still enabled",
         },
       ],
-      [{ candidateFindingId: "cf_1" }],
-      [{ repoId: "repo_1" }],
-      [{ orgId: "org_1" }],
     ];
     const insertedOutcomes: unknown[] = [];
-    const db = {
-      insert: () => ({
-        values: (value: unknown) => {
-          insertedOutcomes.push(value);
-          return {
-            onConflictDoNothing: async () => undefined,
-          };
-        },
-      }),
-      select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => selectRows.shift() ?? [],
-          }),
-        }),
-      }),
-    };
+    const db = createWorkerSequentialDatabaseStub({ insertedRows: insertedOutcomes, selectRows });
     const handlers = createWorkerHandlers({
       db: db as never,
       gitProvider: {} as never,
@@ -1027,13 +1018,6 @@ describe("createWorkerHandlers", () => {
     const selectRows: unknown[][] = [
       [
         {
-          publishedFindingId: "pub_1",
-          reviewRunId: "rrn_1",
-          validatedFindingId: "vf_1",
-        },
-      ],
-      [
-        {
           body: "Leaked debug output should not be committed.",
           candidateFindingId: "cf_1",
           category: "correctness",
@@ -1041,32 +1025,17 @@ describe("createWorkerHandlers", () => {
           findingId: "vf_1",
           fingerprint: "fp_thread_1",
           location: { path: "src/debug.ts", startLine: 12 },
+          orgId: "org_1",
+          publishedFindingId: "pub_1",
+          repoId: "repo_1",
           reviewRunId: "rrn_1",
           severity: "medium",
           title: "Debug output is still enabled",
         },
       ],
-      [{ repoId: "repo_1" }],
-      [{ orgId: "org_1" }],
     ];
     const insertedRows: unknown[] = [];
-    const db = {
-      insert: () => ({
-        values: (value: unknown) => {
-          insertedRows.push(value);
-          return {
-            onConflictDoNothing: async () => undefined,
-          };
-        },
-      }),
-      select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => selectRows.shift() ?? [],
-          }),
-        }),
-      }),
-    };
+    const db = createWorkerSequentialDatabaseStub({ insertedRows, selectRows });
     const handlers = createWorkerHandlers({
       db: db as never,
       gitProvider: {} as never,
@@ -1141,13 +1110,6 @@ describe("createWorkerHandlers", () => {
       ],
       [
         {
-          publishedFindingId: "pub_1",
-          reviewRunId: "rrn_1",
-          validatedFindingId: "vf_1",
-        },
-      ],
-      [
-        {
           body: "Debug logging should not be enabled in production.",
           candidateFindingId: "cf_1",
           category: "correctness",
@@ -1155,43 +1117,17 @@ describe("createWorkerHandlers", () => {
           findingId: "vf_1",
           fingerprint: "fp_reconcile_thread_1",
           location: { path: "src/debug.ts", startLine: 12 },
+          orgId: "org_1",
+          publishedFindingId: "pub_1",
+          repoId: "repo_1",
           reviewRunId: "rrn_1",
           severity: "medium",
           title: "Debug logging is enabled",
         },
       ],
-      [{ repoId: "repo_1" }],
-      [{ orgId: "org_1" }],
     ];
     const insertedRows: unknown[] = [];
-    const db = {
-      insert: () => ({
-        values: (value: unknown) => {
-          insertedRows.push(value);
-          return {
-            onConflictDoNothing: async () => undefined,
-          };
-        },
-      }),
-      select: () => ({
-        from: () => ({
-          innerJoin: () => ({
-            where: () => ({
-              limit: async () => selectRows.shift() ?? [],
-            }),
-          }),
-          where: () => {
-            const query = {
-              limit: async () => selectRows.shift() ?? [],
-              orderBy: () => ({
-                limit: async () => selectRows.shift() ?? [],
-              }),
-            };
-            return query;
-          },
-        }),
-      }),
-    };
+    const db = createWorkerSequentialDatabaseStub({ insertedRows, selectRows });
     const requestedRefs: unknown[] = [];
     const handlers = createWorkerHandlers({
       db: db as never,
@@ -1262,13 +1198,6 @@ describe("createWorkerHandlers", () => {
     const selectRows: unknown[][] = [
       [
         {
-          publishedFindingId: "pub_1",
-          reviewRunId: "rrn_1",
-          validatedFindingId: "vf_1",
-        },
-      ],
-      [
-        {
           body: "This pattern is noisy for this repository.",
           candidateFindingId: "cf_1",
           category: "maintainability",
@@ -1276,32 +1205,17 @@ describe("createWorkerHandlers", () => {
           findingId: "vf_1",
           fingerprint: "fp_command_1",
           location: { path: "src/generated/client.ts" },
+          orgId: "org_1",
+          publishedFindingId: "pub_1",
+          repoId: "repo_1",
           reviewRunId: "rrn_1",
           severity: "low",
           title: "Generated client method is missing docs",
         },
       ],
-      [{ repoId: "repo_1" }],
-      [{ orgId: "org_1" }],
     ];
     const insertedRows: unknown[] = [];
-    const db = {
-      insert: () => ({
-        values: (value: unknown) => {
-          insertedRows.push(value);
-          return {
-            onConflictDoNothing: async () => undefined,
-          };
-        },
-      }),
-      select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => selectRows.shift() ?? [],
-          }),
-        }),
-      }),
-    };
+    const db = createWorkerSequentialDatabaseStub({ insertedRows, selectRows });
     const handlers = createWorkerHandlers({
       db: db as never,
       gitProvider: {} as never,
@@ -1384,32 +1298,16 @@ describe("createWorkerHandlers", () => {
       [],
       [
         {
+          orgId: "org_1",
           providerCommentId: "summary_1",
           publishedSummaryCommentId: "psc_1",
+          repoId: "repo_1",
           reviewRunId: "rrn_1",
         },
       ],
-      [{ repoId: "repo_1" }],
-      [{ orgId: "org_1" }],
     ];
     const insertedRows: unknown[] = [];
-    const db = {
-      insert: () => ({
-        values: (value: unknown) => {
-          insertedRows.push(value);
-          return {
-            onConflictDoNothing: async () => undefined,
-          };
-        },
-      }),
-      select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => selectRows.shift() ?? [],
-          }),
-        }),
-      }),
-    };
+    const db = createWorkerSequentialDatabaseStub({ insertedRows, selectRows });
     const handlers = createWorkerHandlers({
       db: db as never,
       gitProvider: {} as never,
@@ -1949,6 +1847,71 @@ function createWorkerProviderInstallationDatabaseStub(
   };
 
   return db as never;
+}
+
+/** Options for a sequential database stub used by worker repository-path tests. */
+type WorkerSequentialDatabaseStubOptions = {
+  /** Inserted row values captured from insert calls. */
+  readonly insertedRows: unknown[];
+  /** Select result sets returned in call order. */
+  readonly selectRows: unknown[][];
+};
+
+/** Minimal select chain shape used by worker database stubs. */
+type WorkerSequentialSelectChain = {
+  /** Continues a joined select chain. */
+  readonly innerJoin: () => WorkerSequentialSelectChain;
+  /** Continues an optional joined select chain. */
+  readonly leftJoin: () => WorkerSequentialSelectChain;
+  /** Returns the next queued select result set. */
+  readonly where: () => WorkerSequentialSelectWhereChain;
+};
+
+/** Minimal where chain shape used by worker database stubs. */
+type WorkerSequentialSelectWhereChain = Promise<readonly unknown[]> & {
+  /** Returns the selected rows with an optional limit applied. */
+  readonly limit: (count?: number) => Promise<readonly unknown[]>;
+  /** Keeps the selected rows available after an order-by call. */
+  readonly orderBy: () => WorkerSequentialSelectWhereChain;
+};
+
+/** Creates a database stub that returns queued select rows and captures inserted rows. */
+function createWorkerSequentialDatabaseStub(options: WorkerSequentialDatabaseStubOptions): never {
+  const nextRows = () => options.selectRows.shift() ?? [];
+  const selectChain: WorkerSequentialSelectChain = {
+    innerJoin: () => selectChain,
+    leftJoin: () => selectChain,
+    where: () => createWorkerSequentialSelectWhereChain(nextRows()),
+  };
+  const db = {
+    insert: () => ({
+      values: (value: unknown) => {
+        options.insertedRows.push(value);
+
+        return {
+          onConflictDoNothing: async () => undefined,
+        };
+      },
+    }),
+    select: () => ({
+      from: () => selectChain,
+    }),
+  };
+
+  return db as never;
+}
+
+/** Creates a stub where-chain around one selected row set. */
+function createWorkerSequentialSelectWhereChain(
+  rows: readonly unknown[],
+): WorkerSequentialSelectWhereChain {
+  let chain: WorkerSequentialSelectWhereChain;
+  chain = Object.assign(Promise.resolve(rows), {
+    limit: async (count?: number) => (typeof count === "number" ? rows.slice(0, count) : rows),
+    orderBy: () => chain,
+  });
+
+  return chain;
 }
 
 /** Creates a database stub that supports the embedding handler path. */
