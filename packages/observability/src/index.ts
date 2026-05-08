@@ -645,6 +645,8 @@ export const DEFAULT_OBSERVABILITY_CONFIG = {
 
 /** Low-cardinality metric names emitted directly by service bootstrap code. */
 export const OBSERVABILITY_METRIC_NAMES = {
+  adminGatewayRequestDurationMs: "code_review_agent.admin_gateway.request_duration_ms",
+  adminGatewayRequestsTotal: "code_review_agent.admin_gateway.requests_total",
   apiRequestDurationMs: "code_review_agent.api.request_duration_ms",
   apiRequestsTotal: "code_review_agent.api.requests_total",
   apiServiceStartsTotal: "code_review_agent.api.service_starts_total",
@@ -988,6 +990,7 @@ export function getObservabilitySloDefinition(id: string): ObservabilitySloDefin
 
 /** Stable span names emitted directly by service and queue boundaries. */
 export const OBSERVABILITY_SPAN_NAMES = {
+  adminGatewayRequest: "code_review_agent.admin_gateway.request",
   apiRequest: "code_review_agent.api.request",
   durableJobProcess: "code_review_agent.durable_job.process",
   embeddingEmbedBatch: "code_review_agent.embedding.embed_batch",

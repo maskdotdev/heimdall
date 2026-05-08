@@ -83,6 +83,8 @@ if (import.meta.main) {
   const config = readGitHubAdminGatewayConfig();
   const gateway = createGitHubAdminGateway(config, {
     logger: createGitHubAdminGatewayTelemetryLogger(observability.logger),
+    metrics: observability.metrics,
+    traces: observability.traces,
   });
   const server = Bun.serve({
     fetch: gateway.handle,

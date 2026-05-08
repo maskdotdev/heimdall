@@ -311,6 +311,8 @@ describe("structured telemetry logging", () => {
 describe("structured telemetry metrics", () => {
   it("exposes stable API and queue metric names", () => {
     expect(OBSERVABILITY_METRIC_NAMES).toMatchObject({
+      adminGatewayRequestDurationMs: "code_review_agent.admin_gateway.request_duration_ms",
+      adminGatewayRequestsTotal: "code_review_agent.admin_gateway.requests_total",
       apiRequestDurationMs: "code_review_agent.api.request_duration_ms",
       apiRequestsTotal: "code_review_agent.api.requests_total",
       feedbackEventsTotal: "code_review_agent.feedback.events_total",
@@ -467,6 +469,7 @@ describe("structured telemetry metrics", () => {
 describe("structured telemetry spans", () => {
   it("exposes stable review pipeline span names", () => {
     expect(OBSERVABILITY_SPAN_NAMES).toMatchObject({
+      adminGatewayRequest: "code_review_agent.admin_gateway.request",
       apiRequest: "code_review_agent.api.request",
       durableJobProcess: "code_review_agent.durable_job.process",
       findingValidationAnchorCheck: "code_review_agent.finding_validation.anchor_check",

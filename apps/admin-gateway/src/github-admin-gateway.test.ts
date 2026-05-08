@@ -1,8 +1,98 @@
+import {
+  OBSERVABILITY_METRIC_NAMES,
+  OBSERVABILITY_SPAN_NAMES,
+  type TelemetryMetricOptions,
+  type TelemetryMetricRecorder,
+  type TelemetrySpanEndOptions,
+  type TelemetrySpanOptions,
+  type TelemetrySpanRecorder,
+} from "@repo/observability";
 import { verifyAdminIdentityAssertion } from "@repo/security";
 import { describe, expect, it } from "vitest";
 import { createGitHubAdminGateway, type GitHubAdminGatewayConfig } from "./github-admin-gateway";
 
+type RecordedMetric = {
+  /** Low-cardinality metric labels captured by the test recorder. */
+  readonly labels?: TelemetryMetricOptions["labels"] | undefined;
+  /** Metric instrument name. */
+  readonly name: string;
+  /** Metric unit. */
+  readonly unit?: string | undefined;
+  /** Recorded metric value. */
+  readonly value: number;
+};
+
+type RecordedSpan = {
+  /** Attributes attached when the span ended. */
+  readonly endAttributes?: TelemetrySpanEndOptions["attributes"] | undefined;
+  /** Span name. */
+  readonly name: string;
+  /** Attributes attached when the span started. */
+  readonly startAttributes?: TelemetrySpanOptions["attributes"] | undefined;
+  /** Span status. */
+  readonly status?: TelemetrySpanEndOptions["status"] | undefined;
+  /** Trace context attached when the span started. */
+  readonly traceContext?: TelemetrySpanOptions["traceContext"] | undefined;
+};
+
 describe("GitHub admin gateway", () => {
+  it("emits product-safe request telemetry and propagates request IDs", async () => {
+    const metrics: RecordedMetric[] = [];
+    const spans: RecordedSpan[] = [];
+    const gateway = createGitHubAdminGateway(baseConfig(), {
+      ...deterministicDependencies(),
+      metrics: createRecordingMetrics(metrics),
+      traces: createRecordingTraces(spans),
+    });
+
+    const response = await gateway.handle(
+      new Request("https://gateway.test/healthz?token=github-client-secret", {
+        headers: {
+          traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "x-request-id": "req_gateway_1",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-request-id")).toBe("req_gateway_1");
+    expect(metrics).toContainEqual({
+      labels: {
+        method: "GET",
+        route: "/healthz",
+        status_class: "2xx",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.adminGatewayRequestsTotal,
+      value: 1,
+    });
+    expect(metrics).toContainEqual({
+      labels: {
+        method: "GET",
+        route: "/healthz",
+        status_class: "2xx",
+      },
+      name: OBSERVABILITY_METRIC_NAMES.adminGatewayRequestDurationMs,
+      unit: "ms",
+      value: 0,
+    });
+    expect(spans).toContainEqual({
+      endAttributes: {
+        "admin_gateway.status_code": 200,
+      },
+      name: OBSERVABILITY_SPAN_NAMES.adminGatewayRequest,
+      startAttributes: {
+        "admin_gateway.method": "GET",
+        "admin_gateway.route": "/healthz",
+      },
+      status: "ok",
+      traceContext: {
+        requestId: "req_gateway_1",
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      },
+    });
+    expect(JSON.stringify({ metrics, spans })).not.toContain("github-client-secret");
+  });
+
   it("starts GitHub OAuth with a signed state cookie", async () => {
     const gateway = createGitHubAdminGateway(baseConfig(), deterministicDependencies());
 
@@ -323,6 +413,56 @@ function deterministicDependencies() {
     logger: {},
     now: () => new Date("2026-05-06T12:00:00.000Z"),
     randomToken: () => "deterministic-token-with-enough-length",
+  };
+}
+
+/** Creates a metric recorder that stores metric points in memory. */
+function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {
+  return {
+    count: (name, options) => {
+      records.push({
+        labels: options?.labels,
+        name,
+        value: options?.value ?? 1,
+      });
+    },
+    gauge: (name, value, options) => {
+      records.push({
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+    histogram: (name, value, options) => {
+      records.push({
+        labels: options?.labels,
+        name,
+        unit: options?.unit,
+        value,
+      });
+    },
+  };
+}
+
+/** Creates a span recorder that stores span records in memory. */
+function createRecordingTraces(records: RecordedSpan[]): TelemetrySpanRecorder {
+  return {
+    startSpan: (name, options) => {
+      return {
+        end: (endOptions) => {
+          records.push({
+            endAttributes: endOptions?.attributes,
+            name,
+            startAttributes: options?.attributes,
+            status: endOptions?.status,
+            traceContext: options?.traceContext,
+          });
+
+          return undefined;
+        },
+      };
+    },
   };
 }
 
