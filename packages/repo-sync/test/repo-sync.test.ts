@@ -26,6 +26,7 @@ import {
   createAuthenticatedCloneUrl,
   createGitRunner,
   createRepoSyncConfig,
+  ensureRepositoryCommit,
   ensureRepositoryMirror,
   type GitCommandRunner,
   getRepoSyncCacheLayout,
@@ -359,6 +360,182 @@ describe("repo sync workspace", () => {
       throw new Error("Expected mirror creation to create an askpass helper before cloning.");
     }
     await expect(access(askPassPath)).rejects.toThrow();
+  });
+
+  it("returns an existing mirror commit without fetching refs", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-commit-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    await mkdir(mirrorPath, { recursive: true });
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      return "";
+    };
+
+    await expect(
+      ensureRepositoryCommit(
+        {
+          cloneUrl: "https://github.com/acme/api.git",
+          commitSha,
+          config,
+          repoId: "repo_123",
+        },
+        { gitRunner },
+      ),
+    ).resolves.toEqual({
+      cloneUrlHash: hashGitUrl("https://github.com/acme/api.git"),
+      commitSha,
+      created: false,
+      fetched: false,
+      mirrorPath,
+      repoId: "repo_123",
+    });
+
+    expect(mutableCommands).toEqual([
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+    ]);
+  });
+
+  it("fetches ref hints when a mirror is missing the requested commit", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-commit-fetch-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    const mutableCommands: string[][] = [];
+    const fetchEnvironments: Readonly<Record<string, string | undefined>>[] = [];
+    let commitExists = false;
+    const gitRunner: GitCommandRunner = async (args, options) => {
+      mutableCommands.push([...args]);
+      if (args[0] === "clone") {
+        await mkdir(args[args.length - 1] ?? "", { recursive: true });
+        return "";
+      }
+      if (args[2] === "cat-file") {
+        if (commitExists) {
+          return "";
+        }
+        throw createMissingCommitGitError();
+      }
+      if (args[2] === "fetch") {
+        fetchEnvironments.push(options.env ?? {});
+        if (args[args.length - 1] === "refs/pull/1/head") {
+          commitExists = true;
+        }
+        return "";
+      }
+      return "";
+    };
+
+    await expect(
+      ensureRepositoryCommit(
+        {
+          cloneUrl: "https://x-access-token:embedded-secret@github.com/acme/api.git?token=1",
+          commitSha,
+          config,
+          credential: {
+            kind: "https-basic-token",
+            token: "token-123",
+            username: "x-access-token",
+          },
+          fetchRefHints: ["refs/pull/1/head"],
+          repoId: "repo_123",
+        },
+        { gitRunner, tempIdFactory: () => "tmp_456" },
+      ),
+    ).resolves.toEqual({
+      cloneUrlHash: hashGitUrl("https://github.com/acme/api.git"),
+      commitSha,
+      created: true,
+      fetched: true,
+      mirrorPath,
+      repoId: "repo_123",
+    });
+
+    expect(mutableCommands).toEqual([
+      [
+        "clone",
+        "--bare",
+        "--filter=blob:none",
+        "--no-tags",
+        "https://github.com/acme/api.git",
+        tempMirrorPath,
+      ],
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+      ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/1/head"],
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+    ]);
+    expect(fetchEnvironments).toEqual([
+      expect.objectContaining({
+        GIT_PASSWORD: "token-123",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_USERNAME: "x-access-token",
+      }),
+    ]);
+    expect(JSON.stringify(mutableCommands)).not.toContain("token-123");
+    expect(JSON.stringify(mutableCommands)).not.toContain("embedded-secret");
+    const fetchAskPassPath = fetchEnvironments[0]?.GIT_ASKPASS;
+    if (!fetchAskPassPath) {
+      throw new Error("Expected commit fetch to use a temporary Git askpass helper.");
+    }
+    await expect(access(fetchAskPassPath)).rejects.toThrow();
+  });
+
+  it("fails when fetched refs do not provide the requested commit", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-commit-missing-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const tempMirrorPath = getRepoSyncTempMirrorPath(config, "repo_123", "tmp_456");
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[0] === "clone") {
+        await mkdir(args[args.length - 1] ?? "", { recursive: true });
+        return "";
+      }
+      if (args[2] === "cat-file") {
+        throw createMissingCommitGitError();
+      }
+      return "";
+    };
+
+    await expect(
+      ensureRepositoryCommit(
+        {
+          cloneUrl: "https://github.com/acme/api.git",
+          commitSha,
+          config,
+          fetchRefHints: ["refs/pull/1/head"],
+          repoId: "repo_123",
+        },
+        { gitRunner, tempIdFactory: () => "tmp_456" },
+      ),
+    ).rejects.toThrow(`Repository mirror does not contain commit ${commitSha}`);
+
+    expect(mutableCommands).toEqual([
+      [
+        "clone",
+        "--bare",
+        "--filter=blob:none",
+        "--no-tags",
+        "https://github.com/acme/api.git",
+        tempMirrorPath,
+      ],
+      ["-C", getRepoSyncMirrorPath(config, "repo_123"), "cat-file", "-e", `${commitSha}^{commit}`],
+      [
+        "-C",
+        getRepoSyncMirrorPath(config, "repo_123"),
+        "fetch",
+        "--no-tags",
+        "origin",
+        "refs/pull/1/head",
+      ],
+      ["-C", getRepoSyncMirrorPath(config, "repo_123"), "cat-file", "-e", `${commitSha}^{commit}`],
+      ["-C", getRepoSyncMirrorPath(config, "repo_123"), "fetch", "--no-tags", "origin", commitSha],
+      ["-C", getRepoSyncMirrorPath(config, "repo_123"), "cat-file", "-e", `${commitSha}^{commit}`],
+    ]);
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {
@@ -871,6 +1048,17 @@ async function expectGitCommandError(promise: Promise<string>): Promise<RepoSync
   }
 
   throw new Error("Expected command to fail.");
+}
+
+function createMissingCommitGitError(): RepoSyncGitCommandError {
+  return new RepoSyncGitCommandError({
+    code: "GIT_COMMAND_FAILED",
+    command: "git cat-file -e",
+    message: "Git command failed: git cat-file -e",
+    stderr: { originalBytes: 0, text: "", truncated: false },
+    stdout: { originalBytes: 0, text: "", truncated: false },
+    timeoutMs: 120_000,
+  });
 }
 
 function createRecordingMetrics(records: RecordedMetric[]): TelemetryMetricRecorder {

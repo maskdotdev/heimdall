@@ -240,6 +240,22 @@ export type RepositoryMirrorRef = {
   readonly created: boolean;
 };
 
+/** Input required to ensure an exact commit exists in the cached mirror. */
+export type EnsureRepositoryCommitInput = EnsureRepositoryMirrorInput & {
+  /** Commit SHA that must exist in the mirror. */
+  readonly commitSha: string;
+  /** Optional refs to fetch before falling back to a direct commit fetch. */
+  readonly fetchRefHints?: readonly string[];
+};
+
+/** Exact commit availability result for one repository mirror. */
+export type RepositoryCommitAvailability = RepositoryMirrorRef & {
+  /** Commit SHA verified in the mirror. */
+  readonly commitSha: string;
+  /** True when this call fetched refs after an initial miss. */
+  readonly fetched: boolean;
+};
+
 /** Product-safe captured Git command output attached to failures. */
 export type CapturedGitOutput = {
   /** Redacted captured text, truncated when needed. */
@@ -425,7 +441,7 @@ export async function ensureRepositoryMirror(
   let askPassRoot: string | undefined;
 
   try {
-    const commandOptions = await createMirrorCloneCommandOptions(input, layout.tmpRoot);
+    const commandOptions = await createMirrorGitCommandOptions(input, layout.tmpRoot);
     askPassRoot = commandOptions.askPassRoot;
     const gitOptions: GitCommandRunnerOptions = {
       ...(commandOptions.env ? { env: commandOptions.env } : {}),
@@ -464,6 +480,63 @@ export async function ensureRepositoryMirror(
       await rm(askPassRoot, { force: true, recursive: true });
     }
   }
+}
+
+/** Ensures an exact commit exists in a cached repository mirror. */
+export async function ensureRepositoryCommit(
+  input: EnsureRepositoryCommitInput,
+  dependencies: EnsureRepositoryMirrorDependencies = {},
+): Promise<RepositoryCommitAvailability> {
+  assertFullCommitSha(input.commitSha);
+  const mirror = await ensureRepositoryMirror(input, dependencies);
+  const git = dependencies.gitRunner ?? runGit;
+  if (
+    await repositoryCommitExists(
+      git,
+      mirror.mirrorPath,
+      input.commitSha,
+      input.config.defaultFetchTimeoutMs,
+    )
+  ) {
+    return { ...mirror, commitSha: input.commitSha, fetched: false };
+  }
+
+  const layout = getRepoSyncCacheLayout(input.config);
+  await mkdir(layout.tmpRoot, { recursive: true });
+  const commandOptions = await createMirrorGitCommandOptions(input, layout.tmpRoot);
+  try {
+    const gitOptions: GitCommandRunnerOptions = {
+      ...(commandOptions.env ? { env: commandOptions.env } : {}),
+      ...(commandOptions.redact ? { redact: commandOptions.redact } : {}),
+      timeoutMs: input.config.defaultFetchTimeoutMs,
+    };
+    for (const ref of [...(input.fetchRefHints ?? []), input.commitSha]) {
+      await git(
+        buildFetchArgs({ fetchTags: input.fetchTags, mirrorPath: mirror.mirrorPath, ref }),
+        {
+          ...gitOptions,
+        },
+      );
+      if (
+        await repositoryCommitExists(
+          git,
+          mirror.mirrorPath,
+          input.commitSha,
+          input.config.defaultFetchTimeoutMs,
+        )
+      ) {
+        return { ...mirror, commitSha: input.commitSha, fetched: true };
+      }
+    }
+  } finally {
+    if (commandOptions.askPassRoot) {
+      await rm(commandOptions.askPassRoot, { force: true, recursive: true });
+    }
+  }
+
+  throw new Error(
+    `Repository mirror does not contain commit ${input.commitSha} after fetching requested refs.`,
+  );
 }
 
 /** Input required to sync one repository workspace. */
@@ -1028,8 +1101,42 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-/** Git clone command options derived from an optional repo credential. */
-type MirrorCloneCommandOptions = {
+/** Returns true when a full commit SHA exists in a mirror. */
+async function repositoryCommitExists(
+  git: GitCommandRunner,
+  mirrorPath: string,
+  commitSha: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  try {
+    await git(buildCommitExistsArgs({ commitSha, mirrorPath }), { timeoutMs });
+    return true;
+  } catch (error) {
+    if (error instanceof RepoSyncGitCommandError && error.code === "GIT_COMMAND_FAILED") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/** Builds fetch args while preserving exact optional property semantics. */
+function buildFetchArgs(input: {
+  /** Fetches tags when true. */
+  readonly fetchTags?: boolean | undefined;
+  /** Bare mirror path. */
+  readonly mirrorPath: string;
+  /** Ref or refspec to fetch. */
+  readonly ref: string;
+}): readonly string[] {
+  return buildFetchRefArgs({
+    ...(input.fetchTags === undefined ? {} : { fetchTags: input.fetchTags }),
+    mirrorPath: input.mirrorPath,
+    ref: input.ref,
+  });
+}
+
+/** Git mirror command options derived from an optional repo credential. */
+type MirrorGitCommandOptions = {
   /** Private askpass directory that must be removed after the clone attempt. */
   readonly askPassRoot?: string | undefined;
   /** Environment overrides supplied to the Git command. */
@@ -1038,11 +1145,11 @@ type MirrorCloneCommandOptions = {
   readonly redact?: readonly string[] | undefined;
 };
 
-/** Creates askpass options for an authenticated mirror clone command. */
-async function createMirrorCloneCommandOptions(
+/** Creates askpass options for an authenticated mirror Git command. */
+async function createMirrorGitCommandOptions(
   input: Pick<EnsureRepositoryMirrorInput, "credential">,
   tmpRoot: string,
-): Promise<MirrorCloneCommandOptions> {
+): Promise<MirrorGitCommandOptions> {
   if (!input.credential) {
     return {};
   }
