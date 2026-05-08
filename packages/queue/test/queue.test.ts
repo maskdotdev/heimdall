@@ -105,6 +105,7 @@ describe("durable job recovery", () => {
     const retryableEnvelope = syncInstallationEnvelopeForKey("sync:retryable");
     const exhaustedEnvelope = syncInstallationEnvelopeForKey("sync:exhausted");
     const freshEnvelope = syncInstallationEnvelopeForKey("sync:fresh");
+    const heartbeatingEnvelope = syncInstallationEnvelopeForKey("sync:heartbeating");
     const unknownAgeEnvelope = syncInstallationEnvelopeForKey("sync:unknown_age");
     const store = new InMemoryDurableJobStore([
       durableJob({
@@ -129,6 +130,14 @@ describe("durable job recovery", () => {
         backgroundJobId: "job_fresh",
         envelope: freshEnvelope,
         startedAt: freshTimestamp,
+        status: "running",
+        updatedAt: freshTimestamp,
+      }),
+      durableJob({
+        attempts: 1,
+        backgroundJobId: "job_heartbeating",
+        envelope: heartbeatingEnvelope,
+        startedAt: staleTimestamp,
         status: "running",
         updatedAt: freshTimestamp,
       }),
@@ -165,6 +174,7 @@ describe("durable job recovery", () => {
       updatedAt: now,
     });
     expect(jobs.get("job_fresh")?.status).toBe("running");
+    expect(jobs.get("job_heartbeating")?.status).toBe("running");
     expect(jobs.get("job_unknown_age")?.status).toBe("running");
   });
 });
@@ -390,6 +400,35 @@ describe("durable worker processor", () => {
 
     expect(handled).toEqual([]);
     expect(store.list()[0]).toMatchObject({ attempts: 0, status: "canceled" });
+  });
+
+  it("does not complete a running durable job that is canceled before handler return", async () => {
+    const store = new InMemoryDurableJobStore([durableJob({ status: "queued" })]);
+    const processor = createDurableJobProcessor({
+      heartbeatIntervalMs: 1,
+      store,
+      handlers: {
+        [JOB_TYPES.SyncInstallation]: async () => {
+          const runningJob = store.list()[0];
+          if (!runningJob) {
+            throw new Error("Expected a running durable job.");
+          }
+
+          store.add({
+            ...runningJob,
+            completedAt: new Date("2026-05-08T00:30:00.000Z"),
+            status: "canceled",
+            updatedAt: new Date("2026-05-08T00:30:00.000Z"),
+          });
+        },
+      },
+    });
+
+    await expect(
+      processor({ data: syncInstallationEnvelope, attemptsMade: 0 } as never),
+    ).resolves.toBeUndefined();
+
+    expect(store.list()[0]).toMatchObject({ attempts: 1, status: "canceled" });
   });
 });
 
