@@ -25,6 +25,7 @@
     "@repo/github": "workspace:*",
     "@repo/observability": "workspace:*",
     "@repo/rules": "workspace:*",
+    "@repo/security": "workspace:*",
     "drizzle-orm": "catalog:"
   },
   "devDependencies": {

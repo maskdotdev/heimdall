@@ -1,6 +1,6 @@
 import type { PublishReviewJobPayload } from "@repo/contracts";
 import type { HeimdallDatabase } from "@repo/db";
-import { GitHubRateLimitError, type GitProvider } from "@repo/github";
+import { GitHubPermissionError, GitHubRateLimitError, type GitProvider } from "@repo/github";
 import {
   OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
@@ -10,6 +10,7 @@ import {
   type TelemetrySpanOptions,
   type TelemetrySpanRecorder,
 } from "@repo/observability";
+import { createMemorySecurityEventSink } from "@repo/security";
 import { describe, expect, it } from "vitest";
 import { publishReviewRun } from "../src";
 
@@ -249,6 +250,49 @@ describe("publishReviewRun telemetry", () => {
         status: "error",
       }),
     ]);
+  });
+
+  it("records product-safe security events for GitHub publish permission failures", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+
+    await expect(
+      publishReviewRun(testPublishPayload(), {
+        db: createPublisherDatabaseStub({
+          repository: testRepositoryRow(),
+          reviewRun: testReviewRunRow(),
+          validatedFindings: [],
+        }),
+        gitProvider: createTelemetryGitProvider({
+          error: new GitHubPermissionError("Resource not accessible by integration.", {
+            requestId: "req_permission",
+            status: 403,
+          }),
+        }),
+        securityEventSink,
+      }),
+    ).rejects.toThrow("Resource not accessible by integration.");
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: {
+          githubRequestId: "req_permission",
+          githubStatus: 403,
+          publishOperation: "publish_review",
+          pullRequestNumber: 7,
+          reviewRunId: "rrn_telemetry",
+        },
+        repoId: "repo_telemetry",
+        resourceId: "rrn_telemetry",
+        resourceType: "review_run",
+        severity: "high",
+        source: "github",
+        status: "new",
+        type: "github_publish_permission_denied",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("octo-org");
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("heimdall-test");
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("token");
   });
 });
 
