@@ -1225,6 +1225,93 @@ describe("createWorkerHandlers", () => {
     expect(payloads).toEqual([validComplianceEvidenceCollectJobPayloadFixture]);
   });
 
+  it("records worker security events when compliance evidence collection completes", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+    const handlers = createWorkerHandlers({
+      complianceEvidenceCollector: async () => undefined,
+      db: {} as never,
+      gitProvider: {} as never,
+      securityEventSink,
+    });
+
+    await handlers[JOB_TYPES.ComplianceEvidenceCollect]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "compliance-evidence:collect:all:org_01HXAMPLE",
+      jobId: "job_compliance_evidence_collect",
+      jobType: JOB_TYPES.ComplianceEvidenceCollect,
+      maxAttempts: 3,
+      payload: validComplianceEvidenceCollectJobPayloadFixture,
+      schemaVersion: "compliance_evidence_collect_job.v1",
+    });
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        actorId: validComplianceEvidenceCollectJobPayloadFixture.collectedBy,
+        metadata: {
+          artifactRootConfigured: true,
+          collectedByConfigured: true,
+          limit: validComplianceEvidenceCollectJobPayloadFixture.limit,
+          orgScoped: true,
+          reason: validComplianceEvidenceCollectJobPayloadFixture.reason,
+          target: validComplianceEvidenceCollectJobPayloadFixture.target,
+        },
+        orgId: validComplianceEvidenceCollectJobPayloadFixture.orgId,
+        resourceId: "all:org_01HXAMPLE",
+        resourceType: "compliance_evidence_collection",
+        severity: "info",
+        source: "worker",
+        type: "compliance_evidence_collected",
+      },
+    ]);
+  });
+
+  it("records worker security events when compliance evidence collection fails", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+    const handlers = createWorkerHandlers({
+      complianceEvidenceCollector: async () => {
+        throw new Error("collection failed");
+      },
+      db: {} as never,
+      gitProvider: {} as never,
+      securityEventSink,
+    });
+
+    await expect(
+      handlers[JOB_TYPES.ComplianceEvidenceCollect]?.({
+        attempt: 0,
+        createdAt: "2026-05-07T12:00:00.000Z",
+        idempotencyKey: "compliance-evidence:collect:all:org_01HXAMPLE",
+        jobId: "job_compliance_evidence_collect",
+        jobType: JOB_TYPES.ComplianceEvidenceCollect,
+        maxAttempts: 3,
+        payload: validComplianceEvidenceCollectJobPayloadFixture,
+        schemaVersion: "compliance_evidence_collect_job.v1",
+      }),
+    ).rejects.toThrow("collection failed");
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        actorId: validComplianceEvidenceCollectJobPayloadFixture.collectedBy,
+        metadata: {
+          artifactRootConfigured: true,
+          collectedByConfigured: true,
+          errorName: "Error",
+          limit: validComplianceEvidenceCollectJobPayloadFixture.limit,
+          orgScoped: true,
+          reason: validComplianceEvidenceCollectJobPayloadFixture.reason,
+          target: validComplianceEvidenceCollectJobPayloadFixture.target,
+        },
+        orgId: validComplianceEvidenceCollectJobPayloadFixture.orgId,
+        resourceId: "all:org_01HXAMPLE",
+        resourceType: "compliance_evidence_collection",
+        severity: "high",
+        source: "worker",
+        type: "compliance_evidence_failed",
+      },
+    ]);
+  });
+
   it("scrubs expired review artifact payload metadata during cleanup", async () => {
     const updates: unknown[] = [];
     const db = {
