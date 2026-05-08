@@ -77,12 +77,72 @@ describe.runIf(integrationDatabaseUrl)("CodeIntelligenceRepository integration",
       kinds: ["calls"],
       symbolId: "sym_code_intel_handle",
     });
-    expect(outgoingEdges.map((edge) => edge.edgeId)).toEqual(["edge_code_intel_calls_console"]);
+    expect(outgoingEdges.map((edge) => edge.edgeId)).toEqual([
+      "edge_code_intel_calls_console",
+      "edge_code_intel_calls_helper",
+    ]);
 
     const incomingEdges = await codeIntelligenceRepository.listEdgesToSymbol({
       symbolId: "sym_code_intel_handle",
     });
     expect(incomingEdges.map((edge) => edge.edgeId)).toEqual(["edge_code_intel_reference"]);
+
+    const relatedChunks = await codeIntelligenceRepository.listRelatedChunksForSymbols({
+      indexVersionId: "idx_code_intel_new",
+      symbolIds: ["sym_code_intel_handle"],
+    });
+    expect(relatedChunks).toHaveLength(1);
+    expect(relatedChunks[0]).toMatchObject({
+      chunk: {
+        chunkId: "chunk_code_intel_helper",
+        path: "src/helper.ts",
+        text: "export function helper(): void { return; }",
+      },
+      relationKind: "callee",
+    });
+
+    const dependencies = await codeIntelligenceRepository.listDependenciesForFiles({
+      indexVersionId: "idx_code_intel_new",
+      paths: ["package.json"],
+    });
+    expect(dependencies).toMatchObject([
+      {
+        dependencyId: "dep_code_intel_lodash",
+        dependencyType: "prod",
+        manifestPath: "package.json",
+        name: "lodash",
+        packageManager: "pnpm",
+        versionSpec: "^4.17.21",
+      },
+    ]);
+
+    const routes = await codeIntelligenceRepository.listRoutesForFiles({
+      indexVersionId: "idx_code_intel_new",
+      paths: ["src/service.ts"],
+    });
+    expect(routes).toMatchObject([
+      {
+        framework: "express",
+        handlerSymbolId: "sym_code_intel_handle",
+        methods: ["GET"],
+        path: "src/service.ts",
+        range: { endLine: 8, startLine: 5 },
+        routePattern: "/health",
+      },
+    ]);
+
+    const relatedTestChunks = await codeIntelligenceRepository.listRelatedTestChunks({
+      indexVersionId: "idx_code_intel_new",
+      sourcePaths: ["src/service.ts"],
+    });
+    expect(relatedTestChunks.map((chunk) => chunk.chunkId)).toEqual(["chunk_code_intel_test"]);
+
+    const fullTextChunks = await codeIntelligenceRepository.searchFullTextChunks({
+      indexVersionId: "idx_code_intel_new",
+      limit: 3,
+      query: "handle",
+    });
+    expect(fullTextChunks.map((row) => row.chunk.chunkId)).toContain("chunk_code_intel_handle");
   });
 });
 
@@ -202,6 +262,7 @@ async function seedCodeIntelligenceRows(sql: postgres.Sql): Promise<void> {
       commit_sha,
       path,
       language,
+      is_test,
       content_hash
     )
     VALUES
@@ -212,6 +273,7 @@ async function seedCodeIntelligenceRows(sql: postgres.Sql): Promise<void> {
         'abcdef123456',
         'src/service.ts',
         'typescript',
+        false,
         ${`sha256:${"3".repeat(64)}`}
       ),
       (
@@ -221,7 +283,38 @@ async function seedCodeIntelligenceRows(sql: postgres.Sql): Promise<void> {
         'abcdef123456',
         'src/service.ts',
         'typescript',
+        false,
         ${`sha256:${"4".repeat(64)}`}
+      ),
+      (
+        'file_code_intel_helper',
+        'idx_code_intel_new',
+        'repo_code_intel_test',
+        'abcdef123456',
+        'src/helper.ts',
+        'typescript',
+        false,
+        ${`sha256:${"a".repeat(64)}`}
+      ),
+      (
+        'file_code_intel_manifest',
+        'idx_code_intel_new',
+        'repo_code_intel_test',
+        'abcdef123456',
+        'package.json',
+        'json',
+        false,
+        ${`sha256:${"b".repeat(64)}`}
+      ),
+      (
+        'file_code_intel_test',
+        'idx_code_intel_new',
+        'repo_code_intel_test',
+        'abcdef123456',
+        'test/service.test.ts',
+        'typescript',
+        true,
+        ${`sha256:${"c".repeat(64)}`}
       )
   `;
   await sql`
@@ -289,6 +382,22 @@ async function seedCodeIntelligenceRows(sql: postgres.Sql): Promise<void> {
         8,
         ${`sha256:${"7".repeat(64)}`},
         '{"signature":"function handle(): void"}'::jsonb
+      ),
+      (
+        'sym_code_intel_helper',
+        'idx_code_intel_new',
+        'file_code_intel_helper',
+        'repo_code_intel_test',
+        'abcdef123456',
+        'src/helper.ts',
+        'typescript',
+        'helper',
+        'helper',
+        'function',
+        1,
+        3,
+        ${`sha256:${"d".repeat(64)}`},
+        '{"signature":"function helper(): void"}'::jsonb
       )
   `;
   await sql`
@@ -304,18 +413,43 @@ async function seedCodeIntelligenceRows(sql: postgres.Sql): Promise<void> {
       content_hash,
       metadata
     )
-    VALUES (
-      'chunk_code_intel_handle',
-      'idx_code_intel_new',
-      'file_code_intel_new',
-      'sym_code_intel_handle',
-      'repo_code_intel_test',
-      'src/service.ts',
-      5,
-      8,
-      ${`sha256:${"8".repeat(64)}`},
-      '{"language":"typescript","kind":"symbol","text":"export function handle(): void { console.log(''ok''); }","tokenEstimate":8}'::jsonb
-    )
+    VALUES
+      (
+        'chunk_code_intel_handle',
+        'idx_code_intel_new',
+        'file_code_intel_new',
+        'sym_code_intel_handle',
+        'repo_code_intel_test',
+        'src/service.ts',
+        5,
+        8,
+        ${`sha256:${"8".repeat(64)}`},
+        '{"language":"typescript","kind":"symbol","text":"export function handle(): void { console.log(''ok''); }","tokenEstimate":8}'::jsonb
+      ),
+      (
+        'chunk_code_intel_helper',
+        'idx_code_intel_new',
+        'file_code_intel_helper',
+        'sym_code_intel_helper',
+        'repo_code_intel_test',
+        'src/helper.ts',
+        1,
+        3,
+        ${`sha256:${"9".repeat(64)}`},
+        '{"language":"typescript","kind":"symbol","text":"export function helper(): void { return; }","tokenEstimate":7}'::jsonb
+      ),
+      (
+        'chunk_code_intel_test',
+        'idx_code_intel_new',
+        'file_code_intel_test',
+        null,
+        'repo_code_intel_test',
+        'test/service.test.ts',
+        1,
+        4,
+        ${`sha256:${"e".repeat(64)}`},
+        '{"language":"typescript","kind":"test","text":"it(''handles requests'', () => handle());","tokenEstimate":6}'::jsonb
+      )
   `;
   await sql`
     INSERT INTO code_edges (
@@ -354,7 +488,95 @@ async function seedCodeIntelligenceRows(sql: postgres.Sql): Promise<void> {
         'symbol',
         'references',
         0.9
+      ),
+      (
+        'edge_code_intel_calls_helper',
+        'idx_code_intel_new',
+        'repo_code_intel_test',
+        'abcdef123456',
+        'sym_code_intel_handle',
+        'sym_code_intel_helper',
+        'symbol',
+        'symbol',
+        'calls',
+        0.85
       )
+  `;
+  await sql`
+    INSERT INTO code_dependencies (
+      dependency_id,
+      index_version_id,
+      repo_id,
+      commit_sha,
+      manifest_path,
+      package_manager,
+      name,
+      version_spec,
+      dependency_type
+    )
+    VALUES (
+      'dep_code_intel_lodash',
+      'idx_code_intel_new',
+      'repo_code_intel_test',
+      'abcdef123456',
+      'package.json',
+      'pnpm',
+      'lodash',
+      '^4.17.21',
+      'prod'
+    )
+  `;
+  await sql`
+    INSERT INTO code_routes (
+      route_id,
+      index_version_id,
+      repo_id,
+      commit_sha,
+      path,
+      language,
+      route_pattern,
+      methods,
+      handler_symbol_id,
+      start_line,
+      end_line,
+      framework,
+      confidence
+    )
+    VALUES (
+      'route_code_intel_health',
+      'idx_code_intel_new',
+      'repo_code_intel_test',
+      'abcdef123456',
+      'src/service.ts',
+      'typescript',
+      '/health',
+      '["GET"]'::jsonb,
+      'sym_code_intel_handle',
+      5,
+      8,
+      'express',
+      0.92
+    )
+  `;
+  await sql`
+    INSERT INTO code_test_mappings (
+      test_mapping_id,
+      index_version_id,
+      repo_id,
+      commit_sha,
+      test_file_id,
+      target_file_id,
+      confidence
+    )
+    VALUES (
+      'testmap_code_intel_service',
+      'idx_code_intel_new',
+      'repo_code_intel_test',
+      'abcdef123456',
+      'file_code_intel_test',
+      'file_code_intel_new',
+      0.9
+    )
   `;
 }
 

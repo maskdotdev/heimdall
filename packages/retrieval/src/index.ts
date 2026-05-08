@@ -1,26 +1,20 @@
 import { createHash } from "node:crypto";
 import {
   type ChangedSymbol,
+  type ChunkRecord,
   ContextBundleSchema,
+  type DependencyRecord,
   type FindingCategory,
   parseWithSchema,
   type RepoRule,
+  type RouteRecord,
   type SymbolKind,
+  type SymbolRecord,
 } from "@repo/contracts";
 import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
 import type { CodeSnippet, ContextBundle, ContextItem } from "@repo/contracts/review/context";
-import {
-  codeChunks,
-  codeDependencies,
-  codeEdges,
-  codeRoutes,
-  codeTestMappings,
-  EmbeddingRepository,
-  type HeimdallDatabase,
-  indexedFiles,
-  symbols,
-} from "@repo/db";
+import { CodeIntelligenceRepository, EmbeddingRepository, type HeimdallDatabase } from "@repo/db";
 import {
   formatMemoryFactForContext,
   type MemoryFact,
@@ -36,7 +30,6 @@ import {
   type TelemetrySpanRecorder,
 } from "@repo/observability";
 import { matchesAnyPathPattern } from "@repo/rules";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
 
 /** Indexed chunk shape consumed by retrieval. */
 export type RetrievalChunk = {
@@ -621,180 +614,68 @@ export function createDatabaseRetrievalIndex(options: {
   /** Embedding model to use for vector search rows. */
   readonly embeddingModel?: string;
 }): RetrievalIndex {
+  const codeIntelligenceRepository = new CodeIntelligenceRepository(options.db);
   const embeddingRepository = new EmbeddingRepository(options.db);
 
   return {
     indexVersionId: options.indexVersionId,
-    getSameFileChunks: async (paths) => chunksForPaths(options.db, options.indexVersionId, paths),
-    getSymbolsForFiles: async (paths) => {
-      if (paths.length === 0) return [];
-      return options.db
-        .select({
-          symbolId: symbols.symbolId,
-          fileId: symbols.fileId,
-          path: symbols.path,
-          language: symbols.language,
-          name: symbols.name,
-          qualifiedName: symbols.qualifiedName,
-          kind: symbols.kind,
-          startLine: symbols.startLine,
-          endLine: symbols.endLine,
+    getSameFileChunks: async (paths) =>
+      (
+        await codeIntelligenceRepository.listChunksForPaths({
+          indexVersionId: options.indexVersionId,
+          paths,
         })
-        .from(symbols)
-        .where(
-          and(
-            eq(symbols.indexVersionId, options.indexVersionId),
-            inArray(symbols.path, [...paths]),
-          ),
-        );
-    },
-    getRelatedChunks: async (symbolIds) => {
-      if (symbolIds.length === 0) return [];
-      const edges = await options.db
-        .select({ fromId: codeEdges.fromId, toId: codeEdges.toId })
-        .from(codeEdges)
-        .where(
-          and(
-            eq(codeEdges.indexVersionId, options.indexVersionId),
-            or(inArray(codeEdges.fromId, [...symbolIds]), inArray(codeEdges.toId, [...symbolIds])),
-          ),
-        );
-      const relationBySymbolId = new Map<string, "caller" | "callee">();
-      for (const edge of edges) {
-        if (symbolIds.includes(edge.fromId) && !symbolIds.includes(edge.toId)) {
-          relationBySymbolId.set(edge.toId, "callee");
-        }
-        if (symbolIds.includes(edge.toId) && !symbolIds.includes(edge.fromId)) {
-          relationBySymbolId.set(edge.fromId, "caller");
-        }
-      }
-      const relatedIds = [...relationBySymbolId.keys()];
-      if (relatedIds.length === 0) return [];
-      const rows = await options.db
-        .select()
-        .from(codeChunks)
-        .where(
-          and(
-            eq(codeChunks.indexVersionId, options.indexVersionId),
-            inArray(codeChunks.symbolId, relatedIds),
-          ),
-        );
-      return rows.map((row) => {
-        const chunk = toRetrievalChunk(row);
-        const relationKind = row.symbolId ? relationBySymbolId.get(row.symbolId) : undefined;
-        return relationKind ? { ...chunk, relationKind } : chunk;
-      });
-    },
-    getDependenciesForFiles: async (paths) => {
-      if (paths.length === 0) return [];
-      return options.db
-        .select({
-          dependencyId: codeDependencies.dependencyId,
-          manifestPath: codeDependencies.manifestPath,
-          packageManager: codeDependencies.packageManager,
-          name: codeDependencies.name,
-          versionSpec: codeDependencies.versionSpec,
-          resolvedVersion: codeDependencies.resolvedVersion,
-          dependencyType: codeDependencies.dependencyType,
+      ).map(toRetrievalChunk),
+    getSymbolsForFiles: async (paths) =>
+      (
+        await codeIntelligenceRepository.listSymbolsForPaths({
+          indexVersionId: options.indexVersionId,
+          paths,
         })
-        .from(codeDependencies)
-        .where(
-          and(
-            eq(codeDependencies.indexVersionId, options.indexVersionId),
-            inArray(codeDependencies.manifestPath, [...paths]),
-          ),
-        );
-    },
-    getRoutesForFiles: async (paths) => {
-      if (paths.length === 0) return [];
-      const rows = await options.db
-        .select({
-          routeId: codeRoutes.routeId,
-          path: codeRoutes.path,
-          language: codeRoutes.language,
-          routePattern: codeRoutes.routePattern,
-          methods: codeRoutes.methods,
-          handlerSymbolId: codeRoutes.handlerSymbolId,
-          startLine: codeRoutes.startLine,
-          endLine: codeRoutes.endLine,
-          framework: codeRoutes.framework,
-          confidence: codeRoutes.confidence,
+      ).map(toRetrievalSymbol),
+    getRelatedChunks: async (symbolIds) =>
+      (
+        await codeIntelligenceRepository.listRelatedChunksForSymbols({
+          indexVersionId: options.indexVersionId,
+          symbolIds,
         })
-        .from(codeRoutes)
-        .where(
-          and(
-            eq(codeRoutes.indexVersionId, options.indexVersionId),
-            inArray(codeRoutes.path, [...paths]),
-          ),
-        );
-
-      return rows.map((row) => ({
-        ...row,
-        methods: jsonStringArray(row.methods),
-      }));
-    },
-    getRelatedTestChunks: async (paths) => {
-      if (paths.length === 0) return [];
-
-      const changedFiles = await options.db
-        .select({ fileId: indexedFiles.fileId })
-        .from(indexedFiles)
-        .where(
-          and(
-            eq(indexedFiles.indexVersionId, options.indexVersionId),
-            inArray(indexedFiles.path, [...paths]),
-          ),
-        );
-      const changedFileIds = changedFiles.map((file) => file.fileId);
-      if (changedFileIds.length > 0) {
-        const mappings = await options.db
-          .select({ testFileId: codeTestMappings.testFileId })
-          .from(codeTestMappings)
-          .where(
-            and(
-              eq(codeTestMappings.indexVersionId, options.indexVersionId),
-              inArray(codeTestMappings.targetFileId, changedFileIds),
-            ),
-          );
-        const testFileIds = uniqueStrings(mappings.map((mapping) => mapping.testFileId));
-        if (testFileIds.length > 0) {
-          const rows = await options.db
-            .select()
-            .from(codeChunks)
-            .where(
-              and(
-                eq(codeChunks.indexVersionId, options.indexVersionId),
-                inArray(codeChunks.fileId, testFileIds),
-              ),
-            );
-          return rows.map(toRetrievalChunk);
-        }
-      }
-
-      const stems = paths
-        .map((path) =>
-          path
-            .split("/")
-            .at(-1)
-            ?.replace(/\.[^.]+$/, ""),
-        )
-        .filter(Boolean);
-      const rows = await options.db
-        .select({
-          chunk: codeChunks,
-          file: indexedFiles,
+      ).map((row) => ({
+        ...toRetrievalChunk(row.chunk),
+        relationKind: row.relationKind,
+      })),
+    getDependenciesForFiles: async (paths) =>
+      (
+        await codeIntelligenceRepository.listDependenciesForFiles({
+          indexVersionId: options.indexVersionId,
+          paths,
         })
-        .from(codeChunks)
-        .innerJoin(indexedFiles, eq(codeChunks.fileId, indexedFiles.fileId))
-        .where(
-          and(eq(codeChunks.indexVersionId, options.indexVersionId), eq(indexedFiles.isTest, true)),
-        );
-      return rows
-        .filter(({ file }) => stems.some((stem) => file.path.includes(stem ?? "")))
-        .map(({ chunk }) => toRetrievalChunk(chunk));
-    },
+      ).map(toRetrievalDependency),
+    getRoutesForFiles: async (paths) =>
+      (
+        await codeIntelligenceRepository.listRoutesForFiles({
+          indexVersionId: options.indexVersionId,
+          paths,
+        })
+      ).map(toRetrievalRoute),
+    getRelatedTestChunks: async (paths) =>
+      (
+        await codeIntelligenceRepository.listRelatedTestChunks({
+          indexVersionId: options.indexVersionId,
+          sourcePaths: paths,
+        })
+      ).map(toRetrievalChunk),
     searchFullTextChunks: async (query, limit) =>
-      searchFullTextChunks(options.db, options.indexVersionId, query, limit),
+      (
+        await codeIntelligenceRepository.searchFullTextChunks({
+          indexVersionId: options.indexVersionId,
+          limit,
+          query,
+        })
+      ).map((row) => ({
+        ...toRetrievalChunk(row.chunk),
+        score: row.score,
+        searchSource: "full_text_search" as const,
+      })),
     searchSimilarChunks: async (query, limit) => {
       if (options.embedQuery) {
         const queryVector = await options.embedQuery(query);
@@ -1366,64 +1247,40 @@ function withFallbackRule(items: readonly ContextItem[]): readonly ContextItem[]
   ];
 }
 
-async function chunksForPaths(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-  paths: readonly string[],
-): Promise<readonly RetrievalChunk[]> {
-  if (paths.length === 0) {
-    return [];
+/** Structural DB chunk row returned by vector search before contract mapping. */
+type RetrievalChunkRow = {
+  /** Stable chunk ID. */
+  readonly chunkId: string;
+  /** Optional owning symbol ID. */
+  readonly symbolId?: string | null;
+  /** Repository-relative source path. */
+  readonly path: string;
+  /** One-based starting line. */
+  readonly startLine: number;
+  /** One-based ending line. */
+  readonly endLine: number;
+  /** Chunk content hash. */
+  readonly contentHash: string;
+  /** Imported chunk metadata. */
+  readonly metadata: unknown;
+};
+
+/** Converts either a contract chunk or DB chunk row into retrieval's internal chunk shape. */
+function toRetrievalChunk(row: ChunkRecord | RetrievalChunkRow): RetrievalChunk {
+  if ("range" in row) {
+    return {
+      chunkId: row.chunkId,
+      ...(row.symbolId ? { symbolId: row.symbolId } : {}),
+      path: row.path,
+      startLine: row.range.startLine,
+      endLine: row.range.endLine,
+      language: row.language,
+      contentHash: row.contentHash,
+      text: row.text,
+      tokenEstimate: row.tokenEstimate,
+    };
   }
 
-  const rows = await db
-    .select()
-    .from(codeChunks)
-    .where(
-      and(eq(codeChunks.indexVersionId, indexVersionId), inArray(codeChunks.path, [...paths])),
-    );
-
-  return rows.map(toRetrievalChunk);
-}
-
-/** Runs PostgreSQL full-text search over indexed chunk text metadata. */
-async function searchFullTextChunks(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-  query: string,
-  limit: number,
-): Promise<readonly RetrievalChunk[]> {
-  const fullTextQuery = normalizeFullTextQuery(query);
-  if (fullTextQuery.length === 0 || limit <= 0) {
-    return [];
-  }
-
-  const chunkText = sql<string>`coalesce(${codeChunks.metadata}->>'text', '')`;
-  const searchVector = sql`to_tsvector('simple', ${chunkText})`;
-  const queryExpression = sql`plainto_tsquery('simple', ${fullTextQuery})`;
-  const scoreExpression = sql<number>`ts_rank_cd(${searchVector}, ${queryExpression})`;
-  const rows = await db
-    .select({
-      chunk: codeChunks,
-      score: scoreExpression,
-    })
-    .from(codeChunks)
-    .where(
-      and(
-        eq(codeChunks.indexVersionId, indexVersionId),
-        sql`${searchVector} @@ ${queryExpression}`,
-      ),
-    )
-    .orderBy(sql`${scoreExpression} DESC`)
-    .limit(limit);
-
-  return rows.map((row) => ({
-    ...toRetrievalChunk(row.chunk),
-    score: row.score,
-    searchSource: "full_text_search",
-  }));
-}
-
-function toRetrievalChunk(row: typeof codeChunks.$inferSelect): RetrievalChunk {
   const metadata = row.metadata;
   const metadataObject = metadata && typeof metadata === "object" ? metadata : {};
   const text =
@@ -1439,7 +1296,7 @@ function toRetrievalChunk(row: typeof codeChunks.$inferSelect): RetrievalChunk {
 
   return {
     chunkId: row.chunkId,
-    symbolId: row.symbolId,
+    ...(row.symbolId ? { symbolId: row.symbolId } : {}),
     path: row.path,
     startLine: row.startLine,
     endLine: row.endLine,
@@ -1447,6 +1304,49 @@ function toRetrievalChunk(row: typeof codeChunks.$inferSelect): RetrievalChunk {
     contentHash: row.contentHash,
     text,
     tokenEstimate,
+  };
+}
+
+/** Converts a symbol contract into retrieval's internal symbol shape. */
+function toRetrievalSymbol(record: SymbolRecord): RetrievalSymbol {
+  return {
+    symbolId: record.symbolId,
+    fileId: record.fileId,
+    path: record.path,
+    name: record.name,
+    ...(record.qualifiedName ? { qualifiedName: record.qualifiedName } : {}),
+    kind: record.kind,
+    language: record.language,
+    startLine: record.range.startLine,
+    endLine: record.range.endLine,
+  };
+}
+
+/** Converts a dependency contract into retrieval's dependency metadata shape. */
+function toRetrievalDependency(record: DependencyRecord): RetrievalDependency {
+  return {
+    dependencyId: record.dependencyId,
+    manifestPath: record.manifestPath,
+    ...(record.packageManager ? { packageManager: record.packageManager } : {}),
+    name: record.name,
+    ...(record.versionSpec ? { versionSpec: record.versionSpec } : {}),
+    ...(record.resolvedVersion ? { resolvedVersion: record.resolvedVersion } : {}),
+    ...(record.dependencyType ? { dependencyType: record.dependencyType } : {}),
+  };
+}
+
+/** Converts a route contract into retrieval's route metadata shape. */
+function toRetrievalRoute(record: RouteRecord): RetrievalRoute {
+  return {
+    routeId: record.routeId,
+    path: record.path,
+    language: record.language,
+    routePattern: record.routePattern,
+    methods: record.methods,
+    ...(record.handlerSymbolId ? { handlerSymbolId: record.handlerSymbolId } : {}),
+    ...(record.range ? { startLine: record.range.startLine, endLine: record.range.endLine } : {}),
+    ...(record.framework ? { framework: record.framework } : {}),
+    confidence: record.confidence,
   };
 }
 
@@ -2124,12 +2024,7 @@ function stringArrayMetadataValue(
     : [];
 }
 
-function jsonStringArray(value: unknown): readonly string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
+/** Returns unique strings while preserving first-seen order. */
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
 }
@@ -2169,16 +2064,6 @@ function languageForContext(language: string): CodeSnippet["language"] {
   }
 
   return "unknown";
-}
-
-/** Builds a bounded plain-text query for PostgreSQL full-text search. */
-function normalizeFullTextQuery(query: string): string {
-  const terms = query
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/u)
-    .filter((term) => term.length > 2);
-
-  return [...new Set(terms)].slice(0, 32).join(" ");
 }
 
 function packItems(items: readonly ContextItem[], maxTokens: number): PackedContextItems {
