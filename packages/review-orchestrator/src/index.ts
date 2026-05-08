@@ -1015,6 +1015,9 @@ export async function runPullRequestReview(
               kind: "static_analysis",
               name: "static-analysis-report.json",
               payload: staticAnalysisReport,
+              metadata: {
+                staticAnalysis: staticAnalysisArtifactSummary(staticAnalysisReport),
+              },
               createdAt: now().toISOString(),
             }),
           ]
@@ -3603,6 +3606,7 @@ async function persistArtifact(
     readonly kind: ReviewArtifactKind;
     readonly name: string;
     readonly payload: unknown;
+    readonly metadata?: Record<string, unknown> | undefined;
     readonly createdAt: string;
   },
 ): Promise<ReviewArtifactRef> {
@@ -3619,6 +3623,7 @@ async function persistArtifact(
       retentionClass: retention.retentionClass,
       retentionReason: retention.reason,
       retentionStorage: retention.storage,
+      ...input.metadata,
       ...(retentionUntil ? { retentionUntil } : {}),
     },
   });
@@ -3638,6 +3643,7 @@ async function persistArtifact(
       retentionClass: retention.retentionClass,
       retentionReason: retention.reason,
       retentionStorage: retention.storage,
+      ...input.metadata,
       ...(retentionUntil ? { retentionUntil } : {}),
     },
   };
@@ -3654,6 +3660,60 @@ async function persistArtifact(
   });
 
   return artifact;
+}
+
+/** Payload-free static-analysis report counters stored on artifact metadata. */
+type StaticAnalysisArtifactSummary = {
+  /** Metadata schema version. */
+  readonly schemaVersion: "static_analysis_artifact_summary.v1";
+  /** Static-analysis report ID. */
+  readonly reportId: string;
+  /** Static-analysis mode used for the report. */
+  readonly mode: StaticAnalysisMode;
+  /** Final static-analysis report status. */
+  readonly status: StaticAnalysisReport["status"];
+  /** Total static-analysis duration in milliseconds. */
+  readonly durationMs: number;
+  /** Planned tool run count. */
+  readonly toolRunCount: number;
+  /** Successful tool run count. */
+  readonly succeededToolRunCount: number;
+  /** Failed tool run count. */
+  readonly failedToolRunCount: number;
+  /** Timed-out tool run count. */
+  readonly timedOutToolRunCount: number;
+  /** Total normalized diagnostic count. */
+  readonly diagnosticCount: number;
+  /** Diagnostic count on changed lines. */
+  readonly changedLineDiagnosticCount: number;
+  /** Diagnostic count marked new by the analyzer. */
+  readonly newDiagnosticCount: number;
+  /** Error or critical diagnostic count. */
+  readonly highSeverityDiagnosticCount: number;
+  /** Product-safe warning count. */
+  readonly warningCount: number;
+};
+
+/** Builds payload-free metadata for static-analysis artifact list/debug views. */
+function staticAnalysisArtifactSummary(
+  report: StaticAnalysisReport,
+): StaticAnalysisArtifactSummary {
+  return {
+    changedLineDiagnosticCount: report.summary.changedLineDiagnosticCount,
+    diagnosticCount: report.summary.diagnosticCount,
+    durationMs: report.durationMs,
+    failedToolRunCount: report.summary.failedToolRunCount,
+    highSeverityDiagnosticCount: report.summary.highSeverityDiagnosticCount,
+    mode: report.mode,
+    newDiagnosticCount: report.summary.newDiagnosticCount,
+    reportId: report.reportId,
+    schemaVersion: "static_analysis_artifact_summary.v1",
+    status: report.status,
+    succeededToolRunCount: report.summary.succeededToolRunCount,
+    timedOutToolRunCount: report.summary.timedOutToolRunCount,
+    toolRunCount: report.summary.toolRunCount,
+    warningCount: report.warnings.length,
+  };
 }
 
 /** Resolves retention policy for one persisted review artifact kind. */

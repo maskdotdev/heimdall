@@ -1477,6 +1477,38 @@ type AdminReviewArtifactSummary = {
   readonly hasStoredPayload: boolean;
   /** Metadata keys available on the artifact row. */
   readonly metadataKeys: readonly string[];
+  /** Payload-free static-analysis counters when this is a static-analysis report artifact. */
+  readonly staticAnalysis?: AdminStaticAnalysisArtifactSummary | undefined;
+};
+
+/** Payload-free static-analysis report counters returned with artifact metadata. */
+type AdminStaticAnalysisArtifactSummary = {
+  /** Static-analysis report ID. */
+  readonly reportId: string;
+  /** Static-analysis mode used for the report. */
+  readonly mode: string;
+  /** Final static-analysis report status. */
+  readonly status: string;
+  /** Total static-analysis duration in milliseconds. */
+  readonly durationMs: number;
+  /** Planned tool run count. */
+  readonly toolRunCount: number;
+  /** Successful tool run count. */
+  readonly succeededToolRunCount: number;
+  /** Failed tool run count. */
+  readonly failedToolRunCount: number;
+  /** Timed-out tool run count. */
+  readonly timedOutToolRunCount: number;
+  /** Total normalized diagnostic count. */
+  readonly diagnosticCount: number;
+  /** Diagnostic count on changed lines. */
+  readonly changedLineDiagnosticCount: number;
+  /** Diagnostic count marked new by the analyzer. */
+  readonly newDiagnosticCount: number;
+  /** Error or critical diagnostic count. */
+  readonly highSeverityDiagnosticCount: number;
+  /** Product-safe warning count. */
+  readonly warningCount: number;
 };
 
 /** Redaction mode accepted by review artifact payload reads. */
@@ -10106,6 +10138,7 @@ function toAdminReviewArtifactSummary(row: {
   const metadata = asOptionalRecord(row.metadata);
   const redactionLevel =
     metadata && typeof metadata.redactionLevel === "string" ? metadata.redactionLevel : undefined;
+  const staticAnalysis = staticAnalysisArtifactSummaryFromMetadata(metadata);
 
   return {
     classification: row.classification,
@@ -10121,7 +10154,41 @@ function toAdminReviewArtifactSummary(row: {
     reviewArtifactId: row.reviewArtifactId,
     reviewRunId: row.reviewRunId,
     sizeBytes: row.sizeBytes,
+    ...(staticAnalysis ? { staticAnalysis } : {}),
     uri: row.uri,
+  };
+}
+
+/** Reads payload-free static-analysis counters from review artifact metadata. */
+function staticAnalysisArtifactSummaryFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): AdminStaticAnalysisArtifactSummary | undefined {
+  const summary = asOptionalRecord(metadata?.staticAnalysis);
+  if (!summary) {
+    return undefined;
+  }
+
+  const reportId = stringFromUnknownRecord(summary, "reportId");
+  const mode = stringFromUnknownRecord(summary, "mode");
+  const status = stringFromUnknownRecord(summary, "status");
+  if (!reportId || !mode || !status) {
+    return undefined;
+  }
+
+  return {
+    changedLineDiagnosticCount: numberFromRecord(summary, "changedLineDiagnosticCount"),
+    diagnosticCount: numberFromRecord(summary, "diagnosticCount"),
+    durationMs: numberFromRecord(summary, "durationMs"),
+    failedToolRunCount: numberFromRecord(summary, "failedToolRunCount"),
+    highSeverityDiagnosticCount: numberFromRecord(summary, "highSeverityDiagnosticCount"),
+    mode,
+    newDiagnosticCount: numberFromRecord(summary, "newDiagnosticCount"),
+    reportId,
+    status,
+    succeededToolRunCount: numberFromRecord(summary, "succeededToolRunCount"),
+    timedOutToolRunCount: numberFromRecord(summary, "timedOutToolRunCount"),
+    toolRunCount: numberFromRecord(summary, "toolRunCount"),
+    warningCount: numberFromRecord(summary, "warningCount"),
   };
 }
 

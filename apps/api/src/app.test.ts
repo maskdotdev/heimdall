@@ -1188,7 +1188,24 @@ describe("api app", () => {
           return [
             reviewArtifactFixture({
               hasStoredPayload: true,
+              kind: "static_analysis",
               metadataKeys: ["payload", "policyHash"],
+              name: "static-analysis-report.json",
+              staticAnalysis: {
+                changedLineDiagnosticCount: 1,
+                diagnosticCount: 2,
+                durationMs: 1200,
+                failedToolRunCount: 1,
+                highSeverityDiagnosticCount: 1,
+                mode: "changed_files_fast",
+                newDiagnosticCount: 0,
+                reportId: "star_1",
+                status: "partially_succeeded",
+                succeededToolRunCount: 2,
+                timedOutToolRunCount: 0,
+                toolRunCount: 3,
+                warningCount: 1,
+              },
             }),
           ];
         },
@@ -1325,8 +1342,15 @@ describe("api app", () => {
           {
             classification: "customer_confidential",
             hasStoredPayload: true,
+            kind: "static_analysis",
             metadataKeys: ["payload", "policyHash"],
             reviewArtifactId: "art_1",
+            staticAnalysis: {
+              diagnosticCount: 2,
+              reportId: "star_1",
+              status: "partially_succeeded",
+              toolRunCount: 3,
+            },
           },
         ],
         reviewRun: { reviewRunId: "rrn_1" },

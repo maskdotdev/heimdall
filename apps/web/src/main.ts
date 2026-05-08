@@ -210,6 +210,38 @@ type AdminReviewArtifactSummary = {
   readonly hasStoredPayload?: boolean;
   /** Metadata keys present on the artifact row. */
   readonly metadataKeys?: readonly string[];
+  /** Payload-free static-analysis counters when this artifact stores a static-analysis report. */
+  readonly staticAnalysis?: AdminStaticAnalysisArtifactSummary;
+};
+
+/** Payload-free static-analysis counters attached to report artifacts. */
+type AdminStaticAnalysisArtifactSummary = {
+  /** Static-analysis report ID. */
+  readonly reportId: string;
+  /** Static-analysis mode used for the report. */
+  readonly mode: string;
+  /** Final static-analysis report status. */
+  readonly status: string;
+  /** Total static-analysis duration in milliseconds. */
+  readonly durationMs: number;
+  /** Planned tool run count. */
+  readonly toolRunCount: number;
+  /** Successful tool run count. */
+  readonly succeededToolRunCount: number;
+  /** Failed tool run count. */
+  readonly failedToolRunCount: number;
+  /** Timed-out tool run count. */
+  readonly timedOutToolRunCount: number;
+  /** Total normalized diagnostic count. */
+  readonly diagnosticCount: number;
+  /** Diagnostic count on changed lines. */
+  readonly changedLineDiagnosticCount: number;
+  /** Diagnostic count marked new by the analyzer. */
+  readonly newDiagnosticCount: number;
+  /** Error or critical diagnostic count. */
+  readonly highSeverityDiagnosticCount: number;
+  /** Product-safe warning count. */
+  readonly warningCount: number;
 };
 
 /** Audited artifact payload response shown in product review inspectors. */
@@ -7801,6 +7833,7 @@ function renderProductReviewArtifactRow(
             : `<span class="muted-text">none</span>`
         }
         ${artifact.hasStoredPayload ? `<small>stored payload</small>` : ""}
+        ${renderStaticAnalysisArtifactSummary(artifact)}
       </td>
       <td>${formatTime(artifact.createdAt)}</td>
       <td>
@@ -7828,6 +7861,34 @@ function renderProductReviewArtifactRow(
         </div>
       </td>
     </tr>
+  `;
+}
+
+/** Renders compact static-analysis counters for artifact list rows. */
+function renderStaticAnalysisArtifactSummary(artifact: AdminReviewArtifactSummary): string {
+  const summary = artifact.staticAnalysis;
+  if (!summary) {
+    return "";
+  }
+
+  const diagnostics = formatCompactNumber(summary.diagnosticCount);
+  const changedLineDiagnostics = formatCompactNumber(summary.changedLineDiagnosticCount);
+  const highSeverityDiagnostics = formatCompactNumber(summary.highSeverityDiagnosticCount);
+  const warnings = formatCompactNumber(summary.warningCount);
+  const toolRuns = `${formatCompactNumber(summary.succeededToolRunCount)}/${formatCompactNumber(
+    summary.toolRunCount,
+  )}`;
+
+  return `
+    <small>
+      ${escapeHtml(summary.status)} ${escapeHtml(summary.mode)}:
+      ${diagnostics} diagnostics,
+      ${changedLineDiagnostics} changed-line,
+      ${highSeverityDiagnostics} high-severity,
+      ${warnings} warnings,
+      ${toolRuns} tools,
+      ${formatDurationMs(summary.durationMs)}
+    </small>
   `;
 }
 
@@ -11729,7 +11790,10 @@ function renderReviewArtifacts(artifacts: readonly AdminReviewArtifactSummary[])
                 (artifact) => `
                   <tr>
                     <td>${escapeHtml(artifact.name)}</td>
-                    <td>${escapeHtml(artifact.kind)}</td>
+                    <td>
+                      ${escapeHtml(artifact.kind)}
+                      ${renderStaticAnalysisArtifactSummary(artifact)}
+                    </td>
                     <td>${formatBytes(artifact.sizeBytes)}</td>
                     <td><code>${escapeHtml(artifact.uri)}</code></td>
                     <td>${formatTime(artifact.createdAt)}</td>
