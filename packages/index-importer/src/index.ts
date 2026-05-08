@@ -21,7 +21,12 @@ import {
   repositories,
   symbols,
 } from "@repo/db";
-import { type ChunkRecord, type IndexArtifact, validateIndexArtifact } from "@repo/index-schema";
+import {
+  type ChunkRecord,
+  createStableId,
+  type IndexArtifact,
+  validateIndexArtifact,
+} from "@repo/index-schema";
 import { type ReadIndexArtifactPathOptions, readIndexArtifactPath } from "@repo/index-schema/node";
 import {
   classifyTelemetryError,
@@ -809,7 +814,7 @@ function createIndexImportPlan(
     options.embeddingProfileVersion ?? DEFAULT_CODE_EMBEDDING_PROFILE_VERSION;
   const embeddingProvider = options.embeddingProvider ?? "configured";
   const embeddingDimensions = options.embeddingDimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
-  const indexVersionId = stableId("idx", [
+  const indexVersionId = createStableId("idx", [
     artifact.manifest.repoId,
     artifact.manifest.commitSha,
     artifact.manifest.indexerName,
@@ -817,7 +822,7 @@ function createIndexImportPlan(
     artifact.manifest.chunkerVersion,
     artifactHash,
   ]);
-  const embeddingJobId = stableId("embjob", [
+  const embeddingJobId = createStableId("embjob", [
     artifact.manifest.repoId,
     indexVersionId,
     embeddingProfileVersion,
@@ -837,7 +842,7 @@ function createIndexImportPlan(
     embeddingProfileVersion,
     embeddingProvider,
     files,
-    importBatchId: stableId("imb", [
+    importBatchId: createStableId("imb", [
       artifact.manifest.repoId,
       artifact.manifest.commitSha,
       indexKey,
@@ -1462,7 +1467,7 @@ async function enqueueEmbeddingBatches(input: {
     .onConflictDoNothing();
 
   const embeddingJobItemRows = input.plan.chunks.map((chunk) => ({
-    embeddingJobItemId: stableId("embitem", [embeddingJobId, chunk.chunkId]),
+    embeddingJobItemId: createStableId("embitem", [embeddingJobId, chunk.chunkId]),
     embeddingJobId,
     chunkId: chunk.chunkId,
     status: "pending",
@@ -1488,14 +1493,14 @@ async function enqueueEmbeddingBatches(input: {
     await options.db
       .insert(backgroundJobs)
       .values({
-        backgroundJobId: stableId("job", [jobKey]),
+        backgroundJobId: createStableId("job", [jobKey]),
         queueName: QUEUE_NAMES.embedding,
         jobKey,
         jobType: JOB_TYPES.EmbeddingBatch,
         status: "pending",
         repoId: input.repoId,
         payload: {
-          jobId: stableId("job", [jobKey, "envelope"]),
+          jobId: createStableId("job", [jobKey, "envelope"]),
           jobType: JOB_TYPES.EmbeddingBatch,
           schemaVersion: "job_envelope.v1",
           idempotencyKey: jobKey,
@@ -1561,7 +1566,7 @@ async function enqueueEmbeddingRepairJob(input: {
   await input.db
     .insert(backgroundJobs)
     .values({
-      backgroundJobId: stableId("job", [jobKey]),
+      backgroundJobId: createStableId("job", [jobKey]),
       jobKey,
       jobType: JOB_TYPES.EmbeddingRepair,
       maxAttempts: 3,
@@ -1573,7 +1578,7 @@ async function enqueueEmbeddingRepairJob(input: {
         attempt: 0,
         createdAt: new Date().toISOString(),
         idempotencyKey: jobKey,
-        jobId: stableId("job", [jobKey, "envelope"]),
+        jobId: createStableId("job", [jobKey, "envelope"]),
         jobType: JOB_TYPES.EmbeddingRepair,
         maxAttempts: 3,
         payload,
@@ -1664,12 +1669,4 @@ function booleanEnv(value: string | undefined): boolean | undefined {
 /** Computes a stable SHA-256 hash for an index artifact payload. */
 function hashArtifact(artifact: IndexArtifact): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(JSON.stringify(artifact)).digest("hex")}`;
-}
-
-/** Creates a deterministic ID from ordered stringable parts. */
-function stableId(prefix: string, parts: readonly unknown[]): string {
-  return `${prefix}_${createHash("sha256")
-    .update(parts.map((part) => String(part)).join(":"))
-    .digest("base64url")
-    .slice(0, 26)}`;
 }

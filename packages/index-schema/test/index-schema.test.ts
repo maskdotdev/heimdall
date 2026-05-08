@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  createStableId,
   diffIndexArtifacts,
   INDEX_ARTIFACT_SCHEMA_VERSION,
   INDEX_RECORD_SCHEMA_VERSION,
@@ -239,6 +240,18 @@ describe("IndexArtifactSchema", () => {
     );
     expect(() => normalizeRepoPath("/src/service.ts")).toThrow(
       "Invalid repo path /src/service.ts: must be repo-relative.",
+    );
+  });
+
+  it("creates deterministic stable IDs compatible with existing indexer output", () => {
+    expect(createStableId("file", [repoId, commitSha, "src/service.ts"])).toBe(
+      "file_w4gY0A4nMn6rUSzmPhwznlapCu",
+    );
+    expect(createStableId("sym", [repoId, commitSha, "src/service.ts", "Service", 1])).toBe(
+      "sym_0X1qN7fUpP95MgagDMD49kYiWJ",
+    );
+    expect(createStableId("art", [repoId, commitSha, "heimdall-typescript-indexer", "0.1.0"])).toBe(
+      "art_dTC21MZ2XP8sffPXOC_0tAjhaO",
     );
   });
 

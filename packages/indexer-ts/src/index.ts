@@ -5,6 +5,7 @@ import { join, parse, resolve, sep } from "node:path";
 import {
   type ChunkRecord,
   type CodeLanguage,
+  createStableId,
   type EdgeRecord,
   type FileRecord,
   INDEX_ARTIFACT_SCHEMA_VERSION,
@@ -162,7 +163,12 @@ export async function indexTypeScriptRepository(input: {
     manifest: {
       schemaVersion: INDEX_ARTIFACT_SCHEMA_VERSION,
       recordSchemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-      artifactId: stableId("art", [input.repoId, input.commitSha, INDEXER_NAME, INDEXER_VERSION]),
+      artifactId: createStableId("art", [
+        input.repoId,
+        input.commitSha,
+        INDEXER_NAME,
+        INDEXER_VERSION,
+      ]),
       repoId: input.repoId,
       commitSha: input.commitSha,
       indexerName: INDEXER_NAME,
@@ -268,7 +274,7 @@ function fileRecord(
   return {
     type: "file",
     schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-    fileId: stableId("file", [repoId, commitSha, path]),
+    fileId: createStableId("file", [repoId, commitSha, path]),
     repoId,
     commitSha,
     path,
@@ -298,7 +304,7 @@ function collectSymbols(
       symbols.push({
         type: "symbol",
         schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-        symbolId: stableId("sym", [
+        symbolId: createStableId("sym", [
           file.repoId,
           file.commitSha,
           file.path,
@@ -356,7 +362,12 @@ function chunkForRange(
   return {
     type: "chunk",
     schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-    chunkId: stableId("chunk", [file.fileId, symbolId ?? "file", range.startLine, range.endLine]),
+    chunkId: createStableId("chunk", [
+      file.fileId,
+      symbolId ?? "file",
+      range.startLine,
+      range.endLine,
+    ]),
     fileId: file.fileId,
     ...(symbolId ? { symbolId } : {}),
     repoId: file.repoId,
@@ -387,7 +398,7 @@ function edgeRecordsForFile(
       edges.push({
         type: "edge",
         schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-        edgeId: stableId("edge", [repoId, commitSha, fileId, "imports", toId]),
+        edgeId: createStableId("edge", [repoId, commitSha, fileId, "imports", toId]),
         repoId,
         commitSha,
         fromId: fileId,
@@ -407,7 +418,7 @@ function edgeRecordsForFile(
     ...symbols.map((symbol) => ({
       type: "edge" as const,
       schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-      edgeId: stableId("edge", [repoId, commitSha, fileId, "defines", symbol.symbolId]),
+      edgeId: createStableId("edge", [repoId, commitSha, fileId, "defines", symbol.symbolId]),
       repoId,
       commitSha,
       fromId: fileId,
@@ -438,7 +449,13 @@ function callEdgesForFile(
         edges.push({
           type: "edge",
           schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
-          edgeId: stableId("edge", [repoId, commitSha, caller.symbolId, "calls", callee.symbolId]),
+          edgeId: createStableId("edge", [
+            repoId,
+            commitSha,
+            caller.symbolId,
+            "calls",
+            callee.symbolId,
+          ]),
           repoId,
           commitSha,
           fromId: caller.symbolId,
@@ -621,11 +638,4 @@ function estimateTokens(text: string): number {
 
 function sha256(text: string): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(text).digest("hex")}`;
-}
-
-function stableId(prefix: string, parts: readonly unknown[]): string {
-  return `${prefix}_${createHash("sha256")
-    .update(parts.map((part) => String(part)).join(":"))
-    .digest("base64url")
-    .slice(0, 26)}`;
 }

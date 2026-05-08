@@ -47,6 +47,13 @@ export function normalizeRepoPath(input: string): RepoPath {
   return normalizedPath as RepoPath;
 }
 
+/** Creates a deterministic short ID from an ordered list of stringable parts. */
+export function createStableId(prefix: string, parts: readonly unknown[]): string {
+  const payload = parts.map((part) => String(part)).join(":");
+
+  return `${prefix}_${sha256Base64Url(payload).slice(0, 26)}`;
+}
+
 export const Sha256Schema = Type.String({
   pattern: "^sha256:[a-f0-9]{64}$",
 });
@@ -561,6 +568,20 @@ const INDEX_RECORD_TYPE_ORDER = {
 } satisfies Record<IndexRecord["type"], number>;
 
 const utf8Encoder = new TextEncoder();
+const BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const SHA256_INITIAL_HASHES = [
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+] as const;
+const SHA256_ROUND_CONSTANTS = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+] as const;
 
 /** Validates an index artifact before it crosses package or process boundaries. */
 export function validateIndexArtifact(value: unknown): readonly string[] {
@@ -1161,6 +1182,175 @@ function collectEdgeEndpointError(
 /** Returns UTF-8 byte length without depending on Node-only globals. */
 function byteLength(value: string): number {
   return utf8Encoder.encode(value).byteLength;
+}
+
+/** Returns a SHA-256 digest encoded with URL-safe base64 and no padding. */
+function sha256Base64Url(value: string): string {
+  return base64UrlEncode(sha256Bytes(utf8Encoder.encode(value)));
+}
+
+/** Computes a SHA-256 digest for arbitrary bytes. */
+function sha256Bytes(message: Uint8Array): Uint8Array {
+  const padded = paddedSha256Message(message);
+  const hashes = [...SHA256_INITIAL_HASHES];
+  const words = new Uint32Array(64);
+
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    for (let index = 0; index < 16; index += 1) {
+      words[index] = readSha256Word(padded, offset + index * 4);
+    }
+    for (let index = 16; index < 64; index += 1) {
+      words[index] =
+        (smallSha256Sigma1(words[index - 2] ?? 0) +
+          (words[index - 7] ?? 0) +
+          smallSha256Sigma0(words[index - 15] ?? 0) +
+          (words[index - 16] ?? 0)) >>>
+        0;
+    }
+
+    compressSha256Block(hashes, words);
+  }
+
+  return sha256DigestBytes(hashes);
+}
+
+/** Returns a SHA-256 message padded to 512-bit block boundaries. */
+function paddedSha256Message(message: Uint8Array): Uint8Array {
+  const paddedLength = Math.ceil((message.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(message);
+  padded[message.length] = 0x80;
+
+  let bitLength = BigInt(message.length) * 8n;
+  for (let index = paddedLength - 1; index >= paddedLength - 8; index -= 1) {
+    padded[index] = Number(bitLength & 0xffn);
+    bitLength >>= 8n;
+  }
+
+  return padded;
+}
+
+/** Reads one big-endian 32-bit word from a padded SHA-256 message. */
+function readSha256Word(message: Uint8Array, offset: number): number {
+  return (
+    (((message[offset] ?? 0) << 24) |
+      ((message[offset + 1] ?? 0) << 16) |
+      ((message[offset + 2] ?? 0) << 8) |
+      (message[offset + 3] ?? 0)) >>>
+    0
+  );
+}
+
+/** Mutates SHA-256 hash state by compressing one expanded message block. */
+function compressSha256Block(hashes: number[], words: Uint32Array): void {
+  let a = hashes[0] ?? 0;
+  let b = hashes[1] ?? 0;
+  let c = hashes[2] ?? 0;
+  let d = hashes[3] ?? 0;
+  let e = hashes[4] ?? 0;
+  let f = hashes[5] ?? 0;
+  let g = hashes[6] ?? 0;
+  let h = hashes[7] ?? 0;
+
+  for (let round = 0; round < 64; round += 1) {
+    const temp1 =
+      (h +
+        bigSha256Sigma1(e) +
+        sha256Choice(e, f, g) +
+        (SHA256_ROUND_CONSTANTS[round] ?? 0) +
+        (words[round] ?? 0)) >>>
+      0;
+    const temp2 = (bigSha256Sigma0(a) + sha256Majority(a, b, c)) >>> 0;
+    h = g;
+    g = f;
+    f = e;
+    e = (d + temp1) >>> 0;
+    d = c;
+    c = b;
+    b = a;
+    a = (temp1 + temp2) >>> 0;
+  }
+
+  hashes[0] = ((hashes[0] ?? 0) + a) >>> 0;
+  hashes[1] = ((hashes[1] ?? 0) + b) >>> 0;
+  hashes[2] = ((hashes[2] ?? 0) + c) >>> 0;
+  hashes[3] = ((hashes[3] ?? 0) + d) >>> 0;
+  hashes[4] = ((hashes[4] ?? 0) + e) >>> 0;
+  hashes[5] = ((hashes[5] ?? 0) + f) >>> 0;
+  hashes[6] = ((hashes[6] ?? 0) + g) >>> 0;
+  hashes[7] = ((hashes[7] ?? 0) + h) >>> 0;
+}
+
+/** Converts SHA-256 hash words to digest bytes. */
+function sha256DigestBytes(hashes: readonly number[]): Uint8Array {
+  const digest = new Uint8Array(32);
+  for (let index = 0; index < 8; index += 1) {
+    const word = hashes[index] ?? 0;
+    digest[index * 4] = word >>> 24;
+    digest[index * 4 + 1] = word >>> 16;
+    digest[index * 4 + 2] = word >>> 8;
+    digest[index * 4 + 3] = word;
+  }
+
+  return digest;
+}
+
+/** Returns the SHA-256 choice function. */
+function sha256Choice(value: number, whenSet: number, whenUnset: number): number {
+  return (value & whenSet) ^ (~value & whenUnset);
+}
+
+/** Returns the SHA-256 majority function. */
+function sha256Majority(left: number, middle: number, right: number): number {
+  return (left & middle) ^ (left & right) ^ (middle & right);
+}
+
+/** Returns the SHA-256 uppercase sigma-zero function. */
+function bigSha256Sigma0(value: number): number {
+  return rotateRight32(value, 2) ^ rotateRight32(value, 13) ^ rotateRight32(value, 22);
+}
+
+/** Returns the SHA-256 uppercase sigma-one function. */
+function bigSha256Sigma1(value: number): number {
+  return rotateRight32(value, 6) ^ rotateRight32(value, 11) ^ rotateRight32(value, 25);
+}
+
+/** Returns the SHA-256 lowercase sigma-zero function. */
+function smallSha256Sigma0(value: number): number {
+  return rotateRight32(value, 7) ^ rotateRight32(value, 18) ^ (value >>> 3);
+}
+
+/** Returns the SHA-256 lowercase sigma-one function. */
+function smallSha256Sigma1(value: number): number {
+  return rotateRight32(value, 17) ^ rotateRight32(value, 19) ^ (value >>> 10);
+}
+
+/** Rotates an unsigned 32-bit value right by the requested bit count. */
+function rotateRight32(value: number, bits: number): number {
+  return ((value >>> bits) | (value << (32 - bits))) >>> 0;
+}
+
+/** Encodes bytes with URL-safe base64 and no padding. */
+function base64UrlEncode(bytes: Uint8Array): string {
+  let encoded = "";
+
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index] ?? 0;
+    const second = bytes[index + 1] ?? 0;
+    const third = bytes[index + 2] ?? 0;
+    const chunk = (first << 16) | (second << 8) | third;
+
+    encoded += BASE64URL_ALPHABET[(chunk >>> 18) & 0x3f] ?? "";
+    encoded += BASE64URL_ALPHABET[(chunk >>> 12) & 0x3f] ?? "";
+    if (index + 1 < bytes.length) {
+      encoded += BASE64URL_ALPHABET[(chunk >>> 6) & 0x3f] ?? "";
+    }
+    if (index + 2 < bytes.length) {
+      encoded += BASE64URL_ALPHABET[chunk & 0x3f] ?? "";
+    }
+  }
+
+  return encoded;
 }
 
 /** Returns a human-readable validation error for unsafe repo paths. */
