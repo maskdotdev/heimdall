@@ -1904,12 +1904,15 @@ function parseSemgrepJsonDiagnostics(
 function parseGoVetJsonDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
 ): ParseToolOutputDiagnosticsResult {
-  const rawOutput = input.result.stdout.trim();
+  const rawOutput = [input.result.stdout, input.result.stderr]
+    .map((stream) => stream.trim())
+    .filter((stream) => stream.length > 0)
+    .join("\n");
   if (rawOutput.length === 0) {
     return { diagnostics: [], warnings: [] };
   }
 
-  const parsedOutput = parseJson(rawOutput);
+  const parsedOutput = parseJson(goVetJsonPayload(rawOutput));
   if (!parsedOutput.ok) {
     return {
       diagnostics: [],
@@ -1961,6 +1964,17 @@ function parseGoVetJsonDiagnostics(
   }
 
   return { diagnostics, warnings };
+}
+
+/** Extracts the JSON payload from Go vet output that may include package banner lines. */
+function goVetJsonPayload(rawOutput: string): string {
+  const jsonStart = rawOutput.indexOf("{");
+  const jsonEnd = rawOutput.lastIndexOf("}");
+  if (jsonStart === -1 || jsonEnd < jsonStart) {
+    return rawOutput;
+  }
+
+  return rawOutput.slice(jsonStart, jsonEnd + 1);
 }
 
 /** Parses Staticcheck JSONL output into normalized diagnostics. */

@@ -896,6 +896,55 @@ describe("static analysis", () => {
     });
   });
 
+  it("parses Go vet JSON diagnostics from stderr", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: [
+          "# example.com/repo",
+          JSON.stringify({
+            "example.com/repo": {
+              printf: [
+                {
+                  category: "printf",
+                  message: 'fmt.Printf format %d has arg "text" of wrong type string',
+                  posn: "/workspace/repo/pkg/foo.go:10:6",
+                },
+              ],
+            },
+          }),
+        ].join("\n"),
+        stderrBytes: 188,
+        stdout: "",
+        stdoutBytes: 0,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: goPullRequestSnapshotFixture,
+      tool: "go_vet",
+      toolRunId: "str_go_vet_stderr",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      location: {
+        filePath: "pkg/foo.go",
+        startColumn: 6,
+        startLine: 10,
+      },
+      ruleId: "printf",
+      tool: "go_vet",
+    });
+  });
+
   it("parses Staticcheck JSONL output into normalized diagnostics", () => {
     const parsed = parseToolOutputDiagnostics({
       maxDiagnostics: 10,

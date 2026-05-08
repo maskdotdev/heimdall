@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "infra:db:prepare": "bun run src/prepare-local-infra.ts",
+    "smoke:static-analysis:local": "bun run src/local-static-analysis-smoke.ts",
     "smoke:embedding:openai": "bun run src/live-openai-embedding-smoke.ts",
     "smoke:llm:openai": "bun run src/live-openai-llm-smoke.ts",
     "smoke:github-provider-errors": "bun run src/live-github-provider-error-smoke.ts",
@@ -39,6 +40,8 @@
     "@repo/retrieval": "workspace:*",
     "@repo/review-engine": "workspace:*",
     "@repo/rules": "workspace:*",
+    "@repo/static-analysis": "workspace:*",
+    "@repo/tool-runner": "workspace:*",
     "drizzle-orm": "catalog:"
   },
   "devDependencies": {
