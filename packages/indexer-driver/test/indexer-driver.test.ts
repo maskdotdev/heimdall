@@ -16,6 +16,7 @@ import {
   createFakeIndexerDriver,
   createIndexerDriverRegistry,
   createRemoteIndexerDriver,
+  validateIndexArtifact,
   withIndexerTelemetry,
   withIndexerTimeout,
 } from "../src";
@@ -36,6 +37,38 @@ describe("buildSafeIndexerEnv", () => {
       NO_COLOR: "1",
       PATH: "/usr/bin",
     });
+  });
+});
+
+describe("validateIndexArtifact", () => {
+  it("accepts artifacts with coherent cross-record references", () => {
+    expect(validateIndexArtifact(validSemanticArtifact())).toEqual([]);
+  });
+
+  it("reports cross-record semantic errors without exposing record text", () => {
+    const errors = validateIndexArtifact(invalidSemanticArtifact());
+
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        "records[1].fileId duplicates file_index",
+        "records[1].path duplicates src/index.ts",
+        "records[2].repoId repo_2 does not match repo_1",
+        "records[2].commitSha def5678 does not match abc1234",
+        "records[2].range.endLine 2 is before startLine 4",
+        "records[2].selectionRange.endLine 3 is before startLine 5",
+        "manifest.fileCount 1 does not match 2 records",
+        "records[2].fileId references missing record file_missing",
+        "records[3].fileId references missing record file_missing",
+        "records[3].symbolId references missing record sym_missing",
+        "records[4].fromId references missing symbol record sym_missing",
+        "records[4].toId references missing chunk record chunk_missing",
+        "records[5].handlerSymbolId references missing record sym_missing",
+        "records[6].testFileId references missing record file_missing_test",
+        "records[6].targetFileId references missing record file_missing_target",
+        "records[6].targetSymbolId references missing record sym_missing",
+      ]),
+    );
+    expect(errors.join("\n")).not.toContain("super-secret-token");
   });
 });
 
@@ -702,6 +735,211 @@ function emptyArtifact(): IndexArtifact {
       symbolCount: 0,
     },
     records: [],
+  };
+}
+
+/** Stable valid SHA-256 hash used by artifact validation fixtures. */
+const VALID_CONTENT_HASH =
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/** Creates a valid cross-record artifact for semantic validation tests. */
+function validSemanticArtifact(): IndexArtifact {
+  return {
+    manifest: {
+      artifactId: "art_repo_1_abc1234_semantic",
+      chunkCount: 1,
+      chunkerVersion: "chunker.v1",
+      commitSha: "abc1234",
+      edgeCount: 1,
+      fileCount: 1,
+      generatedAt: "2026-05-07T12:00:00.000Z",
+      indexerName: "semantic-fixture-indexer",
+      indexerVersion: "0.0.0",
+      languages: ["typescript"],
+      parserVersions: { typescript: "5.8.0" },
+      recordCount: 4,
+      recordSchemaVersion: "index_record.v1",
+      repoId: "repo_1",
+      schemaVersion: "index_artifact.v1",
+      symbolCount: 1,
+    },
+    records: [
+      {
+        commitSha: "abc1234",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_index",
+        isBinary: false,
+        isGenerated: false,
+        isTest: false,
+        isVendored: false,
+        language: "typescript",
+        lineCount: 8,
+        path: "src/index.ts",
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        sizeBytes: 128,
+        type: "file",
+      },
+      {
+        commitSha: "abc1234",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_index",
+        kind: "function",
+        language: "typescript",
+        name: "handler",
+        path: "src/index.ts",
+        range: { endLine: 4, startLine: 1 },
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        selectionRange: { endLine: 1, startLine: 1 },
+        symbolId: "sym_handler",
+        type: "symbol",
+      },
+      {
+        chunkId: "chunk_handler",
+        commitSha: "abc1234",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_index",
+        kind: "symbol",
+        language: "typescript",
+        path: "src/index.ts",
+        range: { endLine: 4, startLine: 1 },
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        symbolId: "sym_handler",
+        text: "export function handler() { return true; }",
+        tokenEstimate: 8,
+        type: "chunk",
+      },
+      {
+        commitSha: "abc1234",
+        confidence: 0.9,
+        edgeId: "edge_handler_external",
+        fromId: "sym_handler",
+        fromKind: "symbol",
+        kind: "calls",
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        toId: "npm:react",
+        toKind: "external",
+        type: "edge",
+      },
+    ],
+  };
+}
+
+/** Creates an artifact with semantic errors that TypeBox alone cannot reject. */
+function invalidSemanticArtifact(): IndexArtifact {
+  const artifact = validSemanticArtifact();
+
+  return {
+    manifest: {
+      ...artifact.manifest,
+      fileCount: 1,
+      recordCount: 7,
+    },
+    records: [
+      {
+        commitSha: "abc1234",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_index",
+        isBinary: false,
+        isGenerated: false,
+        isTest: false,
+        isVendored: false,
+        language: "typescript",
+        lineCount: 8,
+        path: "src/index.ts",
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        sizeBytes: 128,
+        type: "file",
+      },
+      {
+        commitSha: "abc1234",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_index",
+        isBinary: false,
+        isGenerated: false,
+        isTest: false,
+        isVendored: false,
+        language: "typescript",
+        lineCount: 12,
+        path: "src/index.ts",
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        sizeBytes: 256,
+        type: "file",
+      },
+      {
+        commitSha: "def5678",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_missing",
+        kind: "function",
+        language: "typescript",
+        name: "orphan",
+        path: "src/orphan.ts",
+        range: { endLine: 2, startLine: 4 },
+        repoId: "repo_2",
+        schemaVersion: "index_record.v1",
+        selectionRange: { endLine: 3, startLine: 5 },
+        symbolId: "sym_orphan",
+        type: "symbol",
+      },
+      {
+        chunkId: "chunk_orphan",
+        commitSha: "abc1234",
+        contentHash: VALID_CONTENT_HASH,
+        fileId: "file_missing",
+        kind: "symbol",
+        language: "typescript",
+        path: "src/orphan.ts",
+        range: { endLine: 6, startLine: 3 },
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        symbolId: "sym_missing",
+        text: "super-secret-token",
+        tokenEstimate: 3,
+        type: "chunk",
+      },
+      {
+        commitSha: "abc1234",
+        confidence: 0.9,
+        edgeId: "edge_missing_endpoint",
+        fromId: "sym_missing",
+        fromKind: "symbol",
+        kind: "references",
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        toId: "chunk_missing",
+        toKind: "chunk",
+        type: "edge",
+      },
+      {
+        commitSha: "abc1234",
+        confidence: 0.8,
+        handlerSymbolId: "sym_missing",
+        language: "typescript",
+        methods: ["GET"],
+        path: "src/routes.ts",
+        repoId: "repo_1",
+        routeId: "route_health",
+        routePattern: "/health",
+        schemaVersion: "index_record.v1",
+        type: "route",
+      },
+      {
+        commitSha: "abc1234",
+        confidence: 0.7,
+        repoId: "repo_1",
+        schemaVersion: "index_record.v1",
+        targetFileId: "file_missing_target",
+        targetSymbolId: "sym_missing",
+        testFileId: "file_missing_test",
+        testMappingId: "test_map_orphan",
+        type: "test_mapping",
+      },
+    ],
   };
 }
 

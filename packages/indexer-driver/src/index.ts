@@ -442,8 +442,301 @@ export function validateIndexArtifact(artifact: IndexArtifact): readonly string[
       `manifest.recordCount ${artifact.manifest.recordCount} does not match ${artifact.records.length} records`,
     );
   }
+  errors.push(...validateIndexArtifactRecordSemantics(artifact));
 
   return errors;
+}
+
+/** Validates cross-record artifact invariants that TypeBox cannot express. */
+function validateIndexArtifactRecordSemantics(artifact: IndexArtifact): string[] {
+  const errors: string[] = [];
+  const fileIds = new Set<string>();
+  const filePaths = new Set<string>();
+  const symbolIds = new Set<string>();
+  const chunkIds = new Set<string>();
+  const edgeIds = new Set<string>();
+  const counts = { chunk: 0, edge: 0, file: 0, symbol: 0 };
+
+  artifact.records.forEach((record, index) => {
+    collectRecordIdentity(errors, {
+      index,
+      record,
+      fileIds,
+      filePaths,
+      symbolIds,
+      chunkIds,
+      edgeIds,
+      counts,
+    });
+    validateRecordProvenance(errors, artifact.manifest, record, index);
+    validateRecordRanges(errors, record, index);
+  });
+
+  collectManifestCountError(errors, "fileCount", artifact.manifest.fileCount, counts.file);
+  collectManifestCountError(errors, "symbolCount", artifact.manifest.symbolCount, counts.symbol);
+  collectManifestCountError(errors, "edgeCount", artifact.manifest.edgeCount, counts.edge);
+  collectManifestCountError(errors, "chunkCount", artifact.manifest.chunkCount, counts.chunk);
+
+  artifact.records.forEach((record, index) => {
+    collectRecordReferenceErrors(errors, {
+      chunkIds,
+      fileIds,
+      index,
+      record,
+      symbolIds,
+    });
+  });
+
+  return errors;
+}
+
+/** Mutable state used while collecting artifact identity invariants. */
+type ArtifactIdentityAccumulator = {
+  /** Count of supported normalized record types. */
+  readonly counts: { chunk: number; edge: number; file: number; symbol: number };
+  /** Chunk IDs seen so far. */
+  readonly chunkIds: Set<string>;
+  /** Edge IDs seen so far. */
+  readonly edgeIds: Set<string>;
+  /** File IDs seen so far. */
+  readonly fileIds: Set<string>;
+  /** File paths seen so far. */
+  readonly filePaths: Set<string>;
+  /** Current record offset. */
+  readonly index: number;
+  /** Current artifact record. */
+  readonly record: IndexRecord;
+  /** Symbol IDs seen so far. */
+  readonly symbolIds: Set<string>;
+};
+
+/** Collects duplicate ID/path errors and per-type record counts. */
+function collectRecordIdentity(errors: string[], input: ArtifactIdentityAccumulator): void {
+  switch (input.record.type) {
+    case "chunk":
+      input.counts.chunk += 1;
+      collectDuplicateIdError(errors, input.chunkIds, input.record.chunkId, input.index, "chunkId");
+      break;
+    case "edge":
+      input.counts.edge += 1;
+      collectDuplicateIdError(errors, input.edgeIds, input.record.edgeId, input.index, "edgeId");
+      break;
+    case "file":
+      input.counts.file += 1;
+      collectDuplicateIdError(errors, input.fileIds, input.record.fileId, input.index, "fileId");
+      collectDuplicateIdError(errors, input.filePaths, input.record.path, input.index, "path");
+      break;
+    case "symbol":
+      input.counts.symbol += 1;
+      collectDuplicateIdError(
+        errors,
+        input.symbolIds,
+        input.record.symbolId,
+        input.index,
+        "symbolId",
+      );
+      break;
+    default:
+      break;
+  }
+}
+
+/** Records a duplicate value error when the set already contains the value. */
+function collectDuplicateIdError(
+  errors: string[],
+  seen: Set<string>,
+  value: string,
+  index: number,
+  fieldName: string,
+): void {
+  if (seen.has(value)) {
+    errors.push(`records[${index}].${fieldName} duplicates ${value}`);
+    return;
+  }
+
+  seen.add(value);
+}
+
+/** Validates record repository and commit provenance against the manifest. */
+function validateRecordProvenance(
+  errors: string[],
+  manifest: IndexManifest,
+  record: IndexRecord,
+  index: number,
+): void {
+  if (record.repoId !== manifest.repoId) {
+    errors.push(`records[${index}].repoId ${record.repoId} does not match ${manifest.repoId}`);
+  }
+  if (record.commitSha !== manifest.commitSha) {
+    errors.push(
+      `records[${index}].commitSha ${record.commitSha} does not match ${manifest.commitSha}`,
+    );
+  }
+}
+
+/** Validates line ranges that require endLine to be greater than or equal to startLine. */
+function validateRecordRanges(errors: string[], record: IndexRecord, index: number): void {
+  if ("range" in record && record.range) {
+    collectRangeOrderError(errors, record.range, `records[${index}].range`);
+  }
+  if (record.type === "symbol" && record.selectionRange) {
+    collectRangeOrderError(errors, record.selectionRange, `records[${index}].selectionRange`);
+  }
+}
+
+/** Records an ordered line range error when endLine precedes startLine. */
+function collectRangeOrderError(
+  errors: string[],
+  range: { readonly endLine: number; readonly startLine: number },
+  label: string,
+): void {
+  if (range.endLine < range.startLine) {
+    errors.push(`${label}.endLine ${range.endLine} is before startLine ${range.startLine}`);
+  }
+}
+
+/** Records a manifest count mismatch for one normalized record type. */
+function collectManifestCountError(
+  errors: string[],
+  fieldName: string,
+  expected: number,
+  actual: number,
+): void {
+  if (expected !== actual) {
+    errors.push(`manifest.${fieldName} ${expected} does not match ${actual} records`);
+  }
+}
+
+/** Collects dangling reference errors across artifact records. */
+function collectRecordReferenceErrors(errors: string[], input: ArtifactRecordReferenceInput): void {
+  switch (input.record.type) {
+    case "chunk":
+      collectMissingReferenceError(
+        errors,
+        input.fileIds,
+        input.record.fileId,
+        input.index,
+        "fileId",
+      );
+      if (input.record.symbolId) {
+        collectMissingReferenceError(
+          errors,
+          input.symbolIds,
+          input.record.symbolId,
+          input.index,
+          "symbolId",
+        );
+      }
+      break;
+    case "edge":
+      collectEdgeEndpointError(errors, input.record, input, "from");
+      collectEdgeEndpointError(errors, input.record, input, "to");
+      break;
+    case "route":
+      if (input.record.handlerSymbolId) {
+        collectMissingReferenceError(
+          errors,
+          input.symbolIds,
+          input.record.handlerSymbolId,
+          input.index,
+          "handlerSymbolId",
+        );
+      }
+      break;
+    case "symbol":
+      collectMissingReferenceError(
+        errors,
+        input.fileIds,
+        input.record.fileId,
+        input.index,
+        "fileId",
+      );
+      break;
+    case "test_mapping":
+      collectMissingReferenceError(
+        errors,
+        input.fileIds,
+        input.record.testFileId,
+        input.index,
+        "testFileId",
+      );
+      if (input.record.targetFileId) {
+        collectMissingReferenceError(
+          errors,
+          input.fileIds,
+          input.record.targetFileId,
+          input.index,
+          "targetFileId",
+        );
+      }
+      if (input.record.targetSymbolId) {
+        collectMissingReferenceError(
+          errors,
+          input.symbolIds,
+          input.record.targetSymbolId,
+          input.index,
+          "targetSymbolId",
+        );
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+/** Input for validating one record against artifact-level reference indexes. */
+type ArtifactRecordReferenceInput = ArtifactReferenceIndex & {
+  /** Current record offset. */
+  readonly index: number;
+  /** Current artifact record. */
+  readonly record: IndexRecord;
+};
+
+/** Artifact-level reference indexes used for dangling-reference checks. */
+type ArtifactReferenceIndex = {
+  /** Chunk IDs available in the artifact. */
+  readonly chunkIds: ReadonlySet<string>;
+  /** File IDs available in the artifact. */
+  readonly fileIds: ReadonlySet<string>;
+  /** Symbol IDs available in the artifact. */
+  readonly symbolIds: ReadonlySet<string>;
+};
+
+/** Records a dangling reference error when a referenced record ID is absent. */
+function collectMissingReferenceError(
+  errors: string[],
+  seen: ReadonlySet<string>,
+  value: string,
+  index: number,
+  fieldName: string,
+): void {
+  if (!seen.has(value)) {
+    errors.push(`records[${index}].${fieldName} references missing record ${value}`);
+  }
+}
+
+/** Validates one edge endpoint unless it intentionally points at an external node. */
+function collectEdgeEndpointError(
+  errors: string[],
+  record: Extract<IndexRecord, { type: "edge" }>,
+  references: ArtifactRecordReferenceInput,
+  side: "from" | "to",
+): void {
+  const kind = side === "from" ? record.fromKind : record.toKind;
+  const id = side === "from" ? record.fromId : record.toId;
+  if (kind === "external") {
+    return;
+  }
+
+  const seen =
+    kind === "file"
+      ? references.fileIds
+      : kind === "symbol"
+        ? references.symbolIds
+        : references.chunkIds;
+  if (!seen.has(id)) {
+    errors.push(`records[${references.index}].${side}Id references missing ${kind} record ${id}`);
+  }
 }
 
 /** Validates an index artifact and emits a product-safe validation span when configured. */
