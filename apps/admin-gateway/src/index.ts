@@ -4,6 +4,7 @@ import {
   type StructuredTelemetryLogOptions,
   type TelemetryAttributeValue,
 } from "@repo/observability";
+import type { SecurityEvent, SecurityEventSink } from "@repo/security";
 import {
   createGitHubAdminGateway,
   type GitHubAdminGatewayLogger,
@@ -32,6 +33,36 @@ export function createGitHubAdminGatewayTelemetryLogger(
     warn: (message, fields) => {
       logger.warn(message, createGatewayLogOptions(fields));
     },
+  };
+}
+
+/** Creates a security-event sink that writes normalized gateway events to structured logs. */
+export function createGitHubAdminGatewaySecurityEventLoggerSink(
+  logger: StructuredTelemetryLogger,
+): SecurityEventSink {
+  return {
+    record: (event) => {
+      logger.warn("admin gateway security event recorded", {
+        attributes: gatewaySecurityEventLogAttributes(event),
+        target: "admin-gateway.security_events",
+      });
+    },
+  };
+}
+
+/** Converts one normalized security event into product-safe log attributes. */
+function gatewaySecurityEventLogAttributes(
+  event: SecurityEvent,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  return {
+    "security_event.created_at": event.createdAt,
+    "security_event.id": event.id,
+    "security_event.resource_id": event.resourceId ?? "",
+    "security_event.resource_type": event.resourceType ?? "",
+    "security_event.severity": event.severity,
+    "security_event.source": event.source,
+    "security_event.status": event.status,
+    "security_event.type": event.type,
   };
 }
 
@@ -84,6 +115,7 @@ if (import.meta.main) {
   const gateway = createGitHubAdminGateway(config, {
     logger: createGitHubAdminGatewayTelemetryLogger(observability.logger),
     metrics: observability.metrics,
+    securityEventSink: createGitHubAdminGatewaySecurityEventLoggerSink(observability.logger),
     traces: observability.traces,
   });
   const server = Bun.serve({

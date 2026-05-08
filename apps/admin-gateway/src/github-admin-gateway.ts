@@ -12,6 +12,9 @@ import {
   ADMIN_PERMISSIONS,
   type AdminIdentityAssertion,
   type AdminPermission,
+  recordSecurityEvent,
+  type SecurityEventSeverity,
+  type SecurityEventSink,
   signAdminIdentityAssertion,
 } from "@repo/security";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
@@ -193,13 +196,15 @@ export type GitHubAdminGatewayDependencies = {
   readonly traces?: TelemetrySpanRecorder;
   /** Operator logger. */
   readonly logger?: GitHubAdminGatewayLogger;
+  /** Optional sink used to record normalized admin-gateway security events. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
 };
 
 /** Runtime dependencies resolved after defaults are applied. */
 type GitHubAdminGatewayRuntime = Required<
   Pick<GitHubAdminGatewayDependencies, "fetch" | "logger" | "now" | "randomToken">
 > &
-  Pick<GitHubAdminGatewayDependencies, "metrics" | "traces">;
+  Pick<GitHubAdminGatewayDependencies, "metrics" | "securityEventSink" | "traces">;
 
 /** Created GitHub admin gateway request handler. */
 export type GitHubAdminGateway = {
@@ -238,6 +243,9 @@ export function createGitHubAdminGateway(
     now: dependencies.now ?? (() => new Date()),
     randomToken: dependencies.randomToken ?? (() => randomBytes(32).toString("base64url")),
     ...(dependencies.metrics ? { metrics: dependencies.metrics } : {}),
+    ...(dependencies.securityEventSink
+      ? { securityEventSink: dependencies.securityEventSink }
+      : {}),
     ...(dependencies.traces ? { traces: dependencies.traces } : {}),
   };
 
@@ -352,6 +360,9 @@ async function handleGatewayRequestWithTelemetry(
 
     return withRequestIdHeader(response, requestId);
   } catch (error) {
+    tryRecordGatewaySecurityEvent(runtime.securityEventSink, request, requestId, route, error, {
+      createdAt: runtime.now().toISOString(),
+    });
     const response = handleGatewayError(error, runtime.logger);
     const durationMs = Math.max(0, runtime.now().getTime() - startedAt.getTime());
     recordGatewayRequestMetrics(runtime.metrics, {
@@ -370,6 +381,118 @@ async function handleGatewayRequestWithTelemetry(
 
     return withRequestIdHeader(response, requestId);
   }
+}
+
+/** Optional deterministic fields used when recording gateway security events. */
+type GatewaySecurityEventOptions = {
+  /** Event creation timestamp. */
+  readonly createdAt: string;
+};
+
+/** Security event metadata derived from one rejected gateway request. */
+type GatewaySecurityEventDetails = {
+  /** Normalized gateway error code. */
+  readonly code: string;
+  /** Event severity for triage. */
+  readonly severity: SecurityEventSeverity;
+  /** HTTP status code returned to the caller. */
+  readonly statusCode: number;
+  /** Normalized security event type. */
+  readonly type: string;
+};
+
+/** Records a product-safe security event for high-risk gateway request rejections. */
+function tryRecordGatewaySecurityEvent(
+  securityEventSink: SecurityEventSink | undefined,
+  request: Request,
+  requestId: string,
+  route: string,
+  error: unknown,
+  options: GatewaySecurityEventOptions,
+): void {
+  const details = gatewaySecurityEventDetails(error);
+  if (!securityEventSink || !details) {
+    return;
+  }
+
+  try {
+    recordSecurityEvent(securityEventSink, {
+      createdAt: options.createdAt,
+      metadata: {
+        denialReason: details.code,
+        method: request.method,
+        requestId,
+        route,
+        statusCode: details.statusCode,
+      },
+      resourceId: route,
+      resourceType: "admin_gateway_route",
+      severity: details.severity,
+      source: "admin_gateway",
+      type: details.type,
+    });
+  } catch {
+    // Security event sinks must never change the gateway response outcome.
+  }
+}
+
+/** Returns security-event details for gateway errors that warrant alert correlation. */
+function gatewaySecurityEventDetails(error: unknown): GatewaySecurityEventDetails | undefined {
+  if (!(error instanceof GatewayHttpError) || !isSecurityRelevantGatewayStatus(error.status)) {
+    return undefined;
+  }
+
+  return {
+    code: error.code,
+    severity: gatewaySecurityEventSeverity(error),
+    statusCode: error.status,
+    type: gatewaySecurityEventType(error.code),
+  };
+}
+
+/** Returns whether a gateway status represents a security-relevant denial. */
+function isSecurityRelevantGatewayStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 429;
+}
+
+/** Returns the normalized security event type for one gateway denial code. */
+function gatewaySecurityEventType(code: string): string {
+  if (code === "admin_gateway.github_login_forbidden") {
+    return "admin_gateway_github_login_forbidden";
+  }
+  if (code === "admin_gateway.github_org_forbidden") {
+    return "admin_gateway_github_org_forbidden";
+  }
+  if (code === "admin_gateway.scope_forbidden") {
+    return "admin_gateway_scope_forbidden";
+  }
+  if (code === "admin_gateway.cors_forbidden") {
+    return "admin_gateway_cors_forbidden";
+  }
+  if (code.startsWith("admin_gateway.oauth_state_")) {
+    return "admin_gateway_oauth_state_denied";
+  }
+  if (code === "admin_gateway.unauthorized") {
+    return "admin_gateway_auth_denied";
+  }
+
+  return "admin_gateway_request_denied";
+}
+
+/** Returns the default security severity for one gateway denial. */
+function gatewaySecurityEventSeverity(error: GatewayHttpError): SecurityEventSeverity {
+  if (
+    error.code === "admin_gateway.github_org_forbidden" ||
+    error.code === "admin_gateway.scope_forbidden" ||
+    error.code.startsWith("admin_gateway.oauth_state_")
+  ) {
+    return "high";
+  }
+  if (error.status === 403 || error.status === 429) {
+    return "medium";
+  }
+
+  return "low";
 }
 
 /** Handles one gateway request. */

@@ -7,7 +7,7 @@ import {
   type TelemetrySpanOptions,
   type TelemetrySpanRecorder,
 } from "@repo/observability";
-import { verifyAdminIdentityAssertion } from "@repo/security";
+import { createMemorySecurityEventSink, verifyAdminIdentityAssertion } from "@repo/security";
 import { describe, expect, it } from "vitest";
 import { createGitHubAdminGateway, type GitHubAdminGatewayConfig } from "./github-admin-gateway";
 
@@ -167,9 +167,11 @@ describe("GitHub admin gateway", () => {
   });
 
   it("rejects GitHub users that are not in the allowed login list", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
     const gateway = createGitHubAdminGateway(baseConfig(), {
       ...deterministicDependencies(),
       fetch: async (input) => githubResponse(input.toString(), "other-admin", "active"),
+      securityEventSink,
     });
     const start = await gateway.handle(new Request("https://gateway.test/auth/github/start"));
     const state = requiredOAuthState(start);
@@ -184,6 +186,24 @@ describe("GitHub admin gateway", () => {
     await expect(callback.json()).resolves.toMatchObject({
       error: { code: "admin_gateway.github_login_forbidden" },
     });
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        createdAt: "2026-05-06T12:00:00.000Z",
+        metadata: {
+          denialReason: "admin_gateway.github_login_forbidden",
+          method: "GET",
+          route: "/auth/github/callback",
+          statusCode: 403,
+        },
+        resourceId: "/auth/github/callback",
+        resourceType: "admin_gateway_route",
+        severity: "medium",
+        source: "admin_gateway",
+        status: "new",
+        type: "admin_gateway_github_login_forbidden",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("github-access-token");
   });
 
   it("rejects inactive GitHub organization memberships", async () => {
@@ -240,9 +260,11 @@ describe("GitHub admin gateway", () => {
   });
 
   it("rejects assertion scope requests outside the gateway session scope", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
     const gateway = createGitHubAdminGateway(baseConfig(), {
       ...deterministicDependencies(),
       fetch: async (input) => githubResponse(input.toString(), "allowed-admin", "active"),
+      securityEventSink,
     });
     const start = await gateway.handle(new Request("https://gateway.test/auth/github/start"));
     const state = requiredOAuthState(start);
@@ -267,6 +289,21 @@ describe("GitHub admin gateway", () => {
     await expect(assertionResponse.json()).resolves.toMatchObject({
       error: { code: "admin_gateway.scope_forbidden" },
     });
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: {
+          denialReason: "admin_gateway.scope_forbidden",
+          method: "POST",
+          route: "/assertion",
+          statusCode: 403,
+        },
+        resourceId: "/assertion",
+        resourceType: "admin_gateway_route",
+        severity: "high",
+        source: "admin_gateway",
+        type: "admin_gateway_scope_forbidden",
+      },
+    ]);
   });
 
   it("requires POST for signed assertion issuance", async () => {
