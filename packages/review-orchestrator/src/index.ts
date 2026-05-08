@@ -760,6 +760,17 @@ export async function runPullRequestReview(
     gitProvider: dependencies.gitProvider,
     orgSettings,
     repository,
+  }).catch((error: unknown) => {
+    recordReviewGitHubProviderSecurityEvent({
+      error,
+      orgId: repositoryRecord.orgId,
+      reviewInput: input,
+      reviewRunId,
+      reviewStage: "policy_config",
+      securityEventSink: dependencies.securityEventSink,
+      timestamp: now().toISOString(),
+    });
+    throw error;
   });
   const activeRules = await new RepoRuleRepository(dependencies.db).listEffectiveRules({
     orgId: repositoryRecord.orgId,
