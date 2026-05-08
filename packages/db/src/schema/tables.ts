@@ -314,6 +314,36 @@ export const queueHealthSnapshots = pgTable(
   ],
 );
 
+/** Durable customer-data deletion request workflow rows. */
+export const dataDeletionRequests = pgTable(
+  "data_deletion_requests",
+  {
+    dataDeletionRequestId: text("data_deletion_request_id").primaryKey(),
+    orgId: text("org_id").references(() => orgs.orgId),
+    userId: text("user_id").references(() => users.userId),
+    repoId: text("repo_id").references(() => repositories.repoId),
+    reason: text("reason").notNull(),
+    scope: text("scope").notNull(),
+    status: text("status").notNull(),
+    requestedBy: text("requested_by").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    verificationArtifactUri: text("verification_artifact_uri"),
+    manifest: jsonb("manifest").notNull().default(sql`'{}'::jsonb`),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (table) => [
+    index("data_deletion_requests_org_status_idx").on(table.orgId, table.status, table.requestedAt),
+    index("data_deletion_requests_repo_status_idx").on(
+      table.repoId,
+      table.status,
+      table.requestedAt,
+    ),
+    index("data_deletion_requests_status_requested_idx").on(table.status, table.requestedAt),
+  ],
+);
+
 /** Mutable pull request state keyed by provider PR identity. */
 export const pullRequests = pgTable(
   "pull_requests",

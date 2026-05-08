@@ -85,6 +85,9 @@ export type QuotaCounterId = Static<typeof QuotaCounterIdSchema>;
 export const QuotaReservationIdSchema = Type.String({ pattern: "^qres_[A-Za-z0-9_-]+$" });
 export type QuotaReservationId = Static<typeof QuotaReservationIdSchema>;
 
+export const DataDeletionRequestIdSchema = Type.String({ pattern: "^ddr_[A-Za-z0-9_-]+$" });
+export type DataDeletionRequestId = Static<typeof DataDeletionRequestIdSchema>;
+
 export const WebhookEventIdSchema = Type.String({ pattern: "^webhook_[A-Za-z0-9_-]+$" });
 export type WebhookEventId = Static<typeof WebhookEventIdSchema>;
 
