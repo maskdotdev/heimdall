@@ -252,6 +252,39 @@ export const ReviewArtifactCleanupJobPayloadSchema = Type.Object(
 );
 export type ReviewArtifactCleanupJobPayload = Static<typeof ReviewArtifactCleanupJobPayloadSchema>;
 
+/** Compliance evidence collection targets supported by scheduled worker jobs. */
+export const ComplianceEvidenceCollectTargetSchema = Type.Union([
+  Type.Literal("all"),
+  Type.Literal("access_review_export"),
+  Type.Literal("audit_log_export"),
+  Type.Literal("security_event_export"),
+  Type.Literal("config_snapshot"),
+]);
+export type ComplianceEvidenceCollectTarget = Static<typeof ComplianceEvidenceCollectTargetSchema>;
+
+/** Reason a compliance evidence collection job was scheduled. */
+export const ComplianceEvidenceCollectReasonSchema = Type.Union([
+  Type.Literal("scheduled"),
+  Type.Literal("manual"),
+]);
+export type ComplianceEvidenceCollectReason = Static<typeof ComplianceEvidenceCollectReasonSchema>;
+
+/** Payload used by scheduled or operator-triggered compliance evidence collection jobs. */
+export const ComplianceEvidenceCollectJobPayloadSchema = Type.Object(
+  {
+    target: ComplianceEvidenceCollectTargetSchema,
+    artifactRootDir: Type.Optional(Type.String({ minLength: 1 })),
+    collectedBy: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+    orgId: Type.Optional(OrgIdSchema),
+    reason: Type.Optional(ComplianceEvidenceCollectReasonSchema),
+  },
+  { additionalProperties: false },
+);
+export type ComplianceEvidenceCollectJobPayload = Static<
+  typeof ComplianceEvidenceCollectJobPayloadSchema
+>;
+
 export const JobPayloadSchema = Type.Union([
   SyncInstallationJobPayloadSchema,
   IndexRepoCommitJobPayloadSchema,
@@ -264,5 +297,6 @@ export const JobPayloadSchema = Type.Union([
   DataDeletionPlanJobPayloadSchema,
   SandboxCleanupJobPayloadSchema,
   ReviewArtifactCleanupJobPayloadSchema,
+  ComplianceEvidenceCollectJobPayloadSchema,
 ]);
 export type JobPayload = Static<typeof JobPayloadSchema>;

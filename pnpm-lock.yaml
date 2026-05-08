@@ -292,6 +292,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@repo/admin-tools':
+        specifier: workspace:*
+        version: link:../../packages/admin-tools
       '@repo/artifacts':
         specifier: workspace:*
         version: link:../../packages/artifacts

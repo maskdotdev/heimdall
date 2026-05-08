@@ -3,6 +3,13 @@ import { mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  collectAccessReviewEvidence,
+  collectAuditLogEvidence,
+  collectConfigSnapshotEvidence,
+  collectSecurityEventEvidence,
+  createFilesystemComplianceEvidenceArtifactStore,
+} from "@repo/admin-tools";
+import {
   createReviewArtifactPayloadStoreFromEnvironment,
   InlineReviewArtifactPayloadStore,
   type ReviewArtifactPayloadStore,
@@ -18,6 +25,8 @@ import {
 import { type IndexerConfig, loadIndexerConfig, loadRuntimeConfig } from "@repo/config";
 import {
   type BillingReconcileJobPayload,
+  type ComplianceEvidenceCollectJobPayload,
+  ComplianceEvidenceCollectJobPayloadSchema,
   type DataDeletionManifest,
   DataDeletionManifestSchema,
   type DataDeletionPlanJobPayload,
@@ -203,6 +212,8 @@ const DEFAULT_STALE_RUNNING_JOB_RECOVERY_BATCH_SIZE = 100;
 const DEFAULT_STALE_INDEX_IMPORT_TIMEOUT_MS = 30 * 60 * 1000;
 /** Default stale index import batches repaired by one worker maintenance pass. */
 const DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE = 50;
+/** Default filesystem root for scheduled compliance evidence artifacts. */
+const DEFAULT_COMPLIANCE_EVIDENCE_ARTIFACT_ROOT = ".heimdall/compliance-evidence";
 /** Default delay between queue health metric samples. */
 const DEFAULT_QUEUE_METRICS_INTERVAL_MS = 30_000;
 /** URI prefix used after retention cleanup removes review artifact payload bytes. */
@@ -333,6 +344,10 @@ export type CreateWorkerHandlersOptions = {
   readonly sandboxCleaner?: (payload: SandboxCleanupJobPayload) => Promise<void>;
   /** Optional test hook for review artifact cleanup jobs. */
   readonly reviewArtifactCleaner?: (payload: ReviewArtifactCleanupJobPayload) => Promise<void>;
+  /** Optional test hook for compliance evidence collection jobs. */
+  readonly complianceEvidenceCollector?: (
+    payload: ComplianceEvidenceCollectJobPayload,
+  ) => Promise<void>;
   /** Git provider used by repo sync handlers. */
   readonly gitProvider: GitProvider;
   /** Optional embedding provider used by embedding jobs. */
@@ -1081,7 +1096,65 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         options.artifactPayloadStore ?? new InlineReviewArtifactPayloadStore(),
       );
     },
+    [JOB_TYPES.ComplianceEvidenceCollect]: async (envelope, context) => {
+      const payload = asComplianceEvidenceCollectPayload(envelope.payload);
+      await throwIfWorkerJobCanceled(context);
+      if (options.complianceEvidenceCollector) {
+        await options.complianceEvidenceCollector(payload);
+        return;
+      }
+
+      await collectScheduledComplianceEvidence(options.db, payload);
+    },
   };
+}
+
+/** Runs scheduled compliance evidence collectors from a durable worker job payload. */
+async function collectScheduledComplianceEvidence(
+  db: HeimdallDatabase,
+  payload: ComplianceEvidenceCollectJobPayload,
+): Promise<void> {
+  const artifactStore = createFilesystemComplianceEvidenceArtifactStore({
+    rootDir:
+      payload.artifactRootDir ??
+      process.env.HEIMDALL_COMPLIANCE_EVIDENCE_ARTIFACT_ROOT ??
+      DEFAULT_COMPLIANCE_EVIDENCE_ARTIFACT_ROOT,
+  });
+  const options = {
+    artifactStore,
+    collectedBy: payload.collectedBy ?? "worker:scheduled_compliance_evidence",
+    db,
+    ...(payload.limit ? { limit: payload.limit } : {}),
+    ...(payload.orgId ? { orgId: payload.orgId } : {}),
+  };
+
+  for (const target of expandedComplianceEvidenceJobTargets(payload.target)) {
+    switch (target) {
+      case "access_review_export":
+        await collectAccessReviewEvidence(options);
+        break;
+      case "audit_log_export":
+        await collectAuditLogEvidence(options);
+        break;
+      case "config_snapshot":
+        await collectConfigSnapshotEvidence(options);
+        break;
+      case "security_event_export":
+        await collectSecurityEventEvidence(options);
+        break;
+    }
+  }
+}
+
+/** Returns concrete collector targets for one scheduled compliance evidence job. */
+function expandedComplianceEvidenceJobTargets(
+  target: ComplianceEvidenceCollectJobPayload["target"],
+): readonly Exclude<ComplianceEvidenceCollectJobPayload["target"], "all">[] {
+  if (target !== "all") {
+    return [target];
+  }
+
+  return ["access_review_export", "audit_log_export", "security_event_export", "config_snapshot"];
 }
 
 /** Runs an optional durable cancellation checkpoint for direct and wrapped handler calls. */
@@ -4413,6 +4486,17 @@ function asSandboxCleanupPayload(payload: JobPayload): SandboxCleanupJobPayload 
 /** Narrows a generic job payload to a review artifact cleanup payload. */
 function asReviewArtifactCleanupPayload(payload: JobPayload): ReviewArtifactCleanupJobPayload {
   return payload as ReviewArtifactCleanupJobPayload;
+}
+
+/** Narrows a generic job payload to a compliance evidence collection payload. */
+function asComplianceEvidenceCollectPayload(
+  payload: JobPayload,
+): ComplianceEvidenceCollectJobPayload {
+  return parseWithSchema(
+    "ComplianceEvidenceCollectJobPayload",
+    ComplianceEvidenceCollectJobPayloadSchema,
+    payload,
+  );
 }
 
 /** Requires billing provider configuration before provider-mutating billing jobs run. */

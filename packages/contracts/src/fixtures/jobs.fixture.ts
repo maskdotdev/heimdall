@@ -1,5 +1,6 @@
 import type {
   BillingReconcileJobPayload,
+  ComplianceEvidenceCollectJobPayload,
   DataDeletionPlanJobPayload,
   EmbeddingBatchJobPayload,
   EmbeddingRepairJobPayload,
@@ -100,3 +101,12 @@ export const validReviewArtifactCleanupJobPayloadFixture = {
   reason: "retention_policy",
   repoId: ids.repoId,
 } satisfies ReviewArtifactCleanupJobPayload;
+
+export const validComplianceEvidenceCollectJobPayloadFixture = {
+  artifactRootDir: ".heimdall/compliance-evidence",
+  collectedBy: "worker:scheduled_compliance_evidence",
+  limit: 100,
+  orgId: ids.orgId,
+  reason: "scheduled",
+  target: "all",
+} satisfies ComplianceEvidenceCollectJobPayload;

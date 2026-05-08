@@ -9,6 +9,7 @@
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"],
   "references": [
+    { "path": "../../packages/admin-tools/tsconfig.build.json" },
     { "path": "../../packages/artifacts/tsconfig.build.json" },
     { "path": "../../packages/config/tsconfig.build.json" },
     { "path": "../../packages/billing/tsconfig.build.json" },

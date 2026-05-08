@@ -41,6 +41,7 @@ import {
 } from "#contracts/fixtures/index-artifact.fixture";
 import {
   validBillingReconcileJobPayloadFixture,
+  validComplianceEvidenceCollectJobPayloadFixture,
   validDataDeletionPlanJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
   validEmbeddingRepairJobPayloadFixture,
@@ -107,6 +108,7 @@ import {
 import { JobEnvelopeSchema } from "#contracts/jobs/envelope";
 import {
   BillingReconcileJobPayloadSchema,
+  ComplianceEvidenceCollectJobPayloadSchema,
   DataDeletionPlanJobPayloadSchema,
   EmbeddingBatchJobPayloadSchema,
   EmbeddingRepairJobPayloadSchema,
@@ -450,6 +452,13 @@ describe("contract validation", () => {
         validReviewArtifactCleanupJobPayloadFixture,
       ),
     ).toEqual(validReviewArtifactCleanupJobPayloadFixture);
+    expect(
+      parseWithSchema(
+        "ComplianceEvidenceCollectJobPayload",
+        ComplianceEvidenceCollectJobPayloadSchema,
+        validComplianceEvidenceCollectJobPayloadFixture,
+      ),
+    ).toEqual(validComplianceEvidenceCollectJobPayloadFixture);
 
     const envelope = {
       jobId: "job_01HXAMPLE",

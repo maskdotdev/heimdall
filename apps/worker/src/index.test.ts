@@ -6,6 +6,7 @@ import { REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY } from "@repo/artifacts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
   validBillingReconcileJobPayloadFixture,
+  validComplianceEvidenceCollectJobPayloadFixture,
   validDataDeletionPlanJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
   validEmbeddingRepairJobPayloadFixture,
@@ -1198,6 +1199,30 @@ describe("createWorkerHandlers", () => {
     });
 
     expect(payloads).toEqual([validReviewArtifactCleanupJobPayloadFixture]);
+  });
+
+  it("dispatches compliance evidence collection jobs through the configured collector", async () => {
+    const payloads: unknown[] = [];
+    const handlers = createWorkerHandlers({
+      complianceEvidenceCollector: async (payload) => {
+        payloads.push(payload);
+      },
+      db: {} as never,
+      gitProvider: {} as never,
+    });
+
+    await handlers[JOB_TYPES.ComplianceEvidenceCollect]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "compliance-evidence:collect:all:org_01HXAMPLE",
+      jobId: "job_compliance_evidence_collect",
+      jobType: JOB_TYPES.ComplianceEvidenceCollect,
+      maxAttempts: 3,
+      payload: validComplianceEvidenceCollectJobPayloadFixture,
+      schemaVersion: "compliance_evidence_collect_job.v1",
+    });
+
+    expect(payloads).toEqual([validComplianceEvidenceCollectJobPayloadFixture]);
   });
 
   it("scrubs expired review artifact payload metadata during cleanup", async () => {
