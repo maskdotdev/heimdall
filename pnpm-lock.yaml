@@ -416,6 +416,9 @@ importers:
       '@repo/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+      '@repo/security':
+        specifier: workspace:*
+        version: link:../security
       '@repo/static-analysis':
         specifier: workspace:*
         version: link:../static-analysis

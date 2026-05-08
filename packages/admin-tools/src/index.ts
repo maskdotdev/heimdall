@@ -85,6 +85,8 @@ import { validateAndRankCandidateFindings } from "@repo/review-engine";
 import { type EffectiveReviewPolicy, parseReviewPolicySnapshot } from "@repo/rules";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
+export * from "./compliance-evidence";
+
 /** Resource type that an admin debug lookup can target. */
 export type AdminDebugResourceType =
   | "webhook_event"

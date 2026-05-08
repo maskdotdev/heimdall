@@ -43,6 +43,7 @@
     "@repo/review-engine": "workspace:*",
     "@repo/rules": "workspace:*",
     "@repo/sandbox": "workspace:*",
+    "@repo/security": "workspace:*",
     "@repo/static-analysis": "workspace:*",
     "@repo/tool-runner": "workspace:*",
     "drizzle-orm": "catalog:"
