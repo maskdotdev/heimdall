@@ -2307,6 +2307,65 @@ describe("createWorkerStaticAnalysisRunnerFromEnvironment", () => {
     );
   });
 
+  it("records sandbox policy denials as security events", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+    const runner = createWorkerStaticAnalysisRunnerFromEnvironment(
+      {
+        STATIC_ANALYSIS_RUNNER: "local_process",
+      },
+      {
+        securityEventSink,
+      },
+    );
+    if (!runner) {
+      throw new Error("Expected configured static-analysis runner.");
+    }
+
+    const result = await runner.run({
+      command: {
+        args: ["--format", "json"],
+        cwd: "/workspace/repo",
+        displayCommand: "eslint --format json",
+        env: {},
+        executable: "eslint",
+        filesystemPolicy: "read_only",
+        networkPolicy: "allow",
+      },
+      maxOutputBytes: 1_000,
+      planId: "plan_worker_static_analysis",
+      sandboxContext: {
+        commitSha: "abc123",
+        orgId: "org_1",
+        repoId: "repo_1",
+      },
+      startedAt: "2026-05-07T12:00:00.000Z",
+      timeoutMs: 1_000,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: expect.objectContaining({
+          category: "lint",
+          primaryViolation: "local_process_network_policy_unsupported",
+          runnerKind: "local_process",
+          sandboxStatus: "policy_denied",
+          trustLevel: "trusted_pr",
+          violationCount: 1,
+          violationTypes: "local_process_network_policy_unsupported",
+        }),
+        orgId: "org_1",
+        repoId: "repo_1",
+        resourceType: "sandbox_run",
+        severity: "medium",
+        source: "sandbox",
+        status: "new",
+        type: "sandbox_policy_denied",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("/workspace/repo");
+  });
+
   it("rejects unsafe local-process static analysis in production", () => {
     expect(() =>
       createWorkerStaticAnalysisRunnerFromEnvironment({
