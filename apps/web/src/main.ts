@@ -102,6 +102,28 @@ type AdminBackgroundJobDebugDetails = {
   readonly failures: readonly AdminFailureDetail[];
 };
 
+/** Result returned after canceling one durable background job. */
+type AdminBackgroundJobCancelResult = {
+  /** Admin action that was executed. */
+  readonly action: "job.cancel";
+  /** Durable admin action row ID. */
+  readonly adminActionId: string;
+  /** Audit log row ID. */
+  readonly auditLogId: string;
+  /** Durable background job row ID. */
+  readonly backgroundJobId: string;
+  /** Status observed before cancellation. */
+  readonly previousStatus: string;
+  /** Current durable job status. */
+  readonly currentStatus: "canceled";
+  /** Product-safe operator reason. */
+  readonly reason: string;
+  /** ISO timestamp when the cancellation was recorded. */
+  readonly canceledAt: string;
+  /** Durable job summary after cancellation. */
+  readonly job: AdminBackgroundJobDebugSummary;
+};
+
 /** Review debug response consumed by the dashboard. */
 type AdminReviewDebugDetails = {
   /** Review run summary. */
@@ -3108,6 +3130,8 @@ type InspectorConfig = {
   readonly replayPlanPath?: (id: string) => string;
   /** Builds the replay execution route. */
   readonly replayPath?: (id: string) => string;
+  /** Builds the background job cancellation route when supported by the inspector. */
+  readonly cancelPath?: (id: string) => string;
   /** Builds the debug bundle export route when supported by the inspector. */
   readonly debugBundlePath?: (id: string) => string;
   /** Builds the eval import route when supported by the inspector. */
@@ -3143,6 +3167,8 @@ type InspectorViewState = {
   plan?: InspectorReplayPlan | undefined;
   /** Last replay execution result. */
   result?: AdminReplayExecutionResult | undefined;
+  /** Last background job cancellation result. */
+  cancelResult?: AdminBackgroundJobCancelResult | undefined;
   /** Last exported redacted debug bundle. */
   debugBundle?: AdminReviewRunDebugBundle | undefined;
   /** Last generated eval import draft. */
@@ -3153,6 +3179,8 @@ type InspectorViewState = {
   validationReplay?: ValidationReplayDryRun | undefined;
   /** Typed confirmation token for replay execution. */
   confirmationTokenInput: string;
+  /** Operator reason used for background job cancellation. */
+  cancelReasonInput: string;
   /** Current inspector-specific error. */
   error?: string | undefined;
   /** Current inspector-specific loading label. */
@@ -3354,6 +3382,7 @@ const inspectorConfigs: Record<InspectorKind, InspectorConfig> = {
     detailsPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}`,
     replayPlanPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}/replay-plan`,
     replayPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}/replay`,
+    cancelPath: (id) => `/admin/debug/jobs/${encodeURIComponent(id)}/cancel`,
   },
   review: {
     kind: "review",
@@ -3848,6 +3877,11 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "cancel-job") {
+    await cancelBackgroundJob(state.activeKind);
+    return;
+  }
+
   if (action === "export-debug-bundle") {
     await exportDebugBundle(state.activeKind);
     return;
@@ -3988,6 +4022,11 @@ function handleInput(event: Event): void {
 
   if (field === "confirmation-token") {
     currentInspectorState().confirmationTokenInput = target.value;
+    return;
+  }
+
+  if (field === "cancel-reason") {
+    currentInspectorState().cancelReasonInput = target.value;
     return;
   }
 
@@ -5218,6 +5257,7 @@ async function loadDetails(kind: InspectorKind): Promise<void> {
 
   inspector.loading = "Loading inspector";
   inspector.error = undefined;
+  inspector.cancelResult = undefined;
   inspector.debugBundle = undefined;
   inspector.evalImportDraft = undefined;
   inspector.plan = undefined;
@@ -5252,6 +5292,7 @@ async function createReplayPlan(kind: InspectorKind): Promise<void> {
 
   inspector.loading = "Creating replay plan";
   inspector.error = undefined;
+  inspector.cancelResult = undefined;
   inspector.result = undefined;
   inspector.retrievalReplay = undefined;
   inspector.validationReplay = undefined;
@@ -5366,6 +5407,48 @@ async function executeReplay(kind: InspectorKind): Promise<void> {
       method: "POST",
       body: JSON.stringify({ confirmationToken: providedToken }),
     });
+    inspector.details = await requestAdminData<InspectorDetails>(config.detailsPath(id));
+  } catch (error) {
+    inspector.error = errorMessage(error);
+  } finally {
+    inspector.loading = undefined;
+    render();
+  }
+}
+
+/** Cancels one pending, queued, or running background job from the job inspector. */
+async function cancelBackgroundJob(kind: InspectorKind): Promise<void> {
+  const config = inspectorConfigs[kind];
+  const inspector = state.inspectors[kind];
+  const id = inspector.id.trim();
+  const reason = inspector.cancelReasonInput.trim();
+  if (!config.cancelPath) {
+    inspector.error = "Cancellation is not available for this inspector.";
+    render();
+    return;
+  }
+  if (!id) {
+    inspector.error = `${config.idLabel} is required.`;
+    render();
+    return;
+  }
+  if (!reason) {
+    inspector.error = "Cancellation requires a reason.";
+    render();
+    return;
+  }
+
+  inspector.loading = "Canceling job";
+  inspector.error = undefined;
+  inspector.cancelResult = undefined;
+  try {
+    inspector.cancelResult = await requestAdminData<AdminBackgroundJobCancelResult>(
+      config.cancelPath(id),
+      {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      },
+    );
     inspector.details = await requestAdminData<InspectorDetails>(config.detailsPath(id));
   } catch (error) {
     inspector.error = errorMessage(error);
@@ -6162,6 +6245,7 @@ function initialInspectorState(
   route: DashboardRouteState,
 ): InspectorViewState {
   return {
+    cancelReasonInput: "",
     confirmationTokenInput: "",
     id: route.inspectorKind === kind ? (route.inspectorResourceId ?? "") : "",
   };
@@ -11224,6 +11308,13 @@ function renderInspector(): string {
     Boolean(config.validationReplayPath) &&
     Boolean(state.session?.capabilities.canPlanReplay) &&
     hasDetails;
+  const canCancelJob =
+    Boolean(config.cancelPath) &&
+    Boolean(state.session?.capabilities.canExecuteReplay) &&
+    inspector.details !== undefined &&
+    isBackgroundJobDetails(inspector.details) &&
+    isCancelableBackgroundJobStatus(inspector.details.job.status) &&
+    inspector.cancelReasonInput.trim().length > 0;
 
   return `
     <main class="inspector">
@@ -11297,6 +11388,26 @@ function renderInspector(): string {
                 </button>`
               : ""
           }
+          ${
+            config.cancelPath
+              ? `<label>
+                  <span>Cancel reason</span>
+                  <input
+                    data-field="cancel-reason"
+                    placeholder="Reason"
+                    value="${escapeAttribute(inspector.cancelReasonInput)}"
+                  />
+                </label>
+                <button
+                  class="danger"
+                  data-action="cancel-job"
+                  type="button"
+                  ${canCancelJob ? "" : "disabled"}
+                >
+                  Cancel Job
+                </button>`
+              : ""
+          }
         </div>
       </section>
       ${renderInspectorNotice(inspector)}
@@ -11305,6 +11416,7 @@ function renderInspector(): string {
       ${inspector.retrievalReplay ? renderRetrievalReplay(inspector.retrievalReplay) : ""}
       ${inspector.validationReplay ? renderValidationReplay(inspector.validationReplay) : ""}
       ${inspector.result ? renderReplayResult(inspector.result) : ""}
+      ${inspector.cancelResult ? renderJobCancelResult(inspector.cancelResult) : ""}
       ${inspector.debugBundle ? renderDebugBundle(inspector.debugBundle) : ""}
       ${inspector.evalImportDraft ? renderEvalImportDraft(inspector.evalImportDraft) : ""}
     </main>
@@ -12645,6 +12757,38 @@ function renderReplayResult(result: AdminReplayExecutionResult): string {
   `;
 }
 
+/** Renders a durable background job cancellation result. */
+function renderJobCancelResult(result: AdminBackgroundJobCancelResult): string {
+  return `
+    <section class="panel result-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Cancellation Result</p>
+          <h3>${escapeHtml(result.action)}</h3>
+        </div>
+        <span class="status ok">${escapeHtml(result.auditLogId)}</span>
+      </div>
+      <section class="diff-grid">
+        ${renderDiffColumn("Action records", [
+          `action: ${result.adminActionId}`,
+          `audit: ${result.auditLogId}`,
+        ])}
+        ${renderDiffColumn("Status", [
+          `previous: ${result.previousStatus}`,
+          `current: ${result.currentStatus}`,
+          `canceled: ${formatTime(result.canceledAt)}`,
+        ])}
+        ${renderDiffColumn("Job", [
+          result.backgroundJobId,
+          result.job.queueName,
+          result.job.jobType,
+        ])}
+      </section>
+      ${renderJsonBlock("Reason", { reason: result.reason })}
+    </section>
+  `;
+}
+
 /** Renders a redacted debug bundle export result. */
 function renderDebugBundle(bundle: AdminReviewRunDebugBundle): string {
   return `
@@ -13961,6 +14105,11 @@ function isBackgroundJobDetails(
   details: InspectorDetails,
 ): details is AdminBackgroundJobDebugDetails {
   return "job" in details && "replayAudits" in details && "failures" in details;
+}
+
+/** Returns whether a durable background job can be canceled from the dashboard. */
+function isCancelableBackgroundJobStatus(status: string): boolean {
+  return status === "pending" || status === "queued" || status === "running";
 }
 
 /** Narrows inspector details to review details. */

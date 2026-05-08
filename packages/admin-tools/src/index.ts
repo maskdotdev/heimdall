@@ -121,6 +121,21 @@ export class AdminDebugConfirmationError extends Error {
   }
 }
 
+/** Error raised when an admin debug operation is well-formed but cannot run. */
+export class AdminDebugOperationError extends Error {
+  /** Creates an admin debug operation error. */
+  public constructor(
+    /** Stable API error code. */
+    public readonly code: string,
+    message: string,
+    /** HTTP status code that should represent this failure. */
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "AdminDebugOperationError";
+  }
+}
+
 /** Source table or event that produced a structured admin failure detail. */
 export type AdminFailureSource =
   | "webhook_event"
@@ -487,6 +502,9 @@ export type WebhookReplayAction = "webhook.requeue_jobs";
 /** Replay action that requeues one failed durable background job. */
 export type BackgroundJobReplayAction = "job.requeue";
 
+/** Admin action that cancels one pending, queued, or running durable background job. */
+export type BackgroundJobCancelAction = "job.cancel";
+
 /** Source state used to construct one replay job. */
 export type AdminReplayJobSource = "existing_job" | "missing_job" | "operator_replay";
 
@@ -558,6 +576,28 @@ export type AdminReplayExecutionResult = {
   readonly existingJobIds: readonly string[];
   /** Replay jobs currently present in the durable outbox. */
   readonly replayJobs: readonly AdminBackgroundJobDebugSummary[];
+};
+
+/** Result returned after a confirmed durable background job cancellation. */
+export type AdminBackgroundJobCancelResult = {
+  /** Admin action that was executed. */
+  readonly action: BackgroundJobCancelAction;
+  /** Durable admin action row ID written for this cancellation. */
+  readonly adminActionId: string;
+  /** Audit log row ID written for the cancellation decision. */
+  readonly auditLogId: string;
+  /** Durable background job row ID that was canceled. */
+  readonly backgroundJobId: string;
+  /** Status observed before cancellation. */
+  readonly previousStatus: string;
+  /** Current durable job status after cancellation. */
+  readonly currentStatus: "canceled";
+  /** Product-safe operator reason. */
+  readonly reason: string;
+  /** ISO timestamp when the cancellation was recorded. */
+  readonly canceledAt: string;
+  /** Durable job summary after cancellation. */
+  readonly job: AdminBackgroundJobDebugSummary;
 };
 
 /** Authenticated support/admin actor that requested a replay operation. */
@@ -1649,6 +1689,12 @@ export type AdminDebugService = {
     confirmationToken: string,
     actor: AdminReplayAuditActor,
   ) => Promise<AdminReplayExecutionResult>;
+  /** Cancels one pending, queued, or running durable background job. */
+  readonly cancelBackgroundJob: (
+    backgroundJobId: string,
+    reason: string,
+    actor: AdminReplayAuditActor,
+  ) => Promise<AdminBackgroundJobCancelResult>;
   /** Gets review run debug details. */
   readonly getReviewDebugDetails: (reviewRunId: string) => Promise<AdminReviewDebugDetails>;
   /** Creates a gated review replay plan. */
@@ -1708,6 +1754,8 @@ export function createAdminDebugService(
       createBackgroundJobReplayPlan(backgroundJobId, dependencies),
     executeBackgroundJobReplay: (backgroundJobId, confirmationToken, actor) =>
       executeBackgroundJobReplay(backgroundJobId, confirmationToken, dependencies, actor),
+    cancelBackgroundJob: (backgroundJobId, reason, actor) =>
+      cancelBackgroundJob(backgroundJobId, reason, dependencies, actor),
     getReviewDebugDetails: (reviewRunId) => getReviewDebugDetails(reviewRunId, dependencies),
     createReviewReplayPlan: (reviewRunId) => createReviewReplayPlan(reviewRunId, dependencies),
     replayRetrievalDryRun: (reviewRunId) => replayRetrievalDryRun(reviewRunId, dependencies),
@@ -1876,7 +1924,7 @@ export async function getBackgroundJobDebugDetails(
   const embeddingJobId = embeddingJobIdFromBackgroundJob(row);
   const [replayAudits, embeddingJob, embeddingJobItems] = await Promise.all([
     listReplayAuditLogs(dependencies.db, {
-      actions: ["job.requeue"],
+      actions: ["job.requeue", "job.cancel"],
       resourceType: "background_job",
       resourceId: backgroundJobId,
     }),
@@ -2036,6 +2084,118 @@ export async function executeBackgroundJobReplay(
       plan: auditPlanFromBackgroundJobReplayPlan(plan),
     },
   });
+}
+
+/** Cancels one pending, queued, or running durable background job. */
+export async function cancelBackgroundJob(
+  backgroundJobId: string,
+  reason: string,
+  dependencies: AdminDebugServiceDependencies,
+  actor: AdminReplayAuditActor,
+): Promise<AdminBackgroundJobCancelResult> {
+  const normalizedReason = reason.trim();
+  if (normalizedReason.length === 0) {
+    throw new AdminDebugOperationError(
+      "admin_debug.reason_required",
+      "Background job cancellation requires a non-empty reason.",
+      400,
+    );
+  }
+
+  const existing = await getBackgroundJobRow(backgroundJobId, dependencies.db);
+  if (!isCancelableBackgroundJobStatus(existing.status)) {
+    throw new AdminDebugOperationError(
+      "admin_debug.job_not_cancelable",
+      `Background job ${backgroundJobId} is ${existing.status} and cannot be canceled.`,
+      409,
+    );
+  }
+
+  const canceledAt = new Date();
+  const adminActionId = newId("admact");
+  const auditLogId = newId("audit");
+  const result = await dependencies.db.transaction(async (tx) => {
+    const repository = new BackgroundJobRepository(tx);
+    const cancelResult = await repository.cancelBackgroundJobById({
+      backgroundJobId,
+      now: canceledAt,
+      reason: normalizedReason,
+    });
+    if (!cancelResult.job || !cancelResult.canceled || cancelResult.job.status !== "canceled") {
+      throw new AdminDebugOperationError(
+        "admin_debug.job_not_cancelable",
+        `Background job ${backgroundJobId} could not be canceled because its status changed.`,
+        409,
+      );
+    }
+
+    const job = toBackgroundJobDebugSummary(cancelResult.job);
+    const previousStatus = cancelResult.previousStatus ?? existing.status;
+    await tx.insert(adminActions).values({
+      adminActionId,
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      completedAt: canceledAt,
+      kind: "job.cancel",
+      orgId: job.orgId,
+      reason: normalizedReason,
+      repoId: job.repoId,
+      request: {
+        backgroundJobId,
+        previousStatus,
+        reason: normalizedReason,
+      },
+      result: {
+        backgroundJobId,
+        currentStatus: job.status,
+        previousStatus,
+      },
+      reviewRunId: job.reviewRunId,
+      startedAt: canceledAt,
+      status: "completed",
+      ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
+    });
+    await tx.insert(auditLogs).values({
+      auditLogId,
+      action: "job.cancel",
+      actorType: actor.actorType,
+      actorUserId: actor.actorUserId,
+      metadata: {
+        actor: {
+          role: actor.role,
+          ...(actor.requestId ? { requestId: actor.requestId } : {}),
+          ...(actor.sessionId ? { sessionId: actor.sessionId } : {}),
+          ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
+          ...(actor.provider ? { provider: actor.provider } : {}),
+          ...(actor.permissions ? { permissions: actor.permissions } : {}),
+          ...(actor.displayName ? { displayName: actor.displayName } : {}),
+          ...(actor.email ? { email: actor.email } : {}),
+        },
+        adminActionId,
+        currentStatus: job.status,
+        previousStatus,
+        reason: normalizedReason,
+      },
+      occurredAt: canceledAt,
+      orgId: job.orgId,
+      resourceId: backgroundJobId,
+      resourceType: "background_job",
+    });
+
+    return {
+      action: "job.cancel",
+      adminActionId,
+      auditLogId,
+      backgroundJobId,
+      canceledAt: toIso(canceledAt),
+      currentStatus: "canceled",
+      job,
+      previousStatus,
+      reason: normalizedReason,
+    } satisfies AdminBackgroundJobCancelResult;
+  });
+
+  return result;
 }
 
 /** Gets review state, stage timeline, findings, related jobs, and normalized failures. */
@@ -3729,6 +3889,7 @@ async function listReplayAuditLogs(
     readonly actions: readonly (
       | WebhookReplayAction
       | BackgroundJobReplayAction
+      | BackgroundJobCancelAction
       | ReviewReplayAction
       | PublisherReplayAction
     )[];
@@ -5152,6 +5313,11 @@ function replayJobFromExistingJob(
 /** Returns whether a durable background job can be replayed through the generic job inspector. */
 function isReplayableBackgroundJobStatus(status: string): boolean {
   return status === "failed" || status === "dead_lettered";
+}
+
+/** Returns whether a durable background job can be canceled by an operator. */
+function isCancelableBackgroundJobStatus(status: string): boolean {
+  return status === "pending" || status === "queued" || status === "running";
 }
 
 /** Creates a replay job plan for a webhook job that is missing from durable state. */
