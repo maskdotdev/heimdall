@@ -163,6 +163,9 @@ export const UpdateMemoryJobPayloadSchema = Type.Object(
     externalParentCommentId: Type.Optional(Type.String({ minLength: 1 })),
     externalReactionId: Type.Optional(Type.String({ minLength: 1 })),
     externalThreadId: Type.Optional(Type.String({ minLength: 1 })),
+    feedbackSource: Type.Optional(
+      Type.Union([Type.Literal("webhook"), Type.Literal("reconciliation")]),
+    ),
     actorLogin: Type.Optional(Type.String({ minLength: 1 })),
     bodyHash: Type.Optional(Type.String({ pattern: "^sha256:[a-f0-9]{64}$" })),
     pullRequestNumber: Type.Optional(Type.Integer({ minimum: 1 })),

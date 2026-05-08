@@ -140,6 +140,16 @@ export type ExistingBotComment = {
   readonly htmlUrl?: string;
 };
 
+/** Existing pull request review thread state found on GitHub. */
+export type ExistingReviewThreadState = {
+  /** GitHub pull request review thread node ID. */
+  readonly providerThreadId: string;
+  /** Whether GitHub currently marks the thread as resolved. */
+  readonly isResolved: boolean;
+  /** REST comment IDs attached to the thread. */
+  readonly providerCommentIds: readonly string[];
+};
+
 /** Clone authentication output for repo-sync. */
 export type CloneAuth = {
   /** Sanitized clone URL without credentials. */
@@ -311,6 +321,10 @@ export interface GitProvider {
   fetchExistingBotComments(input: GitHubPullRequestRef): Promise<readonly ExistingBotComment[]>;
   /** Fetches existing bot inline review comments for dedupe and reconciliation. */
   fetchExistingReviewComments(input: GitHubPullRequestRef): Promise<readonly ExistingBotComment[]>;
+  /** Fetches pull request review thread state for feedback reconciliation. */
+  fetchReviewThreadStates?(
+    input: GitHubPullRequestRef,
+  ): Promise<readonly ExistingReviewThreadState[]>;
   /** Publishes a PR review with inline comments. */
   publishReview(input: PublishReviewInput): Promise<PublishedReview>;
   /** Publishes or creates a check run. */

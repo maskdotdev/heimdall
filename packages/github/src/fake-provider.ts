@@ -10,6 +10,7 @@ import type {
   CloneAuth,
   CreateOrUpdateCheckRunInput,
   ExistingBotComment,
+  ExistingReviewThreadState,
   GitHubInstallationRef,
   GitHubPullRequestRef,
   GitHubRepositoryRef,
@@ -34,6 +35,8 @@ export type FakeGitProviderOptions = {
   readonly existingBotComments?: readonly ExistingBotComment[];
   /** Existing bot inline review comments keyed by owner/repo/number. */
   readonly existingReviewComments?: readonly ExistingBotComment[];
+  /** Existing review thread states keyed by owner/repo/number. */
+  readonly reviewThreadStates?: readonly ExistingReviewThreadState[];
   /** Whether inline review publishing should fail. */
   readonly failReviewPublishing?: boolean;
 };
@@ -56,6 +59,7 @@ export class FakeGitProvider implements GitProvider {
   private readonly pullRequestSnapshots: Map<string, PullRequestSnapshot>;
   private readonly botComments: ExistingBotComment[];
   private readonly reviewComments: ExistingBotComment[];
+  private readonly reviewThreadStates: readonly ExistingReviewThreadState[];
   private readonly failReviewPublishing: boolean;
 
   /** Creates a seeded fake provider. */
@@ -67,6 +71,7 @@ export class FakeGitProvider implements GitProvider {
     }
     this.botComments = [...(options.existingBotComments ?? [])];
     this.reviewComments = [...(options.existingReviewComments ?? [])];
+    this.reviewThreadStates = options.reviewThreadStates ?? [];
     this.failReviewPublishing = options.failReviewPublishing ?? false;
   }
 
@@ -162,6 +167,11 @@ export class FakeGitProvider implements GitProvider {
   /** Fetches seeded inline review comments. */
   public async fetchExistingReviewComments(): Promise<readonly ExistingBotComment[]> {
     return this.reviewComments;
+  }
+
+  /** Fetches seeded review thread states. */
+  public async fetchReviewThreadStates(): Promise<readonly ExistingReviewThreadState[]> {
+    return this.reviewThreadStates;
   }
 
   /** Publishes a fake review and records the input. */

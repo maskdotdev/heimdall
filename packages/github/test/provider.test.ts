@@ -619,6 +619,69 @@ describe("GitHubAppProvider", () => {
     );
   });
 
+  it("fetches pull request review thread state through GraphQL", async () => {
+    const fetcher = createMockFetch([
+      tokenRoute,
+      {
+        match: (url: string, init?: RequestInit) =>
+          url.endsWith("/graphql") && init?.method === "POST",
+        response: jsonResponse({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "PRRT_1",
+                      isResolved: true,
+                      comments: {
+                        nodes: [{ databaseId: 888 }, { databaseId: null }],
+                      },
+                    },
+                  ],
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null,
+                  },
+                },
+              },
+            },
+          },
+        }),
+      },
+    ]);
+    const provider = createProvider(fetcher);
+
+    const states = await provider.fetchReviewThreadStates?.({
+      provider: "github",
+      installationId: "99",
+      owner: "acme",
+      repo: "api",
+      pullRequestNumber: 7,
+    });
+
+    expect(states).toEqual([
+      {
+        isResolved: true,
+        providerCommentIds: ["888"],
+        providerThreadId: "PRRT_1",
+      },
+    ]);
+
+    const graphqlCall = fetcher.calls.find((call) => call.url.endsWith("/graphql"));
+    expect(graphqlCall?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer ghs_token",
+    });
+    expect(JSON.parse(String(graphqlCall?.init?.body))).toMatchObject({
+      variables: {
+        name: "api",
+        number: 7,
+        owner: "acme",
+      },
+    });
+  });
+
   it("updates an existing check run with a matching review run id", async () => {
     const fetcher = createMockFetch([
       tokenRoute,

@@ -66,6 +66,7 @@ import {
 } from "@repo/embedding";
 import {
   createGitHubProvider,
+  type ExistingReviewThreadState,
   type GitHubInstallationRef,
   type GitHubRepositoryRef,
   type GitProvider,
@@ -153,7 +154,7 @@ import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } fro
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Worker } from "bullmq";
-import { and, asc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, like, lt, lte, not } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -174,6 +175,8 @@ const DEFAULT_STALE_INDEX_IMPORT_RECOVERY_BATCH_SIZE = 50;
 const DELETED_REVIEW_ARTIFACT_URI_PREFIX = "deleted://review_artifacts/";
 /** Maximum chunk IDs placed in one repair-triggered embedding batch. */
 const EMBEDDING_REPAIR_BATCH_SIZE = 128;
+/** Maximum completed review runs inspected by one scheduled thread reconciliation job. */
+const THREAD_RECONCILIATION_REVIEW_RUN_LIMIT = 10;
 
 /** Environment map used by worker runtime secret resolution. */
 type WorkerSecretEnvironment = Readonly<Record<string, string | undefined>>;
@@ -725,6 +728,17 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     [JOB_TYPES.UpdateMemory]: async (envelope) => {
       const payload = asUpdateMemoryPayload(envelope.payload);
       await updateMemoryFromFindingOutcome(options.db, payload);
+      await reconcileScheduledProviderThreadFeedback(
+        options.db,
+        options.gitProvider,
+        payload,
+        envelope.createdAt,
+        {
+          ...(options.metrics ? { metrics: options.metrics } : {}),
+          ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+          ...(options.traces ? { traces: options.traces } : {}),
+        },
+      );
       await recordOutcomeFromProviderFeedback(options.db, payload, envelope.createdAt, {
         ...(options.metrics ? { metrics: options.metrics } : {}),
         ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
@@ -2371,6 +2385,154 @@ async function updateMemoryFromFindingOutcome(
     .onConflictDoNothing();
 }
 
+/** Reconciles recent provider thread state when a scheduled memory job requests it. */
+async function reconcileScheduledProviderThreadFeedback(
+  db: HeimdallDatabase,
+  gitProvider: GitProvider,
+  payload: UpdateMemoryJobPayload,
+  receivedAt: string,
+  telemetry: MemoryTelemetryOptions = {},
+): Promise<void> {
+  if (payload.reason !== "scheduled" || !gitProvider.fetchReviewThreadStates) {
+    return;
+  }
+
+  const targets = await loadRecentReviewThreadReconciliationTargets(db, payload);
+  for (const target of targets) {
+    const states = await gitProvider.fetchReviewThreadStates({
+      provider: "github",
+      installationId: target.installationId,
+      providerInstallationId: target.providerInstallationId,
+      owner: target.owner,
+      repo: target.repo,
+      providerRepoId: target.providerRepoId,
+      pullRequestNumber: target.pullRequestNumber,
+    });
+    await recordReconciledReviewThreadStates(db, target, states, receivedAt, telemetry);
+  }
+}
+
+/** Review-run context needed to reconcile provider review-thread state. */
+type ReviewThreadReconciliationTarget = {
+  /** Heimdall installation ID. */
+  readonly installationId: string;
+  /** GitHub installation ID. */
+  readonly providerInstallationId: string;
+  /** GitHub repository owner. */
+  readonly owner: string;
+  /** GitHub repository name. */
+  readonly repo: string;
+  /** GitHub repository ID. */
+  readonly providerRepoId: string;
+  /** Heimdall repository ID. */
+  readonly repoId: string;
+  /** GitHub pull request number. */
+  readonly pullRequestNumber: number;
+  /** Review run being reconciled. */
+  readonly reviewRunId: string;
+};
+
+/** Loads recent completed review runs that can have review-thread state reconciled. */
+async function loadRecentReviewThreadReconciliationTargets(
+  db: HeimdallDatabase,
+  payload: UpdateMemoryJobPayload,
+): Promise<readonly ReviewThreadReconciliationTarget[]> {
+  const [repository] = await db
+    .select({
+      installationId: repositories.installationId,
+      owner: repositories.owner,
+      provider: repositories.provider,
+      providerRepoId: repositories.providerRepoId,
+      repo: repositories.name,
+      repoId: repositories.repoId,
+    })
+    .from(repositories)
+    .where(eq(repositories.repoId, payload.repoId))
+    .limit(1);
+  if (!repository || repository.provider !== "github") {
+    return [];
+  }
+
+  const [installation] = await db
+    .select({
+      installationId: providerInstallations.installationId,
+      providerInstallationId: providerInstallations.providerInstallationId,
+    })
+    .from(providerInstallations)
+    .where(eq(providerInstallations.installationId, repository.installationId))
+    .limit(1);
+  if (!installation) {
+    return [];
+  }
+
+  const filters = [
+    eq(reviewRuns.repoId, payload.repoId),
+    eq(reviewRuns.status, "completed"),
+    ...(payload.pullRequestNumber
+      ? [eq(reviewRuns.pullRequestNumber, payload.pullRequestNumber)]
+      : []),
+  ];
+  const runs = await db
+    .select({
+      pullRequestNumber: reviewRuns.pullRequestNumber,
+      reviewRunId: reviewRuns.reviewRunId,
+    })
+    .from(reviewRuns)
+    .where(and(...filters))
+    .orderBy(desc(reviewRuns.updatedAt))
+    .limit(THREAD_RECONCILIATION_REVIEW_RUN_LIMIT);
+
+  return runs.map((run) => ({
+    installationId: installation.installationId,
+    providerInstallationId: installation.providerInstallationId,
+    owner: repository.owner,
+    pullRequestNumber: run.pullRequestNumber,
+    providerRepoId: repository.providerRepoId,
+    repo: repository.repo,
+    repoId: repository.repoId,
+    reviewRunId: run.reviewRunId,
+  }));
+}
+
+/** Records provider-derived reconciliation events for resolved and unresolved review threads. */
+async function recordReconciledReviewThreadStates(
+  db: HeimdallDatabase,
+  target: ReviewThreadReconciliationTarget,
+  states: readonly ExistingReviewThreadState[],
+  receivedAt: string,
+  telemetry: MemoryTelemetryOptions,
+): Promise<void> {
+  for (const state of states) {
+    const action = state.isResolved ? "resolved" : "unresolved";
+    const feedbackKind = state.isResolved ? "thread_resolved" : "thread_unresolved";
+    const externalEventId = providerFeedbackStableId("fb", [
+      "github",
+      "pull_request_review_thread",
+      action,
+      state.providerThreadId,
+    ]);
+
+    for (const externalCommentId of state.providerCommentIds) {
+      await recordOutcomeFromProviderFeedback(
+        db,
+        {
+          externalCommentId,
+          externalEventId,
+          externalThreadId: state.providerThreadId,
+          feedbackKind,
+          feedbackSource: "reconciliation",
+          provider: "github",
+          pullRequestNumber: target.pullRequestNumber,
+          reason: "comment_thread",
+          repoId: target.repoId,
+        },
+        receivedAt,
+        telemetry,
+      );
+    }
+  }
+}
+
 /** Finds the provider-published finding row for one validated finding when it exists. */
 async function findPublishedFindingIdForValidatedFinding(
   db: HeimdallDatabase,
@@ -2700,7 +2862,7 @@ function providerFeedbackEventFromPayload(
     orgId: context.orgId,
     repoId: context.repoId,
     provider: payload.provider ?? "github",
-    source: "webhook",
+    source: payload.feedbackSource ?? "webhook",
     eventKind: feedbackEventKindFromPayload(payload),
     ...(payload.externalEventId ? { externalEventId: payload.externalEventId } : {}),
     ...(payload.actorLogin
@@ -2814,6 +2976,7 @@ function providerFeedbackPayloadRedacted(payload: UpdateMemoryJobPayload): Recor
     ...(payload.externalReactionId ? { externalReactionId: payload.externalReactionId } : {}),
     ...(payload.externalThreadId ? { externalThreadId: payload.externalThreadId } : {}),
     ...(payload.feedbackKind ? { feedbackKind: payload.feedbackKind } : {}),
+    ...(payload.feedbackSource ? { feedbackSource: payload.feedbackSource } : {}),
     ...(payload.feedbackCommand
       ? {
           feedbackCommand: {
@@ -3104,7 +3267,9 @@ function providerFeedbackOutcomeMetadata(payload: UpdateMemoryJobPayload): Recor
       ? { externalParentCommentId: payload.externalParentCommentId }
       : {}),
     ...(payload.externalReactionId ? { externalReactionId: payload.externalReactionId } : {}),
+    ...(payload.externalThreadId ? { externalThreadId: payload.externalThreadId } : {}),
     ...(payload.feedbackKind ? { feedbackKind: payload.feedbackKind } : {}),
+    ...(payload.feedbackSource ? { feedbackSource: payload.feedbackSource } : {}),
     ...(payload.feedbackCommand
       ? {
           feedbackCommand: {
@@ -3203,6 +3368,15 @@ function pathFromFindingLocation(location: unknown): string | undefined {
 /** Returns a stable ID for worker-created rows. */
 function stableWorkerId(prefix: string, parts: readonly unknown[]): string {
   const digest = createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 24);
+  return `${prefix}_${digest}`;
+}
+
+/** Returns a provider-compatible stable ID for reconciliation-created provider events. */
+function providerFeedbackStableId(prefix: string, parts: readonly unknown[]): string {
+  const digest = createHash("sha256")
+    .update(parts.map((part) => String(part)).join(":"))
+    .digest("base64url")
+    .slice(0, 26);
   return `${prefix}_${digest}`;
 }
 

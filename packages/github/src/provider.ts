@@ -31,6 +31,7 @@ import type {
   CloneAuth,
   CreateOrUpdateCheckRunInput,
   ExistingBotComment,
+  ExistingReviewThreadState,
   GitHubFetch,
   GitHubInstallationRef,
   GitHubProviderConfig,
@@ -65,6 +66,17 @@ type GitHubInstallationTokenResponse = {
   readonly expiresAt?: string;
 };
 
+type GitHubGraphQLResponse = {
+  readonly data?: unknown;
+  readonly errors?: readonly unknown[];
+};
+
+type GitHubReviewThreadStatePage = {
+  readonly endCursor?: string | undefined;
+  readonly hasNextPage: boolean;
+  readonly threads: readonly ExistingReviewThreadState[];
+};
+
 const DEFAULT_API_BASE_URL = "https://api.github.com";
 const DEFAULT_WEB_BASE_URL = "https://github.com";
 const DEFAULT_API_VERSION = "2022-11-28";
@@ -73,6 +85,29 @@ const DEFAULT_TOKEN_EXPIRY_BUFFER_SECONDS = 300;
 const DEFAULT_MAX_PR_FILES = 3000;
 const DEFAULT_MAX_DIFF_BYTES = 8_000_000;
 const MAX_RECENT_REQUEST_OBSERVATIONS = 50;
+const REVIEW_THREAD_STATES_QUERY = `
+query HeimdallReviewThreadStates($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        nodes {
+          id
+          isResolved
+          comments(first: 100) {
+            nodes {
+              databaseId
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+`;
 
 const base64Url = (input: string | Buffer): string =>
   Buffer.from(input)
@@ -113,6 +148,17 @@ const asString = (record: JsonRecord, key: string): string => {
 const optionalString = (record: JsonRecord, key: string): string | undefined => {
   const value = record[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+};
+
+const optionalProviderId = (record: JsonRecord, key: string): string | undefined => {
+  const value = record[key];
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  return undefined;
 };
 
 const withOptional = <K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> =>
@@ -1133,6 +1179,43 @@ export class GitHubAppProvider implements GitProvider {
       }));
   }
 
+  /** Fetches pull request review thread state for feedback reconciliation. */
+  public async fetchReviewThreadStates(
+    input: GitHubPullRequestRef,
+  ): Promise<readonly ExistingReviewThreadState[]> {
+    const threads: ExistingReviewThreadState[] = [];
+    let after: string | undefined;
+
+    do {
+      const response = await this.requestInstallation<GitHubGraphQLResponse>(input, "/graphql", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          query: REVIEW_THREAD_STATES_QUERY,
+          variables: {
+            owner: input.owner,
+            name: input.repo,
+            number: input.pullRequestNumber,
+            ...(after ? { after } : {}),
+          },
+        }),
+      });
+      const page = reviewThreadStatePageFromGraphQL(response);
+      threads.push(...page.threads);
+      if (page.hasNextPage && !page.endCursor) {
+        throw new GitHubValidationError(
+          "GitHub review thread response was missing a pagination cursor.",
+          {},
+        );
+      }
+      after = page.hasNextPage ? page.endCursor : undefined;
+    } while (after);
+
+    return threads;
+  }
+
   private async withGitHubSpan<T>(
     spanName: string,
     input: {
@@ -1280,6 +1363,52 @@ const asArray = (value: unknown, name: string): readonly unknown[] => {
 
   return value;
 };
+
+/** Parses one GraphQL review-thread connection page. */
+function reviewThreadStatePageFromGraphQL(
+  response: GitHubGraphQLResponse,
+): GitHubReviewThreadStatePage {
+  if (Array.isArray(response.errors) && response.errors.length > 0) {
+    throw new GitHubValidationError("GitHub review thread GraphQL query failed.", {
+      cause: response.errors,
+    });
+  }
+
+  const data = asRecord(response.data, "graphql.data");
+  const repository = asRecord(data.repository, "graphql.data.repository");
+  const pullRequest = asRecord(repository.pullRequest, "graphql.data.repository.pullRequest");
+  const reviewThreads = asRecord(
+    pullRequest.reviewThreads,
+    "graphql.data.repository.pullRequest.reviewThreads",
+  );
+  const pageInfo = asRecord(reviewThreads.pageInfo, "graphql.reviewThreads.pageInfo");
+  const nodes = asArray(reviewThreads.nodes, "graphql.reviewThreads.nodes");
+
+  return {
+    endCursor: optionalString(pageInfo, "endCursor"),
+    hasNextPage: optionalBoolean(pageInfo, "hasNextPage"),
+    threads: nodes.map(reviewThreadStateFromGraphQL),
+  };
+}
+
+/** Parses one GraphQL review-thread node into provider-neutral state. */
+function reviewThreadStateFromGraphQL(value: unknown): ExistingReviewThreadState {
+  const thread = asRecord(value, "graphql.reviewThread");
+  const comments = asRecord(thread.comments, "graphql.reviewThread.comments");
+  const commentNodes = asArray(comments.nodes, "graphql.reviewThread.comments.nodes");
+
+  return {
+    providerThreadId: asString(thread, "id"),
+    isResolved: optionalBoolean(thread, "isResolved"),
+    providerCommentIds: commentNodes.flatMap((comment) => {
+      const providerCommentId = optionalProviderId(
+        asRecord(comment, "graphql.reviewThread.comment"),
+        "databaseId",
+      );
+      return providerCommentId ? [providerCommentId] : [];
+    }),
+  };
+}
 
 /** Returns a product-safe route template for GitHub REST telemetry. */
 function githubRouteTemplate(path: string): string {

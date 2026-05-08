@@ -1052,6 +1052,144 @@ describe("createWorkerHandlers", () => {
     ]);
   });
 
+  it("reconciles scheduled review thread state into provider feedback outcomes", async () => {
+    const selectRows: unknown[][] = [
+      [
+        {
+          installationId: "inst_1",
+          owner: "acme",
+          provider: "github",
+          providerRepoId: "987654",
+          repo: "heimdall",
+          repoId: "repo_1",
+        },
+      ],
+      [
+        {
+          installationId: "inst_1",
+          providerInstallationId: "123456",
+        },
+      ],
+      [
+        {
+          pullRequestNumber: 7,
+          reviewRunId: "rrn_1",
+        },
+      ],
+      [
+        {
+          publishedFindingId: "pub_1",
+          reviewRunId: "rrn_1",
+          validatedFindingId: "vf_1",
+        },
+      ],
+      [
+        {
+          body: "Debug logging should not be enabled in production.",
+          candidateFindingId: "cf_1",
+          category: "correctness",
+          confidence: 0.9,
+          findingId: "vf_1",
+          fingerprint: "fp_reconcile_thread_1",
+          location: { path: "src/debug.ts", startLine: 12 },
+          reviewRunId: "rrn_1",
+          severity: "medium",
+          title: "Debug logging is enabled",
+        },
+      ],
+      [{ repoId: "repo_1" }],
+      [{ orgId: "org_1" }],
+    ];
+    const insertedRows: unknown[] = [];
+    const db = {
+      insert: () => ({
+        values: (value: unknown) => {
+          insertedRows.push(value);
+          return {
+            onConflictDoNothing: async () => undefined,
+          };
+        },
+      }),
+      select: () => ({
+        from: () => ({
+          where: () => {
+            const query = {
+              limit: async () => selectRows.shift() ?? [],
+              orderBy: () => ({
+                limit: async () => selectRows.shift() ?? [],
+              }),
+            };
+            return query;
+          },
+        }),
+      }),
+    };
+    const requestedRefs: unknown[] = [];
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {
+        provider: "github",
+        fetchReviewThreadStates: async (input: unknown) => {
+          requestedRefs.push(input);
+          return [
+            {
+              providerCommentIds: ["888"],
+              providerThreadId: "PRRT_1",
+              isResolved: true,
+            },
+          ];
+        },
+      } as never,
+    });
+
+    await handlers[JOB_TYPES.UpdateMemory]?.({
+      attempt: 0,
+      createdAt: "2026-05-07T12:00:00.000Z",
+      idempotencyKey: "github:memory:thread-reconcile:repo_1",
+      jobId: "job_memory_thread_reconcile",
+      jobType: JOB_TYPES.UpdateMemory,
+      maxAttempts: 3,
+      payload: {
+        provider: "github",
+        pullRequestNumber: 7,
+        reason: "scheduled",
+        repoId: "repo_1",
+      },
+      schemaVersion: "job_envelope.v1",
+    });
+
+    expect(requestedRefs).toEqual([
+      expect.objectContaining({
+        installationId: "inst_1",
+        owner: "acme",
+        providerInstallationId: "123456",
+        providerRepoId: "987654",
+        pullRequestNumber: 7,
+        repo: "heimdall",
+      }),
+    ]);
+    expect(insertedRows).toEqual([
+      expect.objectContaining({
+        eventKind: "review_thread_resolved",
+        externalThreadId: "PRRT_1",
+        payloadRedacted: expect.objectContaining({
+          feedbackSource: "reconciliation",
+        }),
+        publishedFindingId: "pub_1",
+        source: "reconciliation",
+      }),
+      expect.objectContaining({
+        polarity: "positive",
+        signalKind: "thread_resolved",
+      }),
+      expect.objectContaining({
+        outcome: "resolved",
+        publishedFindingId: "pub_1",
+        source: "provider_webhook",
+      }),
+    ]);
+  });
+
   it("creates pending memory candidates from trusted provider feedback commands", async () => {
     const selectRows: unknown[][] = [
       [
