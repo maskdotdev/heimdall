@@ -196,6 +196,62 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
       reviewRepository.getReviewFindingByAnyId("fnd_review_repository_missing"),
     ).resolves.toBeUndefined();
 
+    const createdOutcome = await reviewRepository.createFindingOutcomeIfAbsent({
+      candidateFindingId: "fnd_review_repository_candidate",
+      createdAt: new Date("2026-05-08T00:05:00.000Z"),
+      findingOutcomeId: "out_review_repository",
+      metadata: { note: "accepted" },
+      occurredAt: new Date("2026-05-08T00:05:00.000Z"),
+      orgId: "org_review_repository_test",
+      outcome: "accepted",
+      publishedFindingId: "pub_review_repository_validated",
+      repoId: "repo_review_repository_test",
+      source: "user",
+    });
+    expect(createdOutcome).toMatchObject({
+      candidateFindingId: "fnd_review_repository_candidate",
+      findingOutcomeId: "out_review_repository",
+      metadata: { note: "accepted" },
+      outcome: "accepted",
+      publishedFindingId: "pub_review_repository_validated",
+      source: "user",
+    });
+    const replayedOutcome = await reviewRepository.createFindingOutcomeIfAbsent({
+      candidateFindingId: "fnd_review_repository_candidate",
+      findingOutcomeId: "out_review_repository",
+      metadata: { note: "ignored" },
+      occurredAt: new Date("2026-05-08T00:06:00.000Z"),
+      orgId: "org_review_repository_test",
+      outcome: "fixed",
+      publishedFindingId: "pub_review_repository_validated",
+      repoId: "repo_review_repository_test",
+      source: "user",
+    });
+    expect(replayedOutcome).toMatchObject({
+      findingOutcomeId: "out_review_repository",
+      metadata: { note: "accepted" },
+      outcome: "accepted",
+    });
+    const findingOutcomes = await reviewRepository.listFindingOutcomesForFindings({
+      candidateFindingIds: ["fnd_review_repository_candidate"],
+      publishedFindingIds: ["pub_review_repository_validated"],
+    });
+    expect(findingOutcomes.map((outcome) => outcome.findingOutcomeId)).toEqual([
+      "out_review_repository",
+    ]);
+    await expect(
+      reviewRepository.getFindingOutcome("out_review_repository"),
+    ).resolves.toMatchObject({
+      findingOutcomeId: "out_review_repository",
+      outcome: "accepted",
+    });
+    await expect(
+      reviewRepository.listFindingOutcomesForFindings({
+        candidateFindingIds: [],
+        publishedFindingIds: [],
+      }),
+    ).resolves.toEqual([]);
+
     await reviewRepository.insertSuppressionMatches([
       {
         candidateFindingId: "fnd_review_repository_candidate",

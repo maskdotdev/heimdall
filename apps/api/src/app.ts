@@ -95,9 +95,9 @@ import {
   type EvalRunRow,
   type EvalSuiteRow,
   EvaluationRepository,
+  type FindingOutcomeRecord,
   feedbackEvents,
   feedbackSignals,
-  findingOutcomes,
   type HeimdallDatabase,
   invoices,
   type MemoryCandidateRecord,
@@ -9903,34 +9903,10 @@ async function latestFindingOutcomesForRows(
   const publishedFindingIds = uniqueStrings(
     findings.flatMap((finding) => (finding.publishedFindingId ? [finding.publishedFindingId] : [])),
   );
-  const conditions: SQL[] = [];
-  if (candidateFindingIds.length > 0) {
-    conditions.push(inArray(findingOutcomes.candidateFindingId, candidateFindingIds));
-  }
-  if (publishedFindingIds.length > 0) {
-    conditions.push(inArray(findingOutcomes.publishedFindingId, publishedFindingIds));
-  }
-  if (conditions.length === 0) {
-    return {
-      byCandidateFindingId: new Map(),
-      byPublishedFindingId: new Map(),
-    };
-  }
-
-  const rows = await db
-    .select({
-      candidateFindingId: findingOutcomes.candidateFindingId,
-      createdAt: findingOutcomes.createdAt,
-      findingOutcomeId: findingOutcomes.findingOutcomeId,
-      metadata: findingOutcomes.metadata,
-      occurredAt: findingOutcomes.occurredAt,
-      outcome: findingOutcomes.outcome,
-      publishedFindingId: findingOutcomes.publishedFindingId,
-      source: findingOutcomes.source,
-    })
-    .from(findingOutcomes)
-    .where(conditions.length === 1 ? (conditions[0] ?? sql`false`) : or(...conditions))
-    .orderBy(desc(findingOutcomes.occurredAt), desc(findingOutcomes.createdAt));
+  const rows = await new ReviewRepository(db).listFindingOutcomesForFindings({
+    candidateFindingIds,
+    publishedFindingIds,
+  });
 
   const byCandidateFindingId = new Map<string, AdminReviewFindingOutcomeSummary>();
   const byPublishedFindingId = new Map<string, AdminReviewFindingOutcomeSummary>();
@@ -10003,20 +9979,9 @@ function toAdminReviewFindingSummary(
 }
 
 /** Converts a finding outcome row into an API DTO. */
-function toAdminReviewFindingOutcomeSummary(row: {
-  /** Finding outcome row ID. */
-  readonly findingOutcomeId: string;
-  /** Outcome label. */
-  readonly outcome: string;
-  /** Outcome source. */
-  readonly source: string;
-  /** Outcome timestamp. */
-  readonly occurredAt: Date;
-  /** Row creation timestamp. */
-  readonly createdAt: Date;
-  /** Outcome metadata. */
-  readonly metadata: unknown;
-}): AdminReviewFindingOutcomeSummary {
+function toAdminReviewFindingOutcomeSummary(
+  row: FindingOutcomeRecord,
+): AdminReviewFindingOutcomeSummary {
   const metadata = asOptionalRecord(row.metadata);
   return {
     createdAt: row.createdAt.toISOString(),
@@ -10114,9 +10079,8 @@ async function recordFindingOutcome(
       requestId: request.requestId,
     };
 
-    const [inserted] = await transactionDb
-      .insert(findingOutcomes)
-      .values({
+    const outcome = toAdminReviewFindingOutcomeSummary(
+      await new ReviewRepository(transactionDb).createFindingOutcomeIfAbsent({
         candidateFindingId: finding.candidateFindingId,
         createdAt: new Date(),
         findingOutcomeId,
@@ -10124,22 +10088,10 @@ async function recordFindingOutcome(
         occurredAt: new Date(request.occurredAt),
         orgId: finding.orgId,
         outcome: request.outcome,
-        ...(finding.publishedFindingId ? { publishedFindingId: finding.publishedFindingId } : {}),
+        publishedFindingId: finding.publishedFindingId ?? null,
         repoId: finding.repoId,
         source: request.source,
-      })
-      .onConflictDoNothing()
-      .returning({
-        createdAt: findingOutcomes.createdAt,
-        findingOutcomeId: findingOutcomes.findingOutcomeId,
-        metadata: findingOutcomes.metadata,
-        occurredAt: findingOutcomes.occurredAt,
-        outcome: findingOutcomes.outcome,
-        source: findingOutcomes.source,
-      });
-
-    const outcome = toAdminReviewFindingOutcomeSummary(
-      inserted ?? (await getExistingFindingOutcome(transactionDb, findingOutcomeId)),
+      }),
     );
     const memoryUpdateJob = await enqueueFindingOutcomeMemoryUpdate(
       transactionDb,
@@ -10299,40 +10251,6 @@ function truncateText(value: string, maxLength: number): string {
   }
 
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
-/** Gets an existing finding outcome for an idempotent write request. */
-async function getExistingFindingOutcome(
-  db: HeimdallDatabase,
-  findingOutcomeId: string,
-): Promise<{
-  /** Finding outcome row ID. */
-  readonly findingOutcomeId: string;
-  /** Outcome label. */
-  readonly outcome: string;
-  /** Outcome source. */
-  readonly source: string;
-  /** Outcome timestamp. */
-  readonly occurredAt: Date;
-  /** Row creation timestamp. */
-  readonly createdAt: Date;
-  /** Outcome metadata. */
-  readonly metadata: unknown;
-}> {
-  const [row] = await db
-    .select({
-      createdAt: findingOutcomes.createdAt,
-      findingOutcomeId: findingOutcomes.findingOutcomeId,
-      metadata: findingOutcomes.metadata,
-      occurredAt: findingOutcomes.occurredAt,
-      outcome: findingOutcomes.outcome,
-      source: findingOutcomes.source,
-    })
-    .from(findingOutcomes)
-    .where(eq(findingOutcomes.findingOutcomeId, findingOutcomeId))
-    .limit(1);
-
-  return requireReturnedRow(row);
 }
 
 /** Enqueues memory candidate processing for one recorded finding outcome. */

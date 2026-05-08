@@ -5,11 +5,12 @@ import type {
   ReviewRun,
   ValidatedFinding,
 } from "@repo/contracts";
-import { and, asc, desc, eq, ne, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, or, type SQL } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
   candidateFindings,
   findingDuplicateGroups,
+  findingOutcomes,
   findingValidationEvents,
   memoryFacts,
   publishedFindings,
@@ -300,6 +301,58 @@ export type ListReviewFindingsInput = {
   readonly limit?: number | undefined;
 };
 
+/** Durable finding outcome row used by review inspection APIs. */
+export type FindingOutcomeRecord = {
+  /** Finding outcome row ID. */
+  readonly findingOutcomeId: string;
+  /** Candidate finding ID when the outcome is attached before publication. */
+  readonly candidateFindingId: string | null;
+  /** Published finding ID when the outcome is attached after publication. */
+  readonly publishedFindingId: string | null;
+  /** Outcome label. */
+  readonly outcome: string;
+  /** Outcome source. */
+  readonly source: string;
+  /** Outcome timestamp. */
+  readonly occurredAt: Date;
+  /** Row creation timestamp. */
+  readonly createdAt: Date;
+  /** Outcome metadata. */
+  readonly metadata: unknown;
+};
+
+/** Input used to insert a finding outcome if the stable ID is not already present. */
+export type CreateFindingOutcomeInput = {
+  /** Stable finding outcome row ID. */
+  readonly findingOutcomeId: string;
+  /** Organization that owns the finding. */
+  readonly orgId: string;
+  /** Repository that owns the finding. */
+  readonly repoId: string;
+  /** Candidate finding ID when present. */
+  readonly candidateFindingId: string | null;
+  /** Published finding ID when present. */
+  readonly publishedFindingId: string | null;
+  /** Outcome label. */
+  readonly outcome: string;
+  /** Outcome source. */
+  readonly source: string;
+  /** Outcome timestamp. */
+  readonly occurredAt: Date;
+  /** Outcome metadata. */
+  readonly metadata: unknown;
+  /** Row creation timestamp. */
+  readonly createdAt?: Date | undefined;
+};
+
+/** Input used to list outcome rows attached to inspected findings. */
+export type ListFindingOutcomesForFindingsInput = {
+  /** Candidate finding IDs to inspect. */
+  readonly candidateFindingIds: readonly string[];
+  /** Published finding IDs to inspect. */
+  readonly publishedFindingIds: readonly string[];
+};
+
 /** Query helper for review runs and candidate findings. */
 export class ReviewRepository {
   /** Creates a review query helper. */
@@ -438,6 +491,78 @@ export class ReviewRepository {
       .limit(1);
 
     return row;
+  }
+
+  /** Creates one finding outcome or returns the existing row for the same stable ID. */
+  public async createFindingOutcomeIfAbsent(
+    input: CreateFindingOutcomeInput,
+  ): Promise<FindingOutcomeRecord> {
+    const [inserted] = await this.db
+      .insert(findingOutcomes)
+      .values({
+        candidateFindingId: input.candidateFindingId ?? undefined,
+        createdAt: input.createdAt ?? new Date(),
+        findingOutcomeId: input.findingOutcomeId,
+        metadata: input.metadata,
+        occurredAt: input.occurredAt,
+        orgId: input.orgId,
+        outcome: input.outcome,
+        publishedFindingId: input.publishedFindingId ?? undefined,
+        repoId: input.repoId,
+        source: input.source,
+      })
+      .onConflictDoNothing()
+      .returning(findingOutcomeRecordSelect());
+
+    if (inserted) {
+      return inserted;
+    }
+
+    const existing = await this.getFindingOutcome(input.findingOutcomeId);
+    if (!existing) {
+      throw new Error(`Finding outcome ${input.findingOutcomeId} was not found after conflict.`);
+    }
+
+    return existing;
+  }
+
+  /** Gets one finding outcome by ID. */
+  public async getFindingOutcome(
+    findingOutcomeId: string,
+  ): Promise<FindingOutcomeRecord | undefined> {
+    const [row] = await this.db
+      .select(findingOutcomeRecordSelect())
+      .from(findingOutcomes)
+      .where(eq(findingOutcomes.findingOutcomeId, findingOutcomeId))
+      .limit(1);
+
+    return row;
+  }
+
+  /** Lists latest-first outcome rows attached to inspected findings. */
+  public async listFindingOutcomesForFindings(
+    input: ListFindingOutcomesForFindingsInput,
+  ): Promise<readonly FindingOutcomeRecord[]> {
+    const conditions: SQL[] = [];
+    if (input.candidateFindingIds.length > 0) {
+      conditions.push(inArray(findingOutcomes.candidateFindingId, [...input.candidateFindingIds]));
+    }
+    if (input.publishedFindingIds.length > 0) {
+      conditions.push(inArray(findingOutcomes.publishedFindingId, [...input.publishedFindingIds]));
+    }
+    if (conditions.length === 0) {
+      return [];
+    }
+    const filter = conditions.length === 1 ? conditions[0] : or(...conditions);
+    if (!filter) {
+      return [];
+    }
+
+    return this.db
+      .select(findingOutcomeRecordSelect())
+      .from(findingOutcomes)
+      .where(filter)
+      .orderBy(desc(findingOutcomes.occurredAt), desc(findingOutcomes.createdAt));
   }
 
   /** Lists previously published findings for a pull request. */
@@ -782,6 +907,20 @@ function reviewFindingInspectionSelect() {
     severity: validatedFindings.severity,
     title: validatedFindings.title,
     validation: validatedFindings.validation,
+  };
+}
+
+/** Selects durable finding outcome fields used by inspection APIs. */
+function findingOutcomeRecordSelect() {
+  return {
+    candidateFindingId: findingOutcomes.candidateFindingId,
+    createdAt: findingOutcomes.createdAt,
+    findingOutcomeId: findingOutcomes.findingOutcomeId,
+    metadata: findingOutcomes.metadata,
+    occurredAt: findingOutcomes.occurredAt,
+    outcome: findingOutcomes.outcome,
+    publishedFindingId: findingOutcomes.publishedFindingId,
+    source: findingOutcomes.source,
   };
 }
 

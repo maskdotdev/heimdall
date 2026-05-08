@@ -135,11 +135,12 @@ tracked milestone.
 - Latest DB review milestone: `ReviewRepository` now returns the stored candidate row when an
   idempotent insert conflicts on review/fingerprint uniqueness, instead of echoing the rejected
   input, owns validated finding inspection reads joined with repository and publication display
-  fields for API review finding list/detail routes, and owns repository suppression-match audit
-  reads joined with memory fact and finding display fields for API memory inspection. The
+  fields for API review finding list/detail routes, owns finding outcome creation/idempotent lookup
+  and latest-outcome reads for API finding outcome routes, and owns repository suppression-match
+  audit reads joined with memory fact and finding display fields for API memory inspection. The
   Postgres-backed integration test verifies review-run upsert behavior, candidate/validated finding
-  idempotency, review finding inspection rows, and suppression-match inspection rows against the
-  current migration chain.
+  idempotency, review finding inspection rows, finding outcome idempotency/lookups, and
+  suppression-match inspection rows against the current migration chain.
 - Latest index artifact schema milestone: `@repo/index-schema` now owns a checked-in split
   fixture catalog for the Phase #10 valid and invalid artifact cases. The CLI can generate the
   same fixture shapes, preserves read-time integrity failures as JSON validation output, and the
