@@ -21,6 +21,7 @@ import {
   reviewMemoryFactFromRow,
   reviewPublishSkipReason,
   reviewRunStatusForStage,
+  reviewStageLogAttributes,
   reviewStalenessDisposition,
   startReviewTelemetryStageSpan,
 } from "../src";
@@ -229,6 +230,38 @@ describe("reviewPublishSkipReason", () => {
       "no_planned_publish_operations",
     );
     expect(reviewPublishSkipReason({ dryRun: false, hasExternalWrites: true })).toBeUndefined();
+  });
+});
+
+describe("reviewStageLogAttributes", () => {
+  it("includes the required product-safe stage log context", () => {
+    expect(
+      reviewStageLogAttributes({
+        attributes: {
+          "review.context_item_count": 3,
+          "review.optional": undefined,
+        },
+        context: {
+          headSha: reviewInput.headSha,
+          jobId: "job_review",
+          pullRequestNumber: reviewInput.pullRequestNumber,
+          repoId: reviewInput.repoId,
+          reviewRunId: "rrn_review",
+        },
+        stage: "retrieval",
+        status: "completed",
+      }),
+    ).toEqual({
+      "event.name": "review.stage.completed",
+      "job.id": "job_review",
+      "pull_request.number": reviewInput.pullRequestNumber,
+      "repo.id": reviewInput.repoId,
+      "review.context_item_count": 3,
+      "review.head_sha": reviewInput.headSha,
+      "review.run_id": "rrn_review",
+      "review.stage": "retrieval",
+      "review.stage_status": "completed",
+    });
   });
 });
 

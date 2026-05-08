@@ -103,6 +103,7 @@ import {
 import {
   createObservabilityRuntime,
   OBSERVABILITY_METRIC_NAMES,
+  type StructuredTelemetryLogger,
   type TelemetryMetricRecorder,
   type TelemetrySpanRecorder,
 } from "@repo/observability";
@@ -218,6 +219,8 @@ export type CreateWorkerHandlersOptions = {
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder passed into review orchestration. */
   readonly traces?: TelemetrySpanRecorder;
+  /** Optional structured logger passed into review orchestration. */
+  readonly logger?: StructuredTelemetryLogger;
   /** Optional usage ledger shared by review and embedding jobs. */
   readonly usageLedger?: UsageLedger;
 };
@@ -670,25 +673,29 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
     [JOB_TYPES.ReviewPullRequest]: async (envelope) => {
       const payload = asReviewPullRequestPayload(envelope.payload);
 
-      await runPullRequestReview(payload, {
-        ...(options.artifactPayloadStore
-          ? { artifactPayloadStore: options.artifactPayloadStore }
-          : {}),
-        db: options.db,
-        gitProvider: options.gitProvider,
-        ...(options.llmGateway ? { llmGateway: options.llmGateway } : {}),
-        ...(options.staticAnalysisRunner
-          ? { staticAnalysisRunner: options.staticAnalysisRunner }
-          : {}),
-        ...(options.reviewIndexDependencyMode
-          ? { indexDependencyMode: options.reviewIndexDependencyMode }
-          : {}),
-        ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
-        ...(options.metrics ? { metrics: options.metrics } : {}),
-        ...(options.traces ? { traces: options.traces } : {}),
-        ...(options.usageLedger ? { usageLedger: options.usageLedger } : {}),
-        ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
-      });
+      await runPullRequestReview(
+        { ...payload, jobId: envelope.jobId },
+        {
+          ...(options.artifactPayloadStore
+            ? { artifactPayloadStore: options.artifactPayloadStore }
+            : {}),
+          db: options.db,
+          gitProvider: options.gitProvider,
+          ...(options.llmGateway ? { llmGateway: options.llmGateway } : {}),
+          ...(options.staticAnalysisRunner
+            ? { staticAnalysisRunner: options.staticAnalysisRunner }
+            : {}),
+          ...(options.reviewIndexDependencyMode
+            ? { indexDependencyMode: options.reviewIndexDependencyMode }
+            : {}),
+          ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
+          ...(options.logger ? { logger: options.logger } : {}),
+          ...(options.metrics ? { metrics: options.metrics } : {}),
+          ...(options.traces ? { traces: options.traces } : {}),
+          ...(options.usageLedger ? { usageLedger: options.usageLedger } : {}),
+          ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+        },
+      );
     },
     [JOB_TYPES.PublishReview]: async (envelope) => {
       const payload = asPublishReviewPayload(envelope.payload);
@@ -1155,6 +1162,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       indexArtifactRoot,
       indexerDriver,
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
+      logger: observability.logger,
       metrics: observability.metrics,
       traces: observability.traces,
     }),

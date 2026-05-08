@@ -44,6 +44,7 @@ import {
 import type { MemoryAppliesTo, MemoryFact, MemoryFactKind } from "@repo/memory";
 import {
   OBSERVABILITY_SPAN_NAMES,
+  type StructuredTelemetryLogger,
   type TelemetryAttributeValue,
   type TelemetryMetricRecorder,
   type TelemetrySpanHandle,
@@ -154,6 +155,8 @@ export type ReviewPullRequestInput = {
   readonly headSha: string;
   /** Review trigger source. */
   readonly trigger: ReviewTrigger;
+  /** Durable job ID used for product-safe review stage logs. */
+  readonly jobId?: string;
   /** Runs the review pipeline without enqueueing provider-visible publisher work. */
   readonly dryRun?: boolean;
 };
@@ -202,6 +205,8 @@ export type ReviewOrchestratorDependencies = {
   readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder used for review pipeline instrumentation. */
   readonly traces?: TelemetrySpanRecorder;
+  /** Optional structured logger used for product-safe review stage logs. */
+  readonly logger?: StructuredTelemetryLogger;
 };
 
 /** Missing-index behavior after review orchestration's bounded index wait. */
@@ -397,6 +402,30 @@ export type ReviewTelemetryStageSpanInput = {
   readonly traces?: TelemetrySpanRecorder | undefined;
 };
 
+/** Product-safe stage status emitted in structured review logs. */
+export type ReviewStageLogStatus =
+  | "started"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "queued"
+  | "paused"
+  | "degraded";
+
+/** Product-safe context attached to every structured review stage log. */
+export type ReviewStageLogContext = {
+  /** Durable job ID that caused the review stage, or `unknown` when unavailable. */
+  readonly jobId: string;
+  /** Head commit SHA being reviewed. */
+  readonly headSha: string;
+  /** Pull request number being reviewed. */
+  readonly pullRequestNumber: number;
+  /** Repository that owns the review. */
+  readonly repoId: string;
+  /** Review run that owns the stage. */
+  readonly reviewRunId: string;
+};
+
 /** Review orchestration outcomes emitted on the top-level review span. */
 type ReviewTelemetryOutcome = "completed" | "failed" | "skipped" | "superseded";
 
@@ -408,6 +437,8 @@ type ReviewTelemetryStageOperationOptions<T> = {
   readonly endAttributes?:
     | ((result: T) => Readonly<Record<string, TelemetryAttributeValue | undefined>>)
     | undefined;
+  /** Product-safe context attached to structured stage logs. */
+  readonly logContext?: ReviewStageLogContext | undefined;
 };
 
 /** Result from optional static-analysis orchestration. */
@@ -541,17 +572,26 @@ export async function runPullRequestReview(
   let quotaReservationFinalized = false;
   let currentStage = "snapshot";
   const reviewSpan = startPullRequestReviewTelemetrySpan(input, dependencies);
+  const reviewStageLogContext = createReviewStageLogContext({
+    input,
+    reviewRunId,
+    snapshot,
+  });
 
   try {
     currentStage = "quota";
-    quotaReservation = await runReviewTelemetryStage(dependencies, "quota", () =>
-      reserveReviewCreditQuota({
-        now: startedAt,
-        orgId: repositoryRecord.orgId,
-        planSnapshot,
-        quotaService,
-        reviewRunId,
-      }),
+    quotaReservation = await runReviewTelemetryStage(
+      dependencies,
+      "quota",
+      () =>
+        reserveReviewCreditQuota({
+          now: startedAt,
+          orgId: repositoryRecord.orgId,
+          planSnapshot,
+          quotaService,
+          reviewRunId,
+        }),
+      { logContext: reviewStageLogContext },
     );
     if (!quotaReservation.decision.allowed || !quotaReservation.reservation) {
       const skippedAt = now().toISOString();
@@ -633,6 +673,7 @@ export async function runPullRequestReview(
         });
       },
       {
+        logContext: reviewStageLogContext,
         endAttributes: () => ({
           "review.changed_file_count": snapshot.changedFileCount,
           "review.raw_diff_available": snapshotFetch.rawDiffBytes !== undefined,
@@ -643,6 +684,7 @@ export async function runPullRequestReview(
     const afterSnapshotStaleness = await stopReviewRunIfStale({
       checkpoint: "after_snapshot",
       dependencies,
+      logContext: reviewStageLogContext,
       now,
       pullRequestRef,
       quotaReservation,
@@ -683,6 +725,7 @@ export async function runPullRequestReview(
           ),
         ),
       {
+        logContext: reviewStageLogContext,
         endAttributes: (syncedWorkspace) => ({
           "review.workspace_cleaned_up": syncedWorkspace.cleanedUp,
         }),
@@ -725,6 +768,7 @@ export async function runPullRequestReview(
         attributes: {
           "review.static_analysis_configured": Boolean(dependencies.staticAnalysisRunner),
         },
+        logContext: reviewStageLogContext,
         endAttributes: (result) => ({
           "review.static_analysis_reported": result.report !== undefined,
           "review.workspace_cleaned_up": result.workspaceCleanedUp,
@@ -864,6 +908,7 @@ export async function runPullRequestReview(
           pollIntervalMs: dependencies.indexPollIntervalMs ?? DEFAULT_INDEX_POLL_INTERVAL_MS,
         }),
       {
+        logContext: reviewStageLogContext,
         endAttributes: (readyIndexVersionId) => ({
           "review.index_ready": readyIndexVersionId !== undefined,
         }),
@@ -936,6 +981,7 @@ export async function runPullRequestReview(
       artifactRefs: artifacts,
       checkpoint: "after_index",
       dependencies,
+      logContext: reviewStageLogContext,
       now,
       pullRequestRef,
       quotaReservation,
@@ -987,6 +1033,7 @@ export async function runPullRequestReview(
           "review.index_available":
             Boolean(retrievalIndex) || (dependencies.indexAvailable ?? false),
         },
+        logContext: reviewStageLogContext,
         endAttributes: (bundle) => ({
           "review.context_item_count": bundle.items.length,
           "review.estimated_context_tokens": bundle.tokenBudget.estimatedTokens,
@@ -1040,6 +1087,7 @@ export async function runPullRequestReview(
       artifactRefs: [...artifacts, contextArtifact, retrievalTraceArtifact],
       checkpoint: "before_review",
       dependencies,
+      logContext: reviewStageLogContext,
       now,
       pullRequestRef,
       quotaReservation,
@@ -1110,6 +1158,7 @@ export async function runPullRequestReview(
         attributes: {
           "review.static_analysis_reported": staticAnalysisReport !== undefined,
         },
+        logContext: reviewStageLogContext,
         endAttributes: (findings) => ({
           "review.candidate_finding_count": findings.length,
         }),
@@ -1174,6 +1223,7 @@ export async function runPullRequestReview(
         };
       },
       {
+        logContext: reviewStageLogContext,
         endAttributes: (result) => ({
           "review.memory_fact_count": result.reviewMemoryFacts.length,
           "review.previous_published_finding_count": result.previousPublishedFindings.length,
@@ -1371,6 +1421,7 @@ export async function runPullRequestReview(
         validatedFindings: publishedFindingCount,
       },
       dependencies,
+      logContext: reviewStageLogContext,
       metadata: {
         publishPlanArtifactId: publishPlanArtifact.artifactId,
         publishPlanId,
@@ -1396,12 +1447,17 @@ export async function runPullRequestReview(
     }
 
     if (publishSkipReason) {
-      recordReviewTelemetryStage(dependencies, "publish", {
-        "review.dry_run": dryRun,
-        "review.publish_enqueued": false,
-        "review.publish_mode": publishPlanModeLabel,
-        "review.stage_status": "skipped",
-      });
+      recordReviewTelemetryStage(
+        dependencies,
+        "publish",
+        {
+          "review.dry_run": dryRun,
+          "review.publish_enqueued": false,
+          "review.publish_mode": publishPlanModeLabel,
+          "review.stage_status": "skipped",
+        },
+        { logContext: reviewStageLogContext },
+      );
       await reviewRepository.insertStageEvent({
         reviewRunId,
         stage: "publish",
@@ -1535,6 +1591,7 @@ export async function runPullRequestReview(
           traceContext: dependencies.traceContext,
         }),
       {
+        logContext: reviewStageLogContext,
         endAttributes: () => ({
           "review.publish_enqueued": true,
           "review.publish_mode": publishPlanModeLabel,
@@ -1753,9 +1810,13 @@ export function startReviewTelemetryStageSpan(
 
 /** Records an instantaneous review stage span for skipped or decision-only stages. */
 function recordReviewTelemetryStage(
-  dependencies: Pick<ReviewOrchestratorDependencies, "traceContext" | "traces">,
+  dependencies: Pick<ReviewOrchestratorDependencies, "logger" | "traceContext" | "traces">,
   stage: ReviewTelemetryStage,
   attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+  options: {
+    /** Product-safe context attached to structured stage logs. */
+    readonly logContext?: ReviewStageLogContext | undefined;
+  } = {},
 ): void {
   const span = startReviewTelemetryStageSpan({
     attributes,
@@ -1763,6 +1824,8 @@ function recordReviewTelemetryStage(
     traceContext: dependencies.traceContext,
     traces: dependencies.traces,
   });
+  const stageStatus = reviewStageLogStatusFromAttributes(attributes);
+  logReviewStage(dependencies.logger, stage, stageStatus, options.logContext, attributes);
   span?.end({
     attributes: {
       "review.stage_status": "completed",
@@ -1773,7 +1836,7 @@ function recordReviewTelemetryStage(
 
 /** Runs one review stage operation and records success or failure as a telemetry span. */
 async function runReviewTelemetryStage<T>(
-  dependencies: Pick<ReviewOrchestratorDependencies, "traceContext" | "traces">,
+  dependencies: Pick<ReviewOrchestratorDependencies, "logger" | "traceContext" | "traces">,
   stage: ReviewTelemetryStage,
   operation: () => Promise<T>,
   options: ReviewTelemetryStageOperationOptions<T> = {},
@@ -1784,23 +1847,132 @@ async function runReviewTelemetryStage<T>(
     traceContext: dependencies.traceContext,
     traces: dependencies.traces,
   });
+  logReviewStage(dependencies.logger, stage, "started", options.logContext, options.attributes);
 
   try {
     const result = await operation();
+    const endAttributes = options.endAttributes?.(result) ?? {};
+    logReviewStage(dependencies.logger, stage, "completed", options.logContext, endAttributes);
     span?.end({
       attributes: {
-        ...(options.endAttributes?.(result) ?? {}),
+        ...endAttributes,
         "review.stage_status": "completed",
       },
     });
     return result;
   } catch (error) {
+    logReviewStage(dependencies.logger, stage, "failed", options.logContext, undefined, error);
     span?.end({
       attributes: { "review.stage_status": "failed" },
       error,
     });
     throw error;
   }
+}
+
+/** Builds the product-safe stage log context for one review job. */
+function createReviewStageLogContext(input: {
+  /** Durable review job payload. */
+  readonly input: ReviewPullRequestInput;
+  /** Review run that owns stage execution. */
+  readonly reviewRunId: string;
+  /** Pull request snapshot being reviewed. */
+  readonly snapshot: PullRequestSnapshot;
+}): ReviewStageLogContext {
+  return {
+    jobId: input.input.jobId ?? "unknown",
+    headSha: input.snapshot.headSha,
+    pullRequestNumber: input.snapshot.pullRequestNumber,
+    repoId: input.snapshot.repoId,
+    reviewRunId: input.reviewRunId,
+  };
+}
+
+/** Builds product-safe structured log attributes for a review stage. */
+export function reviewStageLogAttributes(input: {
+  /** Additional product-safe attributes to include with the log. */
+  readonly attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>> | undefined;
+  /** Product-safe review context shared by all stage logs. */
+  readonly context: ReviewStageLogContext;
+  /** Review pipeline stage represented by the log. */
+  readonly stage: ReviewTelemetryStage;
+  /** Stage status represented by the log. */
+  readonly status: ReviewStageLogStatus;
+}): Readonly<Record<string, TelemetryAttributeValue>> {
+  return compactTelemetryAttributes({
+    ...(input.attributes ?? {}),
+    "event.name": `review.stage.${input.status}`,
+    "job.id": input.context.jobId,
+    "pull_request.number": input.context.pullRequestNumber,
+    "repo.id": input.context.repoId,
+    "review.head_sha": input.context.headSha,
+    "review.run_id": input.context.reviewRunId,
+    "review.stage": input.stage,
+    "review.stage_status": input.status,
+  });
+}
+
+/** Emits one product-safe structured review stage log when a logger is configured. */
+function logReviewStage(
+  logger: StructuredTelemetryLogger | undefined,
+  stage: ReviewTelemetryStage,
+  status: ReviewStageLogStatus,
+  context: ReviewStageLogContext | undefined,
+  attributes?: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+  error?: unknown,
+): void {
+  if (!logger || !context) {
+    return;
+  }
+
+  const logOptions = {
+    attributes: reviewStageLogAttributes({ attributes, context, stage, status }),
+    ...(error !== undefined ? { error } : {}),
+    target: "review-orchestrator",
+  };
+
+  if (status === "failed") {
+    logger.error("review stage failed", logOptions);
+    return;
+  }
+  if (status === "degraded") {
+    logger.warn("review stage degraded", logOptions);
+    return;
+  }
+
+  logger.info(`review stage ${status}`, logOptions);
+}
+
+/** Normalizes stage status attributes into the structured log status vocabulary. */
+function reviewStageLogStatusFromAttributes(
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+): ReviewStageLogStatus {
+  const value = attributes["review.stage_status"];
+  switch (value) {
+    case "skipped":
+    case "queued":
+    case "paused":
+    case "degraded":
+      return value;
+    case "failed":
+      return "failed";
+    default:
+      return "completed";
+  }
+}
+
+/** Drops undefined telemetry attributes while preserving safe scalar values. */
+function compactTelemetryAttributes(
+  attributes: Readonly<Record<string, TelemetryAttributeValue | undefined>>,
+): Readonly<Record<string, TelemetryAttributeValue>> {
+  const compacted: Record<string, TelemetryAttributeValue> = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value !== undefined) {
+      compacted[key] = value;
+    }
+  }
+
+  return compacted;
 }
 
 /** Waits briefly for the ready index version produced by the paired indexing job. */
@@ -2145,8 +2317,10 @@ async function stopReviewRunIfStale(input: {
   /** Review orchestration dependencies used for provider checks and telemetry. */
   readonly dependencies: Pick<
     ReviewOrchestratorDependencies,
-    "gitProvider" | "traceContext" | "traces"
+    "gitProvider" | "logger" | "traceContext" | "traces"
   >;
+  /** Product-safe context attached to structured staleness stage logs. */
+  readonly logContext: ReviewStageLogContext;
   /** Additional product-safe metadata to merge into the terminal review run. */
   readonly metadata?: Record<string, unknown> | undefined;
   /** Clock used for deterministic tests. */
@@ -2176,6 +2350,7 @@ async function stopReviewRunIfStale(input: {
       attributes: {
         "review.staleness_checkpoint": input.checkpoint,
       },
+      logContext: input.logContext,
       endAttributes: (status) => ({
         "review.staleness_checkpoint": input.checkpoint,
         "review.staleness_status": status,
