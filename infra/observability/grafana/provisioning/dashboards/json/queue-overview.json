@@ -1,0 +1,169 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "jobs/min"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(code_review_agent_queue_jobs_started_total[1m])) * 60",
+          "refId": "A"
+        }
+      ],
+      "title": "Jobs Started / Min",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "jobs/min"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(code_review_agent_queue_jobs_failed_total[1m])) * 60",
+          "refId": "A"
+        }
+      ],
+      "title": "Jobs Failed / Min",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum(rate(code_review_agent_queue_job_duration_ms_bucket[5m])) by (le))",
+          "refId": "A"
+        }
+      ],
+      "title": "Job P95 Duration",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (queue_name, job_type) (rate(code_review_agent_queue_jobs_completed_total[5m]))",
+          "legendFormat": "completed {{queue_name}} {{job_type}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (queue_name, job_type) (rate(code_review_agent_queue_jobs_failed_total[5m]))",
+          "legendFormat": "failed {{queue_name}} {{job_type}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (queue_name, job_type) (rate(code_review_agent_queue_retries_total[5m]))",
+          "legendFormat": "retry {{queue_name}} {{job_type}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Queue Throughput by Job",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "heimdall",
+    "local",
+    "queue"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Heimdall Queue Overview",
+  "uid": "heimdall-queue-overview",
+  "version": 1
+}

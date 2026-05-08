@@ -42,7 +42,8 @@ OBSERVABILITY_SERVICE_NAME=code-review-api
 ```
 
 Use `code-review-worker` as `OBSERVABILITY_SERVICE_NAME` for worker processes. Grafana provisions
-Prometheus and Tempo datasources automatically.
+Prometheus and Tempo datasources automatically, plus starter dashboards for the API, queue, review
+pipeline, LLM and retrieval paths, indexing and embedding, publishing, and webhook delivery.
 
 The local MinIO bootstrap creates the `heimdall-review-artifacts` bucket for review artifact
 payloads. Use these environment variables when running the API or worker against local object
