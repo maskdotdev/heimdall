@@ -820,6 +820,31 @@ button.small {
   color: var(--status-warning);
 }
 
+.retrieval-item-detail {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 18rem;
+}
+
+.retrieval-item-detail strong {
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.retrieval-item-detail span,
+.retrieval-item-detail p {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.retrieval-item-detail p {
+  max-width: 34rem;
+  color: var(--text-secondary);
+}
+
 /* ============================================================================
    Empty State
    ============================================================================ */

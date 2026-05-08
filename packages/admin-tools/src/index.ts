@@ -1390,6 +1390,45 @@ export type RetrievalReplayBundleSummary = {
   readonly maxTokens: number;
 };
 
+/** Inspectable summary of one retrieval context item. */
+export type RetrievalReplayItemInspection = {
+  /** Stable context item ID. */
+  readonly contextItemId: string;
+  /** Context item kind. */
+  readonly kind: string;
+  /** Retrieval source that produced the item. */
+  readonly source: string;
+  /** Context item title when present. */
+  readonly title?: string;
+  /** Repository path when the item has a code snippet. */
+  readonly path?: string;
+  /** Line range when the item has a code snippet. */
+  readonly lineRange?: {
+    /** 1-based start line. */
+    readonly startLine: number;
+    /** 1-based end line. */
+    readonly endLine: number;
+  };
+  /** Related symbol ID when present. */
+  readonly symbolId?: string;
+  /** Chunk ID when present. */
+  readonly chunkId?: string;
+  /** Context item priority used for packing. */
+  readonly priority: number;
+  /** Estimated tokens consumed by the item. */
+  readonly tokenEstimate: number;
+  /** Retrieval score when available. */
+  readonly score?: number;
+  /** Retriever name that selected the item. */
+  readonly retriever: string;
+  /** Product-safe reason the retriever selected the item. */
+  readonly reason: string;
+  /** Short bounded text or snippet preview. */
+  readonly textPreview?: string;
+  /** Metadata keys present on the context item. */
+  readonly metadataKeys: readonly string[];
+};
+
 /** One context item comparison emitted by retrieval dry-run replay. */
 export type RetrievalReplayItemComparison = {
   /** Stable comparison key. */
@@ -1408,6 +1447,10 @@ export type RetrievalReplayItemComparison = {
   readonly originalPriority?: number;
   /** Replayed item priority when present. */
   readonly replayedPriority?: number;
+  /** Original context item inspection when present. */
+  readonly originalItem?: RetrievalReplayItemInspection;
+  /** Replayed context item inspection when present. */
+  readonly replayedItem?: RetrievalReplayItemInspection;
 };
 
 /** Non-mutating dry-run result for deterministic retrieval replay. */
@@ -4794,10 +4837,45 @@ function retrievalReplayComparison(
     key,
     ...(original ? { originalKind: original.kind, originalPriority: original.priority } : {}),
     ...(original?.title ? { originalTitle: original.title } : {}),
+    ...(original ? { originalItem: retrievalReplayItemInspection(original) } : {}),
     ...(replayed ? { replayedKind: replayed.kind, replayedPriority: replayed.priority } : {}),
     ...(replayed?.title ? { replayedTitle: replayed.title } : {}),
+    ...(replayed ? { replayedItem: retrievalReplayItemInspection(replayed) } : {}),
     status: retrievalReplayStatus(original, replayed),
   };
+}
+
+/** Builds a bounded operator-facing inspection summary for a context item. */
+function retrievalReplayItemInspection(item: ContextItem): RetrievalReplayItemInspection {
+  const textPreview = retrievalReplayTextPreview(item);
+  return {
+    contextItemId: item.contextItemId,
+    kind: item.kind,
+    source: item.source,
+    ...(item.title ? { title: item.title } : {}),
+    ...(item.snippet?.path ? { path: item.snippet.path } : {}),
+    ...(item.snippet?.range ? { lineRange: item.snippet.range } : {}),
+    ...(item.snippet?.symbolId ? { symbolId: item.snippet.symbolId } : {}),
+    ...(item.snippet?.chunkId ? { chunkId: item.snippet.chunkId } : {}),
+    priority: item.priority,
+    tokenEstimate: item.tokenEstimate,
+    ...(item.score === undefined ? {} : { score: item.score }),
+    retriever: item.provenance.retriever,
+    reason: item.provenance.reason,
+    ...(textPreview ? { textPreview } : {}),
+    metadataKeys: sortedRecordKeys(asRecord(item.metadata)),
+  };
+}
+
+/** Builds a short context preview without returning full context item text. */
+function retrievalReplayTextPreview(item: ContextItem): string | undefined {
+  const text = item.snippet?.text ?? item.text ?? item.summary;
+  const normalized = text?.replaceAll(/\s+/gu, " ").trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
 }
 
 /** Classifies one retrieval comparison row. */

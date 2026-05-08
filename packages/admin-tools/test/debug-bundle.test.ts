@@ -86,8 +86,22 @@ describe("compareRetrievalReplayItems", () => {
       chunk_unchanged: "unchanged",
     });
     expect(comparisons.find((comparison) => comparison.key === "chunk_changed")).toMatchObject({
+      originalItem: expect.objectContaining({
+        kind: "same_file_context",
+        path: "src/math.ts",
+        reason: "Changed symbol context",
+        retriever: "fixture",
+        textPreview: expect.stringContaining("export function add"),
+        tokenEstimate: 22,
+      }),
       originalPriority: 90,
       originalTitle: "Context changed",
+      replayedItem: expect.objectContaining({
+        kind: "same_file_context",
+        path: "src/math.ts",
+        priority: 72,
+        source: "symbol_graph",
+      }),
       replayedPriority: 72,
       replayedTitle: "Changed replay context",
     });

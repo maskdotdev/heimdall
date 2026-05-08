@@ -613,6 +613,45 @@ type RetrievalReplayBundleSummary = {
   readonly maxTokens: number;
 };
 
+/** Inspectable retrieval context item summary. */
+type RetrievalReplayItemInspection = {
+  /** Stable context item ID. */
+  readonly contextItemId: string;
+  /** Context item kind. */
+  readonly kind: string;
+  /** Retrieval source. */
+  readonly source: string;
+  /** Context item title when present. */
+  readonly title?: string;
+  /** Repository path when present. */
+  readonly path?: string;
+  /** Line range when present. */
+  readonly lineRange?: {
+    /** 1-based start line. */
+    readonly startLine: number;
+    /** 1-based end line. */
+    readonly endLine: number;
+  };
+  /** Related symbol ID when present. */
+  readonly symbolId?: string;
+  /** Chunk ID when present. */
+  readonly chunkId?: string;
+  /** Context packing priority. */
+  readonly priority: number;
+  /** Estimated token count. */
+  readonly tokenEstimate: number;
+  /** Retrieval score when present. */
+  readonly score?: number;
+  /** Retriever that selected the item. */
+  readonly retriever: string;
+  /** Product-safe selection reason. */
+  readonly reason: string;
+  /** Short context preview when present. */
+  readonly textPreview?: string;
+  /** Metadata keys present on the item. */
+  readonly metadataKeys: readonly string[];
+};
+
 /** Context item comparison row for retrieval replay. */
 type RetrievalReplayItemComparison = {
   /** Stable comparison key. */
@@ -631,6 +670,10 @@ type RetrievalReplayItemComparison = {
   readonly originalPriority?: number;
   /** Replayed item priority when present. */
   readonly replayedPriority?: number;
+  /** Original item inspection when present. */
+  readonly originalItem?: RetrievalReplayItemInspection;
+  /** Replayed item inspection when present. */
+  readonly replayedItem?: RetrievalReplayItemInspection;
 };
 
 /** Non-mutating retrieval replay dry-run result. */
@@ -11396,8 +11439,22 @@ function renderRetrievalReplayComparisons(
                 <tr>
                   <td>${escapeHtml(comparison.status)}</td>
                   <td><code>${escapeHtml(comparison.key)}</code></td>
-                  <td>${escapeHtml(retrievalReplayItemLabel(comparison.originalKind, comparison.originalTitle, comparison.originalPriority))}</td>
-                  <td>${escapeHtml(retrievalReplayItemLabel(comparison.replayedKind, comparison.replayedTitle, comparison.replayedPriority))}</td>
+                  <td>${renderRetrievalReplayItemInspection(
+                    comparison.originalItem,
+                    retrievalReplayItemLabel(
+                      comparison.originalKind,
+                      comparison.originalTitle,
+                      comparison.originalPriority,
+                    ),
+                  )}</td>
+                  <td>${renderRetrievalReplayItemInspection(
+                    comparison.replayedItem,
+                    retrievalReplayItemLabel(
+                      comparison.replayedKind,
+                      comparison.replayedTitle,
+                      comparison.replayedPriority,
+                    ),
+                  )}</td>
                 </tr>
               `,
             )
@@ -11406,6 +11463,43 @@ function renderRetrievalReplayComparisons(
       </table>
     </div>
   `;
+}
+
+/** Renders an inspectable retrieval replay context item cell. */
+function renderRetrievalReplayItemInspection(
+  item: RetrievalReplayItemInspection | undefined,
+  fallback: string,
+): string {
+  if (!item) {
+    return `<span class="muted-text">${escapeHtml(fallback)}</span>`;
+  }
+
+  const location = retrievalReplayItemLocation(item);
+  const metadata = item.metadataKeys.length > 0 ? item.metadataKeys.join(", ") : "none";
+
+  return `
+    <div class="retrieval-item-detail">
+      <strong>${escapeHtml(item.title ?? item.contextItemId)}</strong>
+      <span>${escapeHtml(item.kind)} / ${escapeHtml(item.source)} / priority ${item.priority} / ${item.tokenEstimate} token(s)</span>
+      ${location ? `<span>${escapeHtml(location)}</span>` : ""}
+      <span>${escapeHtml(item.retriever)}: ${escapeHtml(item.reason)}</span>
+      ${item.score === undefined ? "" : `<span>score ${escapeHtml(item.score.toFixed(3))}</span>`}
+      ${item.textPreview ? `<p>${escapeHtml(item.textPreview)}</p>` : ""}
+      <span>metadata: ${escapeHtml(metadata)}</span>
+    </div>
+  `;
+}
+
+/** Builds a compact location label for retrieval replay item inspection. */
+function retrievalReplayItemLocation(item: RetrievalReplayItemInspection): string | undefined {
+  if (!item.path) {
+    return undefined;
+  }
+  if (!item.lineRange) {
+    return item.path;
+  }
+
+  return `${item.path}:${item.lineRange.startLine}-${item.lineRange.endLine}`;
 }
 
 /** Builds a compact context item label for comparison tables. */
