@@ -276,13 +276,27 @@ export type FindingJudgeOutput = {
   /** Judge output schema version. */
   readonly schemaVersion: "finding_judge_output.v1";
   /** Current MVP judging strategy. */
-  readonly strategy: "delegated_to_validation";
+  readonly strategy: "deterministic_pre_validation";
   /** Number of candidate findings inspected by the judge pass. */
   readonly candidateCount: number;
   /** Number of candidates kept by the judge pass. */
   readonly keptCandidateCount: number;
   /** Number of candidates dropped by the judge pass. */
   readonly droppedCandidateCount: number;
+  /** Candidate IDs kept by the judge pass. */
+  readonly keptCandidateFindingIds: readonly string[];
+  /** Candidate IDs dropped by the judge pass. */
+  readonly droppedCandidateFindingIds: readonly string[];
+  /** Product-safe drop reasons keyed by candidate ID. */
+  readonly dropReasons: readonly FindingJudgeDropReason[];
+};
+
+/** Product-safe reason emitted when the judge drops a candidate. */
+export type FindingJudgeDropReason = {
+  /** Candidate finding dropped by the judge. */
+  readonly candidateFindingId: string;
+  /** Deterministic judge reason. */
+  readonly reason: "low_confidence" | "speculative_language";
 };
 
 /** High-level review engine facade used by orchestration code. */
@@ -524,15 +538,42 @@ function createBehaviorChangeSummary(context: ReviewPassContext): BehaviorChange
 
 /** Creates the MVP judge output that delegates final decisions to validation. */
 function createFindingJudgeOutput(context: ReviewPassContext): FindingJudgeOutput {
-  const candidateCount = context.candidateFindings?.length ?? 0;
+  const candidates = context.candidateFindings ?? [];
+  const dropReasons = candidates.flatMap((finding) => {
+    const reason = findingJudgeDropReason(finding);
+    return reason ? [{ candidateFindingId: finding.findingId, reason }] : [];
+  });
+  const droppedCandidateFindingIds = new Set(
+    dropReasons.map((dropReason) => dropReason.candidateFindingId),
+  );
+  const keptCandidateFindingIds = candidates
+    .filter((finding) => !droppedCandidateFindingIds.has(finding.findingId))
+    .map((finding) => finding.findingId);
 
   return {
     schemaVersion: "finding_judge_output.v1",
-    strategy: "delegated_to_validation",
-    candidateCount,
-    keptCandidateCount: candidateCount,
-    droppedCandidateCount: 0,
+    strategy: "deterministic_pre_validation",
+    candidateCount: candidates.length,
+    keptCandidateCount: keptCandidateFindingIds.length,
+    droppedCandidateCount: droppedCandidateFindingIds.size,
+    keptCandidateFindingIds,
+    droppedCandidateFindingIds: [...droppedCandidateFindingIds],
+    dropReasons,
   };
+}
+
+/** Returns why the MVP judge should drop a candidate, if applicable. */
+function findingJudgeDropReason(
+  finding: CandidateFinding,
+): FindingJudgeDropReason["reason"] | undefined {
+  if (finding.confidence < 0.35) {
+    return "low_confidence";
+  }
+  if (finding.confidence < 0.6 && /\b(could|maybe|might|possibly|seems?)\b/iu.test(finding.body)) {
+    return "speculative_language";
+  }
+
+  return undefined;
 }
 
 /** Returns high-level risk area labels for a PR summary. */
@@ -606,23 +647,50 @@ export function createReviewEngine(): ReviewEngine {
         ...(input.mode ? { mode: input.mode } : {}),
         snapshot: input.context.snapshot,
       });
-      const passes = selectedPassIds.map((passId) => registry.require(passId));
-      const result = await runReviewPassesDetailed({
+      const selectedPasses = selectedPassIds.map((passId) => ({
+        passId,
+        pass: registry.require(passId),
+      }));
+      const generationPasses = selectedPasses
+        .filter((entry) => entry.passId !== "finding_judge")
+        .map((entry) => entry.pass);
+      const judgePass = selectedPasses.find((entry) => entry.passId === "finding_judge")?.pass;
+      const generationResult = await runReviewPassesDetailed({
         context: input.context,
         ...(input.metrics ? { metrics: input.metrics } : {}),
         isolatePassFailures: true,
-        passes,
+        passes: generationPasses,
         ...(input.traceContext ? { traceContext: input.traceContext } : {}),
         ...(input.traces ? { traces: input.traces } : {}),
       });
 
-      const summary = summaryFromPassResults(result.passResults);
-      const behaviorChange = behaviorChangeFromPassResults(result.passResults);
+      const summary = summaryFromPassResults(generationResult.passResults);
+      const behaviorChange = behaviorChangeFromPassResults(generationResult.passResults);
+      const judgeResult = judgePass
+        ? await runReviewPassesDetailed({
+            context: {
+              ...input.context,
+              candidateFindings: generationResult.findings,
+              ...(behaviorChange ? { behaviorChange } : {}),
+              ...(summary ? { summary } : {}),
+            },
+            ...(input.metrics ? { metrics: input.metrics } : {}),
+            isolatePassFailures: true,
+            passes: [judgePass],
+            ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+            ...(input.traces ? { traces: input.traces } : {}),
+          })
+        : { findings: [], passResults: [] };
+      const passResults = [...generationResult.passResults, ...judgeResult.passResults];
+      const findings = applyFindingJudgeOutput(
+        generationResult.findings,
+        findingJudgeOutputFromPassResults(judgeResult.passResults),
+      );
 
       return {
         ...(behaviorChange ? { behaviorChange } : {}),
-        findings: result.findings,
-        passResults: result.passResults,
+        findings,
+        passResults,
         selectedPassIds,
         ...(summary ? { summary } : {}),
       };
@@ -885,6 +953,27 @@ function behaviorChangeFromPassResults(
   return isBehaviorChangeSummary(output) ? output : undefined;
 }
 
+/** Extracts the first structured finding-judge output from pass results. */
+function findingJudgeOutputFromPassResults(
+  passResults: readonly ReviewPassResult[],
+): FindingJudgeOutput | undefined {
+  const output = passResults.find((passResult) => passResult.passName === "finding_judge")?.output;
+  return isFindingJudgeOutput(output) ? output : undefined;
+}
+
+/** Applies deterministic judge keep/drop output to candidate findings. */
+function applyFindingJudgeOutput(
+  findings: readonly CandidateFinding[],
+  output: FindingJudgeOutput | undefined,
+): readonly CandidateFinding[] {
+  if (!output) {
+    return findings;
+  }
+
+  const keptCandidateFindingIds = new Set(output.keptCandidateFindingIds);
+  return findings.filter((finding) => keptCandidateFindingIds.has(finding.findingId));
+}
+
 /** Returns whether a pass returned structured output instead of a candidate array. */
 function isReviewPassRunOutput(output: ReviewPassRunReturn): output is ReviewPassRunOutput {
   return !Array.isArray(output) && isRecord(output) && Array.isArray(output.candidates);
@@ -898,6 +987,11 @@ function isPRReviewSummary(value: unknown): value is PRReviewSummary {
 /** Returns whether a value is a structured behavior-change summary. */
 function isBehaviorChangeSummary(value: unknown): value is BehaviorChangeSummary {
   return isRecord(value) && value.schemaVersion === "behavior_change_summary.v1";
+}
+
+/** Returns whether a value is a structured finding-judge output. */
+function isFindingJudgeOutput(value: unknown): value is FindingJudgeOutput {
+  return isRecord(value) && value.schemaVersion === "finding_judge_output.v1";
 }
 
 /** Converts an unknown pass error into bounded product-safe failure details. */

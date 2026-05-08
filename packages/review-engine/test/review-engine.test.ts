@@ -141,6 +141,17 @@ describe("createReviewEngine", () => {
       changedPaths: ["src/math.ts"],
       riskLevel: "low",
     });
+    expect(
+      result.passResults.find((passResult) => passResult.passName === "finding_judge"),
+    ).toEqual(
+      expect.objectContaining({
+        output: expect.objectContaining({
+          schemaVersion: "finding_judge_output.v1",
+          candidateCount: 1,
+          keptCandidateCount: 1,
+        }),
+      }),
+    );
   });
 
   it("isolates selected pass failures and returns structured pass results", async () => {
@@ -204,6 +215,54 @@ describe("createReviewEngine", () => {
       code: "unknown_error",
       message: "fixture pass failure",
       retryable: false,
+    });
+  });
+
+  it("applies deterministic judge drops before returning candidate findings", async () => {
+    const engine = createReviewEngine();
+    const result = await engine.run({
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        timestamp: validCandidateFindingFixture.createdAt,
+        llmGateway: createStaticLLMGateway({
+          findings: [
+            {
+              path: "src/math.ts",
+              line: 2,
+              severity: "medium",
+              category: "correctness",
+              title: "Reject non-finite arithmetic inputs",
+              body: "The changed arithmetic path accepts NaN and Infinity without validation.",
+              evidence: ["The added line coerces values with Number() and returns the result."],
+              confidence: 0.84,
+            },
+            {
+              path: "src/math.ts",
+              line: 2,
+              severity: "low",
+              category: "correctness",
+              title: "Maybe simplify this branch",
+              body: "This could possibly be a problem, but the impact is unclear.",
+              evidence: ["The added line might need more review."],
+              confidence: 0.42,
+            },
+          ],
+        }),
+      },
+    });
+    const judgeOutput = result.passResults.find(
+      (passResult) => passResult.passName === "finding_judge",
+    )?.output;
+
+    expect(result.findings.map((finding) => finding.title)).toEqual([
+      "Reject non-finite arithmetic inputs",
+    ]);
+    expect(judgeOutput).toMatchObject({
+      schemaVersion: "finding_judge_output.v1",
+      candidateCount: 2,
+      droppedCandidateCount: 1,
+      dropReasons: [expect.objectContaining({ reason: "speculative_language" })],
     });
   });
 });
