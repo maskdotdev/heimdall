@@ -104,6 +104,45 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         repoId: "repo_review_repository_test",
       }),
     ).rejects.toThrow(/limit must be an integer/u);
+    await reviewRepository.upsertReviewRun(
+      reviewRunFixture({
+        headSha: "3333333",
+        metadata: { dryRun: true },
+        reviewRunId: "rrn_review_repository_waiting_for_index",
+        status: "waiting_for_index",
+        updatedAt: "2026-05-08T00:04:30.000Z",
+      }),
+    );
+    await expect(
+      reviewRepository.listReviewRunsWaitingForIndex({
+        headSha: "3333333",
+        limit: 10,
+        repoId: "repo_review_repository_test",
+      }),
+    ).resolves.toEqual([
+      {
+        baseSha: "1111111",
+        dryRunMetadata: { dryRun: true },
+        headSha: "3333333",
+        pullRequestNumber: 42,
+        reviewRunId: "rrn_review_repository_waiting_for_index",
+        trigger: "webhook",
+      },
+    ]);
+    await expect(
+      reviewRepository.listReviewRunsWaitingForIndex({
+        headSha: "missing-sha",
+        limit: 10,
+        repoId: "repo_review_repository_test",
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      reviewRepository.listReviewRunsWaitingForIndex({
+        headSha: "3333333",
+        limit: 0,
+        repoId: "repo_review_repository_test",
+      }),
+    ).rejects.toThrow(/limit must be an integer/u);
 
     const candidate = await reviewRepository.insertCandidateFinding(
       candidateFindingFixture({

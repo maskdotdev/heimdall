@@ -320,6 +320,32 @@ export type RecentCompletedReviewRunRecord = {
   readonly reviewRunId: string;
 };
 
+/** Input used to list review runs waiting for a completed index version. */
+export type ListReviewRunsWaitingForIndexInput = {
+  /** Head commit SHA that now has an index. */
+  readonly headSha: string;
+  /** Maximum rows to return. */
+  readonly limit: number;
+  /** Repository that owns the review runs. */
+  readonly repoId: string;
+};
+
+/** Review run fields needed to resume a waiting index-dependent review. */
+export type ReviewRunWaitingForIndexRecord = {
+  /** Base commit SHA reviewed by the run. */
+  readonly baseSha: string;
+  /** Review-run metadata that may include dry-run flags. */
+  readonly dryRunMetadata: unknown;
+  /** Head commit SHA reviewed by the run. */
+  readonly headSha: string;
+  /** Git provider pull request number. */
+  readonly pullRequestNumber: number;
+  /** Durable review run ID. */
+  readonly reviewRunId: string;
+  /** Trigger that created the review run. */
+  readonly trigger: string;
+};
+
 /** Published finding target used to correlate provider feedback events. */
 export type PublishedFindingFeedbackTargetRecord = {
   /** Candidate finding linked to the published finding. */
@@ -496,6 +522,31 @@ export class ReviewRepository {
       .from(reviewRuns)
       .where(and(...filters))
       .orderBy(desc(reviewRuns.updatedAt), desc(reviewRuns.reviewRunId))
+      .limit(repositoryInspectionLimit(input.limit));
+  }
+
+  /** Lists review runs waiting for a completed index version. */
+  public async listReviewRunsWaitingForIndex(
+    input: ListReviewRunsWaitingForIndexInput,
+  ): Promise<readonly ReviewRunWaitingForIndexRecord[]> {
+    return this.db
+      .select({
+        baseSha: reviewRuns.baseSha,
+        dryRunMetadata: reviewRuns.metadata,
+        headSha: reviewRuns.headSha,
+        pullRequestNumber: reviewRuns.pullRequestNumber,
+        reviewRunId: reviewRuns.reviewRunId,
+        trigger: reviewRuns.trigger,
+      })
+      .from(reviewRuns)
+      .where(
+        and(
+          eq(reviewRuns.repoId, input.repoId),
+          eq(reviewRuns.headSha, input.headSha),
+          eq(reviewRuns.status, "waiting_for_index"),
+        ),
+      )
+      .orderBy(asc(reviewRuns.updatedAt), asc(reviewRuns.reviewRunId))
       .limit(repositoryInspectionLimit(input.limit));
   }
 

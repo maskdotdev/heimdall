@@ -647,8 +647,8 @@ describe("createWorkerHandlers", () => {
       }),
       select: () => ({
         from: () => ({
-          where: () => ({
-            limit: async () => [
+          where: () => {
+            const rows = [
               {
                 baseSha: "1111111",
                 dryRunMetadata: { dryRun: true },
@@ -657,8 +657,15 @@ describe("createWorkerHandlers", () => {
                 reviewRunId: "rrn_waiting",
                 trigger: "webhook",
               },
-            ],
-          }),
+            ];
+
+            return {
+              limit: async () => rows,
+              orderBy: () => ({
+                limit: async () => rows,
+              }),
+            };
+          },
         }),
       }),
     };

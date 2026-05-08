@@ -51,7 +51,6 @@ import {
   RepositoryRepository,
   ReviewRepository,
   reviewArtifacts,
-  reviewRuns,
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
@@ -804,24 +803,11 @@ export async function enqueueWaitingReviewRunsForIndex(
     readonly traceContext?: JobEnvelope<IndexRepoCommitJobPayload>["traceContext"];
   },
 ): Promise<EnqueueWaitingReviewRunsForIndexResult> {
-  const waitingRuns = await db
-    .select({
-      baseSha: reviewRuns.baseSha,
-      dryRunMetadata: reviewRuns.metadata,
-      headSha: reviewRuns.headSha,
-      pullRequestNumber: reviewRuns.pullRequestNumber,
-      reviewRunId: reviewRuns.reviewRunId,
-      trigger: reviewRuns.trigger,
-    })
-    .from(reviewRuns)
-    .where(
-      and(
-        eq(reviewRuns.repoId, payload.repoId),
-        eq(reviewRuns.headSha, payload.commitSha),
-        eq(reviewRuns.status, "waiting_for_index"),
-      ),
-    )
-    .limit(100);
+  const waitingRuns = await new ReviewRepository(db).listReviewRunsWaitingForIndex({
+    headSha: payload.commitSha,
+    limit: 100,
+    repoId: payload.repoId,
+  });
 
   const backgroundJobRepository = new BackgroundJobRepository(db);
 
