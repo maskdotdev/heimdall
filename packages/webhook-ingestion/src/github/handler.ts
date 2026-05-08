@@ -1,7 +1,7 @@
 import type { OrgSettings, RepositorySettings } from "@repo/contracts";
 import type { HeimdallDatabase } from "@repo/db";
 import {
-  backgroundJobs,
+  BackgroundJobRepository,
   orgs,
   PullRequestRepository,
   providerInstallations,
@@ -391,19 +391,11 @@ async function persistPullRequest(
 }
 
 async function persistJob(tx: Transaction, job: PlannedJob): Promise<void> {
-  await tx
-    .insert(backgroundJobs)
-    .values({
-      backgroundJobId: newId("job"),
-      queueName: job.queueName,
-      jobKey: job.envelope.idempotencyKey,
-      jobType: job.envelope.jobType,
-      status: "pending",
-      orgId: job.orgId,
-      repoId: job.repoId,
-      payload: job.envelope,
-      maxAttempts: job.envelope.maxAttempts,
-      scheduledAt: job.envelope.scheduledFor ? new Date(job.envelope.scheduledFor) : undefined,
-    })
-    .onConflictDoNothing();
+  await new BackgroundJobRepository(tx).insertBackgroundJob({
+    backgroundJobId: newId("job"),
+    queueName: job.queueName,
+    envelope: job.envelope,
+    ...(job.orgId ? { orgId: job.orgId } : {}),
+    ...(job.repoId ? { repoId: job.repoId } : {}),
+  });
 }
