@@ -294,7 +294,7 @@ describe("retrieveContext", () => {
         {
           chunkId: "chunk_same",
           symbolId: "sym_same",
-          path: "src/index.ts",
+          path: "src/math.ts",
           startLine: 1,
           endLine: 3,
           language: "typescript",
@@ -307,11 +307,24 @@ describe("retrieveContext", () => {
         {
           symbolId: "sym_same",
           fileId: "file_same",
-          path: "src/index.ts",
+          path: "src/math.ts",
           name: "run",
+          qualifiedName: "run",
           kind: "function",
+          language: "typescript",
           startLine: 1,
-          endLine: 1,
+          endLine: 3,
+        },
+        {
+          symbolId: "sym_unrelated",
+          fileId: "file_same",
+          path: "src/math.ts",
+          name: "outsideChangedLines",
+          qualifiedName: "outsideChangedLines",
+          kind: "function",
+          language: "typescript",
+          startLine: 40,
+          endLine: 45,
         },
       ],
       getRelatedChunks: async () => [],
@@ -328,7 +341,7 @@ describe("retrieveContext", () => {
       getRoutesForFiles: async () => [
         {
           routeId: "route_user",
-          path: "src/index.ts",
+          path: "src/math.ts",
           language: "typescript",
           routePattern: "/api/users/:id",
           methods: ["GET"],
@@ -393,6 +406,15 @@ describe("retrieveContext", () => {
       indexAvailable: true,
       indexVersionId: "idx_123",
     });
+    expect(bundle.changedSymbols).toEqual([
+      expect.objectContaining({
+        diffHunkIds: ["hunk_1"],
+        name: "run",
+        newRange: { startLine: 1, endLine: 3 },
+        path: "src/math.ts",
+        symbolId: "sym_same",
+      }),
+    ]);
     expect(bundle.items.map((item) => item.kind)).toEqual(
       expect.arrayContaining([
         "same_file_context",

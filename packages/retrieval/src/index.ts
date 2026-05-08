@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  type ChangedSymbol,
   ContextBundleSchema,
   type FindingCategory,
   parseWithSchema,
   type RepoRule,
+  type SymbolKind,
 } from "@repo/contracts";
 import type { ChangedFile } from "@repo/contracts/pull-request/diff";
 import type { PullRequestSnapshot } from "@repo/contracts/pull-request/pull-request";
@@ -74,8 +76,12 @@ export type RetrievalSymbol = {
   readonly path: string;
   /** Symbol name. */
   readonly name: string;
+  /** Symbol qualified name when the indexer provides one. */
+  readonly qualifiedName?: string | null;
   /** Symbol kind. */
   readonly kind: string;
+  /** Symbol language. */
+  readonly language: string;
   /** 1-based start line. */
   readonly startLine: number;
   /** 1-based end line. */
@@ -216,6 +222,8 @@ export type RetrievalWarning = {
 type IndexedRetrievalResult = {
   /** Context items produced by successful indexed retrievers. */
   readonly items: readonly ContextItem[];
+  /** Changed symbols detected from diff lines and imported symbols. */
+  readonly changedSymbols: readonly ChangedSymbol[];
   /** Non-fatal warnings from optional indexed retrievers. */
   readonly warnings: readonly RetrievalWarning[];
 };
@@ -277,9 +285,10 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
 
   try {
     const diffItems = input.snapshot.changedFiles.flatMap((file) => contextItemsForFile(file));
+    const fallbackChangedSymbols = changedSymbolsFromDiff(input.snapshot);
     const indexedResult = input.index
       ? await retrieveIndexedItems({ ...input, index: input.index }, diffItems)
-      : { items: [], warnings: [] };
+      : { changedSymbols: fallbackChangedSymbols, items: [], warnings: [] };
     const memoryResult = input.memory
       ? await retrieveMemoryItems({ ...input, memory: input.memory }, timestamp)
       : { factIds: [], items: [], trace: [] };
@@ -307,7 +316,7 @@ export async function retrieveContext(input: RetrieveContextInput): Promise<Cont
       baseSha: input.snapshot.baseSha,
       headSha: input.snapshot.headSha,
       changedFiles: input.snapshot.changedFiles,
-      changedSymbols: [],
+      changedSymbols: indexedResult.changedSymbols,
       items: [...items],
       tokenBudget: {
         maxTokens,
@@ -535,7 +544,9 @@ export function createDatabaseRetrievalIndex(options: {
           symbolId: symbols.symbolId,
           fileId: symbols.fileId,
           path: symbols.path,
+          language: symbols.language,
           name: symbols.name,
+          qualifiedName: symbols.qualifiedName,
           kind: symbols.kind,
           startLine: symbols.startLine,
           endLine: symbols.endLine,
@@ -740,7 +751,21 @@ async function retrieveIndexedItems(
     input.index.getSameFileChunks(paths),
     input.index.getSymbolsForFiles(paths),
   ]);
-  const symbolIds = symbolsForFiles.map((symbol) => symbol.symbolId);
+  const changedSymbolsForFiles = symbolsForFiles.filter((symbol) =>
+    retrievalSymbolOverlapsChangedLines(symbol, input.snapshot.changedFiles),
+  );
+  const indexedChangedSymbols = changedSymbolsFromIndexedSymbols(
+    input.snapshot,
+    changedSymbolsForFiles,
+  );
+  const indexedSymbolPaths = new Set(indexedChangedSymbols.map((symbol) => symbol.path));
+  const changedSymbols = [
+    ...indexedChangedSymbols,
+    ...changedSymbolsFromDiff(input.snapshot).filter(
+      (symbol) => !indexedSymbolPaths.has(symbol.path),
+    ),
+  ];
+  const symbolIds = changedSymbolsForFiles.map((symbol) => symbol.symbolId);
   const [
     relatedResult,
     dependencyResult,
@@ -780,7 +805,7 @@ async function retrieveIndexedItems(
       ...sameFile.map((chunk) =>
         chunkItem(chunk, "same_file_context", "Same file indexed context."),
       ),
-      ...symbolsForFiles.map(symbolItem),
+      ...changedSymbolsForFiles.map(symbolItem),
       ...relatedResult.items.map((chunk) =>
         chunkItem(
           chunk,
@@ -808,6 +833,7 @@ async function retrieveIndexedItems(
       ...fullTextResult.warnings,
       ...similarResult.warnings,
     ],
+    changedSymbols,
   };
 }
 
@@ -1101,6 +1127,147 @@ function memoryFactPriority(fact: MemoryFact): number {
 
 function memoryKindLabel(kind: MemoryFact["kind"]): string {
   return kind.replaceAll("_", " ");
+}
+
+/** Converts indexed symbols that overlap changed lines into changed-symbol contracts. */
+function changedSymbolsFromIndexedSymbols(
+  snapshot: PullRequestSnapshot,
+  symbolsForFiles: readonly RetrievalSymbol[],
+): readonly ChangedSymbol[] {
+  const changedFileByPath = new Map(snapshot.changedFiles.map((file) => [file.path, file]));
+
+  return symbolsForFiles.flatMap((symbol) => {
+    const file = changedFileByPath.get(symbol.path);
+    if (!file) {
+      return [];
+    }
+    const diffHunkIds = file.hunks
+      .filter((hunk) =>
+        lineRangeOverlaps(
+          { startLine: symbol.startLine, endLine: symbol.endLine },
+          changedLineRangeForHunk(file, hunk),
+        ),
+      )
+      .map((hunk) => hunk.hunkId);
+
+    return [
+      {
+        symbolId: symbol.symbolId,
+        fileId: symbol.fileId,
+        path: symbol.path,
+        name: symbol.name,
+        ...(symbol.qualifiedName ? { qualifiedName: symbol.qualifiedName } : {}),
+        kind: symbolKindForContext(symbol.kind),
+        language: languageForContext(symbol.language),
+        changeType: file.status,
+        newRange: { startLine: symbol.startLine, endLine: symbol.endLine },
+        diffHunkIds,
+        confidence: diffHunkIds.length > 0 ? 0.9 : 0.75,
+      },
+    ];
+  });
+}
+
+/** Creates line-range changed-symbol fallbacks directly from diff hunks. */
+function changedSymbolsFromDiff(snapshot: PullRequestSnapshot): readonly ChangedSymbol[] {
+  return snapshot.changedFiles.flatMap((file) =>
+    file.hunks.map((hunk, index) => {
+      const range = changedLineRangeForHunk(file, hunk);
+      const patch = hunk.lines
+        .map((line) => `${prefixForLine(line.kind)}${line.content}`)
+        .join("\n");
+
+      return {
+        path: file.path,
+        language: file.language,
+        changeType: file.status,
+        ...(file.status === "deleted" ? { oldRange: range } : { newRange: range }),
+        diffHunkIds: [hunk.hunkId],
+        patch,
+        confidence: 0.55,
+        name: `${file.path} hunk ${index + 1}`,
+        kind: "unknown",
+      } satisfies ChangedSymbol;
+    }),
+  );
+}
+
+/** Returns whether an indexed symbol overlaps at least one changed line range. */
+function retrievalSymbolOverlapsChangedLines(
+  symbol: RetrievalSymbol,
+  files: readonly ChangedFile[],
+): boolean {
+  const file = files.find((changedFile) => changedFile.path === symbol.path);
+  if (!file) {
+    return false;
+  }
+
+  return file.hunks.some((hunk) =>
+    lineRangeOverlaps(
+      { startLine: symbol.startLine, endLine: symbol.endLine },
+      changedLineRangeForHunk(file, hunk),
+    ),
+  );
+}
+
+/** Builds the changed-line range for a diff hunk on the relevant side. */
+function changedLineRangeForHunk(
+  file: ChangedFile,
+  hunk: ChangedFile["hunks"][number],
+): { readonly startLine: number; readonly endLine: number } {
+  const changedLines = hunk.lines
+    .filter((line) =>
+      file.status === "deleted" ? line.kind === "deletion" : line.kind === "addition",
+    )
+    .map((line) => (file.status === "deleted" ? line.oldLine : line.newLine))
+    .filter((line): line is number => line !== undefined);
+  if (changedLines.length > 0) {
+    return {
+      startLine: Math.max(1, Math.min(...changedLines)),
+      endLine: Math.max(1, Math.max(...changedLines)),
+    };
+  }
+
+  const startLine = file.status === "deleted" ? hunk.oldStart : hunk.newStart;
+  const lineCount = file.status === "deleted" ? hunk.oldLines : hunk.newLines;
+
+  return {
+    startLine: Math.max(1, startLine),
+    endLine: Math.max(1, startLine + Math.max(0, lineCount - 1)),
+  };
+}
+
+/** Returns whether two line ranges overlap. */
+function lineRangeOverlaps(
+  left: { readonly startLine: number; readonly endLine: number },
+  right: { readonly startLine: number; readonly endLine: number },
+): boolean {
+  return left.startLine <= right.endLine && left.endLine >= right.startLine;
+}
+
+/** Maps indexer symbol kinds to the shared symbol-kind contract. */
+function symbolKindForContext(kind: string): SymbolKind {
+  if (
+    kind === "module" ||
+    kind === "namespace" ||
+    kind === "class" ||
+    kind === "interface" ||
+    kind === "type" ||
+    kind === "enum" ||
+    kind === "function" ||
+    kind === "method" ||
+    kind === "constructor" ||
+    kind === "property" ||
+    kind === "variable" ||
+    kind === "constant" ||
+    kind === "route" ||
+    kind === "component" ||
+    kind === "hook"
+  ) {
+    return kind;
+  }
+
+  return "unknown";
 }
 
 function withFallbackRule(items: readonly ContextItem[]): readonly ContextItem[] {
