@@ -187,9 +187,9 @@ class AdminDebugSelectStub {
     return this;
   }
 
-  /** Ignores sort expressions and resolves the selected fake rows. */
-  public orderBy(): Promise<readonly unknown[]> {
-    return Promise.resolve(this.currentRows());
+  /** Ignores sort expressions and returns this fake builder. */
+  public orderBy(): this {
+    return this;
   }
 
   /** Resolves at most the requested number of fake rows. */
