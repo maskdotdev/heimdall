@@ -36,7 +36,13 @@ import {
   type ReviewRunMetricsInput,
   SecurityAuditRepository,
 } from "@repo/db";
-import type { GitHubPullRequestRef, GitHubRepositoryRef, GitProvider } from "@repo/github";
+import {
+  type GitHubErrorCode,
+  GitHubProviderError,
+  type GitHubPullRequestRef,
+  type GitHubRepositoryRef,
+  type GitProvider,
+} from "@repo/github";
 import {
   createStaticLLMGateway,
   type LLMGateway,
@@ -80,8 +86,11 @@ import {
 } from "@repo/rules";
 import {
   type RetentionDecision,
+  recordSecurityEvent,
   redactPromptSecrets,
   resolveArtifactRetention,
+  type SecurityEventSeverity,
+  type SecurityEventSink,
 } from "@repo/security";
 import {
   type NormalizedToolDiagnostic,
@@ -194,6 +203,8 @@ export type ReviewOrchestratorDependencies = {
   readonly llmUsageRateCard?: LlmTokenRateCard;
   /** Optional usage ledger for recording completed review and model usage. */
   readonly usageLedger?: UsageLedger;
+  /** Optional sink for GitHub provider-control security events during review orchestration. */
+  readonly securityEventSink?: SecurityEventSink;
   /** Optional artifact payload store used for durable review artifact payloads. */
   readonly artifactPayloadStore?: ReviewArtifactPayloadStore;
   /** Optional static-analysis runner for changed-file tool diagnostics. */
@@ -562,6 +573,24 @@ export type LlmUsageTelemetryInput = {
   readonly task: string;
 };
 
+/** Input used to record one review-time GitHub provider control security event. */
+export type RecordReviewGitHubProviderSecurityEventInput = {
+  /** Error returned by the GitHub provider. */
+  readonly error: unknown;
+  /** Organization that owns the review, when known. */
+  readonly orgId?: string | undefined;
+  /** Pull request review job input that reached the GitHub provider. */
+  readonly reviewInput: Pick<ReviewPullRequestInput, "headSha" | "pullRequestNumber" | "repoId">;
+  /** Review run associated with the failure when it has already been created. */
+  readonly reviewRunId?: string | undefined;
+  /** Review orchestration stage where the provider failure surfaced. */
+  readonly reviewStage: string;
+  /** Optional sink configured by the worker runtime. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+  /** Deterministic event creation timestamp for tests. */
+  readonly timestamp?: string | undefined;
+};
+
 /** Product-safe context attached to every structured review stage log. */
 export type ReviewStageLogContext = {
   /** Durable job ID that caused the review stage, or `unknown` when unavailable. */
@@ -691,7 +720,17 @@ export async function runPullRequestReview(
   const snapshotFetch = await fetchPullRequestSnapshotForReview(
     dependencies.gitProvider,
     pullRequestRef,
-  );
+  ).catch((error: unknown) => {
+    recordReviewGitHubProviderSecurityEvent({
+      error,
+      orgId: repositoryRecord.orgId,
+      reviewInput: input,
+      reviewStage: "snapshot",
+      securityEventSink: dependencies.securityEventSink,
+      timestamp: now().toISOString(),
+    });
+    throw error;
+  });
   const snapshot = snapshotFetch.snapshot;
   assertSnapshotMatchesJob(input, snapshot);
   const reviewRunId = stableId("rrn", [
@@ -2138,6 +2177,15 @@ export async function runPullRequestReview(
       throw error;
     }
     const failedAt = now().toISOString();
+    recordReviewGitHubProviderSecurityEvent({
+      error,
+      orgId: repositoryRecord.orgId,
+      reviewInput: input,
+      reviewRunId,
+      reviewStage: currentStage,
+      securityEventSink: dependencies.securityEventSink,
+      timestamp: failedAt,
+    });
     if (quotaReservation?.reservation?.status === "reserved" && !quotaReservationFinalized) {
       await quotaService.releaseReservation({
         now: failedAt,
@@ -2444,6 +2492,96 @@ export function recordLlmUsageTelemetry(
     labels,
     value: Math.max(0, input.costMicros),
   });
+}
+
+/** Records product-safe GitHub provider control failures that block review orchestration. */
+export function recordReviewGitHubProviderSecurityEvent(
+  input: RecordReviewGitHubProviderSecurityEventInput,
+): void {
+  if (!input.securityEventSink || !(input.error instanceof GitHubProviderError)) {
+    return;
+  }
+
+  const eventType = reviewGitHubSecurityEventType(input.error.code);
+  if (!eventType) {
+    return;
+  }
+
+  const repoId = input.reviewInput.repoId;
+  recordSecurityEvent(input.securityEventSink, {
+    createdAt: input.timestamp,
+    id: stableId("secevt", [
+      "github_review",
+      input.reviewStage,
+      repoId,
+      input.reviewRunId ?? "pending",
+      input.reviewInput.pullRequestNumber,
+      input.reviewInput.headSha,
+      input.error.code,
+      input.error.requestId ?? "unknown",
+    ]),
+    metadata: {
+      githubReason: input.error.code,
+      ...(input.error.requestId ? { githubRequestId: input.error.requestId } : {}),
+      ...(input.error.status ? { githubStatus: input.error.status } : {}),
+      headSha: input.reviewInput.headSha,
+      pullRequestNumber: input.reviewInput.pullRequestNumber,
+      ...(input.error.rateLimit?.remaining !== undefined
+        ? { rateLimitRemaining: input.error.rateLimit.remaining }
+        : {}),
+      ...(input.error.rateLimit?.resource
+        ? { rateLimitBucket: input.error.rateLimit.resource }
+        : {}),
+      ...(input.error.retryAfterSeconds !== undefined
+        ? { retryAfterSeconds: input.error.retryAfterSeconds }
+        : {}),
+      ...(input.reviewRunId ? { reviewRunId: input.reviewRunId } : {}),
+      reviewStage: input.reviewStage,
+    },
+    orgId: input.orgId,
+    repoId,
+    resourceId: input.reviewRunId ?? repoId,
+    resourceType: input.reviewRunId ? "review_run" : "repository",
+    severity: reviewGitHubSecurityEventSeverity(input.error.code),
+    source: "github",
+    type: eventType,
+  });
+}
+
+/** Maps GitHub review-time provider failures to security-event types worth triaging. */
+function reviewGitHubSecurityEventType(code: GitHubErrorCode): string | undefined {
+  switch (code) {
+    case "github_installation_suspended":
+      return "github_review_installation_suspended";
+    case "github_permission":
+      return "github_review_permission_denied";
+    case "github_rate_limit":
+      return "github_review_rate_limited";
+    case "github_secondary_rate_limit":
+      return "github_review_secondary_rate_limited";
+    case "github_token":
+      return "github_review_token_failed";
+    case "github_unavailable":
+      return "github_review_unavailable";
+    case "github_unknown":
+    case "github_validation":
+      return "github_review_provider_failed";
+    default:
+      return undefined;
+  }
+}
+
+/** Returns the security-event severity for one review-time GitHub provider failure. */
+function reviewGitHubSecurityEventSeverity(code: GitHubErrorCode): SecurityEventSeverity {
+  if (
+    code === "github_installation_suspended" ||
+    code === "github_permission" ||
+    code === "github_token"
+  ) {
+    return "high";
+  }
+
+  return "medium";
 }
 
 /** Builds the product-safe stage log context for one review job. */

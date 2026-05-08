@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { JOB_TYPES, type PullRequestSnapshot } from "@repo/contracts";
 import { validOrgSettingsFixture } from "@repo/contracts/fixtures/repository.fixture";
 import { validContextBundleFixture } from "@repo/contracts/fixtures/review.fixture";
-import { createFakeGitProvider, type GitHubRepositoryRef } from "@repo/github";
+import { createFakeGitProvider, GitHubProviderError, type GitHubRepositoryRef } from "@repo/github";
 import {
   createMemoryTelemetrySpanSink,
   createTelemetrySpanRecorder,
@@ -21,6 +21,7 @@ import {
   RepoSyncGitCommandError,
 } from "@repo/repo-sync";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
+import { createMemorySecurityEventSink } from "@repo/security";
 import { createFakeToolRunner } from "@repo/tool-runner";
 import { describe, expect, it } from "vitest";
 import {
@@ -40,6 +41,7 @@ import {
   type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
   recordLlmUsageTelemetry,
+  recordReviewGitHubProviderSecurityEvent,
   recordReviewStageMetrics,
   reviewGateSkipSummary,
   reviewMemoryFactFromRow,
@@ -656,6 +658,71 @@ describe("recordLlmUsageTelemetry", () => {
         value: 250,
       },
     ]);
+  });
+});
+
+describe("recordReviewGitHubProviderSecurityEvent", () => {
+  it("records product-safe GitHub review control failures", () => {
+    const securityEventSink = createMemorySecurityEventSink();
+
+    recordReviewGitHubProviderSecurityEvent({
+      error: new GitHubProviderError("github_permission", "missing checks permission", {
+        rateLimit: { remaining: 42, resource: "core" },
+        requestId: "req_review_permission",
+        retryAfterSeconds: 12,
+        status: 403,
+      }),
+      orgId: "org_test",
+      reviewInput,
+      reviewRunId: "rrn_test",
+      reviewStage: "snapshot",
+      securityEventSink,
+      timestamp: "2026-05-08T18:40:00.000Z",
+    });
+
+    expect(securityEventSink.events()).toEqual([
+      expect.objectContaining({
+        createdAt: "2026-05-08T18:40:00.000Z",
+        metadata: {
+          githubReason: "github_permission",
+          githubRequestId: "req_review_permission",
+          githubStatus: 403,
+          headSha: reviewInput.headSha,
+          pullRequestNumber: reviewInput.pullRequestNumber,
+          rateLimitBucket: "core",
+          rateLimitRemaining: 42,
+          retryAfterSeconds: 12,
+          reviewRunId: "rrn_test",
+          reviewStage: "snapshot",
+        },
+        orgId: "org_test",
+        repoId: reviewInput.repoId,
+        resourceId: "rrn_test",
+        resourceType: "review_run",
+        severity: "high",
+        source: "github",
+        status: "new",
+        type: "github_review_permission_denied",
+      }),
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("rateLimitResource");
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("missing checks permission");
+  });
+
+  it("ignores not-found provider responses that commonly mean stale pull request state", () => {
+    const securityEventSink = createMemorySecurityEventSink();
+
+    recordReviewGitHubProviderSecurityEvent({
+      error: new GitHubProviderError("github_not_found", "pull request not found", {
+        requestId: "req_review_not_found",
+        status: 404,
+      }),
+      reviewInput,
+      reviewStage: "current_state",
+      securityEventSink,
+    });
+
+    expect(securityEventSink.events()).toEqual([]);
   });
 });
 
