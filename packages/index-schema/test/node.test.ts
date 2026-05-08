@@ -12,7 +12,11 @@ import {
   stringifyIndexManifestJson,
   stringifyIndexRecordsJsonl,
 } from "../src";
-import { readSplitIndexArtifactDirectory, writeSplitIndexArtifactDirectory } from "../src/node";
+import {
+  openIndexArtifact,
+  readSplitIndexArtifactDirectory,
+  writeSplitIndexArtifactDirectory,
+} from "../src/node";
 
 /** Temporary directories created by Node helper tests. */
 const tempRoots: string[] = [];
@@ -64,6 +68,21 @@ describe("index artifact Node helpers", () => {
       manifest,
       records: artifact.records,
     });
+  });
+
+  it("opens a split artifact as a manifest plus streamed records", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithTwoFiles();
+
+    await writeSplitIndexArtifactDirectory(root, artifact);
+
+    const reader = await openIndexArtifact({ artifactDir: root });
+
+    expect(reader.manifest).toEqual({
+      ...artifact.manifest,
+      recordFiles: [recordFileFor("records.jsonl", artifact.records)],
+    });
+    await expect(collectRecords(reader.records())).resolves.toEqual(artifact.records);
   });
 
   it("rejects unsupported partitioned record-file compression", async () => {
@@ -127,6 +146,18 @@ async function createTempRoot(): Promise<string> {
   tempRoots.push(root);
 
   return root;
+}
+
+/** Collects streamed records for reader tests. */
+async function collectRecords(
+  records: AsyncIterable<IndexRecord>,
+): Promise<readonly IndexRecord[]> {
+  const collected: IndexRecord[] = [];
+  for await (const record of records) {
+    collected.push(record);
+  }
+
+  return collected;
 }
 
 /** Creates a minimal artifact with two file records for filesystem helper tests. */

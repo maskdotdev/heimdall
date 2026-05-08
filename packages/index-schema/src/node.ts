@@ -20,20 +20,40 @@ import {
   stringifyIndexRecordsJsonl,
 } from "./index";
 
-/** Records parsed from one JSONL file plus byte-level integrity metadata. */
-type IndexRecordsJsonlFileReadResult = {
+/** Byte-level integrity metadata for one parsed JSONL record file. */
+type IndexRecordsJsonlFileReadMetadata = {
   /** UTF-8 byte length of the exact file content. */
   readonly byteLength: number;
-  /** Parsed records. */
-  readonly records: readonly IndexRecord[];
+  /** Number of parsed records. */
+  readonly recordCount: number;
   /** SHA-256 digest of the exact file content. */
   readonly sha256: `sha256:${string}`;
+};
+
+/** Records parsed from one JSONL file plus byte-level integrity metadata. */
+type IndexRecordsJsonlFileReadResult = IndexRecordsJsonlFileReadMetadata & {
+  /** Parsed records. */
+  readonly records: readonly IndexRecord[];
 };
 
 /** Options for reading filesystem-backed index artifacts. */
 export type ReadIndexArtifactPathOptions = {
   /** Optional record count and byte limits for split artifact JSONL reads. */
   readonly recordLimits?: IndexJsonlRecordLimits;
+};
+
+/** Input for opening a filesystem-backed split index artifact. */
+export type OpenIndexArtifactInput = ReadIndexArtifactPathOptions & {
+  /** Directory containing the split artifact manifest and record files. */
+  readonly artifactDir: string;
+};
+
+/** Streaming reader for a filesystem-backed split index artifact. */
+export type IndexArtifactReader = {
+  /** Parsed manifest for the opened artifact. */
+  readonly manifest: IndexManifest;
+  /** Streams artifact records in manifest-declared order. */
+  records(): AsyncGenerator<IndexRecord>;
 };
 
 /** Reads either a whole-artifact JSON file or a split artifact directory. */
@@ -54,10 +74,28 @@ export async function readSplitIndexArtifactDirectory(
   directoryPath: string,
   options: ReadIndexArtifactPathOptions = {},
 ): Promise<IndexArtifact> {
-  const manifest = await readSplitIndexManifestFile(directoryPath);
-  const records = await readIndexRecordFiles(directoryPath, manifest, options);
+  const reader = await openIndexArtifact({
+    artifactDir: directoryPath,
+    ...recordLimitOption(options),
+  });
+  const records: IndexRecord[] = [];
+  for await (const record of reader.records()) {
+    records.push(record);
+  }
 
-  return { manifest, records };
+  return { manifest: reader.manifest, records };
+}
+
+/** Opens a split index artifact directory without eagerly loading every record. */
+export async function openIndexArtifact(
+  input: OpenIndexArtifactInput,
+): Promise<IndexArtifactReader> {
+  const manifest = await readSplitIndexManifestFile(input.artifactDir);
+
+  return {
+    manifest,
+    records: () => streamIndexRecordFiles(input.artifactDir, manifest, input),
+  };
 }
 
 /** Reads a compact JSONL records file without loading the full file into memory. */
@@ -74,8 +112,28 @@ async function readIndexRecordsJsonlFileWithMetadata(
   options: ReadIndexArtifactPathOptions = {},
 ): Promise<IndexRecordsJsonlFileReadResult> {
   const records: IndexRecord[] = [];
+  const iterator = readIndexRecordsJsonlFileStreamWithMetadata(recordsPath, options)[
+    Symbol.asyncIterator
+  ]();
+
+  while (true) {
+    const result = await iterator.next();
+    if (result.done) {
+      return { ...result.value, records };
+    }
+
+    records.push(result.value);
+  }
+}
+
+/** Streams a compact JSONL records file and returns integrity metadata when fully consumed. */
+async function* readIndexRecordsJsonlFileStreamWithMetadata(
+  recordsPath: string,
+  options: ReadIndexArtifactPathOptions = {},
+): AsyncGenerator<IndexRecord, IndexRecordsJsonlFileReadMetadata, void> {
   const hash = createHash("sha256");
   let byteLength = 0;
+  let recordCount = 0;
   const stream = createReadStream(recordsPath);
   stream.on("data", (chunk) => {
     const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
@@ -94,19 +152,20 @@ async function readIndexRecordsJsonlFileWithMetadata(
     const record = parseIndexRecordJsonlLine(line, lineNumber, parseOptions);
     if (
       options.recordLimits?.maxRecords !== undefined &&
-      records.length + 1 > options.recordLimits.maxRecords
+      recordCount + 1 > options.recordLimits.maxRecords
     ) {
       throw new Error(
         `Index artifact JSONL record count exceeds configured maximum ${options.recordLimits.maxRecords}.`,
       );
     }
 
-    records.push(record);
+    recordCount += 1;
+    yield record;
   }
 
   return {
     byteLength,
-    records,
+    recordCount,
     sha256: `sha256:${hash.digest("hex")}`,
   };
 }
@@ -133,18 +192,22 @@ export async function writeSplitIndexArtifactDirectory(
   ]);
 }
 
-/** Reads all record files declared by the manifest, or the canonical MVP record file. */
-async function readIndexRecordFiles(
+/** Streams all record files declared by the manifest, or the canonical MVP record file. */
+async function* streamIndexRecordFiles(
   directoryPath: string,
   manifest: IndexManifest,
   options: ReadIndexArtifactPathOptions,
-): Promise<IndexRecord[]> {
+): AsyncGenerator<IndexRecord> {
   if (!manifest.recordFiles) {
-    return readIndexRecordsJsonlFile(join(directoryPath, INDEX_RECORDS_FILE_NAME), options);
+    yield* readIndexRecordsJsonlFileStreamWithMetadata(
+      join(directoryPath, INDEX_RECORDS_FILE_NAME),
+      options,
+    );
+    return;
   }
 
   const recordFiles = manifest.recordFiles;
-  const records: IndexRecord[] = [];
+  let totalRecordCount = 0;
 
   for (const recordFile of recordFiles) {
     assertSafeRecordFilePath(recordFile.path);
@@ -154,24 +217,21 @@ async function readIndexRecordFiles(
       );
     }
 
-    const result = await readIndexRecordsJsonlFileWithMetadata(
+    const result = yield* readIndexRecordsJsonlFileStreamWithMetadata(
       join(directoryPath, recordFile.path),
-      options.recordLimits === undefined ? {} : { recordLimits: options.recordLimits },
+      recordLimitOption(options),
     );
     validateRecordFileMetadata(recordFile, result);
-    const fileRecords = result.records;
-    records.push(...fileRecords);
+    totalRecordCount += result.recordCount;
     if (
       options.recordLimits?.maxRecords !== undefined &&
-      records.length > options.recordLimits.maxRecords
+      totalRecordCount > options.recordLimits.maxRecords
     ) {
       throw new Error(
         `Index artifact JSONL record count exceeds configured maximum ${options.recordLimits.maxRecords}.`,
       );
     }
   }
-
-  return records;
 }
 
 /** Throws when a manifest record-file path could escape the artifact directory. */
@@ -184,11 +244,11 @@ function assertSafeRecordFilePath(path: string): void {
 /** Validates one record file read result against its manifest metadata. */
 function validateRecordFileMetadata(
   recordFile: IndexRecordFile,
-  result: IndexRecordsJsonlFileReadResult,
+  result: IndexRecordsJsonlFileReadMetadata,
 ): void {
-  if (result.records.length !== recordFile.recordCount) {
+  if (result.recordCount !== recordFile.recordCount) {
     throw new Error(
-      `Index artifact record file ${recordFile.path} contains ${result.records.length} records but manifest declares ${recordFile.recordCount}.`,
+      `Index artifact record file ${recordFile.path} contains ${result.recordCount} records but manifest declares ${recordFile.recordCount}.`,
     );
   }
   if (result.byteLength !== recordFile.byteLength) {
@@ -227,6 +287,11 @@ function withCanonicalRecordFile(artifact: IndexArtifactInput): IndexManifest {
 /** Returns a canonical SHA-256 digest for UTF-8 text. */
 function sha256Text(text: string): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
+}
+
+/** Returns a record-limit option object without writing exact-optional undefined fields. */
+function recordLimitOption(options: ReadIndexArtifactPathOptions): ReadIndexArtifactPathOptions {
+  return options.recordLimits === undefined ? {} : { recordLimits: options.recordLimits };
 }
 
 /** Reads the canonical split artifact manifest file. */
