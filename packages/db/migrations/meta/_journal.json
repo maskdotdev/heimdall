@@ -162,6 +162,13 @@
       "when": 1778200111237,
       "tag": "0022_futuristic_quicksilver",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1778211368177,
+      "tag": "0023_purple_mercury",
+      "breakpoints": true
     }
   ]
 }

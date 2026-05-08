@@ -332,6 +332,10 @@ export const codeIndexVersions = pgTable(
     symbolCount: integer("symbol_count").notNull().default(0),
     edgeCount: integer("edge_count").notNull().default(0),
     chunkCount: integer("chunk_count").notNull().default(0),
+    diagnosticCount: integer("diagnostic_count").notNull().default(0),
+    dependencyCount: integer("dependency_count").notNull().default(0),
+    routeCount: integer("route_count").notNull().default(0),
+    testMappingCount: integer("test_mapping_count").notNull().default(0),
     embeddedChunkCount: integer("embedded_chunk_count").notNull().default(0),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     error: jsonb("error"),
@@ -367,6 +371,10 @@ export const indexImportBatches = pgTable(
     symbolCount: integer("symbol_count").notNull().default(0),
     edgeCount: integer("edge_count").notNull().default(0),
     chunkCount: integer("chunk_count").notNull().default(0),
+    diagnosticCount: integer("diagnostic_count").notNull().default(0),
+    dependencyCount: integer("dependency_count").notNull().default(0),
+    routeCount: integer("route_count").notNull().default(0),
+    testMappingCount: integer("test_mapping_count").notNull().default(0),
     embeddingJobCount: integer("embedding_job_count").notNull().default(0),
     error: jsonb("error"),
     metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
@@ -472,6 +480,118 @@ export const codeChunks = pgTable("code_chunks", {
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Indexer-produced diagnostics captured while building an index artifact. */
+export const codeIndexDiagnostics = pgTable(
+  "code_index_diagnostics",
+  {
+    diagnosticId: text("diagnostic_id").primaryKey(),
+    indexVersionId: text("index_version_id")
+      .notNull()
+      .references(() => codeIndexVersions.indexVersionId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    commitSha: text("commit_sha").notNull(),
+    path: text("path"),
+    startLine: integer("start_line"),
+    endLine: integer("end_line"),
+    source: text("source").notNull(),
+    severity: text("severity").notNull(),
+    code: text("code"),
+    message: text("message").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("code_index_diagnostics_index_version_idx").on(table.indexVersionId),
+    index("code_index_diagnostics_repo_severity_idx").on(table.repoId, table.severity),
+  ],
+);
+
+/** Package and ecosystem dependencies imported from index artifact records. */
+export const codeDependencies = pgTable(
+  "code_dependencies",
+  {
+    dependencyId: text("dependency_id").primaryKey(),
+    indexVersionId: text("index_version_id")
+      .notNull()
+      .references(() => codeIndexVersions.indexVersionId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    commitSha: text("commit_sha").notNull(),
+    manifestPath: text("manifest_path").notNull(),
+    packageManager: text("package_manager"),
+    name: text("name").notNull(),
+    versionSpec: text("version_spec"),
+    resolvedVersion: text("resolved_version"),
+    dependencyType: text("dependency_type"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("code_dependencies_index_version_idx").on(table.indexVersionId),
+    index("code_dependencies_repo_name_idx").on(table.repoId, table.name),
+  ],
+);
+
+/** Framework route hints imported from index artifact records. */
+export const codeRoutes = pgTable(
+  "code_routes",
+  {
+    routeId: text("route_id").primaryKey(),
+    indexVersionId: text("index_version_id")
+      .notNull()
+      .references(() => codeIndexVersions.indexVersionId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    commitSha: text("commit_sha").notNull(),
+    path: text("path").notNull(),
+    language: text("language").notNull(),
+    routePattern: text("route_pattern").notNull(),
+    methods: jsonb("methods").notNull().default(sql`'[]'::jsonb`),
+    handlerSymbolId: text("handler_symbol_id").references(() => symbols.symbolId),
+    startLine: integer("start_line"),
+    endLine: integer("end_line"),
+    framework: text("framework"),
+    confidence: real("confidence").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("code_routes_index_version_idx").on(table.indexVersionId),
+    index("code_routes_repo_pattern_idx").on(table.repoId, table.routePattern),
+  ],
+);
+
+/** Relationships between test files and the code they exercise. */
+export const codeTestMappings = pgTable(
+  "code_test_mappings",
+  {
+    testMappingId: text("test_mapping_id").primaryKey(),
+    indexVersionId: text("index_version_id")
+      .notNull()
+      .references(() => codeIndexVersions.indexVersionId),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.repoId),
+    commitSha: text("commit_sha").notNull(),
+    testFileId: text("test_file_id")
+      .notNull()
+      .references(() => indexedFiles.fileId),
+    targetFileId: text("target_file_id").references(() => indexedFiles.fileId),
+    targetSymbolId: text("target_symbol_id").references(() => symbols.symbolId),
+    confidence: real("confidence").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("code_test_mappings_index_version_idx").on(table.indexVersionId),
+    index("code_test_mappings_target_file_idx").on(table.targetFileId),
+  ],
+);
 
 /** Embeddings are stored separately from chunks to allow model/dimension changes. */
 export const codeChunkEmbeddings = pgTable(

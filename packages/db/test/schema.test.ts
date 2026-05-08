@@ -12,7 +12,11 @@ import {
   billingProviderRequests,
   billingWebhookEvents,
   codeChunkEmbeddings,
+  codeDependencies,
+  codeIndexDiagnostics,
   codeIndexVersions,
+  codeRoutes,
+  codeTestMappings,
   creditGrants,
   debugExports,
   embeddingJobItems,
@@ -96,6 +100,10 @@ const indexArtifactUniquenessMigrationPath = resolve(
   testDirectory,
   "../migrations/0022_futuristic_quicksilver.sql",
 );
+const optionalIndexRecordsMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0023_purple_mercury.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -116,6 +124,10 @@ describe("database schema foundation", () => {
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
     expect(indexImportBatches.indexImportBatchId.name).toBe("index_import_batch_id");
     expect(indexedFiles.fileId.name).toBe("file_id");
+    expect(codeIndexDiagnostics.diagnosticId.name).toBe("diagnostic_id");
+    expect(codeDependencies.dependencyId.name).toBe("dependency_id");
+    expect(codeRoutes.routeId.name).toBe("route_id");
+    expect(codeTestMappings.testMappingId.name).toBe("test_mapping_id");
     expect(reviewArtifacts.reviewArtifactId.name).toBe("review_artifact_id");
     expect(reviewRunMetrics.reviewRunId.name).toBe("review_run_id");
     expect(reviewRunMetrics.totalDurationMs.name).toBe("total_duration_ms");
@@ -189,6 +201,7 @@ describe("database schema foundation", () => {
       indexArtifactUniquenessMigrationPath,
       "utf8",
     );
+    const optionalIndexRecordsMigration = await readFile(optionalIndexRecordsMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -254,6 +267,13 @@ describe("database schema foundation", () => {
     );
     expect(indexArtifactUniquenessMigration).toContain(
       'CREATE UNIQUE INDEX "code_index_versions_repo_commit_key_artifact_unique"',
+    );
+    expect(optionalIndexRecordsMigration).toContain('CREATE TABLE "code_dependencies"');
+    expect(optionalIndexRecordsMigration).toContain('CREATE TABLE "code_index_diagnostics"');
+    expect(optionalIndexRecordsMigration).toContain('CREATE TABLE "code_routes"');
+    expect(optionalIndexRecordsMigration).toContain('CREATE TABLE "code_test_mappings"');
+    expect(optionalIndexRecordsMigration).toContain(
+      'ALTER TABLE "code_index_versions" ADD COLUMN "dependency_count"',
     );
   });
 });

@@ -11,8 +11,12 @@ import {
   backgroundJobs,
   codeChunkEmbeddings,
   codeChunks,
+  codeDependencies,
   codeEdges,
+  codeIndexDiagnostics,
   codeIndexVersions,
+  codeRoutes,
+  codeTestMappings,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
@@ -24,7 +28,11 @@ import {
 import {
   type ChunkRecord,
   createStableId,
+  type DependencyRecord,
+  type DiagnosticRecord,
   type IndexArtifact,
+  type RouteRecord,
+  type TestMappingRecord,
   validateIndexArtifact,
 } from "@repo/index-schema";
 import { type ReadIndexArtifactPathOptions, readIndexArtifactPath } from "@repo/index-schema/node";
@@ -189,6 +197,14 @@ export type ImportIndexArtifactResult = {
   readonly edgeCount: number;
   /** Number of persisted chunk records. */
   readonly chunkCount: number;
+  /** Number of persisted diagnostic records. */
+  readonly diagnosticCount: number;
+  /** Number of persisted dependency records. */
+  readonly dependencyCount: number;
+  /** Number of persisted route records. */
+  readonly routeCount: number;
+  /** Number of persisted test mapping records. */
+  readonly testMappingCount: number;
   /** Number of queued embedding jobs. */
   readonly embeddingJobCount: number;
 };
@@ -257,6 +273,10 @@ type IndexImportPlan = {
   readonly artifactHash: `sha256:${string}`;
   /** Chunks classified from the artifact records. */
   readonly chunks: readonly ChunkRecord[];
+  /** Dependency records classified from the artifact records. */
+  readonly dependencies: readonly DependencyRecord[];
+  /** Diagnostic records classified from the artifact records. */
+  readonly diagnostics: readonly DiagnosticRecord[];
   /** Edge records classified from the artifact records. */
   readonly edgeRecords: readonly Extract<IndexArtifact["records"][number], { type: "edge" }>[];
   /** Bounded number of chunk IDs placed in one embedding batch job. */
@@ -283,8 +303,12 @@ type IndexImportPlan = {
   readonly indexKey: string;
   /** Deterministic index version ID for this artifact profile. */
   readonly indexVersionId: string;
+  /** Route records classified from the artifact records. */
+  readonly routes: readonly RouteRecord[];
   /** Symbol records classified from the artifact records. */
   readonly symbolRecords: readonly Extract<IndexArtifact["records"][number], { type: "symbol" }>[];
+  /** Test mapping records classified from the artifact records. */
+  readonly testMappings: readonly TestMappingRecord[];
 };
 
 type ExistingIndexVersionForImport = {
@@ -292,16 +316,24 @@ type ExistingIndexVersionForImport = {
   readonly artifactHash: string | null;
   /** Number of chunks recorded on the existing index version. */
   readonly chunkCount: number;
+  /** Number of dependencies recorded on the existing index version. */
+  readonly dependencyCount: number;
+  /** Number of diagnostics recorded on the existing index version. */
+  readonly diagnosticCount: number;
   /** Number of edges recorded on the existing index version. */
   readonly edgeCount: number;
   /** Number of files recorded on the existing index version. */
   readonly fileCount: number;
   /** Existing index version ID. */
   readonly indexVersionId: string;
+  /** Number of routes recorded on the existing index version. */
+  readonly routeCount: number;
   /** Number of symbols recorded on the existing index version. */
   readonly symbolCount: number;
   /** Existing index version status. */
   readonly status: string;
+  /** Number of test mappings recorded on the existing index version. */
+  readonly testMappingCount: number;
 };
 
 type IndexImporterTelemetryState = {
@@ -455,6 +487,10 @@ export async function importIndexArtifact(
         symbolCount: existingIndexVersion.symbolCount,
         edgeCount: existingIndexVersion.edgeCount,
         chunkCount: existingIndexVersion.chunkCount,
+        diagnosticCount: existingIndexVersion.diagnosticCount,
+        dependencyCount: existingIndexVersion.dependencyCount,
+        routeCount: existingIndexVersion.routeCount,
+        testMappingCount: existingIndexVersion.testMappingCount,
         embeddingJobCount: 0,
       } satisfies ImportIndexArtifactResult;
       finishIndexImporterTelemetry(options.metrics, telemetry, {
@@ -509,6 +545,10 @@ export async function importIndexArtifact(
           symbolCount: importPlan.symbolRecords.length,
           edgeCount: importPlan.edgeRecords.length,
           chunkCount: importPlan.chunks.length,
+          diagnosticCount: importPlan.diagnostics.length,
+          dependencyCount: importPlan.dependencies.length,
+          routeCount: importPlan.routes.length,
+          testMappingCount: importPlan.testMappings.length,
           embeddedChunkCount: 0,
           completedAt: null,
           error: null,
@@ -528,6 +568,10 @@ export async function importIndexArtifact(
             symbolCount: importPlan.symbolRecords.length,
             edgeCount: importPlan.edgeRecords.length,
             chunkCount: importPlan.chunks.length,
+            diagnosticCount: importPlan.diagnostics.length,
+            dependencyCount: importPlan.dependencies.length,
+            routeCount: importPlan.routes.length,
+            testMappingCount: importPlan.testMappings.length,
             completedAt: null,
             error: null,
           },
@@ -629,6 +673,84 @@ export async function importIndexArtifact(
           await tx.insert(codeChunks).values(batch).onConflictDoNothing();
         }
       }
+
+      if (importPlan.dependencies.length > 0) {
+        const dependencyRows = importPlan.dependencies.map((dependency) => ({
+          dependencyId: dependency.dependencyId,
+          indexVersionId: importPlan.indexVersionId,
+          repoId: dependency.repoId,
+          commitSha: dependency.commitSha,
+          manifestPath: dependency.manifestPath,
+          packageManager: dependency.packageManager,
+          name: dependency.name,
+          versionSpec: dependency.versionSpec,
+          resolvedVersion: dependency.resolvedVersion,
+          dependencyType: dependency.dependencyType,
+          metadata: dependency.metadata,
+        }));
+        for (const batch of batchRecords(dependencyRows, importPlan.importRecordBatchSize)) {
+          await tx.insert(codeDependencies).values(batch).onConflictDoNothing();
+        }
+      }
+
+      if (importPlan.routes.length > 0) {
+        const routeRows = importPlan.routes.map((route) => ({
+          routeId: route.routeId,
+          indexVersionId: importPlan.indexVersionId,
+          repoId: route.repoId,
+          commitSha: route.commitSha,
+          path: route.path,
+          language: route.language,
+          routePattern: route.routePattern,
+          methods: route.methods,
+          handlerSymbolId: route.handlerSymbolId,
+          startLine: route.range?.startLine,
+          endLine: route.range?.endLine,
+          framework: route.framework,
+          confidence: route.confidence,
+          metadata: route.metadata,
+        }));
+        for (const batch of batchRecords(routeRows, importPlan.importRecordBatchSize)) {
+          await tx.insert(codeRoutes).values(batch).onConflictDoNothing();
+        }
+      }
+
+      if (importPlan.testMappings.length > 0) {
+        const testMappingRows = importPlan.testMappings.map((testMapping) => ({
+          testMappingId: testMapping.testMappingId,
+          indexVersionId: importPlan.indexVersionId,
+          repoId: testMapping.repoId,
+          commitSha: testMapping.commitSha,
+          testFileId: testMapping.testFileId,
+          targetFileId: testMapping.targetFileId,
+          targetSymbolId: testMapping.targetSymbolId,
+          confidence: testMapping.confidence,
+          metadata: testMapping.metadata,
+        }));
+        for (const batch of batchRecords(testMappingRows, importPlan.importRecordBatchSize)) {
+          await tx.insert(codeTestMappings).values(batch).onConflictDoNothing();
+        }
+      }
+
+      if (importPlan.diagnostics.length > 0) {
+        const diagnosticRows = importPlan.diagnostics.map((diagnostic) => ({
+          diagnosticId: diagnostic.diagnosticId,
+          indexVersionId: importPlan.indexVersionId,
+          repoId: diagnostic.repoId,
+          commitSha: diagnostic.commitSha,
+          path: diagnostic.path,
+          startLine: diagnostic.range?.startLine,
+          endLine: diagnostic.range?.endLine,
+          source: diagnostic.source,
+          severity: diagnostic.severity,
+          code: diagnostic.code,
+          message: diagnostic.message,
+          metadata: diagnostic.metadata,
+        }));
+        for (const batch of batchRecords(diagnosticRows, importPlan.importRecordBatchSize)) {
+          await tx.insert(codeIndexDiagnostics).values(batch).onConflictDoNothing();
+        }
+      }
     });
 
     let embeddingJobCount = 0;
@@ -656,6 +778,10 @@ export async function importIndexArtifact(
       symbolCount: importPlan.symbolRecords.length,
       edgeCount: importPlan.edgeRecords.length,
       chunkCount: importPlan.chunks.length,
+      diagnosticCount: importPlan.diagnostics.length,
+      dependencyCount: importPlan.dependencies.length,
+      routeCount: importPlan.routes.length,
+      testMappingCount: importPlan.testMappings.length,
       embeddingJobCount,
     } satisfies ImportIndexArtifactResult;
     finishIndexImporterTelemetry(options.metrics, telemetry, {
@@ -807,6 +933,18 @@ function createIndexImportPlan(
   const chunks = artifact.records.filter(
     (record): record is ChunkRecord => record.type === "chunk",
   );
+  const diagnostics = artifact.records.filter(
+    (record): record is DiagnosticRecord => record.type === "diagnostic",
+  );
+  const dependencies = artifact.records.filter(
+    (record): record is DependencyRecord => record.type === "dependency",
+  );
+  const routes = artifact.records.filter(
+    (record): record is RouteRecord => record.type === "route",
+  );
+  const testMappings = artifact.records.filter(
+    (record): record is TestMappingRecord => record.type === "test_mapping",
+  );
   const importLimits = resolveIndexImportLimits(options.importLimits);
   const embeddingBatchSize = boundedEmbeddingBatchSize(options.embeddingBatchSize);
   const embeddingModel = options.embeddingModel ?? "text-embedding-3-small";
@@ -834,6 +972,8 @@ function createIndexImportPlan(
   return {
     artifactHash,
     chunks,
+    dependencies,
+    diagnostics,
     edgeRecords,
     embeddingBatchSize,
     embeddingDimensions,
@@ -852,7 +992,9 @@ function createIndexImportPlan(
     importRecordBatchSize: boundedImportRecordBatchSize(options.importRecordBatchSize),
     indexKey,
     indexVersionId,
+    routes,
     symbolRecords,
+    testMappings,
   };
 }
 
@@ -931,6 +1073,10 @@ async function markIndexImportBatchRunning(
       symbolCount: plan.symbolRecords.length,
       edgeCount: plan.edgeRecords.length,
       chunkCount: plan.chunks.length,
+      diagnosticCount: plan.diagnostics.length,
+      dependencyCount: plan.dependencies.length,
+      routeCount: plan.routes.length,
+      testMappingCount: plan.testMappings.length,
       embeddingJobCount: 0,
       error: null,
       metadata: {
@@ -958,6 +1104,10 @@ async function markIndexImportBatchRunning(
         symbolCount: plan.symbolRecords.length,
         edgeCount: plan.edgeRecords.length,
         chunkCount: plan.chunks.length,
+        diagnosticCount: plan.diagnostics.length,
+        dependencyCount: plan.dependencies.length,
+        routeCount: plan.routes.length,
+        testMappingCount: plan.testMappings.length,
         error: null,
         metadata: {
           artifactId: artifact.manifest.artifactId,
@@ -1020,11 +1170,15 @@ async function findExistingIndexVersionForImport(
     .select({
       artifactHash: codeIndexVersions.artifactHash,
       chunkCount: codeIndexVersions.chunkCount,
+      dependencyCount: codeIndexVersions.dependencyCount,
+      diagnosticCount: codeIndexVersions.diagnosticCount,
       edgeCount: codeIndexVersions.edgeCount,
       fileCount: codeIndexVersions.fileCount,
       indexVersionId: codeIndexVersions.indexVersionId,
+      routeCount: codeIndexVersions.routeCount,
       status: codeIndexVersions.status,
       symbolCount: codeIndexVersions.symbolCount,
+      testMappingCount: codeIndexVersions.testMappingCount,
     })
     .from(codeIndexVersions)
     .where(
@@ -1116,6 +1270,16 @@ async function cleanupFailedIndexVersionRows(
       .delete(codeChunkEmbeddings)
       .where(eq(codeChunkEmbeddings.indexVersionId, input.indexVersionId));
     await tx.delete(embeddingJobs).where(eq(embeddingJobs.indexVersionId, input.indexVersionId));
+    await tx
+      .delete(codeIndexDiagnostics)
+      .where(eq(codeIndexDiagnostics.indexVersionId, input.indexVersionId));
+    await tx
+      .delete(codeTestMappings)
+      .where(eq(codeTestMappings.indexVersionId, input.indexVersionId));
+    await tx.delete(codeRoutes).where(eq(codeRoutes.indexVersionId, input.indexVersionId));
+    await tx
+      .delete(codeDependencies)
+      .where(eq(codeDependencies.indexVersionId, input.indexVersionId));
     await tx.delete(codeEdges).where(eq(codeEdges.indexVersionId, input.indexVersionId));
     await tx.delete(codeChunks).where(eq(codeChunks.indexVersionId, input.indexVersionId));
     await tx.delete(symbols).where(eq(symbols.indexVersionId, input.indexVersionId));

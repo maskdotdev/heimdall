@@ -6,8 +6,12 @@ import {
   backgroundJobs,
   codeChunkEmbeddings,
   codeChunks,
+  codeDependencies,
   codeEdges,
+  codeIndexDiagnostics,
   codeIndexVersions,
+  codeRoutes,
+  codeTestMappings,
   embeddingJobItems,
   embeddingJobs,
   type HeimdallDatabase,
@@ -451,6 +455,60 @@ describe("importIndexArtifact telemetry", () => {
     );
   });
 
+  it("persists optional index records into normalized tables", async () => {
+    const insertedRows: unknown[] = [];
+    const result = await importIndexArtifact(artifactWithOptionalRecords(), {
+      artifactUri: "file:///tmp/index-artifact.json",
+      db: createRecordingImportDatabaseStub(insertedRows),
+    });
+
+    expect(result).toMatchObject({
+      dependencyCount: 1,
+      diagnosticCount: 1,
+      routeCount: 1,
+      testMappingCount: 1,
+    });
+    expect(insertedRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          dependencyCount: 1,
+          diagnosticCount: 1,
+          routeCount: 1,
+          testMappingCount: 1,
+        }),
+        expect.arrayContaining([
+          expect.objectContaining({
+            dependencyId: "dep_1",
+            manifestPath: "package.json",
+            name: "hono",
+          }),
+        ]),
+        expect.arrayContaining([
+          expect.objectContaining({
+            routeId: "route_1",
+            routePattern: "/api/users/:id",
+            methods: ["GET"],
+          }),
+        ]),
+        expect.arrayContaining([
+          expect.objectContaining({
+            targetFileId: "file_1",
+            targetSymbolId: "sym_1",
+            testFileId: "file_test",
+            testMappingId: "testmap_1",
+          }),
+        ]),
+        expect.arrayContaining([
+          expect.objectContaining({
+            diagnosticId: "diag_1",
+            message: "Skipped generated declaration output.",
+            severity: "warning",
+          }),
+        ]),
+      ]),
+    );
+  });
+
   it("creates durable embedding planner rows and queued batch jobs", async () => {
     const insertedRows: unknown[] = [];
     const result = await importIndexArtifact(artifactWithChunk(), {
@@ -610,6 +668,10 @@ describe("importIndexArtifact telemetry", () => {
       embeddingJobItems,
       codeChunkEmbeddings,
       embeddingJobs,
+      codeIndexDiagnostics,
+      codeTestMappings,
+      codeRoutes,
+      codeDependencies,
       codeEdges,
       codeChunks,
       symbols,
@@ -640,6 +702,10 @@ describe("importIndexArtifact telemetry", () => {
       embeddingJobItems,
       codeChunkEmbeddings,
       embeddingJobs,
+      codeIndexDiagnostics,
+      codeTestMappings,
+      codeRoutes,
+      codeDependencies,
       codeEdges,
       codeChunks,
       symbols,
@@ -722,6 +788,10 @@ describe("importIndexArtifact telemetry", () => {
       embeddingJobItems,
       codeChunkEmbeddings,
       embeddingJobs,
+      codeIndexDiagnostics,
+      codeTestMappings,
+      codeRoutes,
+      codeDependencies,
       codeEdges,
       codeChunks,
       symbols,
@@ -753,6 +823,10 @@ describe("importIndexArtifact telemetry", () => {
       embeddingJobItems,
       codeChunkEmbeddings,
       embeddingJobs,
+      codeIndexDiagnostics,
+      codeTestMappings,
+      codeRoutes,
+      codeDependencies,
       codeEdges,
       codeChunks,
       symbols,
@@ -1044,6 +1118,117 @@ function artifactWithFiles(count: number): IndexArtifact {
       isTest: false,
       isVendored: false,
     })),
+  };
+}
+
+/** Creates a valid index artifact with one record for each optional importer table. */
+function artifactWithOptionalRecords(): IndexArtifact {
+  return {
+    manifest: {
+      ...emptyArtifact().manifest,
+      fileCount: 2,
+      languages: ["typescript"],
+      recordCount: 7,
+      symbolCount: 1,
+    },
+    records: [
+      {
+        type: "file",
+        schemaVersion: "index_record.v1",
+        fileId: "file_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "src/server.ts",
+        language: "typescript",
+        contentHash: `sha256:${"1".repeat(64)}`,
+        sizeBytes: 42,
+        lineCount: 12,
+        isBinary: false,
+        isGenerated: false,
+        isTest: false,
+        isVendored: false,
+      },
+      {
+        type: "file",
+        schemaVersion: "index_record.v1",
+        fileId: "file_test",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "src/server.test.ts",
+        language: "typescript",
+        contentHash: `sha256:${"2".repeat(64)}`,
+        sizeBytes: 42,
+        lineCount: 8,
+        isBinary: false,
+        isGenerated: false,
+        isTest: true,
+        isVendored: false,
+      },
+      {
+        type: "symbol",
+        schemaVersion: "index_record.v1",
+        symbolId: "sym_1",
+        fileId: "file_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "src/server.ts",
+        language: "typescript",
+        name: "getUser",
+        kind: "function",
+        range: { endLine: 8, startLine: 3 },
+        contentHash: `sha256:${"3".repeat(64)}`,
+      },
+      {
+        type: "dependency",
+        schemaVersion: "index_record.v1",
+        dependencyId: "dep_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        manifestPath: "package.json",
+        packageManager: "pnpm",
+        name: "hono",
+        versionSpec: "^4.0.0",
+        dependencyType: "prod",
+      },
+      {
+        type: "route",
+        schemaVersion: "index_record.v1",
+        routeId: "route_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "src/server.ts",
+        language: "typescript",
+        routePattern: "/api/users/:id",
+        methods: ["GET"],
+        handlerSymbolId: "sym_1",
+        range: { endLine: 8, startLine: 3 },
+        framework: "hono",
+        confidence: 0.95,
+      },
+      {
+        type: "test_mapping",
+        schemaVersion: "index_record.v1",
+        testMappingId: "testmap_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        testFileId: "file_test",
+        targetFileId: "file_1",
+        targetSymbolId: "sym_1",
+        confidence: 0.8,
+      },
+      {
+        type: "diagnostic",
+        schemaVersion: "index_record.v1",
+        diagnosticId: "diag_1",
+        repoId: "repo_1",
+        commitSha: "abc1234",
+        path: "dist/index.d.ts",
+        source: "indexer-ts",
+        severity: "warning",
+        code: "generated-output",
+        message: "Skipped generated declaration output.",
+      },
+    ],
   };
 }
 
