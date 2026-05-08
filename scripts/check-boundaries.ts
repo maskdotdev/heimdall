@@ -60,6 +60,24 @@ const implementationPackages = new Set([
 
 const forbiddenBySource = new Map<string, ReadonlySet<string>>([
   [
+    "@app/api",
+    new Set([
+      "@repo/embedding",
+      "@repo/index-importer",
+      "@repo/indexer-driver",
+      "@repo/indexer-ts",
+      "@repo/llm-gateway",
+      "@repo/publisher",
+      "@repo/repo-sync",
+      "@repo/retrieval",
+      "@repo/review-engine",
+      "@repo/review-orchestrator",
+      "@repo/sandbox",
+      "@repo/static-analysis",
+      "@repo/tool-runner",
+    ]),
+  ],
+  [
     "@repo/review-engine",
     new Set([
       "@repo/db",
