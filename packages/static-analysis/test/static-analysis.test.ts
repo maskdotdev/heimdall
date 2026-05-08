@@ -996,6 +996,51 @@ describe("static analysis", () => {
     });
   });
 
+  it("parses Staticcheck JSONL diagnostics from stderr", () => {
+    const parsed = parseToolOutputDiagnostics({
+      maxDiagnostics: 10,
+      result: {
+        durationMs: 1,
+        exitCode: 1,
+        finishedAt: "2026-05-06T00:00:00.001Z",
+        signal: null,
+        startedAt: "2026-05-06T00:00:00.000Z",
+        status: "failed",
+        stderr: [
+          JSON.stringify({
+            code: "SA5009",
+            end: { column: 18, file: "/workspace/repo/pkg/foo.go", line: 6 },
+            location: { column: 14, file: "/workspace/repo/pkg/foo.go", line: 6 },
+            message: "Printf format %d has arg #1 of wrong type string",
+            severity: "error",
+          }),
+          "exit status 1",
+        ].join("\n"),
+        stderrBytes: 210,
+        stdout: "",
+        stdoutBytes: 0,
+        timedOut: false,
+        truncated: false,
+      },
+      snapshot: goPullRequestSnapshotFixture,
+      tool: "staticcheck",
+      toolRunId: "str_staticcheck_stderr",
+      workspacePath: "/workspace/repo",
+    });
+
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0]).toMatchObject({
+      location: {
+        filePath: "pkg/foo.go",
+        startColumn: 14,
+        startLine: 6,
+      },
+      ruleId: "SA5009",
+      tool: "staticcheck",
+    });
+  });
+
   it("parses Cargo JSONL compiler messages into normalized diagnostics", () => {
     const cargoMessage = JSON.stringify({
       manifest_path: "/workspace/repo/Cargo.toml",

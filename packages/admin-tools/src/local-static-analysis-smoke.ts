@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -9,7 +10,10 @@ import {
   type StaticAnalysisRequest,
   type StaticToolName,
 } from "@repo/static-analysis";
-import { createLocalToolRunner } from "@repo/tool-runner";
+import { createLocalToolRunner, type ToolRunnerResult } from "@repo/tool-runner";
+
+/** Default Staticcheck package used when the smoke bootstraps a local binary. */
+const DEFAULT_STATICCHECK_BOOTSTRAP_PACKAGE = "honnef.co/go/tools/cmd/staticcheck@v0.7.0";
 
 /** Product-safe proof emitted by the local static-analysis smoke. */
 type LocalStaticAnalysisSmokeProof = {
@@ -25,7 +29,17 @@ type LocalStaticAnalysisSmokeProof = {
     readonly go: "available";
     /** Cargo version string from the report environment. */
     readonly cargo: "available";
+    /** Staticcheck availability or bootstrap status for this smoke run. */
+    readonly staticcheck: StaticcheckSmokeProof;
   };
+};
+
+/** Product-safe Staticcheck availability proof. */
+type StaticcheckSmokeProof = {
+  /** How Staticcheck was made available to the smoke. */
+  readonly mode: "available" | "bootstrapped" | "not_requested";
+  /** Staticcheck version output when the smoke used Staticcheck. */
+  readonly version?: string | undefined;
 };
 
 /** Product-safe proof for one language smoke report. */
@@ -52,8 +66,35 @@ type ToolSmokeProof = {
   readonly tool: StaticToolName;
 };
 
+/** Parsed options for the local static-analysis smoke. */
+type LocalStaticAnalysisSmokeOptions = {
+  /** Whether the Go smoke should include Staticcheck. */
+  readonly includeStaticcheck: boolean;
+  /** Whether the smoke may install Staticcheck into the throwaway workspace. */
+  readonly bootstrapStaticcheck: boolean;
+  /** Go package reference used for Staticcheck bootstrap. */
+  readonly staticcheckPackage: string;
+};
+
+/** Resolved Staticcheck setup for one smoke run. */
+type StaticcheckSetup = {
+  /** Optional binary directory that should be prepended to PATH. */
+  readonly pathEntry?: string | undefined;
+  /** Product-safe proof for the setup decision. */
+  readonly proof: StaticcheckSmokeProof;
+};
+
+/** Local process environment settings for smoke tool runners. */
+type LocalSmokeBaseEnvInput = {
+  /** Optional throwaway root to use for cache and home directories. */
+  readonly cacheRoot?: string | undefined;
+  /** Optional binary directory that should be prepended to PATH. */
+  readonly pathEntry?: string | undefined;
+};
+
 /** Runs local Go and Rust static-analysis tools against generated throwaway projects. */
 async function main(): Promise<void> {
+  const options = smokeOptions(process.argv.slice(2), process.env);
   const root = await mkdtemp(join(tmpdir(), "heimdall-static-analysis-smoke-"));
 
   try {
@@ -61,17 +102,25 @@ async function main(): Promise<void> {
     const rustWorkspace = join(root, "rust");
     await Promise.all([writeGoFixture(goWorkspace), writeRustFixture(rustWorkspace)]);
 
-    const runner = createLocalToolRunner();
+    const staticcheck = await prepareStaticcheck(options, root);
+    const goTools: readonly StaticToolName[] =
+      staticcheck.proof.mode === "not_requested" ? ["go_vet"] : ["go_vet", "staticcheck"];
+    const goRunner = createLocalToolRunner({
+      baseEnv: localSmokeBaseEnv({ cacheRoot: root, pathEntry: staticcheck.pathEntry }),
+    });
+    const rustRunner = createLocalToolRunner({
+      baseEnv: localSmokeBaseEnv({ pathEntry: undefined }),
+    });
     const [goReport, rustReport] = await Promise.all([
       runStaticAnalysis({
         request: smokeRequest({
           changedFile: changedFile("pkg/foo.go", "go", 6),
           repoId: "repo_static_smoke_go",
-          requestedTools: ["go_vet"],
+          requestedTools: goTools,
           reviewRunId: "rrn_static_smoke_go",
           workspacePath: goWorkspace,
         }),
-        runner,
+        runner: goRunner,
       }),
       runStaticAnalysis({
         request: smokeRequest({
@@ -81,11 +130,11 @@ async function main(): Promise<void> {
           reviewRunId: "rrn_static_smoke_rust",
           workspacePath: rustWorkspace,
         }),
-        runner,
+        runner: rustRunner,
       }),
     ]);
 
-    assertSmokeReport("go", goReport, ["go_vet"]);
+    assertSmokeReport("go", goReport, goTools);
     assertSmokeReport("rust", rustReport, ["cargo_check", "cargo_clippy"]);
 
     const proof: LocalStaticAnalysisSmokeProof = {
@@ -95,12 +144,193 @@ async function main(): Promise<void> {
       toolchain: {
         cargo: "available",
         go: "available",
+        staticcheck: staticcheck.proof,
       },
     };
     console.log(JSON.stringify(proof, null, 2));
   } finally {
-    await rm(root, { force: true, recursive: true });
+    await removeSmokeRoot(root);
   }
+}
+
+/** Parses CLI flags and environment variables for local smoke options. */
+function smokeOptions(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): LocalStaticAnalysisSmokeOptions {
+  return {
+    bootstrapStaticcheck:
+      args.includes("--bootstrap-staticcheck") ||
+      envFlagEnabled(env.HEIMDALL_STATIC_ANALYSIS_SMOKE_BOOTSTRAP_STATICCHECK),
+    includeStaticcheck:
+      args.includes("--include-staticcheck") ||
+      envFlagEnabled(env.HEIMDALL_STATIC_ANALYSIS_SMOKE_INCLUDE_STATICCHECK),
+    staticcheckPackage:
+      env.HEIMDALL_STATIC_ANALYSIS_SMOKE_STATICCHECK_PACKAGE ??
+      DEFAULT_STATICCHECK_BOOTSTRAP_PACKAGE,
+  };
+}
+
+/** Returns true when an environment flag has an affirmative value. */
+function envFlagEnabled(value: string | undefined): boolean {
+  if (!value) return false;
+
+  return ["1", "true", "yes"].includes(value.toLowerCase());
+}
+
+/** Resolves Staticcheck availability for a smoke run. */
+async function prepareStaticcheck(
+  options: LocalStaticAnalysisSmokeOptions,
+  root: string,
+): Promise<StaticcheckSetup> {
+  if (!options.includeStaticcheck) {
+    return { proof: { mode: "not_requested" } };
+  }
+
+  const existingVersion = await staticcheckVersion({ pathEntry: undefined, root });
+  if (existingVersion) {
+    return { proof: { mode: "available", version: existingVersion } };
+  }
+
+  if (!options.bootstrapStaticcheck) {
+    throw new Error(
+      "Staticcheck is not available. Install staticcheck or rerun with --bootstrap-staticcheck.",
+    );
+  }
+
+  const binDir = join(root, "staticcheck-bin");
+  await mkdir(binDir, { recursive: true });
+  await bootstrapStaticcheck({
+    binDir,
+    packageRef: options.staticcheckPackage,
+    root,
+  });
+
+  const version = await staticcheckVersion({ pathEntry: binDir, root });
+  if (!version) {
+    throw new Error("Bootstrapped Staticcheck did not run successfully.");
+  }
+
+  return {
+    pathEntry: binDir,
+    proof: { mode: "bootstrapped", version },
+  };
+}
+
+/** Installs Staticcheck into the throwaway smoke workspace. */
+async function bootstrapStaticcheck(input: {
+  /** Directory that receives the Staticcheck binary. */
+  readonly binDir: string;
+  /** Staticcheck Go package reference to install. */
+  readonly packageRef: string;
+  /** Root throwaway workspace for command working directories and caches. */
+  readonly root: string;
+}): Promise<void> {
+  const result = await createLocalToolRunner({
+    baseEnv: localSmokeBaseEnv({ cacheRoot: input.root, pathEntry: undefined }),
+  }).run({
+    command: {
+      args: ["install", input.packageRef],
+      cwd: input.root,
+      displayCommand: `go install ${input.packageRef}`,
+      env: {
+        GOBIN: input.binDir,
+        GOCACHE: join(input.root, "go-build-cache"),
+        GOMODCACHE: join(input.root, "go-mod-cache"),
+        GOPATH: join(input.root, "go-path"),
+      },
+      executable: "go",
+      filesystemPolicy: "read_write_tmp",
+      networkPolicy: "allow",
+    },
+    maxOutputBytes: 20_000,
+    planId: "staticcheck_bootstrap",
+    timeoutMs: 180_000,
+  });
+
+  if (result.status !== "succeeded" || result.exitCode !== 0) {
+    throw new Error(
+      `Staticcheck bootstrap failed with status ${result.status} and exit code ${
+        result.exitCode ?? "none"
+      }: ${compactToolOutput(result)}`,
+    );
+  }
+}
+
+/** Reads the Staticcheck version using the current or bootstrapped PATH. */
+async function staticcheckVersion(input: {
+  /** Optional binary directory to prepend to PATH. */
+  readonly pathEntry?: string | undefined;
+  /** Root throwaway workspace used as the command working directory. */
+  readonly root: string;
+}): Promise<string | null> {
+  const result = await createLocalToolRunner({
+    baseEnv: localSmokeBaseEnv({ cacheRoot: input.root, pathEntry: input.pathEntry }),
+  }).run({
+    command: {
+      args: ["-version"],
+      cwd: input.root,
+      displayCommand: "staticcheck -version",
+      env: {},
+      executable: "staticcheck",
+      filesystemPolicy: "read_only",
+      networkPolicy: "none",
+    },
+    maxOutputBytes: 4_000,
+    planId: "staticcheck_version",
+    timeoutMs: 30_000,
+  });
+
+  if (result.status !== "succeeded" || result.exitCode !== 0) {
+    return null;
+  }
+
+  return firstNonEmptyLine(result.stdout) ?? firstNonEmptyLine(result.stderr) ?? "available";
+}
+
+/** Builds the product-safe environment allowlist for local smoke tool runs. */
+function localSmokeBaseEnv(input: LocalSmokeBaseEnvInput): Readonly<Record<string, string>> {
+  const env: Record<string, string> = {};
+  const path = input.pathEntry ? pathWithPrependedEntry(input.pathEntry) : process.env.PATH;
+  if (path && path.length > 0) {
+    env.PATH = path;
+  }
+  if (input.cacheRoot) {
+    env.HOME = input.cacheRoot;
+    env.XDG_CACHE_HOME = join(input.cacheRoot, "xdg-cache");
+  }
+
+  return env;
+}
+
+/** Prepends one directory to the current process PATH. */
+function pathWithPrependedEntry(pathEntry: string): string {
+  const currentPath = process.env.PATH;
+  if (!currentPath || currentPath.length === 0) {
+    return pathEntry;
+  }
+
+  return `${pathEntry}:${currentPath}`;
+}
+
+/** Returns the first non-empty line from tool output. */
+function firstNonEmptyLine(output: string): string | undefined {
+  return output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+}
+
+/** Returns a bounded output excerpt for smoke setup failures. */
+function compactToolOutput(result: ToolRunnerResult): string {
+  const output = [result.stdout.trim(), result.stderr.trim()]
+    .filter((stream) => stream.length > 0)
+    .join("\n");
+  if (output.length === 0) {
+    return "no output";
+  }
+
+  return output.length > 1_000 ? `${output.slice(0, 1_000)}...` : output;
 }
 
 /** Writes a minimal Go module with one vet-detectable issue. */
@@ -271,8 +501,15 @@ function assertSmokeReport(
   if (missingTools.length > 0) {
     throw new Error(`${language} static-analysis smoke did not run: ${missingTools.join(", ")}`);
   }
-  if (report.summary.diagnosticCount < 1) {
-    throw new Error(`${language} static-analysis smoke parsed no diagnostics.`);
+  const toolsWithoutDiagnostics = expectedTools.filter(
+    (tool) => (report.toolRuns.find((toolRun) => toolRun.tool === tool)?.diagnosticCount ?? 0) < 1,
+  );
+  if (toolsWithoutDiagnostics.length > 0) {
+    throw new Error(
+      `${language} static-analysis smoke parsed no diagnostics for: ${toolsWithoutDiagnostics.join(
+        ", ",
+      )}`,
+    );
   }
 }
 
@@ -289,6 +526,30 @@ function languageProof(report: StaticAnalysisReport): LanguageSmokeProof {
       tool: toolRun.tool,
     })),
   };
+}
+
+/** Removes the throwaway smoke workspace, including read-only Go module cache files. */
+async function removeSmokeRoot(root: string): Promise<void> {
+  await makeTreeWritable(root);
+  await rm(root, { force: true, recursive: true });
+}
+
+/** Makes a file tree writable enough for recursive deletion. */
+async function makeTreeWritable(path: string): Promise<void> {
+  let stats: Stats;
+  try {
+    stats = await lstat(path);
+  } catch {
+    return;
+  }
+
+  await chmod(path, stats.mode | (stats.isDirectory() ? 0o700 : 0o600)).catch(() => undefined);
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    return;
+  }
+
+  const entries = await readdir(path);
+  await Promise.all(entries.map((entry) => makeTreeWritable(join(path, entry))));
 }
 
 main().catch((error: unknown) => {

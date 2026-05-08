@@ -1981,7 +1981,7 @@ function goVetJsonPayload(rawOutput: string): string {
 function parseStaticcheckJsonDiagnostics(
   input: ParseToolOutputDiagnosticsInput,
 ): ParseToolOutputDiagnosticsResult {
-  const parsedOutput = parseJsonLines(input.result.stdout, "staticcheck_jsonl", input);
+  const parsedOutput = parseJsonLines(combinedToolOutput(input), "staticcheck_jsonl", input);
   if (!parsedOutput.ok) {
     return { diagnostics: [], warnings: parsedOutput.warnings };
   }
@@ -2025,6 +2025,14 @@ function parseStaticcheckJsonDiagnostics(
   }
 
   return { diagnostics, warnings };
+}
+
+/** Combines non-empty stdout and stderr streams for tools that may emit diagnostics on either. */
+function combinedToolOutput(input: ParseToolOutputDiagnosticsInput): string {
+  return [input.result.stdout, input.result.stderr]
+    .map((stream) => stream.trim())
+    .filter((stream) => stream.length > 0)
+    .join("\n");
 }
 
 /** Parses Cargo JSONL compiler messages into normalized diagnostics. */
