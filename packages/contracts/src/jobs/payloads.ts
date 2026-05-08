@@ -93,6 +93,7 @@ export const ReviewPullRequestJobPayloadSchema = Type.Object(
     baseSha: GitCommitShaSchema,
     headSha: GitCommitShaSchema,
     trigger: ReviewTriggerSchema,
+    dryRun: Type.Optional(Type.Boolean()),
     requestedByUserId: Type.Optional(UserIdSchema),
   },
   { additionalProperties: false },

@@ -19,6 +19,7 @@ import {
   type ReviewMemoryFactRow,
   type ReviewPullRequestInput,
   reviewMemoryFactFromRow,
+  reviewPublishSkipReason,
   reviewRunStatusForStage,
   reviewStalenessDisposition,
   startReviewTelemetryStageSpan,
@@ -214,6 +215,20 @@ describe("ReviewIndexDependencyPendingError", () => {
       },
       name: "ReviewIndexDependencyPendingError",
     });
+  });
+});
+
+describe("reviewPublishSkipReason", () => {
+  it("skips publisher handoff for dry runs before considering planned operations", () => {
+    expect(reviewPublishSkipReason({ dryRun: true, hasExternalWrites: true })).toBe("dry_run");
+    expect(reviewPublishSkipReason({ dryRun: true, hasExternalWrites: false })).toBe("dry_run");
+  });
+
+  it("skips publisher handoff when the publish plan has no external writes", () => {
+    expect(reviewPublishSkipReason({ dryRun: false, hasExternalWrites: false })).toBe(
+      "no_planned_publish_operations",
+    );
+    expect(reviewPublishSkipReason({ dryRun: false, hasExternalWrites: true })).toBeUndefined();
   });
 });
 

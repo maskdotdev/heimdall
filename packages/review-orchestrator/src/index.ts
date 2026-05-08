@@ -154,6 +154,8 @@ export type ReviewPullRequestInput = {
   readonly headSha: string;
   /** Review trigger source. */
   readonly trigger: ReviewTrigger;
+  /** Runs the review pipeline without enqueueing provider-visible publisher work. */
+  readonly dryRun?: boolean;
 };
 
 /** Dependencies used by the review orchestrator. */
@@ -204,6 +206,9 @@ export type ReviewOrchestratorDependencies = {
 
 /** Missing-index behavior after review orchestration's bounded index wait. */
 export type ReviewIndexDependencyMode = "fallback" | "pause";
+
+/** Product-safe reasons review orchestration can skip publisher handoff. */
+export type ReviewPublishSkipReason = "dry_run" | "no_planned_publish_operations";
 
 /** PR snapshot fetch result used by review orchestration. */
 type ReviewSnapshotFetchResult = {
@@ -456,6 +461,7 @@ export async function runPullRequestReview(
   dependencies: ReviewOrchestratorDependencies,
 ): Promise<ReviewOrchestrationResult> {
   const now = dependencies.now ?? (() => new Date());
+  const dryRun = input.dryRun ?? false;
   const reviewRepository = new ReviewRepository(dependencies.db);
   const pullRequestRepository = new PullRequestRepository(dependencies.db);
   const repositoryRepository = new RepositoryRepository(dependencies.db);
@@ -1279,6 +1285,7 @@ export async function runPullRequestReview(
       findings: validationResult.accepted,
     });
     const publishPlanPayload = publishPlanArtifactPayload({
+      dryRun,
       generatedAt: now().toISOString(),
       headSha: snapshot.headSha,
       publishPlan,
@@ -1305,6 +1312,7 @@ export async function runPullRequestReview(
       summary: publishPlanPayload.summary,
       stats: publishPlanPayload.stats,
       metadata: {
+        dryRun,
         findingIds: publishPlanPayload.findingIds,
         plannedOperations: publishPlanPayload.plannedOperations,
         policy: publishPlanPayload.policy,
@@ -1319,6 +1327,10 @@ export async function runPullRequestReview(
     ).length;
     const publishPlanModeLabel = publishPlanMode(publishPlan);
     const publishPlanHasExternalWrites = hasPlannedPublishOperations(publishPlan);
+    const publishSkipReason = reviewPublishSkipReason({
+      dryRun,
+      hasExternalWrites: publishPlanHasExternalWrites,
+    });
     const completedReviewArtifactRefs = [
       ...artifacts,
       contextArtifact,
@@ -1383,8 +1395,9 @@ export async function runPullRequestReview(
       return beforePublishStaleness.result;
     }
 
-    if (!publishPlanHasExternalWrites) {
+    if (publishSkipReason) {
       recordReviewTelemetryStage(dependencies, "publish", {
+        "review.dry_run": dryRun,
         "review.publish_enqueued": false,
         "review.publish_mode": publishPlanModeLabel,
         "review.stage_status": "skipped",
@@ -1394,10 +1407,13 @@ export async function runPullRequestReview(
         stage: "publish",
         status: "skipped",
         metadata: {
-          reason: "no_planned_publish_operations",
+          dryRun,
+          plannedOperationCount: publishPlan.plannedOperations.length,
+          publishPlanHasExternalWrites,
           publishPlanId,
           publishPlanArtifactId: publishPlanArtifact.artifactId,
           publishPlanMode: publishPlanModeLabel,
+          reason: publishSkipReason,
         },
       });
       const completedAt = now().toISOString();
@@ -1447,9 +1463,11 @@ export async function runPullRequestReview(
         completedAt,
         updatedAt: completedAt,
         summary:
-          candidateFindings.length === 0
-            ? "Review completed with no candidate findings and no publisher handoff."
-            : "Review completed with no publishable findings and no publisher handoff.",
+          publishSkipReason === "dry_run"
+            ? "Review dry-run completed without publisher handoff."
+            : candidateFindings.length === 0
+              ? "Review completed with no candidate findings and no publisher handoff."
+              : "Review completed with no publishable findings and no publisher handoff.",
         artifactRefs: completedReviewArtifactRefs,
         counts: {
           candidateFindings: candidateFindings.length,
@@ -1473,7 +1491,8 @@ export async function runPullRequestReview(
           publishPlanId,
           publishPlanArtifactId: publishPlanArtifact.artifactId,
           publishSkipped: {
-            reason: "no_planned_publish_operations",
+            dryRun,
+            reason: publishSkipReason,
           },
         },
       });
@@ -2510,6 +2529,7 @@ function createReviewRun(input: {
       rejectedFindings: 0,
     },
     metadata: {
+      dryRun: input.input.dryRun ?? false,
       jobBaseSha: input.input.baseSha,
       jobHeadSha: input.input.headSha,
       planSnapshot: planSnapshotMetadata(input.planSnapshot),
@@ -2658,6 +2678,8 @@ type PublishPlanPayloadObject = Record<string, unknown>;
 type ReviewPublishPlanArtifactPayload = {
   /** Artifact schema version. */
   readonly schemaVersion: "publish_plan.v1";
+  /** Whether orchestration was requested as a non-mutating dry run. */
+  readonly dryRun: boolean;
   /** Review run that owns the plan. */
   readonly reviewRunId: string;
   /** Head commit SHA the plan targets. */
@@ -2688,6 +2710,8 @@ type ReviewPublishPlanArtifactPayload = {
 
 /** Builds the durable publish-plan artifact payload used for publisher handoff inspection. */
 function publishPlanArtifactPayload(input: {
+  /** Whether the review job requested a non-mutating dry run. */
+  readonly dryRun: boolean;
   /** Timestamp when the artifact was generated. */
   readonly generatedAt: string;
   /** Head commit SHA the plan targets. */
@@ -2699,6 +2723,7 @@ function publishPlanArtifactPayload(input: {
 }): ReviewPublishPlanArtifactPayload {
   return {
     schemaVersion: "publish_plan.v1",
+    dryRun: input.dryRun,
     reviewRunId: input.reviewRunId,
     headSha: input.headSha,
     mode: publishPlanMode(input.publishPlan),
@@ -2769,6 +2794,24 @@ function publishPlanMode(plan: PublishPlan): string {
     default:
       return "mixed";
   }
+}
+
+/** Returns the publisher handoff skip reason for a completed review, when publishing is skipped. */
+export function reviewPublishSkipReason(input: {
+  /** Whether the review job requested a non-mutating dry run. */
+  readonly dryRun: boolean;
+  /** Whether the persisted publish plan has provider-visible operations. */
+  readonly hasExternalWrites: boolean;
+}): ReviewPublishSkipReason | undefined {
+  if (input.dryRun) {
+    return "dry_run";
+  }
+
+  if (!input.hasExternalWrites) {
+    return "no_planned_publish_operations";
+  }
+
+  return undefined;
 }
 
 /** Maps duplicate group kinds to canonical product-safe rejection reasons. */

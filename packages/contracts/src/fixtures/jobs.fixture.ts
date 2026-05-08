@@ -48,6 +48,7 @@ export const validReviewPullRequestJobPayloadFixture = {
   baseSha: "1111111",
   headSha: "2222222",
   trigger: "webhook",
+  dryRun: false,
 } satisfies ReviewPullRequestJobPayload;
 
 export const validPublishReviewJobPayloadFixture = {

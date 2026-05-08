@@ -225,6 +225,74 @@ describe.runIf(integrationDatabaseUrl)("review orchestrator integration", () => 
       skipped_publish_events: 1,
     });
   });
+
+  it("runs the full review pipeline in dry-run mode without enqueueing publish work", async () => {
+    await resetDatabase(sql, schemaName);
+
+    const result = await runPullRequestReview(
+      {
+        repoId: "repo_test",
+        installationId: "inst_test",
+        pullRequestNumber: 7,
+        baseSha: "1111111",
+        headSha: "2222222",
+        trigger: "webhook",
+        dryRun: true,
+      },
+      {
+        db,
+        gitProvider: fakeGitProvider,
+        now: () => new Date(now),
+        llmGateway: createStaticLLMGateway({
+          findings: [
+            {
+              path: "src/index.ts",
+              line: 1,
+              severity: "medium",
+              category: "correctness",
+              title: "Check exported value",
+              body: "The exported value is hard-coded without validation.",
+              evidence: ["The added line exports a literal value."],
+              confidence: 0.82,
+            },
+          ],
+        }),
+        syncWorkspace: async () => ({
+          workspacePath: "/tmp/heimdall-review-test",
+          checkedOutSha: "2222222",
+          cleanedUp: true,
+        }),
+        indexWaitTimeoutMs: 0,
+      },
+    );
+
+    expect(result.candidateFindingCount).toBe(1);
+    expect(result.validatedFindingCount).toBe(1);
+    expect(result.publishJobKey).toBeUndefined();
+
+    const [counts] = await sql`
+      SELECT
+        (SELECT count(*)::int FROM review_runs WHERE status = 'completed') AS completed_runs,
+        (SELECT count(*)::int FROM review_runs WHERE metadata->'publishSkipped'->>'reason' = 'dry_run') AS dry_run_review_runs,
+        (SELECT count(*)::int FROM review_artifacts WHERE kind = 'publish_plan') AS publish_plan_artifacts,
+        (SELECT count(*)::int FROM publish_plans WHERE mode <> 'none') AS publish_plans_with_writes,
+        (SELECT count(*)::int FROM validated_findings WHERE decision = 'publish') AS publishable_findings,
+        (SELECT count(*)::int FROM review_run_stage_events WHERE stage = 'publish' AND status = 'skipped' AND metadata->>'reason' = 'dry_run') AS dry_run_publish_events,
+        (SELECT count(*)::int FROM background_jobs WHERE job_type = 'review.publish.v1') AS publish_jobs,
+        (SELECT count(*)::int FROM usage_events WHERE event_type = 'review.run') AS review_usage_events
+    `;
+
+    expect(counts).toEqual({
+      completed_runs: 1,
+      dry_run_publish_events: 1,
+      dry_run_review_runs: 1,
+      publish_jobs: 0,
+      publish_plan_artifacts: 1,
+      publish_plans_with_writes: 1,
+      publishable_findings: 1,
+      review_usage_events: 1,
+    });
+  });
 });
 
 async function resetDatabase(sql: postgres.Sql, schemaName: string): Promise<void> {
