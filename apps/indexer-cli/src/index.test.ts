@@ -158,27 +158,24 @@ describe("runIndexerCli", () => {
     );
   });
 
-  it("indexes a local TypeScript workspace and writes a canonical split artifact directory", async () => {
+  it("runs from request JSON and writes a canonical split artifact directory", async () => {
     const root = await createTempWorkspace();
     const outputPath = join(root, "artifact");
+    const requestPath = join(root, "request.json");
+    await writeFile(
+      requestPath,
+      JSON.stringify({
+        commitSha: "abcdef1",
+        outputFormat: "split",
+        outputPath,
+        repoId: "repo_test",
+        workspacePath: root,
+      }),
+      "utf8",
+    );
 
     const output = memoryIo();
-    const exitCode = await runIndexerCli(
-      [
-        "index",
-        "--repo-id",
-        "repo_test",
-        "--commit-sha",
-        "abcdef1",
-        "--workspace",
-        root,
-        "--output",
-        outputPath,
-        "--format",
-        "split",
-      ],
-      output.io,
-    );
+    const exitCode = await runIndexerCli(["run", "--request", requestPath], output.io);
 
     expect(exitCode).toBe(0);
     expect(output.stderr()).toBe("");

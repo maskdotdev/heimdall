@@ -91,6 +91,33 @@ describe("indexTypeScriptRepository", () => {
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
+  it("emits deterministic records with repository-relative paths across repeated runs", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await mkdir(join(workspacePath, "src"), { recursive: true });
+    await writeFile(
+      join(workspacePath, "src", "service.ts"),
+      "export function service() {\n  return true;\n}\n",
+    );
+
+    const firstArtifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+    const secondArtifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+    const { generatedAt: _firstGeneratedAt, ...firstManifest } = firstArtifact.manifest;
+    const { generatedAt: _secondGeneratedAt, ...secondManifest } = secondArtifact.manifest;
+
+    expect(firstManifest).toEqual(secondManifest);
+    expect(firstArtifact.records).toEqual(secondArtifact.records);
+    expect(JSON.stringify(firstArtifact)).not.toContain(workspacePath);
+    expect(validateIndexArtifact(firstArtifact)).toEqual([]);
+  });
+
   it("prefers Git-tracked files over untracked workspace files", async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
     await runGitCommand(workspacePath, ["init"]);
@@ -110,6 +137,30 @@ describe("indexTypeScriptRepository", () => {
       record.type === "file" ? [record.path] : [],
     );
     expect(filePaths).toEqual(["tracked.ts"]);
+    expect(validateIndexArtifact(artifact)).toEqual([]);
+  });
+
+  it("skips oversized source files before emitting records", async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), "heimdall-indexer-ts-"));
+    await Promise.all([
+      writeFile(join(workspacePath, "safe.ts"), "export const safe = true;\n"),
+      writeFile(
+        join(workspacePath, "large.ts"),
+        `export const large = "${"x".repeat(1_000_001)}";\n`,
+      ),
+    ]);
+
+    const artifact = await indexTypeScriptRepository({
+      repoId: "repo_123",
+      commitSha: "1234567890abcdef",
+      workspacePath,
+    });
+
+    const filePaths = artifact.records.flatMap((record) =>
+      record.type === "file" ? [record.path] : [],
+    );
+    expect(filePaths).toEqual(["safe.ts"]);
+    expect(JSON.stringify(artifact)).not.toContain("large.ts");
     expect(validateIndexArtifact(artifact)).toEqual([]);
   });
 
