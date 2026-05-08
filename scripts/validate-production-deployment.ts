@@ -87,12 +87,37 @@ const REQUIRED_REVIEW_ARTIFACT_ENV = [
   "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY",
 ];
 
-/** Required AWS environment variables for production SecretRef resolution. */
-const REQUIRED_AWS_SECRET_RESOLUTION_ENV = [
-  "AWS_ACCESS_KEY_ID",
-  "AWS_REGION",
-  "AWS_SECRET_ACCESS_KEY",
-];
+/** One accepted environment-variable group for production SecretRef resolution. */
+type SecretResolutionProviderRequirement = {
+  /** Provider name shown in audit failure messages. */
+  readonly label: string;
+  /** Alternative environment-variable sets that can configure the provider. */
+  readonly alternatives: readonly (readonly string[])[];
+};
+
+/** Accepted production SecretRef provider environment-variable groups. */
+const SECRET_RESOLUTION_PROVIDER_REQUIREMENTS = [
+  {
+    alternatives: [["AWS_ACCESS_KEY_ID", "AWS_REGION", "AWS_SECRET_ACCESS_KEY"]],
+    label: "AWS",
+  },
+  {
+    alternatives: [
+      ["HEIMDALL_GCP_SECRET_MANAGER_ACCESS_TOKEN"],
+      ["GCP_SECRET_MANAGER_ACCESS_TOKEN"],
+      ["GOOGLE_OAUTH_ACCESS_TOKEN"],
+      ["GOOGLE_ACCESS_TOKEN"],
+    ],
+    label: "GCP",
+  },
+  {
+    alternatives: [
+      ["HEIMDALL_VAULT_ADDR", "HEIMDALL_VAULT_TOKEN"],
+      ["VAULT_ADDR", "VAULT_TOKEN"],
+    ],
+    label: "Vault",
+  },
+] as const satisfies readonly SecretResolutionProviderRequirement[];
 
 /** Required API environment variables for production admin routes. */
 const REQUIRED_API_ENV = [
@@ -107,7 +132,6 @@ const REQUIRED_API_ENV = [
   "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
   "HEIMDALL_ADMIN_GITHUB_ORG",
   "WEB_URL",
-  ...REQUIRED_AWS_SECRET_RESOLUTION_ENV,
   ...REQUIRED_REVIEW_ARTIFACT_ENV,
 ];
 
@@ -137,7 +161,6 @@ const REQUIRED_WORKER_ENV = [
   "REDIS_URL",
   "GITHUB_APP_ID",
   "GITHUB_APP_PRIVATE_KEY_SECRET_REF",
-  ...REQUIRED_AWS_SECRET_RESOLUTION_ENV,
   ...REQUIRED_REVIEW_ARTIFACT_ENV,
 ];
 
@@ -243,6 +266,7 @@ export function productionDeploymentIssues(
     ...REQUIRED_API_ENV.filter((envName) => !requiredEnv(apiService).includes(envName)).map(
       (envName) => `api requiredEnv must include ${envName}`,
     ),
+    ...secretResolutionProviderIssues("api", requiredEnv(apiService)),
     ...REQUIRED_DASHBOARD_ENV.filter(
       (envName) => !requiredEnv(dashboardService).includes(envName),
     ).map((envName) => `dashboard requiredEnv must include ${envName}`),
@@ -313,9 +337,31 @@ function workerServiceIssues(services: readonly JsonRecord[]): readonly string[]
         ...[...REQUIRED_WORKER_ENV, ...extraEnv]
           .filter((envName) => !serviceRequiredEnv.includes(envName))
           .map((envName) => `${serviceName} requiredEnv must include ${envName}`),
+        ...secretResolutionProviderIssues(serviceName, serviceRequiredEnv),
       ].filter((issue): issue is string => typeof issue === "string");
     },
   );
+}
+
+/** Returns issues when a service lacks every supported production SecretRef provider group. */
+function secretResolutionProviderIssues(
+  serviceName: string,
+  serviceRequiredEnv: readonly string[],
+): readonly string[] {
+  const hasSupportedProvider = SECRET_RESOLUTION_PROVIDER_REQUIREMENTS.some((requirement) =>
+    requirement.alternatives.some((alternative) =>
+      alternative.every((envName) => serviceRequiredEnv.includes(envName)),
+    ),
+  );
+
+  if (hasSupportedProvider) {
+    return [];
+  }
+
+  const labels = SECRET_RESOLUTION_PROVIDER_REQUIREMENTS.map(
+    (requirement) => requirement.label,
+  ).join("/");
+  return [`${serviceName} requiredEnv must include one SecretRef provider group (${labels})`];
 }
 
 /** Returns issues for the production review artifact-storage policy. */

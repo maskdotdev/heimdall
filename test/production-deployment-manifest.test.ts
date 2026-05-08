@@ -168,6 +168,53 @@ describe("production deployment manifest", () => {
     );
   });
 
+  it("reports missing production SecretRef provider environment", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        services: validManifest().services.map((serviceRecord) => {
+          if (serviceRecord.name === "api" || serviceRecord.name === "worker-index") {
+            return replaceSecretProviderEnv(serviceRecord, []);
+          }
+
+          return serviceRecord;
+        }),
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).toEqual(
+      expect.arrayContaining([
+        "api requiredEnv must include one SecretRef provider group (AWS/GCP/Vault)",
+        "worker-index requiredEnv must include one SecretRef provider group (AWS/GCP/Vault)",
+      ]),
+    );
+  });
+
+  it("accepts GCP and Vault production SecretRef provider environment groups", () => {
+    const input = productionDeploymentInput({
+      manifest: {
+        ...validManifest(),
+        services: validManifest().services.map((serviceRecord) => {
+          if (serviceRecord.name === "api") {
+            return replaceSecretProviderEnv(serviceRecord, ["GCP_SECRET_MANAGER_ACCESS_TOKEN"]);
+          }
+          if (serviceRecord.name.startsWith("worker-")) {
+            return replaceSecretProviderEnv(serviceRecord, ["VAULT_ADDR", "VAULT_TOKEN"]);
+          }
+
+          return serviceRecord;
+        }),
+      },
+    });
+
+    expect(productionDeploymentIssues(input)).not.toEqual(
+      expect.arrayContaining([
+        "api requiredEnv must include one SecretRef provider group (AWS/GCP/Vault)",
+        "worker-index requiredEnv must include one SecretRef provider group (AWS/GCP/Vault)",
+      ]),
+    );
+  });
+
   it("reports missing role-specific worker deployment coverage", () => {
     const input = productionDeploymentInput({
       manifest: {
@@ -432,5 +479,21 @@ function removeRequiredEnv(serviceRecord: ReturnType<typeof service>, envName: s
   return {
     ...serviceRecord,
     requiredEnv: serviceRecord.requiredEnv.filter((requiredEnv) => requiredEnv !== envName),
+  };
+}
+
+/** Replaces the AWS SecretRef provider env group in a service fixture. */
+function replaceSecretProviderEnv(
+  serviceRecord: ReturnType<typeof service>,
+  replacementEnv: readonly string[],
+) {
+  return {
+    ...serviceRecord,
+    requiredEnv: [
+      ...serviceRecord.requiredEnv.filter(
+        (requiredEnv) => !REQUIRED_AWS_SECRET_RESOLUTION_ENV.includes(requiredEnv),
+      ),
+      ...replacementEnv,
+    ],
   };
 }
