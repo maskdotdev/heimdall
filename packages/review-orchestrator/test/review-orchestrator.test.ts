@@ -820,6 +820,7 @@ describe("acquireReviewRepositoryWorkspace", () => {
           tempMirrorPath,
         ],
         ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+        ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
         ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/7/head"],
         ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
         ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],

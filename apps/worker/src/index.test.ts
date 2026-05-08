@@ -228,6 +228,7 @@ describe("acquireWorkerRepositoryWorkspace", () => {
           tempMirrorPath,
         ],
         ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+        ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
         ["-C", mirrorPath, "fetch", "--no-tags", "origin", commitSha],
         ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
         ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],

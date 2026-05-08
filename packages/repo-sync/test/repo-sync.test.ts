@@ -1,6 +1,7 @@
 import { access, mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   OBSERVABILITY_METRIC_NAMES,
   OBSERVABILITY_SPAN_NAMES,
@@ -467,6 +468,7 @@ describe("repo sync workspace", () => {
         tempMirrorPath,
       ],
       ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
       ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/1/head"],
       ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
     ]);
@@ -484,6 +486,70 @@ describe("repo sync workspace", () => {
       throw new Error("Expected commit fetch to use a temporary Git askpass helper.");
     }
     await expect(access(fetchAskPassPath)).rejects.toThrow();
+  });
+
+  it("serializes concurrent fetches for the same cached mirror", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-fetch-lock-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultFetchTimeoutMs: 5_000 });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const mutableCommands: string[][] = [];
+    let activeFetchCount = 0;
+    let commitExists = false;
+    let maxActiveFetchCount = 0;
+
+    await mkdir(mirrorPath, { recursive: true });
+
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[2] === "cat-file") {
+        if (commitExists) {
+          return "";
+        }
+        throw createMissingCommitGitError();
+      }
+      if (args[2] === "fetch") {
+        activeFetchCount += 1;
+        maxActiveFetchCount = Math.max(maxActiveFetchCount, activeFetchCount);
+        await sleep(30);
+        commitExists = true;
+        activeFetchCount -= 1;
+      }
+      return "";
+    };
+
+    const results = await Promise.all([
+      ensureRepositoryCommit(
+        {
+          cloneUrl: "https://github.com/acme/api.git",
+          commitSha,
+          config,
+          fetchRefHints: ["refs/pull/1/head"],
+          repoId: "repo_123",
+        },
+        { gitRunner },
+      ),
+      ensureRepositoryCommit(
+        {
+          cloneUrl: "https://github.com/acme/api.git",
+          commitSha,
+          config,
+          fetchRefHints: ["refs/pull/1/head"],
+          repoId: "repo_123",
+        },
+        { gitRunner },
+      ),
+    ]);
+
+    expect(results).toEqual([
+      expect.objectContaining({ commitSha, repoId: "repo_123" }),
+      expect.objectContaining({ commitSha, repoId: "repo_123" }),
+    ]);
+    expect(results.filter((result) => result.fetched)).toHaveLength(1);
+    expect(maxActiveFetchCount).toBe(1);
+    expect(mutableCommands.filter((command) => command[2] === "fetch")).toEqual([
+      ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/1/head"],
+    ]);
   });
 
   it("fails when fetched refs do not provide the requested commit", async () => {
@@ -526,6 +592,7 @@ describe("repo sync workspace", () => {
         "https://github.com/acme/api.git",
         tempMirrorPath,
       ],
+      ["-C", getRepoSyncMirrorPath(config, "repo_123"), "cat-file", "-e", `${commitSha}^{commit}`],
       ["-C", getRepoSyncMirrorPath(config, "repo_123"), "cat-file", "-e", `${commitSha}^{commit}`],
       [
         "-C",
@@ -708,6 +775,7 @@ describe("repo sync workspace", () => {
         "https://github.com/acme/api.git",
         tempMirrorPath,
       ],
+      ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
       ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],
       ["-C", mirrorPath, "fetch", "--no-tags", "origin", "refs/pull/1/head"],
       ["-C", mirrorPath, "cat-file", "-e", `${commitSha}^{commit}`],

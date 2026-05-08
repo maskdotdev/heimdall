@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { GitHubRepositoryRef, GitProvider } from "@repo/github";
 import {
@@ -37,6 +38,7 @@ const defaultRepoSyncMaxTotalCacheBytes = 100 * 1024 * 1024 * 1024;
 const defaultRepoSyncMaxMirrorBytes = 20 * 1024 * 1024 * 1024;
 const defaultRepoSyncMaxWorkspaceBytes = 5 * 1024 * 1024 * 1024;
 const defaultRepoSyncCleanupLimit = 100;
+const defaultRepoSyncLockRetryDelayMs = 25;
 const managedWorkspacePrefix = "heimdall-repo-";
 const redactedSecret = "***";
 const githubTokenPattern = /\bgh[opsu]_[A-Za-z0-9_]+\b/gu;
@@ -543,12 +545,56 @@ export function getRepoSyncWorktreePath(input: RepoSyncCachePathInput, leaseId: 
   );
 }
 
-/** Returns the lock file path for a repo-sync lock ID. */
+/** Returns the lock path for a repo-sync lock ID. */
 export function getRepoSyncLockPath(input: RepoSyncCachePathInput, lockId: string): string {
   return join(
     getRepoSyncCacheLayout(input).locksRoot,
     `${safeCachePathSegment("lockId", lockId)}.lock`,
   );
+}
+
+/** Runs a cache mutation while holding a bounded repo-sync filesystem lock. */
+export async function withRepoSyncLock<T>(
+  input: RepoSyncLockInput,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const layout = getRepoSyncCacheLayout(input.config);
+  const lockPath = getRepoSyncLockPath(
+    input.config,
+    `${input.operation}_${safeCachePathSegment("repoId", input.repoId)}`,
+  );
+  const timeoutMs = normalizeRepoSyncLockTimeout(input.timeoutMs);
+  const retryDelayMs = normalizeRepoSyncLockRetryDelay(input.retryDelayMs);
+  const startedAtMs = Date.now();
+
+  assertInsideRoot(layout.locksRoot, lockPath);
+  await mkdir(layout.locksRoot, { recursive: true });
+
+  while (true) {
+    try {
+      await mkdir(lockPath);
+      break;
+    } catch (error) {
+      if (!isPathExistsError(error)) {
+        throw error;
+      }
+
+      const elapsedMs = Date.now() - startedAtMs;
+      if (elapsedMs >= timeoutMs) {
+        throw new Error(
+          `Timed out acquiring repo sync ${input.operation} lock for repository ${input.repoId}.`,
+        );
+      }
+
+      await sleep(Math.min(retryDelayMs, Math.max(1, timeoutMs - elapsedMs)));
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    await rm(lockPath, { force: true, recursive: true });
+  }
 }
 
 /** Creates a cached bare repository mirror when it does not already exist. */
@@ -566,59 +612,73 @@ export async function ensureRepositoryMirror(
     return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
   }
 
-  await mkdir(layout.mirrorsRoot, { recursive: true });
-  await mkdir(layout.tmpRoot, { recursive: true });
-
-  const tempMirrorPath = getRepoSyncTempMirrorPath(
-    input.config,
-    input.repoId,
-    dependencies.tempIdFactory?.() ?? randomUUID(),
-  );
-  await rm(tempMirrorPath, { force: true, recursive: true });
-
-  const git = dependencies.gitRunner ?? runGit;
-  let askPassRoot: string | undefined;
-
-  try {
-    const commandOptions = await createMirrorGitCommandOptions(input, layout.tmpRoot);
-    askPassRoot = commandOptions.askPassRoot;
-    const gitOptions: GitCommandRunnerOptions = {
-      ...(commandOptions.env ? { env: commandOptions.env } : {}),
-      ...(commandOptions.redact ? { redact: commandOptions.redact } : {}),
+  return withRepoSyncLock(
+    {
+      config: input.config,
+      operation: "mirror",
+      repoId: input.repoId,
       timeoutMs: input.config.defaultFetchTimeoutMs,
-    };
-    const bareCloneInput: BuildBareCloneArgsInput = {
-      cloneUrl: sanitizedCloneUrl,
-      enablePartialClone: input.enablePartialClone ?? input.config.enablePartialClone,
-      ...(input.fetchTags === undefined ? {} : { fetchTags: input.fetchTags }),
-      mirrorPath: tempMirrorPath,
-    };
-    await git(buildBareCloneArgs(bareCloneInput), gitOptions);
-
-    if (await pathExists(mirrorPath)) {
-      await rm(tempMirrorPath, { force: true, recursive: true });
-      return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
-    }
-
-    try {
-      await rename(tempMirrorPath, mirrorPath);
-    } catch (error) {
+    },
+    async () => {
       if (await pathExists(mirrorPath)) {
-        await rm(tempMirrorPath, { force: true, recursive: true });
         return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
       }
-      throw error;
-    }
 
-    return { cloneUrlHash, created: true, mirrorPath, repoId: input.repoId };
-  } catch (error) {
-    await rm(tempMirrorPath, { force: true, recursive: true });
-    throw error;
-  } finally {
-    if (askPassRoot) {
-      await rm(askPassRoot, { force: true, recursive: true });
-    }
-  }
+      await mkdir(layout.mirrorsRoot, { recursive: true });
+      await mkdir(layout.tmpRoot, { recursive: true });
+
+      const tempMirrorPath = getRepoSyncTempMirrorPath(
+        input.config,
+        input.repoId,
+        dependencies.tempIdFactory?.() ?? randomUUID(),
+      );
+      await rm(tempMirrorPath, { force: true, recursive: true });
+
+      const git = dependencies.gitRunner ?? runGit;
+      let askPassRoot: string | undefined;
+
+      try {
+        const commandOptions = await createMirrorGitCommandOptions(input, layout.tmpRoot);
+        askPassRoot = commandOptions.askPassRoot;
+        const gitOptions: GitCommandRunnerOptions = {
+          ...(commandOptions.env ? { env: commandOptions.env } : {}),
+          ...(commandOptions.redact ? { redact: commandOptions.redact } : {}),
+          timeoutMs: input.config.defaultFetchTimeoutMs,
+        };
+        const bareCloneInput: BuildBareCloneArgsInput = {
+          cloneUrl: sanitizedCloneUrl,
+          enablePartialClone: input.enablePartialClone ?? input.config.enablePartialClone,
+          ...(input.fetchTags === undefined ? {} : { fetchTags: input.fetchTags }),
+          mirrorPath: tempMirrorPath,
+        };
+        await git(buildBareCloneArgs(bareCloneInput), gitOptions);
+
+        if (await pathExists(mirrorPath)) {
+          await rm(tempMirrorPath, { force: true, recursive: true });
+          return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
+        }
+
+        try {
+          await rename(tempMirrorPath, mirrorPath);
+        } catch (error) {
+          if (await pathExists(mirrorPath)) {
+            await rm(tempMirrorPath, { force: true, recursive: true });
+            return { cloneUrlHash, created: false, mirrorPath, repoId: input.repoId };
+          }
+          throw error;
+        }
+
+        return { cloneUrlHash, created: true, mirrorPath, repoId: input.repoId };
+      } catch (error) {
+        await rm(tempMirrorPath, { force: true, recursive: true });
+        throw error;
+      } finally {
+        if (askPassRoot) {
+          await rm(askPassRoot, { force: true, recursive: true });
+        }
+      }
+    },
+  );
 }
 
 /** Ensures an exact commit exists in a cached repository mirror. */
@@ -640,22 +700,14 @@ export async function ensureRepositoryCommit(
     return { ...mirror, commitSha: input.commitSha, fetched: false };
   }
 
-  const layout = getRepoSyncCacheLayout(input.config);
-  await mkdir(layout.tmpRoot, { recursive: true });
-  const commandOptions = await createMirrorGitCommandOptions(input, layout.tmpRoot);
-  try {
-    const gitOptions: GitCommandRunnerOptions = {
-      ...(commandOptions.env ? { env: commandOptions.env } : {}),
-      ...(commandOptions.redact ? { redact: commandOptions.redact } : {}),
+  return withRepoSyncLock(
+    {
+      config: input.config,
+      operation: "fetch",
+      repoId: input.repoId,
       timeoutMs: input.config.defaultFetchTimeoutMs,
-    };
-    for (const ref of [...(input.fetchRefHints ?? []), input.commitSha]) {
-      await git(
-        buildFetchArgs({ fetchTags: input.fetchTags, mirrorPath: mirror.mirrorPath, ref }),
-        {
-          ...gitOptions,
-        },
-      );
+    },
+    async () => {
       if (
         await repositoryCommitExists(
           git,
@@ -664,17 +716,46 @@ export async function ensureRepositoryCommit(
           input.config.defaultFetchTimeoutMs,
         )
       ) {
-        return { ...mirror, commitSha: input.commitSha, fetched: true };
+        return { ...mirror, commitSha: input.commitSha, fetched: false };
       }
-    }
-  } finally {
-    if (commandOptions.askPassRoot) {
-      await rm(commandOptions.askPassRoot, { force: true, recursive: true });
-    }
-  }
 
-  throw new Error(
-    `Repository mirror does not contain commit ${input.commitSha} after fetching requested refs.`,
+      const layout = getRepoSyncCacheLayout(input.config);
+      await mkdir(layout.tmpRoot, { recursive: true });
+      const commandOptions = await createMirrorGitCommandOptions(input, layout.tmpRoot);
+      try {
+        const gitOptions: GitCommandRunnerOptions = {
+          ...(commandOptions.env ? { env: commandOptions.env } : {}),
+          ...(commandOptions.redact ? { redact: commandOptions.redact } : {}),
+          timeoutMs: input.config.defaultFetchTimeoutMs,
+        };
+        for (const ref of [...(input.fetchRefHints ?? []), input.commitSha]) {
+          await git(
+            buildFetchArgs({ fetchTags: input.fetchTags, mirrorPath: mirror.mirrorPath, ref }),
+            {
+              ...gitOptions,
+            },
+          );
+          if (
+            await repositoryCommitExists(
+              git,
+              mirror.mirrorPath,
+              input.commitSha,
+              input.config.defaultFetchTimeoutMs,
+            )
+          ) {
+            return { ...mirror, commitSha: input.commitSha, fetched: true };
+          }
+        }
+      } finally {
+        if (commandOptions.askPassRoot) {
+          await rm(commandOptions.askPassRoot, { force: true, recursive: true });
+        }
+      }
+
+      throw new Error(
+        `Repository mirror does not contain commit ${input.commitSha} after fetching requested refs.`,
+      );
+    },
   );
 }
 
@@ -691,13 +772,23 @@ export async function createRepositoryWorktreeLease(
 
   const git = dependencies.gitRunner ?? runGit;
   try {
-    await git(
-      buildWorktreeAddArgs({
-        commitSha: input.commitSha,
-        mirrorPath: input.mirrorPath,
-        workspacePath,
-      }),
-      { timeoutMs: input.config.defaultWorktreeTimeoutMs },
+    await withRepoSyncLock(
+      {
+        config: input.config,
+        operation: "worktree",
+        repoId: input.repoId,
+        timeoutMs: input.config.defaultWorktreeTimeoutMs,
+      },
+      async () => {
+        await git(
+          buildWorktreeAddArgs({
+            commitSha: input.commitSha,
+            mirrorPath: input.mirrorPath,
+            workspacePath,
+          }),
+          { timeoutMs: input.config.defaultWorktreeTimeoutMs },
+        );
+      },
     );
   } catch (error) {
     await rm(workspacePath, { force: true, recursive: true });
@@ -722,13 +813,23 @@ export async function createRepositoryWorktreeLease(
         return;
       }
 
-      await git(buildWorktreeRemoveArgs({ mirrorPath: input.mirrorPath, workspacePath }), {
-        timeoutMs: input.config.defaultWorktreeTimeoutMs,
-      });
-      await rm(workspacePath, { force: true, recursive: true });
-      await git(buildWorktreePruneArgs({ mirrorPath: input.mirrorPath }), {
-        timeoutMs: input.config.defaultWorktreeTimeoutMs,
-      });
+      await withRepoSyncLock(
+        {
+          config: input.config,
+          operation: "worktree",
+          repoId: input.repoId,
+          timeoutMs: input.config.defaultWorktreeTimeoutMs,
+        },
+        async () => {
+          await git(buildWorktreeRemoveArgs({ mirrorPath: input.mirrorPath, workspacePath }), {
+            timeoutMs: input.config.defaultWorktreeTimeoutMs,
+          });
+          await rm(workspacePath, { force: true, recursive: true });
+          await git(buildWorktreePruneArgs({ mirrorPath: input.mirrorPath }), {
+            timeoutMs: input.config.defaultWorktreeTimeoutMs,
+          });
+        },
+      );
       released = true;
     },
     repoId: input.repoId,
@@ -881,6 +982,23 @@ export type AssertAllowedGitUrlOptions = {
 
 /** Input accepted by repo-sync cache path builders. */
 export type RepoSyncCachePathInput = Pick<RepoSyncConfig, "cacheRoot"> | string;
+
+/** Cache mutation operation protected by a repo-sync filesystem lock. */
+export type RepoSyncLockOperation = "cleanup" | "fetch" | "mirror" | "worktree";
+
+/** Input required to acquire a bounded repo-sync filesystem lock. */
+export type RepoSyncLockInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Cache mutation operation protected by the lock. */
+  readonly operation: RepoSyncLockOperation;
+  /** Stable product repository ID used in the lock key. */
+  readonly repoId: string;
+  /** Maximum time to wait for the lock before failing. */
+  readonly timeoutMs?: number;
+  /** Delay between lock-acquire attempts. */
+  readonly retryDelayMs?: number;
+};
 
 /** Result returned after a repository workspace sync finishes. */
 export type SyncRepositoryWorkspaceResult = {
@@ -1114,6 +1232,30 @@ function normalizeRepoSyncCleanupLimit(input: number | undefined): number {
   return input;
 }
 
+/** Normalizes the maximum time spent waiting for a repo-sync lock. */
+function normalizeRepoSyncLockTimeout(input: number | undefined): number {
+  if (input === undefined) {
+    return defaultGitCommandTimeoutMs;
+  }
+  if (!Number.isSafeInteger(input) || input < 0) {
+    throw new Error("Repo sync lock timeout must be a non-negative integer.");
+  }
+
+  return input;
+}
+
+/** Normalizes the delay between repo-sync lock acquisition attempts. */
+function normalizeRepoSyncLockRetryDelay(input: number | undefined): number {
+  if (input === undefined) {
+    return defaultRepoSyncLockRetryDelayMs;
+  }
+  if (!Number.isSafeInteger(input) || input < 1) {
+    throw new Error("Repo sync lock retry delay must be a positive integer.");
+  }
+
+  return input;
+}
+
 /** Builds a product-safe cleanup failure record. */
 function repoSyncCleanupFailure(
   path: string,
@@ -1134,6 +1276,16 @@ function isMissingPathError(error: unknown): boolean {
     error !== null &&
     "code" in error &&
     (error as { readonly code?: unknown }).code === "ENOENT"
+  );
+}
+
+/** Returns true when an error represents an existing filesystem path. */
+function isPathExistsError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "EEXIST"
   );
 }
 
