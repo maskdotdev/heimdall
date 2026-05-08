@@ -4,6 +4,9 @@ import type { HeimdallDatabase } from "../client";
 import { pullRequestSnapshots, pullRequests } from "../schema";
 import { toPullRequestSnapshot } from "./row-mappers";
 
+/** Durable pull request snapshot row returned for debug inspection. */
+export type PullRequestSnapshotRecord = typeof pullRequestSnapshots.$inferSelect;
+
 /** Mutable pull request state stored from the latest provider snapshot. */
 export type PullRequestRecord = {
   /** Durable pull request ID. */
@@ -164,13 +167,21 @@ export class PullRequestRepository {
 
   /** Gets one immutable pull request snapshot by its durable snapshot ID. */
   public async getSnapshot(snapshotId: string): Promise<PullRequestSnapshot | undefined> {
+    const row = await this.getSnapshotRecord(snapshotId);
+    return row ? toPullRequestSnapshot(row) : undefined;
+  }
+
+  /** Gets one durable pull request snapshot row by its snapshot ID. */
+  public async getSnapshotRecord(
+    snapshotId: string,
+  ): Promise<PullRequestSnapshotRecord | undefined> {
     const [row] = await this.db
       .select()
       .from(pullRequestSnapshots)
       .where(eq(pullRequestSnapshots.snapshotId, snapshotId))
       .limit(1);
 
-    return row ? toPullRequestSnapshot(row) : undefined;
+    return row;
   }
 
   /** Gets the mutable pull request row for a repository pull request number. */

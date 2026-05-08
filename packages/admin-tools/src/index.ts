@@ -40,13 +40,13 @@ import {
   type MemoryFactRecord,
   MemoryFactRepository,
   PullRequestRepository,
+  type PullRequestSnapshotRecord,
   publishedCheckRuns,
   publishedFindings,
   publishedReviews,
   publishedSummaryComments,
   publishOperations,
   publishRuns,
-  pullRequestSnapshots,
   quotaCounters,
   quotaReservations,
   RepoRuleRepository,
@@ -2234,6 +2234,7 @@ export async function getReviewDebugDetails(
 ): Promise<AdminReviewDebugDetails> {
   const reviewRepository = new ReviewRepository(dependencies.db);
   const llmCallRepository = new LlmCallRepository(dependencies.db);
+  const pullRequestRepository = new PullRequestRepository(dependencies.db);
   const sandboxRepository = new SandboxRepository(dependencies.db);
   const reviewRun = await reviewRepository.getReviewRun(reviewRunId);
   if (!reviewRun) {
@@ -2241,7 +2242,7 @@ export async function getReviewDebugDetails(
   }
 
   const [
-    snapshotRows,
+    snapshotRow,
     stageRows,
     dependencyRows,
     artifactRows,
@@ -2252,11 +2253,7 @@ export async function getReviewDebugDetails(
     relatedJobs,
     replayAudits,
   ] = await Promise.all([
-    dependencies.db
-      .select()
-      .from(pullRequestSnapshots)
-      .where(eq(pullRequestSnapshots.snapshotId, reviewRun.pullRequestSnapshotId))
-      .limit(1),
+    pullRequestRepository.getSnapshotRecord(reviewRun.pullRequestSnapshotId),
     reviewRepository.listReviewStageEventsForRun(reviewRunId),
     reviewRepository.listReviewDependenciesForRun(reviewRunId),
     reviewRepository.listReviewArtifactsForRun(reviewRunId),
@@ -2311,7 +2308,7 @@ export async function getReviewDebugDetails(
 
   return {
     reviewRun,
-    ...(snapshotRows[0] ? { snapshot: toPullRequestSnapshotDebugSummary(snapshotRows[0]) } : {}),
+    ...(snapshotRow ? { snapshot: toPullRequestSnapshotDebugSummary(snapshotRow) } : {}),
     stageEvents,
     dependencies: dependencyRows.map(toReviewDependencyDebugSummary),
     artifacts: artifactRows.map(toReviewArtifactDebugSummary),
@@ -3595,7 +3592,7 @@ export async function executePublisherReplay(
 type WebhookEventRow = WebhookEventRecord;
 type BackgroundJobRow = BackgroundJobRecord;
 type AuditLogRow = AuditLogRecord;
-type PullRequestSnapshotRow = typeof pullRequestSnapshots.$inferSelect;
+type PullRequestSnapshotRow = PullRequestSnapshotRecord;
 type ReviewStageEventRow = ReviewStageEventRecord;
 type ReviewDependencyRow = ReviewDependencyRecord;
 type ReviewArtifactRow = ReviewArtifactRecord;
