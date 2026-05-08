@@ -4,6 +4,7 @@ export * from "./repositories/code-intelligence-repository";
 export * from "./repositories/embedding-repository";
 export * from "./repositories/evaluation-repository";
 export * from "./repositories/index-version-repository";
+export * from "./repositories/memory-candidate-repository";
 export * from "./repositories/memory-fact-repository";
 export * from "./repositories/provider-installation-repository";
 export * from "./repositories/pull-request-repository";

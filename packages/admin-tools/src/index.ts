@@ -34,9 +34,10 @@ import {
   indexedFiles,
   indexImportBatches,
   llmCalls,
+  type MemoryCandidateRecord,
+  MemoryCandidateRepository,
   type MemoryFactRecord,
   MemoryFactRepository,
-  memoryCandidates,
   PullRequestRepository,
   publishedCheckRuns,
   publishedFindings,
@@ -82,7 +83,7 @@ import { parseJobEnvelope, QUEUE_NAMES, type QueueName } from "@repo/queue";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
 import { validateAndRankCandidateFindings } from "@repo/review-engine";
 import { type EffectiveReviewPolicy, parseReviewPolicySnapshot } from "@repo/rules";
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 /** Resource type that an admin debug lookup can target. */
 export type AdminDebugResourceType =
@@ -3425,7 +3426,7 @@ type PublishedReviewRow = typeof publishedReviews.$inferSelect;
 type PublishedSummaryCommentRow = typeof publishedSummaryComments.$inferSelect;
 type PublishedFindingRow = typeof publishedFindings.$inferSelect;
 type MemoryFactRow = MemoryFactRecord;
-type MemoryCandidateRow = typeof memoryCandidates.$inferSelect;
+type MemoryCandidateRow = MemoryCandidateRecord;
 type IndexVersionRow = IndexVersionRecord;
 type IndexImportBatchRow = typeof indexImportBatches.$inferSelect;
 type EmbeddingJobRow = typeof embeddingJobs.$inferSelect;
@@ -3708,20 +3709,7 @@ async function listMemoryCandidatesForRepository(
     readonly repoId: string;
   },
 ): Promise<readonly MemoryCandidateRow[]> {
-  return db
-    .select()
-    .from(memoryCandidates)
-    .where(
-      or(
-        eq(memoryCandidates.repoId, input.repoId),
-        and(eq(memoryCandidates.orgId, input.orgId), isNull(memoryCandidates.repoId)),
-      ),
-    )
-    .orderBy(
-      asc(memoryCandidates.status),
-      desc(memoryCandidates.updatedAt),
-      asc(memoryCandidates.memoryCandidateId),
-    );
+  return new MemoryCandidateRepository(db).listRepositoryMemoryCandidates(input);
 }
 
 async function listJobsByKeys(

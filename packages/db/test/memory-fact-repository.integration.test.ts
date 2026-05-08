@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { HeimdallDatabase } from "../src/client";
+import { MemoryCandidateRepository } from "../src/repositories/memory-candidate-repository";
 import { MemoryFactRepository } from "../src/repositories/memory-fact-repository";
 
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
@@ -19,6 +20,7 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
   );
   const sql = postgres(integrationDatabaseUrl ?? "", { max: 1, onnotice: () => undefined });
   const db = drizzle(sql) as HeimdallDatabase;
+  const memoryCandidateRepository = new MemoryCandidateRepository(db);
   const memoryFactRepository = new MemoryFactRepository(db);
 
   beforeAll(async () => {
@@ -28,6 +30,7 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
     await applyMigrations(sql, schemaName);
     await seedRepositoryParents(sql);
     await seedMemoryFacts(sql);
+    await seedMemoryCandidates(sql);
   });
 
   afterAll(async () => {
@@ -91,6 +94,32 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
       "mem_memory_fact_org",
       "mem_memory_fact_disabled",
     ]);
+  });
+
+  it("lists repository and organization memory candidates for inspection", async () => {
+    const candidates = await memoryCandidateRepository.listRepositoryMemoryCandidates({
+      orgId: "org_memory_fact_test",
+      repoId: "repo_memory_fact_test",
+    });
+
+    expect(candidates.map((candidate) => candidate.memoryCandidateId)).toEqual([
+      "memcand_memory_fact_org",
+      "memcand_memory_fact_repo_recent",
+      "memcand_memory_fact_repo_older",
+    ]);
+    expect(candidates[1]).toMatchObject({
+      candidateKind: "suppression",
+      createdByLogin: "maintainer",
+      metadata: { source: "review_feedback" },
+      orgId: "org_memory_fact_test",
+      proposedAppliesTo: { pathGlobs: ["src/generated/**"] },
+      proposedContent: "Suppress generated client comments.",
+      proposedScope: { scope: "repository" },
+      repoId: "repo_memory_fact_test",
+      sourceKind: "feedback",
+      status: "pending",
+      trustLevel: "maintainer",
+    });
   });
 });
 
@@ -272,6 +301,98 @@ async function seedMemoryFacts(sql: postgres.Sql): Promise<void> {
         ${JSON.stringify({ source: "manual" })}::jsonb,
         '2026-05-08T00:00:00.000Z',
         '2026-05-08T00:05:00.000Z'
+      )
+  `;
+}
+
+/** Inserts memory candidate rows that exercise scope and ordering filters. */
+async function seedMemoryCandidates(sql: postgres.Sql): Promise<void> {
+  await sql`
+    INSERT INTO memory_candidates (
+      memory_candidate_id,
+      org_id,
+      repo_id,
+      source_kind,
+      candidate_kind,
+      proposed_content,
+      proposed_scope,
+      proposed_applies_to,
+      confidence,
+      trust_level,
+      status,
+      created_by_login,
+      metadata,
+      created_at,
+      updated_at
+    )
+    VALUES
+      (
+        'memcand_memory_fact_org',
+        'org_memory_fact_test',
+        null,
+        'manual',
+        'team_preference',
+        'Prefer short explanations.',
+        ${JSON.stringify({ scope: "organization" })}::jsonb,
+        ${JSON.stringify({})}::jsonb,
+        0.8,
+        'admin',
+        'approved',
+        'owner',
+        ${JSON.stringify({ source: "manual" })}::jsonb,
+        '2026-05-08T00:00:00.000Z',
+        '2026-05-08T00:01:00.000Z'
+      ),
+      (
+        'memcand_memory_fact_repo_recent',
+        'org_memory_fact_test',
+        'repo_memory_fact_test',
+        'feedback',
+        'suppression',
+        'Suppress generated client comments.',
+        ${JSON.stringify({ scope: "repository" })}::jsonb,
+        ${JSON.stringify({ pathGlobs: ["src/generated/**"] })}::jsonb,
+        0.92,
+        'maintainer',
+        'pending',
+        'maintainer',
+        ${JSON.stringify({ source: "review_feedback" })}::jsonb,
+        '2026-05-08T00:00:00.000Z',
+        '2026-05-08T00:03:00.000Z'
+      ),
+      (
+        'memcand_memory_fact_repo_older',
+        'org_memory_fact_test',
+        'repo_memory_fact_test',
+        'feedback',
+        'suppression',
+        'Suppress generated fixtures.',
+        ${JSON.stringify({ scope: "repository" })}::jsonb,
+        ${JSON.stringify({ pathGlobs: ["fixtures/**"] })}::jsonb,
+        0.7,
+        'maintainer',
+        'pending',
+        'maintainer',
+        ${JSON.stringify({ source: "review_feedback" })}::jsonb,
+        '2026-05-08T00:00:00.000Z',
+        '2026-05-08T00:02:00.000Z'
+      ),
+      (
+        'memcand_memory_fact_other',
+        'org_memory_fact_other',
+        'repo_memory_fact_other',
+        'manual',
+        'team_preference',
+        'Other org candidates are not visible.',
+        ${JSON.stringify({ scope: "repository" })}::jsonb,
+        ${JSON.stringify({})}::jsonb,
+        0.5,
+        'admin',
+        'pending',
+        'owner',
+        ${JSON.stringify({ source: "manual" })}::jsonb,
+        '2026-05-08T00:00:00.000Z',
+        '2026-05-08T00:04:00.000Z'
       )
   `;
 }
