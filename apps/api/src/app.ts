@@ -78,7 +78,6 @@ import {
   ValidateRepoLocalConfigFileRequestSchema,
 } from "@repo/contracts";
 import {
-  artifactAccessEvents,
   auditLogs,
   type BackgroundJobRecord,
   BackgroundJobRepository,
@@ -112,6 +111,7 @@ import {
   providerInstallations,
   pullRequestSnapshots,
   quotaCounters,
+  type RecordSecurityEventInput,
   RepoRuleRepository,
   RepositoryRepository,
   type RepositorySuppressionMatchRecord,
@@ -123,6 +123,7 @@ import {
   reviewArtifacts,
   reviewRunMetrics,
   reviewRuns,
+  SecurityAuditRepository,
   securityEvents,
   subscriptions,
   usageEvents,
@@ -3022,10 +3023,9 @@ export function createPostgresSecurityEventSink(
   return {
     record: (event) => {
       try {
-        const write = options.db
-          .insert(securityEvents)
-          .values(securityEventInsertFromEvent(event))
-          .onConflictDoNothing();
+        const write = new SecurityAuditRepository(options.db).recordSecurityEvent(
+          securityEventRecordFromEvent(event),
+        );
         void Promise.resolve(write).catch((error: unknown) => {
           options.onError?.(error, event);
         });
@@ -3036,8 +3036,8 @@ export function createPostgresSecurityEventSink(
   };
 }
 
-/** Converts a normalized security event into a `security_events` insert row. */
-function securityEventInsertFromEvent(event: SecurityEvent): typeof securityEvents.$inferInsert {
+/** Converts a normalized security event into a durable security event record. */
+function securityEventRecordFromEvent(event: SecurityEvent): RecordSecurityEventInput {
   const createdAt = new Date(event.createdAt);
   return {
     actorId: event.actorId ?? null,
@@ -3047,12 +3047,11 @@ function securityEventInsertFromEvent(event: SecurityEvent): typeof securityEven
     repoId: event.repoId ?? null,
     resourceId: event.resourceId ?? null,
     resourceType: event.resourceType ?? null,
-    securityEventId: event.id,
     severity: event.severity,
+    securityEventId: event.id,
     source: event.source,
     status: event.status,
     type: event.type,
-    updatedAt: createdAt,
   };
 }
 
@@ -9512,7 +9511,7 @@ async function recordReviewArtifactAccessEvent(
   },
 ): Promise<string> {
   const artifactAccessEventId = `artaccess_${randomUUID()}`;
-  await db.insert(artifactAccessEvents).values({
+  await new SecurityAuditRepository(db).recordArtifactAccessEvent({
     accessLevel: input.request.accessLevel,
     actorType: input.request.actor.actorType,
     actorUserId: input.request.actor.actorUserId,
@@ -13174,34 +13173,31 @@ async function insertAuditLog(
   db: HeimdallDatabase,
   event: AdminAuditEventInput,
 ): Promise<AdminAuditLogSummary> {
-  const [row] = await db
-    .insert(auditLogs)
-    .values({
-      action: event.action,
-      actorType: event.actor.actorType,
-      actorUserId: event.actor.actorUserId,
-      auditLogId: newAuditLogId(),
-      metadata: {
-        actor: {
-          email: event.actor.email,
-          displayName: event.actor.displayName,
-          permissions: event.actor.permissions,
-          provider: event.actor.provider,
-          providerSubject: event.actor.providerSubject,
-          role: event.actor.role,
-        },
-        requestId: event.requestId,
-        sessionId: event.sessionId,
-        ...event.metadata,
+  const row = await new SecurityAuditRepository(db).recordAuditLog({
+    action: event.action,
+    actorType: event.actor.actorType,
+    actorUserId: event.actor.actorUserId,
+    auditLogId: newAuditLogId(),
+    metadata: {
+      actor: {
+        email: event.actor.email,
+        displayName: event.actor.displayName,
+        permissions: event.actor.permissions,
+        provider: event.actor.provider,
+        providerSubject: event.actor.providerSubject,
+        role: event.actor.role,
       },
-      occurredAt: new Date(),
-      orgId: event.orgId,
-      resourceId: event.resourceId,
-      resourceType: event.resourceType,
-    })
-    .returning();
+      requestId: event.requestId,
+      sessionId: event.sessionId,
+      ...event.metadata,
+    },
+    occurredAt: new Date(),
+    orgId: event.orgId,
+    resourceId: event.resourceId,
+    resourceType: event.resourceType,
+  });
 
-  return toAuditLogSummary(requireReturnedRow(row));
+  return toAuditLogSummary(row);
 }
 
 /** Resolves admin control-plane authentication settings from options and environment. */

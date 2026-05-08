@@ -15,5 +15,6 @@ export * from "./repositories/repo-rule-repository";
 export * from "./repositories/repository-repository";
 export * from "./repositories/review-repository";
 export * from "./repositories/sandbox-repository";
+export * from "./repositories/security-audit-repository";
 export * from "./repositories/webhook-repository";
 export * from "./schema";
