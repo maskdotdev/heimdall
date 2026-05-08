@@ -518,6 +518,7 @@ describe("api app", () => {
       await expect(response.json()).resolves.toMatchObject({
         checks: [
           { name: "config", status: "pass" },
+          { name: "github_app", status: "pass" },
           { name: "postgres", status: "pass" },
           { name: "redis", status: "pass" },
         ],
@@ -549,6 +550,7 @@ describe("api app", () => {
       expect(body).toMatchObject({
         checks: [
           { name: "config", status: "pass" },
+          { name: "github_app", status: "pass" },
           { name: "postgres", status: "pass" },
           {
             message: "Redis is unavailable.",
@@ -561,6 +563,39 @@ describe("api app", () => {
         status: "fail",
       });
       expect(JSON.stringify(body)).not.toContain("redis://default:secret@redis.internal");
+    } finally {
+      restoreEnv(previousEnv);
+    }
+  });
+
+  it("returns default readiness failure when GitHub App config is incomplete", async () => {
+    const previousEnv = setDefaultReadinessRuntimeEnv();
+    try {
+      delete process.env.GITHUB_APP_ID;
+      const app = createApiApp({
+        databaseClient: createReadyDatabaseClient(),
+        githubWebhookHandler: noopWebhookHandler(),
+        redisReadinessCheck: async () => {},
+      });
+
+      const response = await app.handle(new Request("http://localhost/readyz"));
+
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toMatchObject({
+        checks: [
+          { name: "config", status: "pass" },
+          {
+            message: "GitHub App configuration is incomplete.",
+            name: "github_app",
+            status: "fail",
+          },
+          { name: "postgres", status: "pass" },
+          { name: "redis", status: "pass" },
+        ],
+        ok: false,
+        service: "api",
+        status: "fail",
+      });
     } finally {
       restoreEnv(previousEnv);
     }
@@ -6686,6 +6721,11 @@ const READINESS_RUNTIME_ENV_KEYS = [
   "REDIS_URL",
   "NODE_ENV",
   "LOG_LEVEL",
+  "GITHUB_APP_ID",
+  "GITHUB_WEBHOOK_SECRET",
+  "GITHUB_WEBHOOK_SECRET_REF",
+  "HEIMDALL_GITHUB_APP_INSTALL_URL",
+  "HEIMDALL_GITHUB_APP_SLUG",
   "HEIMDALL_ADMIN_ENABLED",
   "HEIMDALL_ADMIN_ROUTE_EXPOSURE",
   "HEIMDALL_ADMIN_IDENTITY_PROVIDER",
@@ -6716,6 +6756,11 @@ function setDefaultReadinessRuntimeEnv(): Record<string, string | undefined> {
   process.env.REDIS_URL = "redis://localhost:6379";
   process.env.NODE_ENV = "test";
   process.env.LOG_LEVEL = "info";
+  process.env.GITHUB_APP_ID = "12345";
+  process.env.GITHUB_WEBHOOK_SECRET = "webhook-secret";
+  delete process.env.GITHUB_WEBHOOK_SECRET_REF;
+  process.env.HEIMDALL_GITHUB_APP_SLUG = "heimdall-dev";
+  delete process.env.HEIMDALL_GITHUB_APP_INSTALL_URL;
   process.env.HEIMDALL_ADMIN_ENABLED = "false";
   delete process.env.HEIMDALL_ADMIN_ROUTE_EXPOSURE;
   delete process.env.HEIMDALL_ADMIN_IDENTITY_PROVIDER;

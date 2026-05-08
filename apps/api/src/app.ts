@@ -7563,6 +7563,17 @@ async function checkApiReadiness(
   }
 
   try {
+    checkGitHubAppReadiness();
+    checks.push({ name: "github_app", status: "pass" });
+  } catch {
+    checks.push({
+      message: "GitHub App configuration is incomplete.",
+      name: "github_app",
+      status: "fail",
+    });
+  }
+
+  try {
     await getDatabaseClient().db.execute(sql`select 1`);
     checks.push({ name: "postgres", status: "pass" });
   } catch {
@@ -7585,6 +7596,13 @@ async function checkApiReadiness(
   }
 
   return checks;
+}
+
+/** Verifies that the API has enough GitHub App config to accept production traffic. */
+function checkGitHubAppReadiness(): void {
+  if (!productGitHubAppSetup().configured) {
+    throw new Error("GitHub App configuration is incomplete.");
+  }
 }
 
 /** Runs a bounded Redis PING without leaking connection details. */
