@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { OrgSettings, PageInfo, Repository, RepositorySettings } from "@repo/contracts";
-import { and, asc, eq, gt, inArray, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { orgSettings, providerInstallations, repositories, repositorySettings } from "../schema";
 import { toOrgSettings, toRepository, toRepositorySettings } from "./row-mappers";
@@ -47,6 +47,18 @@ export type ListEnabledRepositoriesInput = {
   readonly limit: number;
   /** Opaque cursor returned by a previous page. */
   readonly cursor?: string;
+};
+
+/** Input for bounded repository discovery. */
+export type ListRepositoriesInput = {
+  /** Organization IDs to include. Omit to include every organization. */
+  readonly orgIds?: readonly string[];
+  /** Repository IDs to include. Omit to include every repository. */
+  readonly repoIds?: readonly string[];
+  /** Free-text search over repository identity fields. */
+  readonly search?: string;
+  /** Maximum number of repository rows to return. */
+  readonly limit: number;
 };
 
 /** Cursor-paginated repository page. */
@@ -222,6 +234,19 @@ export class RepositoryRepository {
       .from(repositories)
       .where(inArray(repositories.repoId, uniqueRepoIds))
       .orderBy(asc(repositories.repoId));
+
+    return rows.map(toRepository);
+  }
+
+  /** Lists repositories with scoped filters for admin and product discovery. */
+  public async listRepositories(input: ListRepositoriesInput): Promise<readonly Repository[]> {
+    const filters = repositoryListFilters(input);
+    const rows = await this.db
+      .select()
+      .from(repositories)
+      .where(filters.length > 0 ? and(...filters) : undefined)
+      .orderBy(desc(repositories.updatedAt), asc(repositories.repoId))
+      .limit(repositoryListLimit(input.limit));
 
     return rows.map(toRepository);
   }
@@ -425,6 +450,59 @@ function repositoryPageLimit(limit: number): number {
     throw new RangeError("Repository page limit must be an integer from 1 through 100.");
   }
   return limit;
+}
+
+/** Validates and returns a repository list limit. */
+function repositoryListLimit(limit: number): number {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new RangeError("Repository list limit must be an integer from 1 through 100.");
+  }
+  return limit;
+}
+
+/** Builds repository discovery filters. */
+function repositoryListFilters(input: ListRepositoriesInput): SQL[] {
+  const filters: SQL[] = [];
+  const scopedFilter = scopedRepositoryFilter(input);
+  if (scopedFilter) {
+    filters.push(scopedFilter);
+  }
+
+  const search = input.search?.trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const searchFilter = or(
+      ilike(repositories.fullName, pattern),
+      ilike(repositories.owner, pattern),
+      ilike(repositories.name, pattern),
+      ilike(repositories.providerRepoId, pattern),
+    );
+    if (searchFilter) {
+      filters.push(searchFilter);
+    }
+  }
+
+  return filters;
+}
+
+/** Builds the repository discovery scope filter. */
+function scopedRepositoryFilter(input: ListRepositoriesInput): SQL | undefined {
+  const orgIds = uniqueStrings(input.orgIds ?? []);
+  const repoIds = uniqueStrings(input.repoIds ?? []);
+  const hasExplicitScope = input.orgIds !== undefined || input.repoIds !== undefined;
+  const filters: SQL[] = [];
+  if (orgIds.length > 0) {
+    filters.push(inArray(repositories.orgId, orgIds));
+  }
+  if (repoIds.length > 0) {
+    filters.push(inArray(repositories.repoId, repoIds));
+  }
+  if (filters.length === 0) {
+    return hasExplicitScope ? sql`false` : undefined;
+  }
+
+  const [filter] = filters;
+  return filters.length === 1 ? (filter ?? sql`false`) : or(...filters);
 }
 
 /** Builds page metadata for a repository page. */

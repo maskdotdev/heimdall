@@ -9106,31 +9106,13 @@ async function listRepositories(
   db: HeimdallDatabase,
   query: AdminRepositoryListQuery,
 ): Promise<readonly AdminRepositorySummary[]> {
-  const conditions = repositoryListConditions(query);
-  const rows = await db
-    .select({
-      cloneUrl: repositories.cloneUrl,
-      createdAt: repositories.createdAt,
-      defaultBranch: repositories.defaultBranch,
-      enabled: repositories.enabled,
-      fullName: repositories.fullName,
-      installationId: repositories.installationId,
-      isArchived: repositories.isArchived,
-      isFork: repositories.isFork,
-      metadata: repositories.metadata,
-      name: repositories.name,
-      orgId: repositories.orgId,
-      owner: repositories.owner,
-      provider: repositories.provider,
-      providerRepoId: repositories.providerRepoId,
-      repoId: repositories.repoId,
-      updatedAt: repositories.updatedAt,
-      visibility: repositories.visibility,
-    })
-    .from(repositories)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(repositories.updatedAt))
-    .limit(boundedListLimit(query.limit));
+  const wildcardScope = query.orgIds?.includes("*") || query.repoIds?.includes("*");
+  const rows = await new RepositoryRepository(db).listRepositories({
+    limit: boundedListLimit(query.limit),
+    ...(query.search !== undefined ? { search: query.search } : {}),
+    ...(!wildcardScope && query.orgIds !== undefined ? { orgIds: query.orgIds } : {}),
+    ...(!wildcardScope && query.repoIds !== undefined ? { repoIds: query.repoIds } : {}),
+  });
   const latestReviews = await Promise.all(
     rows.map((repository) => latestReviewForRepository(db, repository.repoId)),
   );
@@ -9179,111 +9161,26 @@ async function latestReviewForRepository(
   return row;
 }
 
-/** Builds SQL predicates for repository discovery. */
-function repositoryListConditions(query: AdminRepositoryListQuery): SQL[] {
-  const conditions: SQL[] = [];
-  const scopedConditions = scopedRepositoryConditions(query);
-  if (scopedConditions) {
-    conditions.push(scopedConditions);
-  }
-
-  const search = query.search?.trim();
-  if (search) {
-    const pattern = `%${search}%`;
-    const searchCondition = or(
-      ilike(repositories.fullName, pattern),
-      ilike(repositories.owner, pattern),
-      ilike(repositories.name, pattern),
-      ilike(repositories.providerRepoId, pattern),
-    );
-    if (searchCondition) {
-      conditions.push(searchCondition);
-    }
-  }
-
-  return conditions;
-}
-
-/** Builds a repository discovery scope predicate. */
-function scopedRepositoryConditions(query: AdminRepositoryListQuery): SQL | undefined {
-  const orgIds = query.orgIds ?? [];
-  const repoIds = query.repoIds ?? [];
-  const hasExplicitScope = query.orgIds !== undefined || query.repoIds !== undefined;
-  if (orgIds.includes("*") || repoIds.includes("*")) {
-    return undefined;
-  }
-
-  const conditions: SQL[] = [];
-  if (orgIds.length > 0) {
-    conditions.push(inArray(repositories.orgId, [...orgIds]));
-  }
-  if (repoIds.length > 0) {
-    conditions.push(inArray(repositories.repoId, [...repoIds]));
-  }
-  if (conditions.length === 0) {
-    return hasExplicitScope ? sql`false` : undefined;
-  }
-
-  const [condition] = conditions;
-  return conditions.length === 1 ? (condition ?? sql`false`) : or(...conditions);
-}
-
 /** Converts a repository row into a dashboard repository summary. */
-function toAdminRepositorySummary(row: {
-  /** Repository ID. */
-  readonly repoId: string;
-  /** Organization ID. */
-  readonly orgId: string;
-  /** Installation ID. */
-  readonly installationId: string;
-  /** Git provider. */
-  readonly provider: string;
-  /** Provider repository ID. */
-  readonly providerRepoId: string;
-  /** Repository owner. */
-  readonly owner: string;
-  /** Repository name. */
-  readonly name: string;
-  /** Repository full name. */
-  readonly fullName: string;
-  /** Default branch. */
-  readonly defaultBranch: string | null;
-  /** Clone URL. */
-  readonly cloneUrl: string | null;
-  /** Repository visibility. */
-  readonly visibility: string;
-  /** Whether the repository is archived. */
-  readonly isArchived: boolean;
-  /** Whether the repository is a fork. */
-  readonly isFork: boolean;
-  /** Whether review automation is enabled. */
-  readonly enabled: boolean;
-  /** Creation timestamp. */
-  readonly createdAt: Date;
-  /** Update timestamp. */
-  readonly updatedAt: Date;
-  /** Repository metadata. */
-  readonly metadata: unknown;
-}): AdminRepositorySummary {
-  const metadata = asOptionalRecord(row.metadata);
+function toAdminRepositorySummary(repository: Repository): AdminRepositorySummary {
   return {
-    repoId: row.repoId,
-    orgId: row.orgId,
-    installationId: row.installationId,
-    provider: row.provider as Repository["provider"],
-    providerRepoId: row.providerRepoId,
-    owner: row.owner,
-    name: row.name,
-    fullName: row.fullName,
-    ...(row.defaultBranch ? { defaultBranch: row.defaultBranch } : {}),
-    ...(row.cloneUrl ? { cloneUrl: row.cloneUrl } : {}),
-    visibility: row.visibility as Repository["visibility"],
-    isArchived: row.isArchived,
-    isFork: row.isFork,
-    enabled: row.enabled,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-    ...(metadata ? { metadata } : {}),
+    repoId: repository.repoId,
+    orgId: repository.orgId,
+    installationId: repository.installationId,
+    provider: repository.provider,
+    providerRepoId: repository.providerRepoId,
+    owner: repository.owner,
+    name: repository.name,
+    fullName: repository.fullName,
+    ...(repository.defaultBranch ? { defaultBranch: repository.defaultBranch } : {}),
+    ...(repository.cloneUrl ? { cloneUrl: repository.cloneUrl } : {}),
+    visibility: repository.visibility,
+    isArchived: repository.isArchived,
+    isFork: repository.isFork,
+    enabled: repository.enabled,
+    createdAt: repository.createdAt,
+    updatedAt: repository.updatedAt,
+    ...(repository.metadata ? { metadata: repository.metadata } : {}),
   };
 }
 

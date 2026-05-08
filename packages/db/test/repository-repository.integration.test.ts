@@ -173,6 +173,30 @@ describe.runIf(integrationDatabaseUrl)("RepositoryRepository integration", () =>
       "repo_repository_alpha",
       "repo_repository_beta",
     ]);
+    const searchedRepositories = await repositoryRepository.listRepositories({
+      orgIds: ["org_repository_test"],
+      search: "beta",
+      limit: 10,
+    });
+    expect(searchedRepositories.map((repository) => repository.repoId)).toEqual([
+      "repo_repository_beta",
+    ]);
+    const repoScopedRepositories = await repositoryRepository.listRepositories({
+      repoIds: ["repo_repository_other"],
+      limit: 10,
+    });
+    expect(repoScopedRepositories.map((repository) => repository.repoId)).toEqual([
+      "repo_repository_other",
+    ]);
+    await expect(
+      repositoryRepository.listRepositories({
+        orgIds: [],
+        limit: 10,
+      }),
+    ).resolves.toEqual([]);
+    await expect(repositoryRepository.listRepositories({ limit: 0 })).rejects.toThrow(
+      /list limit must be an integer/u,
+    );
 
     const settings = await repositoryRepository.insertSettingsIfAbsent(
       repositorySettingsFixture({
