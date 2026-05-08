@@ -1697,6 +1697,7 @@ function toolRunPlan(input: {
   readonly paths: readonly string[];
 }): ToolRunPlan {
   const paths = [...input.paths].sort();
+  const command = toolCommand(input.descriptor.name, input.request.workspace.path, paths);
   const planId = stableId("stplan", [
     input.request.reviewRunId,
     input.descriptor.name,
@@ -1704,17 +1705,9 @@ function toolRunPlan(input: {
   ]);
 
   return {
-    adapterVersion: "static-analysis.fake-adapter.v1",
+    adapterVersion: "static-analysis.command-adapter.v1",
     allowFailure: true,
-    command: {
-      args: ["--changed-files", ...paths],
-      cwd: input.request.workspace.path,
-      displayCommand: `${input.descriptor.name} --changed-files ${paths.join(" ")}`.trim(),
-      env: {},
-      executable: input.descriptor.name,
-      filesystemPolicy: "read_only",
-      networkPolicy: "none",
-    },
+    command,
     expectedOutputFormat: input.descriptor.preferredOutputFormat,
     maxOutputBytes: input.descriptor.defaultMaxOutputBytes,
     planId,
@@ -1728,6 +1721,46 @@ function toolRunPlan(input: {
     timeoutMs: input.descriptor.defaultTimeoutMs,
     tool: input.descriptor.name,
   };
+}
+
+/** Creates a shell-free command specification for one static-analysis tool. */
+function toolCommand(
+  tool: StaticToolName,
+  workspacePath: string,
+  paths: readonly string[],
+): ToolCommandSpec {
+  const executable = toolExecutable(tool);
+  const args = toolCommandArgs(tool, paths);
+
+  return {
+    args,
+    cwd: workspacePath,
+    displayCommand: [executable, ...args].join(" ").trim(),
+    env: {},
+    executable,
+    filesystemPolicy: "read_only",
+    networkPolicy: "none",
+  };
+}
+
+/** Returns the process executable for one static-analysis tool. */
+function toolExecutable(tool: StaticToolName): string {
+  return tool === "typescript" ? "tsc" : tool;
+}
+
+/** Returns MVP command arguments for one static-analysis tool. */
+function toolCommandArgs(tool: StaticToolName, paths: readonly string[]): readonly string[] {
+  if (tool === "eslint") {
+    return ["--format", "json", ...paths];
+  }
+  if (tool === "biome") {
+    return ["check", "--reporter=json", ...paths];
+  }
+  if (tool === "typescript") {
+    return ["--noEmit", "--pretty", "false"];
+  }
+
+  return ["--changed-files", ...paths];
 }
 
 /** Converts a runner result into a report run summary. */

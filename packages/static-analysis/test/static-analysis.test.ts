@@ -42,10 +42,32 @@ describe("static analysis", () => {
 
     expect(plan.toolRuns).toHaveLength(1);
     expect(plan.toolRuns[0]).toMatchObject({
+      adapterVersion: "static-analysis.command-adapter.v1",
       allowFailure: true,
+      command: {
+        args: ["--format", "json", "src/math.ts"],
+        displayCommand: "eslint --format json src/math.ts",
+        executable: "eslint",
+      },
       scope: { kind: "changed_files", paths: ["src/math.ts"] },
     });
     expect(plan.warnings).toEqual([expect.objectContaining({ code: "tool_run_budget_truncated" })]);
+  });
+
+  it("plans runnable commands for supported local tools", () => {
+    const biomePlan = planStaticAnalysis({ ...request, requestedTools: ["biome"] });
+    const typeScriptPlan = planStaticAnalysis({ ...request, requestedTools: ["typescript"] });
+
+    expect(biomePlan.toolRuns[0]?.command).toMatchObject({
+      args: ["check", "--reporter=json", "src/math.ts"],
+      displayCommand: "biome check --reporter=json src/math.ts",
+      executable: "biome",
+    });
+    expect(typeScriptPlan.toolRuns[0]?.command).toMatchObject({
+      args: ["--noEmit", "--pretty", "false"],
+      displayCommand: "tsc --noEmit --pretty false",
+      executable: "tsc",
+    });
   });
 
   it("maps diagnostics to changed lines", () => {
