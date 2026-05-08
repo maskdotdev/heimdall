@@ -50,6 +50,7 @@ import {
   type PublishedSummaryFeedbackTargetRecord,
   RepositoryRepository,
   ReviewRepository,
+  SandboxRepository,
   sandboxArtifacts,
   sandboxPolicyDecisions,
   sandboxRuns,
@@ -154,7 +155,7 @@ import { createLocalEnvSecretsManager, parseSecretRef, type SecretsManager } fro
 import { createSandboxToolRunner, type ToolRunner } from "@repo/tool-runner";
 import { PostgresUsageLedgerStore, reconcileBillingState, UsageLedger } from "@repo/usage";
 import { Worker } from "bullmq";
-import { and, asc, eq, inArray, lt } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import IORedis from "ioredis";
 
 /** Default durable artifact directory used when INDEX_ARTIFACT_ROOT is unset. */
@@ -1568,25 +1569,14 @@ export async function cleanupSandboxRuns(
   const cutoff = sandboxCleanupCutoff(payload, now);
   const limit = payload.limit ?? 100;
   const dryRun = payload.dryRun ?? false;
-  const conditions = [lt(sandboxRuns.createdAt, cutoff)];
-  if (payload.repoId) {
-    conditions.push(eq(sandboxRuns.repoId, payload.repoId));
-  }
-
-  const selectedRuns = await db
-    .select({ sandboxRunId: sandboxRuns.sandboxRunId })
-    .from(sandboxRuns)
-    .where(and(...conditions))
-    .orderBy(asc(sandboxRuns.createdAt))
-    .limit(limit);
+  const sandboxRepository = new SandboxRepository(db);
+  const selectedRuns = await sandboxRepository.listSandboxRunCleanupTargets({
+    cutoff,
+    limit,
+    repoId: payload.repoId,
+  });
   const sandboxRunIds = selectedRuns.map((row) => row.sandboxRunId);
-  const artifactRows =
-    sandboxRunIds.length === 0
-      ? []
-      : await db
-          .select({ uri: sandboxArtifacts.uri })
-          .from(sandboxArtifacts)
-          .where(inArray(sandboxArtifacts.sandboxRunId, sandboxRunIds));
+  const artifactRows = await sandboxRepository.listSandboxArtifactUrisForRuns(sandboxRunIds);
 
   if (dryRun || sandboxRunIds.length === 0) {
     return {
@@ -1600,7 +1590,7 @@ export async function cleanupSandboxRuns(
   }
 
   const artifactCleanup = await removeSandboxArtifactFiles(artifactRows.map((row) => row.uri));
-  await db.delete(sandboxRuns).where(inArray(sandboxRuns.sandboxRunId, sandboxRunIds));
+  await sandboxRepository.deleteSandboxRuns(sandboxRunIds);
 
   return {
     cutoff: cutoff.toISOString(),
