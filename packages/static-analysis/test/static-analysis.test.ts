@@ -457,6 +457,38 @@ describe("static analysis", () => {
     ]);
   });
 
+  it("classifies head diagnostics as new when an optional baseline ran clean", async () => {
+    const report = await runStaticAnalysis({
+      baselineDiagnosticsByTool: {},
+      request: { ...request, mode: "base_head_delta" },
+      runner: createFakeToolRunner([{ executable: "eslint", stdout: "[]" }]),
+      diagnosticsByTool: {
+        eslint: [
+          {
+            location: { filePath: "src/math.ts", startLine: 2 },
+            message: "'total' is not defined.",
+            ruleId: "no-undef",
+            snapshot: validPullRequestSnapshotFixture,
+            tool: "eslint",
+            toolRunId: "ignored_new",
+          },
+        ],
+      },
+    });
+
+    expect(report.summary).toMatchObject({
+      diagnosticCount: 1,
+      newDiagnosticCount: 1,
+    });
+    expect(report.diagnostics).toEqual([
+      expect.objectContaining({
+        baselineStatus: "new",
+        introducedByPr: true,
+        ruleId: "no-undef",
+      }),
+    ]);
+  });
+
   it("records static-analysis telemetry without raw output or workspace paths", async () => {
     const metrics: RecordedMetric[] = [];
     const spans: RecordedSpan[] = [];

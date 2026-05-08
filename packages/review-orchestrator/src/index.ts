@@ -82,11 +82,13 @@ import {
   resolveArtifactRetention,
 } from "@repo/security";
 import {
+  type NormalizedToolDiagnostic,
   runStaticAnalysis,
   type StaticAnalysisBudgets,
   type StaticAnalysisMode,
   type StaticAnalysisReport,
   type StaticAnalysisRequest,
+  type StaticToolName,
 } from "@repo/static-analysis";
 import type { ToolRunner } from "@repo/tool-runner";
 import {
@@ -519,9 +521,23 @@ type ReviewTelemetryStageOperationOptions<T> = {
 
 /** Result from optional static-analysis orchestration. */
 type ReviewStaticAnalysisResult = {
+  /** Static-analysis report from the optional base commit run. */
+  readonly baselineReport?: StaticAnalysisReport | undefined;
+  /** Whether the optional base static-analysis workspace has been removed. */
+  readonly baselineWorkspaceCleanedUp?: boolean | undefined;
   /** Static-analysis report when execution completed. */
   readonly report?: StaticAnalysisReport | undefined;
   /** Whether the synced workspace has been removed. */
+  readonly workspaceCleanedUp: boolean;
+};
+
+/** Result from the optional base commit static-analysis run. */
+type ReviewStaticAnalysisBaselineResult = {
+  /** Diagnostics from the base run grouped by static-analysis tool. */
+  readonly diagnosticsByTool: Partial<Record<StaticToolName, readonly NormalizedToolDiagnostic[]>>;
+  /** Static-analysis report produced for the base commit. */
+  readonly report: StaticAnalysisReport;
+  /** Whether the base workspace has been removed. */
   readonly workspaceCleanedUp: boolean;
 };
 
@@ -882,10 +898,14 @@ export async function runPullRequestReview(
       return afterSnapshotStaleness.result;
     }
 
-    const syncWorkspace =
+    const syncWorkspace: SyncWorkspace =
       dependencies.syncWorkspace ??
       ((workspaceInput: GitHubRepositoryRef & { readonly commitSha: string }) =>
         syncRepositoryWorkspace(workspaceInput, { gitProvider: dependencies.gitProvider }));
+    const shouldRunStaticAnalysisBaseline = shouldRunBaseHeadStaticAnalysis({
+      mode: dependencies.staticAnalysisMode,
+      runner: dependencies.staticAnalysisRunner,
+    });
     currentStage = "workspace";
     const workspace = await runReviewTelemetryStage(
       dependencies,
@@ -918,12 +938,56 @@ export async function runPullRequestReview(
         workspacePath: workspace.workspacePath,
       },
     });
+    const staticAnalysisBaselineWorkspace = shouldRunStaticAnalysisBaseline
+      ? await runReviewTelemetryStage(
+          dependencies,
+          "workspace",
+          () =>
+            syncWorkspace(
+              withOptionalWorkspaceRoot(
+                {
+                  ...repository,
+                  commitSha: snapshot.baseSha,
+                  keepWorkspace: true,
+                },
+                dependencies.workspaceRoot,
+              ),
+            ),
+          {
+            attributes: {
+              "review.static_analysis_baseline_workspace": true,
+            },
+            logContext: reviewStageLogContext,
+            endAttributes: (syncedWorkspace) => ({
+              "review.workspace_cleaned_up": syncedWorkspace.cleanedUp,
+            }),
+          },
+        )
+      : undefined;
+    if (staticAnalysisBaselineWorkspace) {
+      await reviewRepository.insertStageEvent({
+        reviewRunId,
+        stage: "workspace",
+        status: "completed",
+        metadata: {
+          checkedOutSha: staticAnalysisBaselineWorkspace.checkedOutSha,
+          cleanedUp: staticAnalysisBaselineWorkspace.cleanedUp,
+          purpose: "static_analysis_baseline",
+          workspacePath: staticAnalysisBaselineWorkspace.workspacePath,
+        },
+      });
+    }
     const staticAnalysis = await runReviewTelemetryStage(
       dependencies,
       "static_analysis",
       () =>
         runStaticAnalysisForReview({
+          baselineWorkspace: staticAnalysisBaselineWorkspace,
           budgets: dependencies.staticAnalysisBudgets,
+          cleanupBaselineWorkspace:
+            staticAnalysisBaselineWorkspace !== undefined &&
+            !dependencies.syncWorkspace &&
+            !staticAnalysisBaselineWorkspace.cleanedUp,
           cleanupWorkspace:
             Boolean(dependencies.staticAnalysisRunner) &&
             !dependencies.syncWorkspace &&
@@ -1007,6 +1071,22 @@ export async function runPullRequestReview(
         payload: planSnapshot,
         createdAt: now().toISOString(),
       }),
+      ...(staticAnalysis.baselineReport
+        ? [
+            await persistArtifact(reviewRepository, artifactPayloadStore, {
+              reviewRunId,
+              repoId: snapshot.repoId,
+              kind: "static_analysis",
+              name: "static-analysis-baseline-report.json",
+              payload: staticAnalysis.baselineReport,
+              metadata: {
+                staticAnalysis: staticAnalysisArtifactSummary(staticAnalysis.baselineReport),
+                staticAnalysisRole: "baseline",
+              },
+              createdAt: now().toISOString(),
+            }),
+          ]
+        : []),
       ...(staticAnalysisReport
         ? [
             await persistArtifact(reviewRepository, artifactPayloadStore, {
@@ -1052,6 +1132,15 @@ export async function runPullRequestReview(
             checkedOutSha: workspace.checkedOutSha,
             cleanedUp: staticAnalysis.workspaceCleanedUp,
           },
+          ...(staticAnalysis.baselineReport
+            ? {
+                staticAnalysisBaseline: {
+                  diagnosticCount: staticAnalysis.baselineReport.summary.diagnosticCount,
+                  reportId: staticAnalysis.baselineReport.reportId,
+                  status: staticAnalysis.baselineReport.status,
+                },
+              }
+            : {}),
           ...(staticAnalysisReport
             ? {
                 staticAnalysis: {
@@ -3069,10 +3158,37 @@ export function createStaticAnalysisRequestForReview(
   };
 }
 
+/** Returns whether review orchestration should run a base/head static-analysis delta. */
+export function shouldRunBaseHeadStaticAnalysis(input: {
+  /** Optional static-analysis mode selected for review orchestration. */
+  readonly mode?: StaticAnalysisMode | undefined;
+  /** Optional static-analysis runner selected for review orchestration. */
+  readonly runner?: ToolRunner | undefined;
+}): boolean {
+  return input.mode === "base_head_delta" && input.runner !== undefined;
+}
+
+/** Builds the snapshot view used to plan a base-commit static-analysis run. */
+export function createStaticAnalysisBaseSnapshotForReview(
+  snapshot: PullRequestSnapshot,
+): PullRequestSnapshot {
+  const changedFiles = snapshot.changedFiles.filter((file) => file.status !== "added");
+
+  return {
+    ...snapshot,
+    changedFileCount: changedFiles.length,
+    changedFiles,
+  };
+}
+
 /** Runs optional static analysis and records non-fatal stage events. */
 async function runStaticAnalysisForReview(input: {
+  /** Optional base workspace used for base/head diagnostic comparison. */
+  readonly baselineWorkspace?: SyncRepositoryWorkspaceResult | undefined;
   /** Optional static-analysis budgets. */
   readonly budgets?: StaticAnalysisBudgets | undefined;
+  /** Whether to remove the optional base workspace after static-analysis execution. */
+  readonly cleanupBaselineWorkspace?: boolean | undefined;
   /** Whether to remove the retained workspace after static-analysis execution. */
   readonly cleanupWorkspace: boolean;
   /** Optional metric recorder used for static-analysis component telemetry. */
@@ -3116,8 +3232,10 @@ async function runStaticAnalysisForReview(input: {
   }
 
   let report: StaticAnalysisReport | undefined;
+  const baseline = await runStaticAnalysisBaselineForReview(input);
   try {
     report = await runStaticAnalysis({
+      ...(baseline ? { baselineDiagnosticsByTool: baseline.diagnosticsByTool } : {}),
       request: createStaticAnalysisRequestForReview({
         budgets: input.budgets,
         mode: input.mode,
@@ -3139,6 +3257,7 @@ async function runStaticAnalysisForReview(input: {
       status: report.status,
       metadata: {
         diagnosticCount: report.summary.diagnosticCount,
+        newDiagnosticCount: report.summary.newDiagnosticCount,
         reportId: report.reportId,
         toolRunCount: report.summary.toolRunCount,
         warningCount: report.warnings.length,
@@ -3154,27 +3273,185 @@ async function runStaticAnalysisForReview(input: {
   }
 
   if (input.cleanupWorkspace) {
-    try {
-      await cleanupRepositoryWorkspace(input.workspace.workspacePath);
-      workspaceCleanedUp = true;
-      await input.reviewRepository.insertStageEvent({
-        reviewRunId: input.reviewRunId,
-        stage: "workspace_cleanup",
-        status: "completed",
-        metadata: { workspacePath: input.workspace.workspacePath },
-      });
-    } catch (error) {
-      await input.reviewRepository.insertStageEvent({
-        reviewRunId: input.reviewRunId,
-        stage: "workspace_cleanup",
-        status: "failed",
-        message: error instanceof Error ? error.message : String(error),
-        metadata: { workspacePath: input.workspace.workspacePath },
-      });
-    }
+    workspaceCleanedUp = await cleanupStaticAnalysisWorkspaceForReview({
+      reviewRepository: input.reviewRepository,
+      reviewRunId: input.reviewRunId,
+      stage: "workspace_cleanup",
+      workspace: input.workspace,
+    });
   }
 
-  return { report, workspaceCleanedUp };
+  return {
+    ...(baseline ? { baselineReport: baseline.report } : {}),
+    ...(baseline ? { baselineWorkspaceCleanedUp: baseline.workspaceCleanedUp } : {}),
+    report,
+    workspaceCleanedUp,
+  };
+}
+
+/** Runs the optional base-commit static-analysis pass for base/head comparison. */
+async function runStaticAnalysisBaselineForReview(input: {
+  /** Optional base workspace used for base/head diagnostic comparison. */
+  readonly baselineWorkspace?: SyncRepositoryWorkspaceResult | undefined;
+  /** Optional static-analysis budgets. */
+  readonly budgets?: StaticAnalysisBudgets | undefined;
+  /** Whether to remove the optional base workspace after static-analysis execution. */
+  readonly cleanupBaselineWorkspace?: boolean | undefined;
+  /** Optional metric recorder used for static-analysis component telemetry. */
+  readonly metrics?: TelemetryMetricRecorder | undefined;
+  /** Optional static-analysis mode. */
+  readonly mode?: StaticAnalysisMode | undefined;
+  /** Timestamp used for the static-analysis request. */
+  readonly now: string;
+  /** Organization ID that owns the review run. */
+  readonly orgId: string;
+  /** Repository ID being reviewed. */
+  readonly repoId: string;
+  /** Review repository used for stage events. */
+  readonly reviewRepository: ReviewRepository;
+  /** Review run ID that owns the static-analysis report. */
+  readonly reviewRunId: string;
+  /** Static-analysis runner. */
+  readonly runner?: ToolRunner | undefined;
+  /** Pull request snapshot being reviewed. */
+  readonly snapshot: PullRequestSnapshot;
+  /** Optional trace context propagated from the durable review job. */
+  readonly traceContext?: TelemetryTraceContext | undefined;
+  /** Optional span recorder used for static-analysis component telemetry. */
+  readonly traces?: TelemetrySpanRecorder | undefined;
+}): Promise<ReviewStaticAnalysisBaselineResult | undefined> {
+  if (input.mode !== "base_head_delta" || !input.runner || !input.baselineWorkspace) {
+    return undefined;
+  }
+
+  let workspaceCleanedUp = input.baselineWorkspace.cleanedUp;
+  if (input.baselineWorkspace.cleanedUp) {
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: "static_analysis_baseline",
+      status: "skipped",
+      metadata: { reason: "baseline_workspace_already_cleaned_up" },
+    });
+    return undefined;
+  }
+
+  try {
+    const report = await runStaticAnalysis({
+      request: createStaticAnalysisRequestForReview({
+        budgets: input.budgets,
+        mode: input.mode,
+        orgId: input.orgId,
+        repoId: input.repoId,
+        reviewRunId: input.reviewRunId,
+        snapshot: createStaticAnalysisBaseSnapshotForReview(input.snapshot),
+        timestamp: input.now,
+        workspace: input.baselineWorkspace,
+      }),
+      ...(input.metrics ? { metrics: input.metrics } : {}),
+      runner: input.runner,
+      ...(input.traceContext ? { traceContext: input.traceContext } : {}),
+      ...(input.traces ? { traces: input.traces } : {}),
+    });
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: "static_analysis_baseline",
+      status: report.status,
+      metadata: {
+        diagnosticCount: report.summary.diagnosticCount,
+        reportId: report.reportId,
+        toolRunCount: report.summary.toolRunCount,
+        warningCount: report.warnings.length,
+      },
+    });
+
+    if (input.cleanupBaselineWorkspace) {
+      workspaceCleanedUp = await cleanupStaticAnalysisWorkspaceForReview({
+        reviewRepository: input.reviewRepository,
+        reviewRunId: input.reviewRunId,
+        stage: "static_analysis_baseline_workspace_cleanup",
+        workspace: input.baselineWorkspace,
+      });
+    }
+
+    return {
+      diagnosticsByTool: staticAnalysisBaselineDiagnosticsByTool(report),
+      report,
+      workspaceCleanedUp,
+    };
+  } catch (error) {
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: "static_analysis_baseline",
+      status: "degraded",
+      message: error instanceof Error ? error.message : String(error),
+    });
+
+    if (input.cleanupBaselineWorkspace) {
+      workspaceCleanedUp = await cleanupStaticAnalysisWorkspaceForReview({
+        reviewRepository: input.reviewRepository,
+        reviewRunId: input.reviewRunId,
+        stage: "static_analysis_baseline_workspace_cleanup",
+        workspace: input.baselineWorkspace,
+      });
+    }
+
+    return undefined;
+  }
+}
+
+/** Groups base diagnostics by tool while preserving tools that ran cleanly. */
+function staticAnalysisBaselineDiagnosticsByTool(
+  report: StaticAnalysisReport,
+): Partial<Record<StaticToolName, readonly NormalizedToolDiagnostic[]>> {
+  const diagnosticsByTool: Partial<Record<StaticToolName, readonly NormalizedToolDiagnostic[]>> =
+    {};
+
+  for (const toolRun of report.toolRuns) {
+    diagnosticsByTool[toolRun.tool] = [];
+  }
+
+  for (const diagnostic of report.diagnostics) {
+    diagnosticsByTool[diagnostic.tool] = [
+      ...(diagnosticsByTool[diagnostic.tool] ?? []),
+      diagnostic,
+    ];
+  }
+
+  return diagnosticsByTool;
+}
+
+/** Removes a retained static-analysis workspace and records a stage event. */
+async function cleanupStaticAnalysisWorkspaceForReview(input: {
+  /** Review repository used for stage events. */
+  readonly reviewRepository: ReviewRepository;
+  /** Review run ID that owns the static-analysis workspace. */
+  readonly reviewRunId: string;
+  /** Stage name used for the cleanup event. */
+  readonly stage: string;
+  /** Workspace to remove. */
+  readonly workspace: SyncRepositoryWorkspaceResult;
+}): Promise<boolean> {
+  try {
+    await cleanupRepositoryWorkspace(input.workspace.workspacePath);
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: input.stage,
+      status: "completed",
+      metadata: { workspacePath: input.workspace.workspacePath },
+    });
+
+    return true;
+  } catch (error) {
+    await input.reviewRepository.insertStageEvent({
+      reviewRunId: input.reviewRunId,
+      stage: input.stage,
+      status: "failed",
+      message: error instanceof Error ? error.message : String(error),
+      metadata: { workspacePath: input.workspace.workspacePath },
+    });
+
+    return input.workspace.cleanedUp;
+  }
 }
 
 /** Maps an orchestration stage to the persisted review run status for that stage. */

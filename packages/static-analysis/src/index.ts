@@ -1392,14 +1392,17 @@ function normalizeStaticAnalysisDiagnosticsWithTelemetry(
       0,
       context.maxDiagnosticsPerTool,
     );
+    const hasBaselineDiagnostics =
+      input.baselineDiagnosticsByTool !== undefined &&
+      (input.request.mode === "base_head_delta" ||
+        Object.hasOwn(input.baselineDiagnosticsByTool, context.runPlan.tool));
     const baselineDiagnostics = input.baselineDiagnosticsByTool?.[context.runPlan.tool] ?? [];
-    const diagnostics =
-      baselineDiagnostics.length > 0
-        ? compareStaticAnalysisDiagnosticBaselines({
-            baseDiagnostics: baselineDiagnostics,
-            headDiagnostics,
-          }).diagnostics
-        : headDiagnostics;
+    const diagnostics = hasBaselineDiagnostics
+      ? compareStaticAnalysisDiagnosticBaselines({
+          baseDiagnostics: baselineDiagnostics,
+          headDiagnostics,
+        }).diagnostics
+      : headDiagnostics;
     const warnings: StaticAnalysisWarning[] = [];
     const wasTruncated =
       context.parsedOutput.diagnostics.length + fixtureDiagnostics.length > headDiagnostics.length;

@@ -516,6 +516,23 @@ describe("staticAnalysisReviewPass", () => {
 
     expect(findings).toEqual([]);
   });
+
+  it("ignores static diagnostics already present in the baseline", async () => {
+    const findings = await runReviewPasses({
+      passes: [staticAnalysisReviewPass],
+      context: {
+        reviewRunId: validCandidateFindingFixture.reviewRunId,
+        snapshot: validPullRequestSnapshotFixture,
+        staticAnalysisReport: staticAnalysisReportFixture({
+          baselineStatus: "existing",
+          introducedByPr: false,
+        }),
+        timestamp: validCandidateFindingFixture.createdAt,
+      },
+    });
+
+    expect(findings).toEqual([]);
+  });
 });
 
 describe("runReviewPasses telemetry", () => {

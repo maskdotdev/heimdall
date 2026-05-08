@@ -11,6 +11,7 @@ import {
   type TelemetryMetricRecorder,
 } from "@repo/observability";
 import { buildReviewPolicySnapshot, type ReviewPolicySnapshot } from "@repo/rules";
+import { createFakeToolRunner } from "@repo/tool-runner";
 import { describe, expect, it } from "vitest";
 import {
   assertSnapshotMatchesJob,
@@ -18,6 +19,7 @@ import {
   checkReviewRunCurrent,
   createIndexDependencyJobEnvelope,
   createIndexDependencyJobKey,
+  createStaticAnalysisBaseSnapshotForReview,
   createStaticAnalysisRequestForReview,
   decideReviewGate,
   detectRepoLocalConfigChange,
@@ -33,6 +35,7 @@ import {
   reviewRunStatusForStage,
   reviewStageLogAttributes,
   reviewStalenessDisposition,
+  shouldRunBaseHeadStaticAnalysis,
   startReviewTelemetryStageSpan,
 } from "../src";
 
@@ -713,6 +716,44 @@ describe("createStaticAnalysisRequestForReview", () => {
       },
     });
     expect(request.workspace.workspaceId).toMatch(/^ws_[A-Za-z0-9_-]+$/u);
+  });
+});
+
+describe("shouldRunBaseHeadStaticAnalysis", () => {
+  it("requires base-head mode and a configured runner", () => {
+    const runner = createFakeToolRunner();
+
+    expect(shouldRunBaseHeadStaticAnalysis({ mode: "base_head_delta", runner })).toBe(true);
+    expect(shouldRunBaseHeadStaticAnalysis({ mode: "changed_files_fast", runner })).toBe(false);
+    expect(shouldRunBaseHeadStaticAnalysis({ mode: "base_head_delta" })).toBe(false);
+  });
+});
+
+describe("createStaticAnalysisBaseSnapshotForReview", () => {
+  it("excludes added files that do not exist in the base commit", () => {
+    const snapshot = reviewablePullRequestSnapshot({
+      changedFileCount: 2,
+      changedFiles: [
+        ...reviewablePullRequestSnapshot().changedFiles,
+        {
+          additions: 4,
+          changes: 4,
+          deletions: 0,
+          hunks: [],
+          isBinary: false,
+          isGenerated: false,
+          isTest: false,
+          language: "typescript",
+          path: "src/new-file.ts",
+          status: "added",
+        },
+      ],
+    });
+
+    const baseSnapshot = createStaticAnalysisBaseSnapshotForReview(snapshot);
+
+    expect(baseSnapshot.changedFileCount).toBe(1);
+    expect(baseSnapshot.changedFiles.map((file) => file.path)).toEqual(["src/value.ts"]);
   });
 });
 

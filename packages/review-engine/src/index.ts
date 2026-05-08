@@ -2185,7 +2185,13 @@ function staticAnalysisFindingsFromReport(context: ReviewPassContext): readonly 
   }
 
   return report.diagnostics
-    .filter((diagnostic) => diagnostic.isInChangedFile && diagnostic.isOnChangedLine)
+    .filter(
+      (diagnostic) =>
+        diagnostic.isInChangedFile &&
+        diagnostic.isOnChangedLine &&
+        diagnostic.baselineStatus !== "existing" &&
+        diagnostic.baselineStatus !== "fixed",
+    )
     .slice(0, STATIC_ANALYSIS_FINDING_LIMIT)
     .map((diagnostic, index) =>
       staticAnalysisDiagnosticFinding(context, report, diagnostic, index),
@@ -2236,6 +2242,8 @@ function staticAnalysisDiagnosticFinding(
           tool: diagnostic.tool,
           toolRunId: diagnostic.toolRunId,
           ...(diagnostic.ruleId ? { ruleId: diagnostic.ruleId } : {}),
+          baselineStatus: diagnostic.baselineStatus,
+          introducedByPr: diagnostic.introducedByPr ?? false,
         },
         path: diagnostic.location.filePath,
         range: {
@@ -2260,6 +2268,8 @@ function staticAnalysisDiagnosticFinding(
     },
     metadata: {
       diagnosticId: diagnostic.diagnosticId,
+      baselineStatus: diagnostic.baselineStatus,
+      introducedByPr: diagnostic.introducedByPr ?? false,
       passVersion: staticAnalysisReviewPass.version,
       reportId: report.reportId,
       tool: diagnostic.tool,
