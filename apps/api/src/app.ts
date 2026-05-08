@@ -79,7 +79,8 @@ import {
 import {
   artifactAccessEvents,
   auditLogs,
-  backgroundJobs,
+  type BackgroundJobRecord,
+  BackgroundJobRepository,
   billingAccounts,
   billingMeterEvents,
   billingPlans,
@@ -8827,30 +8828,16 @@ async function enqueueInstallationSync(
       ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
-    const [inserted] = await transactionDb
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
-        jobKey,
-        jobType: JOB_TYPES.SyncInstallation,
-        maxAttempts: 3,
-        metadata: {
-          requestId: request.requestId,
-          source: "api_installation_sync",
-        },
-        orgId: installation.orgId,
-        payload: envelope,
-        queueName: QUEUE_NAMES.repoSync,
-        status: "pending",
-      })
-      .onConflictDoNothing()
-      .returning({
-        backgroundJobId: backgroundJobs.backgroundJobId,
-        jobKey: backgroundJobs.jobKey,
-        status: backgroundJobs.status,
-      });
-
-    const job = inserted ?? (await getExistingInstallationSyncJob(transactionDb, jobKey));
+    const { job } = await new BackgroundJobRepository(transactionDb).insertBackgroundJob({
+      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+      envelope,
+      metadata: {
+        requestId: request.requestId,
+        source: "api_installation_sync",
+      },
+      orgId: installation.orgId,
+      queueName: QUEUE_NAMES.repoSync,
+    });
     const audit = await insertAuditLog(transactionDb, {
       actor: request.actor,
       action: "installation.sync.enqueued",
@@ -8876,26 +8863,6 @@ async function enqueueInstallationSync(
       status: job.status,
     };
   });
-}
-
-/** Gets an existing durable installation sync job for an idempotent enqueue request. */
-async function getExistingInstallationSyncJob(
-  db: HeimdallDatabase,
-  jobKey: string,
-): Promise<Omit<AdminInstallationSyncRunSummary, "auditLogId">> {
-  const [existing] = await db
-    .select({
-      backgroundJobId: backgroundJobs.backgroundJobId,
-      jobKey: backgroundJobs.jobKey,
-      status: backgroundJobs.status,
-    })
-    .from(backgroundJobs)
-    .where(
-      and(eq(backgroundJobs.queueName, QUEUE_NAMES.repoSync), eq(backgroundJobs.jobKey, jobKey)),
-    )
-    .limit(1);
-
-  return requireReturnedRow(existing);
 }
 
 /** Enqueues a durable manual repository sync job and records an audit event. */
@@ -8934,34 +8901,19 @@ async function enqueueRepositorySync(
       ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
-    const [inserted] = await transactionDb
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
-        jobKey,
-        jobType: JOB_TYPES.SyncInstallation,
-        maxAttempts: 3,
-        metadata: {
-          providerRepoId: settings.repository.providerRepoId,
-          requestId: request.requestId,
-          source: "api_repository_sync",
-          targetRepoId: repoId,
-        },
-        orgId: settings.repository.orgId,
-        payload: envelope,
-        queueName: QUEUE_NAMES.repoSync,
-        repoId,
-        status: "pending",
-      })
-      .onConflictDoNothing()
-      .returning({
-        backgroundJobId: backgroundJobs.backgroundJobId,
-        jobKey: backgroundJobs.jobKey,
-        status: backgroundJobs.status,
-      });
-
-    const job =
-      inserted ?? (await getExistingBackgroundJob(transactionDb, QUEUE_NAMES.repoSync, jobKey));
+    const { job } = await new BackgroundJobRepository(transactionDb).insertBackgroundJob({
+      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+      envelope,
+      metadata: {
+        providerRepoId: settings.repository.providerRepoId,
+        requestId: request.requestId,
+        source: "api_repository_sync",
+        targetRepoId: repoId,
+      },
+      orgId: settings.repository.orgId,
+      queueName: QUEUE_NAMES.repoSync,
+      repoId,
+    });
     const audit = await insertAuditLog(transactionDb, {
       actor: request.actor,
       action: "repo.sync.enqueued",
@@ -9034,35 +8986,20 @@ async function enqueueRepositoryReindex(
       ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
-    const [inserted] = await transactionDb
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
-        jobKey,
-        jobType: JOB_TYPES.IndexRepoCommit,
-        maxAttempts: 3,
-        metadata: {
-          commitSha: request.commitSha,
-          force: request.force ?? false,
-          ...(request.reason ? { reason: request.reason } : {}),
-          requestId: request.requestId,
-          source: "api_repository_reindex",
-        },
-        orgId: settings.repository.orgId,
-        payload: envelope,
-        queueName: QUEUE_NAMES.indexing,
-        repoId,
-        status: "pending",
-      })
-      .onConflictDoNothing()
-      .returning({
-        backgroundJobId: backgroundJobs.backgroundJobId,
-        jobKey: backgroundJobs.jobKey,
-        status: backgroundJobs.status,
-      });
-
-    const job =
-      inserted ?? (await getExistingBackgroundJob(transactionDb, QUEUE_NAMES.indexing, jobKey));
+    const { job } = await new BackgroundJobRepository(transactionDb).insertBackgroundJob({
+      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+      envelope,
+      metadata: {
+        commitSha: request.commitSha,
+        force: request.force ?? false,
+        ...(request.reason ? { reason: request.reason } : {}),
+        requestId: request.requestId,
+        source: "api_repository_reindex",
+      },
+      orgId: settings.repository.orgId,
+      queueName: QUEUE_NAMES.indexing,
+      repoId,
+    });
     const audit = await insertAuditLog(transactionDb, {
       actor: request.actor,
       action: "repo.reindex.enqueued",
@@ -9131,34 +9068,19 @@ async function enqueueReviewRerun(
       ...(request.traceContext ? { traceContext: request.traceContext } : {}),
     };
 
-    const [inserted] = await transactionDb
-      .insert(backgroundJobs)
-      .values({
-        backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
-        jobKey,
-        jobType: JOB_TYPES.ReviewPullRequest,
-        maxAttempts: 3,
-        metadata: {
-          originalStatus: reviewRun.status,
-          requestId: request.requestId,
-          source: "api_review_rerun",
-        },
-        orgId: reviewRun.orgId,
-        payload: envelope,
-        queueName: QUEUE_NAMES.review,
-        repoId: reviewRun.repoId,
-        reviewRunId,
-        status: "pending",
-      })
-      .onConflictDoNothing()
-      .returning({
-        backgroundJobId: backgroundJobs.backgroundJobId,
-        jobKey: backgroundJobs.jobKey,
-        status: backgroundJobs.status,
-      });
-
-    const job =
-      inserted ?? (await getExistingBackgroundJob(transactionDb, QUEUE_NAMES.review, jobKey));
+    const { job } = await new BackgroundJobRepository(transactionDb).insertBackgroundJob({
+      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+      envelope,
+      metadata: {
+        originalStatus: reviewRun.status,
+        requestId: request.requestId,
+        source: "api_review_rerun",
+      },
+      orgId: reviewRun.orgId,
+      queueName: QUEUE_NAMES.review,
+      repoId: reviewRun.repoId,
+      reviewRunId,
+    });
     const audit = await insertAuditLog(transactionDb, {
       actor: request.actor,
       action: "review.rerun.enqueued",
@@ -9187,23 +9109,15 @@ async function enqueueReviewRerun(
   });
 }
 
-/** Gets an existing durable background job for an idempotent enqueue request. */
-async function getExistingBackgroundJob(
-  db: HeimdallDatabase,
-  queueName: string,
-  jobKey: string,
-): Promise<Omit<AdminRepositoryJobRunSummary, "auditLogId">> {
-  const [existing] = await db
-    .select({
-      backgroundJobId: backgroundJobs.backgroundJobId,
-      jobKey: backgroundJobs.jobKey,
-      status: backgroundJobs.status,
-    })
-    .from(backgroundJobs)
-    .where(and(eq(backgroundJobs.queueName, queueName), eq(backgroundJobs.jobKey, jobKey)))
-    .limit(1);
-
-  return requireReturnedRow(existing);
+/** Converts a durable job record into the common enqueue response shape. */
+function toAdminBackgroundJobRunSummary(
+  job: Pick<BackgroundJobRecord, "backgroundJobId" | "jobKey" | "status">,
+): Omit<AdminRepositoryJobRunSummary, "auditLogId"> {
+  return {
+    backgroundJobId: job.backgroundJobId,
+    jobKey: job.jobKey,
+    status: job.status,
+  };
 }
 
 /** Lists product-safe repository summaries without admin metadata. */
@@ -9742,28 +9656,7 @@ async function listReviewRunBackgroundJobs(
   db: HeimdallDatabase,
   reviewRunId: string,
 ): Promise<readonly AdminBackgroundJobSummary[]> {
-  const rows = await db
-    .select({
-      attempts: backgroundJobs.attempts,
-      backgroundJobId: backgroundJobs.backgroundJobId,
-      completedAt: backgroundJobs.completedAt,
-      createdAt: backgroundJobs.createdAt,
-      error: backgroundJobs.error,
-      jobKey: backgroundJobs.jobKey,
-      jobType: backgroundJobs.jobType,
-      maxAttempts: backgroundJobs.maxAttempts,
-      orgId: backgroundJobs.orgId,
-      queueName: backgroundJobs.queueName,
-      repoId: backgroundJobs.repoId,
-      reviewRunId: backgroundJobs.reviewRunId,
-      scheduledAt: backgroundJobs.scheduledAt,
-      startedAt: backgroundJobs.startedAt,
-      status: backgroundJobs.status,
-      updatedAt: backgroundJobs.updatedAt,
-    })
-    .from(backgroundJobs)
-    .where(eq(backgroundJobs.reviewRunId, reviewRunId))
-    .orderBy(asc(backgroundJobs.createdAt), asc(backgroundJobs.backgroundJobId));
+  const rows = await new BackgroundJobRepository(db).listBackgroundJobsForReviewRun(reviewRunId);
 
   return rows.map(toAdminBackgroundJobSummary);
 }
@@ -9775,11 +9668,11 @@ function toAdminBackgroundJobSummary(row: {
   /** Durable background job row ID. */
   readonly backgroundJobId: string;
   /** Completion timestamp. */
-  readonly completedAt: Date | null;
+  readonly completedAt?: Date | undefined;
   /** Creation timestamp. */
   readonly createdAt: Date;
   /** Durable job error payload. */
-  readonly error: unknown;
+  readonly error?: unknown;
   /** Durable idempotency key. */
   readonly jobKey: string;
   /** Durable job type. */
@@ -9787,17 +9680,17 @@ function toAdminBackgroundJobSummary(row: {
   /** Maximum durable attempt count. */
   readonly maxAttempts: number;
   /** Organization ID. */
-  readonly orgId: string | null;
+  readonly orgId?: string | undefined;
   /** Queue name. */
   readonly queueName: string;
   /** Repository ID. */
-  readonly repoId: string | null;
+  readonly repoId?: string | undefined;
   /** Review run ID. */
-  readonly reviewRunId: string | null;
+  readonly reviewRunId?: string | undefined;
   /** Schedule timestamp. */
-  readonly scheduledAt: Date | null;
+  readonly scheduledAt?: Date | undefined;
   /** Start timestamp. */
-  readonly startedAt: Date | null;
+  readonly startedAt?: Date | undefined;
   /** Durable job status. */
   readonly status: string;
   /** Update timestamp. */
@@ -10802,34 +10695,22 @@ async function enqueueFindingOutcomeMemoryUpdate(
     ...(request.traceContext ? { traceContext: request.traceContext } : {}),
   };
 
-  const [inserted] = await db
-    .insert(backgroundJobs)
-    .values({
-      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
-      jobKey,
-      jobType: JOB_TYPES.UpdateMemory,
-      maxAttempts: 3,
-      metadata: {
-        outcome: outcome.outcome,
-        outcomeId: outcome.findingOutcomeId,
-        requestId: request.requestId,
-        source: "finding_outcome",
-      },
-      orgId: finding.orgId,
-      payload: envelope,
-      queueName: QUEUE_NAMES.memory,
-      repoId: finding.repoId,
-      reviewRunId: finding.reviewRunId,
-      status: "pending",
-    })
-    .onConflictDoNothing()
-    .returning({
-      backgroundJobId: backgroundJobs.backgroundJobId,
-      jobKey: backgroundJobs.jobKey,
-      status: backgroundJobs.status,
-    });
+  const { job } = await new BackgroundJobRepository(db).insertBackgroundJob({
+    backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+    envelope,
+    metadata: {
+      outcome: outcome.outcome,
+      outcomeId: outcome.findingOutcomeId,
+      requestId: request.requestId,
+      source: "finding_outcome",
+    },
+    orgId: finding.orgId,
+    queueName: QUEUE_NAMES.memory,
+    repoId: finding.repoId,
+    reviewRunId: finding.reviewRunId,
+  });
 
-  return inserted ?? getExistingBackgroundJob(db, QUEUE_NAMES.memory, jobKey);
+  return toAdminBackgroundJobRunSummary(job);
 }
 
 /** Lists memory facts that apply to one repository. */
@@ -11707,9 +11588,9 @@ function backgroundJobFailureFromUnknown(row: {
   /** Durable job status. */
   readonly status: string;
   /** Durable job error payload. */
-  readonly error: unknown;
+  readonly error?: unknown;
   /** Completion timestamp. */
-  readonly completedAt: Date | null;
+  readonly completedAt?: Date | undefined;
   /** Update timestamp. */
   readonly updatedAt: Date;
 }): AdminFailureDetail {
@@ -13060,46 +12941,18 @@ async function enqueueBillingReconciliation(
     schemaVersion: "billing_reconcile_job.v1",
     ...(query.traceContext ? { traceContext: query.traceContext } : {}),
   };
-  const [inserted] = await db
-    .insert(backgroundJobs)
-    .values({
-      backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
-      jobKey,
-      jobType: JOB_TYPES.BillingReconcile,
-      maxAttempts: 3,
-      metadata: {
-        ...(query.requestId ? { requestId: query.requestId } : {}),
-        source: "admin_billing_reconciliation",
-      },
-      orgId: query.orgId,
-      payload: envelope,
-      queueName: QUEUE_NAMES.billing,
-      status: "pending",
-    })
-    .onConflictDoNothing()
-    .returning({
-      backgroundJobId: backgroundJobs.backgroundJobId,
-      jobKey: backgroundJobs.jobKey,
-      status: backgroundJobs.status,
-    });
+  const { job } = await new BackgroundJobRepository(db).insertBackgroundJob({
+    backgroundJobId: stablePrefixedId("job", ["background_job", jobKey]),
+    envelope,
+    metadata: {
+      ...(query.requestId ? { requestId: query.requestId } : {}),
+      source: "admin_billing_reconciliation",
+    },
+    orgId: query.orgId,
+    queueName: QUEUE_NAMES.billing,
+  });
 
-  if (inserted) {
-    return inserted;
-  }
-
-  const [existing] = await db
-    .select({
-      backgroundJobId: backgroundJobs.backgroundJobId,
-      jobKey: backgroundJobs.jobKey,
-      status: backgroundJobs.status,
-    })
-    .from(backgroundJobs)
-    .where(
-      and(eq(backgroundJobs.queueName, QUEUE_NAMES.billing), eq(backgroundJobs.jobKey, jobKey)),
-    )
-    .limit(1);
-
-  return requireReturnedRow(existing);
+  return toAdminBackgroundJobRunSummary(job);
 }
 
 /** Builds a contract-compatible billing reconciliation job payload. */

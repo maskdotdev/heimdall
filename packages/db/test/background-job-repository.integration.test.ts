@@ -262,6 +262,37 @@ describe.runIf(integrationDatabaseUrl)("BackgroundJobRepository integration", ()
       }),
     ).resolves.toMatchObject({ backgroundJobId: "job_embedding_unrelated" });
   });
+
+  it("lists review-run background jobs in creation order", async () => {
+    const reviewRunId = "rrn_background_job_repository_test";
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: "job_review_run_second",
+      createdAt: "2026-05-08T00:02:00.000Z",
+      envelope: syncInstallationEnvelope("sync:review-run:second"),
+      queueName: "repo-sync",
+      reviewRunId,
+    });
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: "job_review_run_first",
+      createdAt: "2026-05-08T00:01:00.000Z",
+      envelope: syncInstallationEnvelope("sync:review-run:first"),
+      queueName: "repo-sync",
+      reviewRunId,
+    });
+    await backgroundJobRepository.insertBackgroundJob({
+      backgroundJobId: "job_review_run_unrelated",
+      envelope: syncInstallationEnvelope("sync:review-run:unrelated"),
+      queueName: "repo-sync",
+      reviewRunId: "rrn_background_job_repository_unrelated",
+    });
+
+    const jobs = await backgroundJobRepository.listBackgroundJobsForReviewRun(reviewRunId);
+
+    expect(jobs.map((job) => job.backgroundJobId)).toEqual([
+      "job_review_run_first",
+      "job_review_run_second",
+    ]);
+  });
 });
 
 /** Builds a sync-installation durable job envelope for repository tests. */

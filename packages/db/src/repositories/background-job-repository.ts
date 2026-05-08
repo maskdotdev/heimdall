@@ -245,6 +245,19 @@ export class BackgroundJobRepository {
       );
   }
 
+  /** Lists durable jobs tied to a review run in creation order. */
+  public async listBackgroundJobsForReviewRun(
+    reviewRunId: string,
+  ): Promise<readonly BackgroundJobRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(backgroundJobs)
+      .where(eq(backgroundJobs.reviewRunId, reviewRunId))
+      .orderBy(asc(backgroundJobs.createdAt), asc(backgroundJobs.backgroundJobId));
+
+    return rows.map(toBackgroundJobRecord);
+  }
+
   /** Returns pending jobs eligible for dispatch. */
   public async claimPendingJobs(
     options: ClaimPendingBackgroundJobsOptions,
