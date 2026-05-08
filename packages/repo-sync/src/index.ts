@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   writeFile,
@@ -1129,7 +1130,11 @@ async function validateRepositoryWorktreeState(
       timeoutMs: input.timeoutMs,
     })
   ).trim();
-  if (resolve(rootPath) !== resolve(input.workspacePath)) {
+  const [canonicalRootPath, canonicalWorkspacePath] = await Promise.all([
+    realpath(rootPath),
+    realpath(input.workspacePath),
+  ]);
+  if (canonicalRootPath !== canonicalWorkspacePath) {
     throw new Error(
       `Repository worktree root resolved ${rootPath} instead of ${input.workspacePath}.`,
     );

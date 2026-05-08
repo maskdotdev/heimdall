@@ -911,6 +911,44 @@ describe("repo sync workspace", () => {
     ]);
   });
 
+  it("checks out and releases an exact commit from a local bare mirror with real Git", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-local-git-test-"));
+    const sourceRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-local-source-test-"));
+    workspaceRoots.push(cacheRoot, sourceRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 60 });
+    const layout = getRepoSyncCacheLayout(config);
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_local");
+    const gitRunner = createGitRunner({ defaultTimeoutMs: 30_000 });
+
+    await gitRunner(["init"], { cwd: sourceRoot });
+    await gitRunner(["config", "user.email", "repo-sync@example.test"], { cwd: sourceRoot });
+    await gitRunner(["config", "user.name", "Repo Sync Test"], { cwd: sourceRoot });
+    await writeFile(join(sourceRoot, "README.md"), "# Local repo\n", "utf8");
+    await gitRunner(["add", "README.md"], { cwd: sourceRoot });
+    await gitRunner(["commit", "-m", "Initial commit"], { cwd: sourceRoot });
+    const localCommitSha = (await gitRunner(["rev-parse", "HEAD"], { cwd: sourceRoot })).trim();
+    await mkdir(layout.mirrorsRoot, { recursive: true });
+    await gitRunner(["clone", "--bare", sourceRoot, mirrorPath], {});
+
+    const lease = await createRepositoryWorktreeLease({
+      commitSha: localCommitSha,
+      config,
+      leaseId: "lease_local",
+      mirrorPath,
+      purpose: "index",
+      repoId: "repo_local",
+    });
+
+    expect(lease.commitSha).toBe(localCommitSha);
+    expect(lease.workspaceSizeBytes).toBeGreaterThan(0);
+    await expect(access(join(lease.path, "README.md"))).resolves.toBeUndefined();
+
+    await lease.release();
+
+    await expect(access(lease.path)).rejects.toThrow();
+    await expect(access(getRepoSyncLeaseMetadataPath(config, "lease_local"))).rejects.toThrow();
+  });
+
   it("acquires a cached exact-commit workspace and releases its lease", async () => {
     const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-acquire-test-"));
     workspaceRoots.push(cacheRoot);
