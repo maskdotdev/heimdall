@@ -22,7 +22,13 @@ import {
   type AdminUsageCostInspection,
   type AdminWebhookDebugDetails,
   type BackgroundJobReplayPlan,
+  type CollectedComplianceEvidence,
+  collectAccessReviewEvidence,
+  collectAuditLogEvidence,
+  collectConfigSnapshotEvidence,
+  collectSecurityEventEvidence,
   createAdminDebugService,
+  createFilesystemComplianceEvidenceArtifactStore,
   type ImportReviewRunToEvalRequest,
   type PublisherDryRunPlan,
   type PublisherReplayPlan,
@@ -33,6 +39,14 @@ import {
 
 /** Environment variables used by the admin CLI. */
 type AdminCliEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Compliance evidence collector targets accepted by the admin CLI. */
+export type ComplianceEvidenceCollectTarget =
+  | "all"
+  | "access-review"
+  | "audit-log"
+  | "config-snapshot"
+  | "security-events";
 
 /** Parsed admin CLI command. */
 export type AdminCliCommand =
@@ -265,6 +279,22 @@ export type AdminCliCommand =
       readonly json: boolean;
       /** Optional direct database URL override. */
       readonly databaseUrl?: string;
+    }
+  | {
+      /** Command discriminator. */
+      readonly kind: "compliance_collect";
+      /** Evidence collector target to run. */
+      readonly target: ComplianceEvidenceCollectTarget;
+      /** Filesystem directory where product-safe evidence artifacts are written. */
+      readonly artifactDir: string;
+      /** Organization scope for tenant-specific evidence collection. */
+      readonly orgId?: string;
+      /** Optional row limit passed to each collector. */
+      readonly limit?: number;
+      /** Whether output should be JSON. */
+      readonly json: boolean;
+      /** Optional direct database URL override. */
+      readonly databaseUrl?: string;
     };
 
 /** Result returned by CLI execution. */
@@ -354,6 +384,8 @@ export async function runAdminCli(
         return await runIndexImportCommand(command, handle);
       case "index_cleanup":
         return await runIndexCleanupCommand(command, handle);
+      case "compliance_collect":
+        return await runComplianceCollectCommand(command, handle, env);
     }
   } finally {
     await handle.close();
@@ -567,6 +599,20 @@ export function parseAdminCliCommand(args: readonly string[]): AdminCliCommand {
     };
   }
 
+  if (domain === "compliance" && action === "collect" && reviewRunId) {
+    const orgId = stringFlag(parsed.flags, "org-id");
+    const limit = positiveIntegerFlag(parsed.flags, "limit", "compliance collect");
+    return {
+      kind: "compliance_collect",
+      ...(databaseUrl ? { databaseUrl } : {}),
+      ...(limit ? { limit } : {}),
+      ...(orgId ? { orgId } : {}),
+      artifactDir: requiredStringFlag(parsed.flags, "artifact-dir", "compliance collect"),
+      json,
+      target: complianceEvidenceCollectTarget(reviewRunId),
+    };
+  }
+
   throw new Error(`Unsupported admin command: ${args.join(" ")}`);
 }
 
@@ -592,6 +638,7 @@ export function adminCliUsage(): string {
     "  admin index inspect <indexVersionId> [--json] [--database-url <url>]",
     "  admin index import --artifact <uri> --repo-id <repoId> --commit <sha> [--enqueue-embeddings] [--json] [--database-url <url>]",
     "  admin index cleanup <indexVersionId> [--force] [--json] [--database-url <url>]",
+    "  admin compliance collect <all|access-review|audit-log|security-events|config-snapshot> --artifact-dir <dir> [--org-id <orgId>] [--limit <rows>] [--json] [--database-url <url>]",
     "",
     "The CLI uses direct local database access for development and operational drills.",
     "It refuses production direct-DB mode unless HEIMDALL_ADMIN_CLI_ALLOW_PRODUCTION_DB=true.",
@@ -945,6 +992,49 @@ async function runIndexCleanupCommand(
   };
 }
 
+/** Runs one or more compliance evidence collectors and formats the result. */
+async function runComplianceCollectCommand(
+  command: Extract<AdminCliCommand, { kind: "compliance_collect" }>,
+  serviceHandle: AdminCliServiceHandle,
+  env: AdminCliEnvironment,
+): Promise<AdminCliResult> {
+  const artifactStore = createFilesystemComplianceEvidenceArtifactStore({
+    rootDir: command.artifactDir,
+  });
+  const collectedBy = complianceCliCollectorId(env);
+  const options = {
+    artifactStore,
+    collectedBy,
+    db: serviceHandle.db,
+    ...(command.limit ? { limit: command.limit } : {}),
+    ...(command.orgId ? { orgId: command.orgId } : {}),
+  };
+  const evidence: CollectedComplianceEvidence[] = [];
+
+  for (const target of expandedComplianceEvidenceTargets(command.target)) {
+    switch (target) {
+      case "access-review":
+        evidence.push(await collectAccessReviewEvidence(options));
+        break;
+      case "audit-log":
+        evidence.push(await collectAuditLogEvidence(options));
+        break;
+      case "config-snapshot":
+        evidence.push(await collectConfigSnapshotEvidence(options));
+        break;
+      case "security-events":
+        evidence.push(await collectSecurityEventEvidence(options));
+        break;
+    }
+  }
+
+  const summary = buildComplianceEvidenceCollectionSummary(command, collectedBy, evidence);
+  return {
+    exitCode: 0,
+    stdout: command.json ? jsonOutput(summary) : formatComplianceEvidenceCollection(summary),
+  };
+}
+
 /** Creates a local database-backed admin service handle. */
 function createLocalDatabaseService(
   databaseUrl: string | undefined,
@@ -1052,6 +1142,50 @@ function stringListFlag(
     .filter((item) => item.length > 0);
 }
 
+/** Returns a positive integer flag value when present. */
+function positiveIntegerFlag(
+  flags: ReadonlyMap<string, string | true>,
+  name: string,
+  commandName: string,
+): number | undefined {
+  const value = stringFlag(flags, name);
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${commandName} requires --${name} to be a positive integer.`);
+  }
+
+  return parsed;
+}
+
+/** Normalizes a compliance evidence collection target. */
+function complianceEvidenceCollectTarget(value: string): ComplianceEvidenceCollectTarget {
+  switch (value) {
+    case "all":
+    case "access-review":
+    case "audit-log":
+    case "config-snapshot":
+    case "security-events":
+      return value;
+    case "access_review_export":
+      return "access-review";
+    case "audit_log_export":
+      return "audit-log";
+    case "config_snapshot":
+      return "config-snapshot";
+    case "security-event":
+    case "security_event_export":
+      return "security-events";
+    default:
+      throw new Error(
+        "compliance collect target must be all, access-review, audit-log, security-events, or config-snapshot.",
+      );
+  }
+}
+
 /** Narrows eval import redaction levels. */
 function evalImportRedactionLevel(
   value: string | undefined,
@@ -1102,6 +1236,83 @@ function cliActor(env: AdminCliEnvironment): AdminReplayAuditActor {
     ...(env.HEIMDALL_ADMIN_CLI_SUPPORT_SESSION_ID
       ? { supportSessionId: env.HEIMDALL_ADMIN_CLI_SUPPORT_SESSION_ID }
       : {}),
+  };
+}
+
+/** Returns the durable collected-by value for CLI compliance evidence rows. */
+function complianceCliCollectorId(env: AdminCliEnvironment): string {
+  return `admin_cli:${env.HEIMDALL_ADMIN_CLI_ACTOR_ID ?? "local_admin_cli"}`;
+}
+
+/** Returns the concrete collectors to run for a CLI collection target. */
+function expandedComplianceEvidenceTargets(
+  target: ComplianceEvidenceCollectTarget,
+): readonly Exclude<ComplianceEvidenceCollectTarget, "all">[] {
+  if (target !== "all") {
+    return [target];
+  }
+
+  return ["access-review", "audit-log", "security-events", "config-snapshot"];
+}
+
+/** Product-safe CLI summary for one compliance evidence collection run. */
+type ComplianceEvidenceCollectionSummary = {
+  /** Requested evidence target. */
+  readonly target: ComplianceEvidenceCollectTarget;
+  /** Filesystem directory where artifacts were written. */
+  readonly artifactDir: string;
+  /** Organization scope used by the collectors. */
+  readonly orgId?: string;
+  /** Durable actor or automation identifier used for evidence rows. */
+  readonly collectedBy: string;
+  /** Per-evidence artifact and row summary. */
+  readonly evidence: readonly ComplianceEvidenceCollectionItem[];
+};
+
+/** Product-safe CLI summary for one collected compliance evidence artifact. */
+type ComplianceEvidenceCollectionItem = {
+  /** Durable compliance evidence row ID. */
+  readonly complianceEvidenceId: string;
+  /** Control ID supported by this artifact. */
+  readonly controlId: string;
+  /** Evidence type collected. */
+  readonly evidenceType: string;
+  /** Durable artifact URI. */
+  readonly evidenceUri: string;
+  /** SHA-256 digest of the artifact bytes. */
+  readonly evidenceHash: string;
+  /** Number of product-safe source records exported into the artifact. */
+  readonly exportedRecordCount: number;
+  /** Artifact size in bytes. */
+  readonly sizeBytes: number;
+  /** Evidence collection timestamp. */
+  readonly collectedAt: string;
+  /** Durable evidence row status. */
+  readonly status: string;
+};
+
+/** Builds a product-safe CLI summary for collected compliance evidence. */
+function buildComplianceEvidenceCollectionSummary(
+  command: Extract<AdminCliCommand, { kind: "compliance_collect" }>,
+  collectedBy: string,
+  evidence: readonly CollectedComplianceEvidence[],
+): ComplianceEvidenceCollectionSummary {
+  return {
+    ...(command.orgId ? { orgId: command.orgId } : {}),
+    artifactDir: command.artifactDir,
+    collectedBy,
+    evidence: evidence.map((item) => ({
+      collectedAt: item.descriptor.collectedAt,
+      complianceEvidenceId: item.descriptor.id,
+      controlId: item.descriptor.controlId,
+      evidenceHash: item.artifact.sha256,
+      evidenceType: item.descriptor.evidenceType,
+      evidenceUri: item.artifact.uri,
+      exportedRecordCount: item.payload.records.length,
+      sizeBytes: item.artifact.sizeBytes,
+      status: item.record.status,
+    })),
+    target: command.target,
   };
 }
 
@@ -1442,6 +1653,21 @@ function formatIndexCleanupResult(result: CleanupIndexImportRowsResult): string 
     `Force: ${result.force}`,
     `Embedding jobs cleaned: ${result.embeddingJobIds.length}`,
     `Cleaned: ${result.cleaned}`,
+  ].join("\n");
+}
+
+/** Formats a compliance evidence collection result for terminal output. */
+function formatComplianceEvidenceCollection(summary: ComplianceEvidenceCollectionSummary): string {
+  return [
+    `Compliance evidence collection: ${summary.target}`,
+    `Organization: ${summary.orgId ?? "all"}`,
+    `Collected by: ${summary.collectedBy}`,
+    `Artifact directory: ${summary.artifactDir}`,
+    `Evidence artifacts: ${summary.evidence.length}`,
+    ...summary.evidence.map(
+      (item) =>
+        `- ${item.evidenceType}: ${item.exportedRecordCount} records, ${item.evidenceUri}, ${item.evidenceHash}`,
+    ),
   ].join("\n");
 }
 

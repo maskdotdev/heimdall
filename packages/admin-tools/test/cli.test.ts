@@ -197,6 +197,43 @@ describe("parseAdminCliCommand", () => {
       json: true,
       kind: "index_cleanup",
     });
+
+    expect(
+      parseAdminCliCommand([
+        "compliance",
+        "collect",
+        "all",
+        "--artifact-dir",
+        ".tmp/compliance-evidence",
+        "--org-id",
+        "org_1",
+        "--limit",
+        "50",
+        "--json",
+      ]),
+    ).toEqual({
+      artifactDir: ".tmp/compliance-evidence",
+      json: true,
+      kind: "compliance_collect",
+      limit: 50,
+      orgId: "org_1",
+      target: "all",
+    });
+
+    expect(
+      parseAdminCliCommand([
+        "compliance",
+        "collect",
+        "security_event_export",
+        "--artifact-dir",
+        ".tmp/compliance-evidence",
+      ]),
+    ).toEqual({
+      artifactDir: ".tmp/compliance-evidence",
+      json: false,
+      kind: "compliance_collect",
+      target: "security-events",
+    });
   });
 
   it("documents the supported command surface", () => {
@@ -216,6 +253,7 @@ describe("parseAdminCliCommand", () => {
     expect(adminCliUsage()).toContain("admin index inspect <indexVersionId>");
     expect(adminCliUsage()).toContain("admin index import --artifact <uri>");
     expect(adminCliUsage()).toContain("admin index cleanup <indexVersionId>");
+    expect(adminCliUsage()).toContain("admin compliance collect <all|access-review");
   });
 });
 
