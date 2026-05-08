@@ -275,6 +275,20 @@ export type IndexArtifactValidationTelemetryInput = IndexerTelemetryOptions & {
   readonly sampleSize?: number;
 };
 
+/** Input used when recording artifact validation metrics. */
+type RecordIndexArtifactValidationMetricsInput = {
+  /** Stable driver name attached to validation metrics. */
+  readonly driverName: string;
+  /** Wall-clock validation duration in milliseconds. */
+  readonly durationMs: number;
+  /** Validation mode applied to the artifact. */
+  readonly mode: IndexArtifactValidationMode;
+  /** Validation errors returned by the selected validator. */
+  readonly validationErrors: readonly string[];
+  /** Whether validation threw before returning structured errors. */
+  readonly threw?: boolean;
+};
+
 /** Input used to validate CLI indexer filesystem boundaries. */
 type ValidateCliIndexerPathsInput = {
   /** Root directory where artifacts are written. */
@@ -444,6 +458,7 @@ export function validateIndexArtifactWithTelemetry(
   input: IndexArtifactValidationTelemetryInput,
 ): readonly string[] {
   const validationMode = input.mode ?? "full";
+  const startedAt = Date.now();
   const attributes: Record<string, TelemetryAttributeValue> = {
     ...indexArtifactValidationAttributes(artifact),
     "indexer_driver.driver": normalizeTelemetryLabel(input.driverName),
@@ -465,6 +480,12 @@ export function validateIndexArtifactWithTelemetry(
       mode: validationMode,
       ...(input.sampleSize ? { sampleSize: input.sampleSize } : {}),
     });
+    recordIndexArtifactValidationMetrics(input.metrics, {
+      driverName: input.driverName,
+      durationMs: Date.now() - startedAt,
+      mode: validationMode,
+      validationErrors,
+    });
     span?.end({
       attributes: {
         "indexer_driver.status": validationErrors.length === 0 ? "succeeded" : "failed",
@@ -475,6 +496,13 @@ export function validateIndexArtifactWithTelemetry(
 
     return validationErrors;
   } catch (error) {
+    recordIndexArtifactValidationMetrics(input.metrics, {
+      driverName: input.driverName,
+      durationMs: Date.now() - startedAt,
+      mode: validationMode,
+      threw: true,
+      validationErrors: [],
+    });
     span?.end({
       attributes: {
         "indexer_driver.error_class": "validation_error",
@@ -808,6 +836,7 @@ export function createRemoteIndexerDriver(options: RemoteIndexerDriverOptions): 
           validationMode,
           validationSampleSize,
           ...(input.signal ? { signal: input.signal } : {}),
+          ...(input.telemetry?.metrics ? { metrics: input.telemetry.metrics } : {}),
           ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
           ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
         });
@@ -980,6 +1009,7 @@ export function createCliIndexerDriver(options: CliIndexerDriverOptions): CodeIn
           driverVersion: version,
           mode: validationMode,
           ...(validationMode === "sample" ? { sampleSize: validationSampleSize } : {}),
+          ...(input.telemetry?.metrics ? { metrics: input.telemetry.metrics } : {}),
           ...(input.telemetry?.traceContext ? { traceContext: input.telemetry.traceContext } : {}),
           ...(input.telemetry?.traces ? { traces: input.telemetry.traces } : {}),
         });
@@ -1090,6 +1120,8 @@ async function remoteTerminalResult(input: {
   readonly validationMode: IndexArtifactValidationMode;
   /** Number of records checked when validation mode is `sample`. */
   readonly validationSampleSize: number;
+  /** Optional metric recorder for product-safe validation metrics. */
+  readonly metrics?: TelemetryMetricRecorder;
   /** Optional span recorder for product-safe validation traces. */
   readonly traces?: TelemetrySpanRecorder;
   /** Optional trace context propagated from durable job boundaries. */
@@ -1117,6 +1149,7 @@ async function remoteTerminalResult(input: {
     driverVersion: input.driverVersion,
     mode: input.validationMode,
     ...(input.validationMode === "sample" ? { sampleSize: input.validationSampleSize } : {}),
+    ...(input.metrics ? { metrics: input.metrics } : {}),
     ...(input.traceContext ? { traceContext: input.traceContext } : {}),
     ...(input.traces ? { traces: input.traces } : {}),
   });
@@ -1680,6 +1713,58 @@ function recordIndexerRunMetrics(
   }
 }
 
+/** Records low-cardinality metrics for one artifact validation attempt. */
+function recordIndexArtifactValidationMetrics(
+  metrics: TelemetryMetricRecorder | undefined,
+  input: RecordIndexArtifactValidationMetricsInput,
+): void {
+  if (!metrics) {
+    return;
+  }
+
+  const status = input.validationErrors.length === 0 && !input.threw ? "succeeded" : "failed";
+  const labels = {
+    driver: normalizeTelemetryLabel(input.driverName),
+    mode: input.mode,
+    status,
+  };
+  metrics.histogram(
+    OBSERVABILITY_METRIC_NAMES.indexerDriverValidationDurationMs,
+    input.durationMs,
+    {
+      labels,
+      unit: "ms",
+    },
+  );
+  if (status === "failed") {
+    metrics.count(OBSERVABILITY_METRIC_NAMES.indexerDriverValidationFailuresTotal, {
+      labels: {
+        driver: normalizeTelemetryLabel(input.driverName),
+        mode: input.mode,
+        reason: input.threw
+          ? "validation_exception"
+          : classifyIndexArtifactValidationFailureReason(input.validationErrors),
+      },
+      unit: "1",
+    });
+  }
+}
+
+/** Classifies validation errors into low-cardinality failure reasons. */
+function classifyIndexArtifactValidationFailureReason(errors: readonly string[]): string {
+  if (errors.some((error) => error.includes("unsupported feature"))) {
+    return "unsupported_feature";
+  }
+  if (errors.some((error) => error.startsWith("records["))) {
+    return "record_invalid";
+  }
+  if (errors.some((error) => error.startsWith("manifest."))) {
+    return "manifest_invalid";
+  }
+
+  return "artifact_invalid";
+}
+
 /** Returns product-safe span attributes from an indexer result. */
 function indexerRunResultAttributes(
   result: IndexRepositoryResult,
@@ -1763,6 +1848,15 @@ function recordCliOutputMetrics(
         unit: "bytes",
       },
     );
+  }
+  if (result.status === "exited" && result.exitCode !== 0) {
+    metrics.count(OBSERVABILITY_METRIC_NAMES.indexerDriverProcessExitNonzeroTotal, {
+      labels: {
+        driver: normalizeTelemetryLabel(driverName),
+        exit_code: result.exitCode,
+      },
+      unit: "1",
+    });
   }
 }
 

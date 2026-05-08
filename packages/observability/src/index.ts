@@ -658,8 +658,13 @@ export const OBSERVABILITY_METRIC_NAMES = {
   githubRequestsTotal: "code_review_agent.github.requests_total",
   indexerDriverDurationMs: "code_review_agent.indexer_driver.duration_ms",
   indexerDriverOutputBytes: "code_review_agent.indexer_driver.output_bytes",
+  indexerDriverProcessExitNonzeroTotal:
+    "code_review_agent.indexer_driver.process_exit_nonzero_total",
   indexerDriverRunsTotal: "code_review_agent.indexer_driver.runs_total",
   indexerDriverTimeoutsTotal: "code_review_agent.indexer_driver.timeouts_total",
+  indexerDriverValidationDurationMs: "code_review_agent.indexer_driver.validation_duration_ms",
+  indexerDriverValidationFailuresTotal:
+    "code_review_agent.indexer_driver.validation_failures_total",
   indexImporterDurationMs: "code_review_agent.index_importer.duration_ms",
   indexImporterImportsTotal: "code_review_agent.index_importer.imports_total",
   indexImporterRecordsTotal: "code_review_agent.index_importer.records_total",

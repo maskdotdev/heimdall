@@ -729,6 +729,12 @@ describe("withIndexerTelemetry", () => {
           unit: "bytes",
           value: 11,
         }),
+        expect.objectContaining({
+          kind: "histogram",
+          labels: { driver: "node-fake-cli", mode: "full", status: "succeeded" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverValidationDurationMs,
+          unit: "ms",
+        }),
       ]),
     );
     expect(spans).toEqual(
@@ -751,6 +757,80 @@ describe("withIndexerTelemetry", () => {
     expect(JSON.stringify({ metrics, spans })).not.toContain("cli stdout");
     expect(JSON.stringify({ metrics, spans })).not.toContain("cli stderr");
     expect(JSON.stringify({ metrics, spans })).not.toContain(workspacePath);
+  });
+
+  it("records validation failure and nonzero process metrics with bounded labels", async () => {
+    const invalidArtifactRoot = await createTempRoot();
+    const invalidWorkspacePath = await createTempRoot();
+    const invalidMetrics: RecordedMetric[] = [];
+    const invalidDriver = withIndexerTelemetry(
+      createCliIndexerDriver({
+        artifactRootPath: invalidArtifactRoot,
+        args: ["-e", artifactCliScript(invalidSemanticArtifact())],
+        command: process.execPath,
+        name: "node-fake-cli",
+        timeoutMs: 1_000,
+        validationMode: "sample",
+        validationSampleSize: 3,
+      }),
+      { metrics: createRecordingMetrics(invalidMetrics) },
+    );
+
+    await expect(
+      invalidDriver.indexRepository({
+        commitSha: "abc1234",
+        repoId: "repo_1",
+        workspacePath: invalidWorkspacePath,
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "artifact_invalid" },
+      ok: false,
+    });
+    expect(invalidMetrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: { driver: "node-fake-cli", mode: "sample", reason: "record_invalid" },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverValidationFailuresTotal,
+          unit: "1",
+        }),
+      ]),
+    );
+
+    const failingArtifactRoot = await createTempRoot();
+    const failingWorkspacePath = await createTempRoot();
+    const failingMetrics: RecordedMetric[] = [];
+    const failingDriver = withIndexerTelemetry(
+      createCliIndexerDriver({
+        artifactRootPath: failingArtifactRoot,
+        args: ["-e", failingCliScript()],
+        command: process.execPath,
+        name: "node-fake-cli",
+        timeoutMs: 1_000,
+      }),
+      { metrics: createRecordingMetrics(failingMetrics) },
+    );
+
+    await expect(
+      failingDriver.indexRepository({
+        commitSha: "abc1234",
+        repoId: "repo_1",
+        workspacePath: failingWorkspacePath,
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "process_exit_nonzero" },
+      ok: false,
+    });
+    expect(failingMetrics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "counter",
+          labels: { driver: "node-fake-cli", exit_code: 2 },
+          name: OBSERVABILITY_METRIC_NAMES.indexerDriverProcessExitNonzeroTotal,
+          unit: "1",
+        }),
+      ]),
+    );
   });
 });
 
