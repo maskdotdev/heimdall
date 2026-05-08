@@ -294,6 +294,26 @@ export const backgroundJobs = pgTable(
   (table) => [uniqueIndex("background_jobs_job_key_unique").on(table.queueName, table.jobKey)],
 );
 
+/** Periodic queue health samples used by dashboards without reading Redis. */
+export const queueHealthSnapshots = pgTable(
+  "queue_health_snapshots",
+  {
+    queueHealthSnapshotId: text("queue_health_snapshot_id").primaryKey(),
+    queueName: text("queue_name").notNull(),
+    waitingCount: integer("waiting_count").notNull().default(0),
+    delayedCount: integer("delayed_count").notNull().default(0),
+    activeCount: integer("active_count").notNull().default(0),
+    completedCount: integer("completed_count").notNull().default(0),
+    failedCount: integer("failed_count").notNull().default(0),
+    oldestWaitingAgeMs: integer("oldest_waiting_age_ms").notNull().default(0),
+    sampledAt: timestamp("sampled_at", { withTimezone: true }).notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    index("queue_health_snapshots_queue_sampled_idx").on(table.queueName, table.sampledAt),
+  ],
+);
+
 /** Mutable pull request state keyed by provider PR identity. */
 export const pullRequests = pgTable(
   "pull_requests",

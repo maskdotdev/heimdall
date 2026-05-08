@@ -44,6 +44,7 @@ import {
   publishedSummaryComments,
   publishPlans,
   pullRequests,
+  queueHealthSnapshots,
   quotaCounters,
   quotaReservations,
   replayRuns,
@@ -120,6 +121,10 @@ const orgSettingsMigrationPath = resolve(
   testDirectory,
   "../migrations/0026_complex_blonde_phantom.sql",
 );
+const queueHealthSnapshotsMigrationPath = resolve(
+  testDirectory,
+  "../migrations/0027_naive_namor.sql",
+);
 const integrationDatabaseUrl = process.env.HEIMDALL_DB_TEST_URL;
 
 describe("database schema foundation", () => {
@@ -137,6 +142,8 @@ describe("database schema foundation", () => {
     expect(userSessions.sessionHash.name).toBe("session_hash");
     expect(oauthStates.stateHash.name).toBe("state_hash");
     expect(backgroundJobs.backgroundJobId.name).toBe("background_job_id");
+    expect(queueHealthSnapshots.queueHealthSnapshotId.name).toBe("queue_health_snapshot_id");
+    expect(queueHealthSnapshots.oldestWaitingAgeMs.name).toBe("oldest_waiting_age_ms");
     expect(pullRequests.pullRequestId.name).toBe("pull_request_id");
     expect(codeIndexVersions.indexKey.name).toBe("index_key");
     expect(indexImportBatches.indexImportBatchId.name).toBe("index_import_batch_id");
@@ -225,6 +232,7 @@ describe("database schema foundation", () => {
     const feedbackTimelineMigration = await readFile(feedbackTimelineMigrationPath, "utf8");
     const suppressionMatchesMigration = await readFile(suppressionMatchesMigrationPath, "utf8");
     const orgSettingsMigration = await readFile(orgSettingsMigrationPath, "utf8");
+    const queueHealthSnapshotsMigration = await readFile(queueHealthSnapshotsMigrationPath, "utf8");
 
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(bootstrap).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
@@ -271,6 +279,10 @@ describe("database schema foundation", () => {
     );
     expect(orgSettingsMigration).toContain('CREATE TABLE "org_settings"');
     expect(orgSettingsMigration).toContain('"settings_json" jsonb');
+    expect(queueHealthSnapshotsMigration).toContain('CREATE TABLE "queue_health_snapshots"');
+    expect(queueHealthSnapshotsMigration).toContain(
+      'CREATE INDEX "queue_health_snapshots_queue_sampled_idx"',
+    );
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_runs"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_artifacts"');
     expect(sandboxRunsMigration).toContain('CREATE TABLE "sandbox_policy_decisions"');
@@ -472,6 +484,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
         (SELECT to_regclass('feedback_events')::text) AS feedback_events_table,
         (SELECT to_regclass('feedback_signals')::text) AS feedback_signals_table,
         (SELECT to_regclass('org_settings')::text) AS org_settings_table,
+        (SELECT to_regclass('queue_health_snapshots')::text) AS queue_health_snapshots_table,
         (SELECT to_regclass('suppression_matches')::text) AS suppression_matches_table,
         (SELECT to_regclass('review_run_metrics')::text) AS review_run_metrics_table,
         (SELECT to_regclass('users')::text) AS users_table,
@@ -499,6 +512,7 @@ describe.runIf(integrationDatabaseUrl)("database migration integration", () => {
       publish_plans_table: "publish_plans",
       oauth_states_table: "oauth_states",
       org_settings_table: "org_settings",
+      queue_health_snapshots_table: "queue_health_snapshots",
       replay_runs_table: "replay_runs",
       review_run_metrics_table: "review_run_metrics",
       suppression_matches_table: "suppression_matches",

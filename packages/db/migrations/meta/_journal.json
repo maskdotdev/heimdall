@@ -190,6 +190,13 @@
       "when": 1778221603311,
       "tag": "0026_complex_blonde_phantom",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1778262583827,
+      "tag": "0027_naive_namor",
+      "breakpoints": true
     }
   ]
 }
