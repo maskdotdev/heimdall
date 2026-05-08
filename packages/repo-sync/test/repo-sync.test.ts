@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,6 +23,7 @@ import {
   buildWorktreeAddArgs,
   buildWorktreePruneArgs,
   buildWorktreeRemoveArgs,
+  cleanupExpiredRepositoryWorktrees,
   cleanupRepositoryWorkspace,
   createAuthenticatedCloneUrl,
   createGitRunner,
@@ -714,6 +715,90 @@ describe("repo sync workspace", () => {
       ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
       ["-C", mirrorPath, "worktree", "prune"],
     ]);
+  });
+
+  it("removes expired cached worktrees and prunes stale mirror metadata", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-expired-cleanup-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 60 });
+    const layout = getRepoSyncCacheLayout(config);
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const expiredWorktreePath = getRepoSyncWorktreePath(config, "lease_expired");
+    const activeWorktreePath = getRepoSyncWorktreePath(config, "lease_active");
+    const ignoredWorktreePath = join(layout.worktreesRoot, "workspace_ignored");
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const expiredTimestamp = new Date("2025-12-31T23:58:00.000Z");
+    const mutableCommands: string[][] = [];
+
+    await mkdir(mirrorPath, { recursive: true });
+    await mkdir(expiredWorktreePath, { recursive: true });
+    await mkdir(activeWorktreePath, { recursive: true });
+    await mkdir(ignoredWorktreePath, { recursive: true });
+    await utimes(expiredWorktreePath, expiredTimestamp, expiredTimestamp);
+    await utimes(activeWorktreePath, now, now);
+
+    const result = await cleanupExpiredRepositoryWorktrees(
+      { config },
+      {
+        gitRunner: async (args) => {
+          mutableCommands.push([...args]);
+          return "";
+        },
+        now: () => now,
+      },
+    );
+
+    expect(result).toEqual({
+      cutoff: "2025-12-31T23:59:00.000Z",
+      dryRun: false,
+      expiredWorktreeCount: 1,
+      failures: [],
+      prunedMirrorCount: 1,
+      removedWorktreeCount: 1,
+      scannedWorktreeCount: 3,
+      skippedWorktreeCount: 2,
+    });
+    await expect(access(expiredWorktreePath)).rejects.toThrow();
+    await expect(access(activeWorktreePath)).resolves.toBeUndefined();
+    await expect(access(ignoredWorktreePath)).resolves.toBeUndefined();
+    expect(mutableCommands).toEqual([["-C", mirrorPath, "worktree", "prune"]]);
+  });
+
+  it("plans expired cached worktree cleanup without deleting paths during dry runs", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-dry-cleanup-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 60 });
+    const expiredWorktreePath = getRepoSyncWorktreePath(config, "lease_expired");
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const expiredTimestamp = new Date("2025-12-31T23:58:00.000Z");
+    const mutableCommands: string[][] = [];
+
+    await mkdir(expiredWorktreePath, { recursive: true });
+    await utimes(expiredWorktreePath, expiredTimestamp, expiredTimestamp);
+
+    const result = await cleanupExpiredRepositoryWorktrees(
+      { config, dryRun: true },
+      {
+        gitRunner: async (args) => {
+          mutableCommands.push([...args]);
+          return "";
+        },
+        now: () => now,
+      },
+    );
+
+    expect(result).toEqual({
+      cutoff: "2025-12-31T23:59:00.000Z",
+      dryRun: true,
+      expiredWorktreeCount: 1,
+      failures: [],
+      prunedMirrorCount: 0,
+      removedWorktreeCount: 0,
+      scannedWorktreeCount: 1,
+      skippedWorktreeCount: 0,
+    });
+    await expect(access(expiredWorktreePath)).resolves.toBeUndefined();
+    expect(mutableCommands).toEqual([]);
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {

@@ -1,6 +1,17 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -25,6 +36,7 @@ const defaultRepoSyncLeaseTtlSeconds = 60 * 30;
 const defaultRepoSyncMaxTotalCacheBytes = 100 * 1024 * 1024 * 1024;
 const defaultRepoSyncMaxMirrorBytes = 20 * 1024 * 1024 * 1024;
 const defaultRepoSyncMaxWorkspaceBytes = 5 * 1024 * 1024 * 1024;
+const defaultRepoSyncCleanupLimit = 100;
 const managedWorkspacePrefix = "heimdall-repo-";
 const redactedSecret = "***";
 const githubTokenPattern = /\bgh[opsu]_[A-Za-z0-9_]+\b/gu;
@@ -331,6 +343,56 @@ export type RepositoryWorkspaceLease = RepositoryWorktreeLease & {
   readonly mirrorCreated: boolean;
   /** True when workspace acquisition fetched refs after an initial commit miss. */
   readonly fetched: boolean;
+};
+
+/** Input for cleaning expired cached worktree paths after crashes. */
+export type CleanupExpiredRepositoryWorktreesInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Removes at most this many expired worktrees in one pass. */
+  readonly limit?: number;
+  /** Cutoff used to select expired worktree directories. */
+  readonly expiredBefore?: Date;
+  /** Reports eligible cleanup work without deleting paths or pruning mirrors. */
+  readonly dryRun?: boolean;
+};
+
+/** Dependencies for expired worktree cleanup. */
+export type CleanupExpiredRepositoryWorktreesDependencies = {
+  /** Optional Git command runner for pruning stale mirror worktree metadata. */
+  readonly gitRunner?: GitCommandRunner;
+  /** Optional clock for deterministic expiration tests. */
+  readonly now?: () => Date;
+};
+
+/** Failure captured while cleaning one repo-sync cache path. */
+export type RepoSyncCleanupFailure = {
+  /** Filesystem path that cleanup attempted to handle. */
+  readonly path: string;
+  /** Stable product-safe failure reason. */
+  readonly reason: string;
+  /** Product-safe error message. */
+  readonly message: string;
+};
+
+/** Summary returned after one expired worktree cleanup pass. */
+export type CleanupExpiredRepositoryWorktreesResult = {
+  /** Cutoff used to decide whether a worktree had expired. */
+  readonly cutoff: string;
+  /** Whether this pass only planned cleanup work. */
+  readonly dryRun: boolean;
+  /** Expired worktree directories selected before the limit was applied. */
+  readonly expiredWorktreeCount: number;
+  /** Cleanup failures captured without aborting the full pass. */
+  readonly failures: readonly RepoSyncCleanupFailure[];
+  /** Mirrors pruned after worktree removal. */
+  readonly prunedMirrorCount: number;
+  /** Worktree directories removed by this pass. */
+  readonly removedWorktreeCount: number;
+  /** Worktree cache entries inspected. */
+  readonly scannedWorktreeCount: number;
+  /** Worktree cache entries skipped because they were active, unsafe, or over the limit. */
+  readonly skippedWorktreeCount: number;
 };
 
 /** Product-safe captured Git command output attached to failures. */
@@ -700,6 +762,79 @@ export async function acquireRepositoryWorkspace(
   };
 }
 
+/** Cleans expired cached worktree paths and prunes stale mirror metadata. */
+export async function cleanupExpiredRepositoryWorktrees(
+  input: CleanupExpiredRepositoryWorktreesInput,
+  dependencies: CleanupExpiredRepositoryWorktreesDependencies = {},
+): Promise<CleanupExpiredRepositoryWorktreesResult> {
+  const layout = getRepoSyncCacheLayout(input.config);
+  const dryRun = input.dryRun === true;
+  const limit = normalizeRepoSyncCleanupLimit(input.limit);
+  const cutoff =
+    input.expiredBefore ??
+    new Date(
+      (dependencies.now?.() ?? new Date()).getTime() - input.config.defaultLeaseTtlSeconds * 1_000,
+    );
+  const failures: RepoSyncCleanupFailure[] = [];
+  let expiredWorktreeCount = 0;
+  let removedWorktreeCount = 0;
+  let scannedWorktreeCount = 0;
+  let skippedWorktreeCount = 0;
+
+  const worktreeEntries = await readRepoSyncDirectoryEntries(layout.worktreesRoot);
+  for (const entry of worktreeEntries) {
+    scannedWorktreeCount += 1;
+    if (!isRepoSyncLeaseWorktreeName(entry.name)) {
+      skippedWorktreeCount += 1;
+      continue;
+    }
+
+    const worktreePath = getRepoSyncWorktreePath(input.config, entry.name);
+    try {
+      assertInsideRoot(layout.worktreesRoot, worktreePath);
+      const worktreeStats = await lstat(worktreePath);
+      if (!worktreeStats.isDirectory() || worktreeStats.mtime.getTime() > cutoff.getTime()) {
+        skippedWorktreeCount += 1;
+        continue;
+      }
+
+      expiredWorktreeCount += 1;
+      if (removedWorktreeCount >= limit) {
+        skippedWorktreeCount += 1;
+        continue;
+      }
+
+      if (!dryRun) {
+        await rm(worktreePath, { force: true, recursive: true });
+      }
+      removedWorktreeCount += 1;
+    } catch (error) {
+      failures.push(repoSyncCleanupFailure(worktreePath, "worktree_cleanup_failed", error));
+    }
+  }
+
+  const prunedMirrorCount =
+    dryRun || removedWorktreeCount === 0
+      ? 0
+      : await pruneRepoSyncMirrors({
+          failures,
+          gitRunner: dependencies.gitRunner ?? runGit,
+          mirrorsRoot: layout.mirrorsRoot,
+          timeoutMs: input.config.defaultWorktreeTimeoutMs,
+        });
+
+  return {
+    cutoff: cutoff.toISOString(),
+    dryRun,
+    expiredWorktreeCount,
+    failures,
+    prunedMirrorCount,
+    removedWorktreeCount: dryRun ? 0 : removedWorktreeCount,
+    scannedWorktreeCount,
+    skippedWorktreeCount,
+  };
+}
+
 /** Input required to sync one repository workspace. */
 export type SyncRepositoryWorkspaceInput = GitHubRepositoryRef & {
   /** Heimdall repository ID used for product-safe span correlation. */
@@ -912,6 +1047,94 @@ export async function cleanupRepositoryWorkspace(
 ): Promise<void> {
   assertSafeRepositoryWorkspaceCleanupPath(workspacePath, options);
   await rm(workspacePath, { force: true, recursive: true });
+}
+
+/** Input for pruning mirror worktree metadata after cache cleanup. */
+type PruneRepoSyncMirrorsInput = {
+  /** Mutable failure list shared with the parent cleanup pass. */
+  readonly failures: RepoSyncCleanupFailure[];
+  /** Git runner used to prune mirror metadata. */
+  readonly gitRunner: GitCommandRunner;
+  /** Directory containing bare repository mirrors. */
+  readonly mirrorsRoot: string;
+  /** Timeout applied to each prune command. */
+  readonly timeoutMs: number;
+};
+
+/** Prunes stale worktree metadata from every cached mirror. */
+async function pruneRepoSyncMirrors(input: PruneRepoSyncMirrorsInput): Promise<number> {
+  let prunedMirrorCount = 0;
+  const mirrorEntries = await readRepoSyncDirectoryEntries(input.mirrorsRoot);
+  for (const entry of mirrorEntries) {
+    if (!entry.isDirectory() || !entry.name.endsWith(".git")) {
+      continue;
+    }
+
+    const mirrorPath = join(input.mirrorsRoot, entry.name);
+    try {
+      assertInsideRoot(input.mirrorsRoot, mirrorPath);
+      await input.gitRunner(buildWorktreePruneArgs({ mirrorPath }), {
+        timeoutMs: input.timeoutMs,
+      });
+      prunedMirrorCount += 1;
+    } catch (error) {
+      input.failures.push(repoSyncCleanupFailure(mirrorPath, "mirror_prune_failed", error));
+    }
+  }
+
+  return prunedMirrorCount;
+}
+
+/** Reads directory entries and treats missing repo-sync cache roots as empty. */
+async function readRepoSyncDirectoryEntries(path: string): Promise<Dirent[]> {
+  try {
+    return await readdir(path, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+/** Returns true when a filesystem entry name looks like a repo-sync lease worktree. */
+function isRepoSyncLeaseWorktreeName(name: string): boolean {
+  return name.startsWith("lease_") && safeCachePathSegmentPattern.test(name);
+}
+
+/** Normalizes the maximum expired worktrees removed in one cleanup pass. */
+function normalizeRepoSyncCleanupLimit(input: number | undefined): number {
+  if (input === undefined) {
+    return defaultRepoSyncCleanupLimit;
+  }
+  if (!Number.isInteger(input) || input < 1 || input > 10_000) {
+    throw new Error("Repo sync cleanup limit must be an integer between 1 and 10000.");
+  }
+
+  return input;
+}
+
+/** Builds a product-safe cleanup failure record. */
+function repoSyncCleanupFailure(
+  path: string,
+  reason: string,
+  error: unknown,
+): RepoSyncCleanupFailure {
+  return {
+    message: error instanceof Error ? error.message : String(error),
+    path,
+    reason,
+  };
+}
+
+/** Returns true when an error represents a missing filesystem path. */
+function isMissingPathError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
 }
 
 /** Validates that a cleanup target looks like a repo-sync managed workspace. */
