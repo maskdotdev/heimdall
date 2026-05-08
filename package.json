@@ -56,6 +56,7 @@
     "admin:replay-publisher": "pnpm --filter @repo/admin-tools admin -- publisher replay",
     "admin:inspect-memory-rules": "pnpm --filter @repo/admin-tools admin -- memory-rules inspect",
     "admin:inspect-index": "pnpm --filter @repo/admin-tools admin -- index inspect",
+    "admin:collect-compliance-evidence": "pnpm --filter @repo/admin-tools admin -- compliance collect",
     "dev:import-artifact": "pnpm --filter @repo/admin-tools admin -- index import",
     "dev:cleanup-import": "pnpm --filter @repo/admin-tools admin -- index cleanup",
     "dev:show-index-version": "pnpm --filter @repo/admin-tools admin -- index inspect",
