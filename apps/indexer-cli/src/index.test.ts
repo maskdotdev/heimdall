@@ -170,6 +170,7 @@ describe("runIndexerCli", () => {
     const manifest = JSON.parse(
       await readFile(join(outputPath, "index-manifest.json"), "utf8"),
     ) as {
+      readonly artifactId: string;
       readonly commitSha: string;
       readonly fileCount: number;
       readonly recordCount: number;
@@ -191,6 +192,22 @@ describe("runIndexerCli", () => {
     expect(manifest.recordCount).toBe(records.length);
     expect(records).toContainEqual(
       expect.objectContaining({ path: "src/example.ts", type: "file" }),
+    );
+
+    const validationOutput = memoryIo();
+    const validationExitCode = await runIndexerCli(
+      ["validate", "--artifact", outputPath],
+      validationOutput.io,
+    );
+
+    expect(validationExitCode).toBe(0);
+    expect(validationOutput.stderr()).toBe("");
+    expect(JSON.parse(validationOutput.stdout())).toEqual(
+      expect.objectContaining({
+        artifactId: manifest.artifactId,
+        recordCount: manifest.recordCount,
+        valid: true,
+      }),
     );
   });
 
@@ -216,6 +233,54 @@ describe("runIndexerCli", () => {
     expect(exitCode).toBe(1);
     expect(output.stdout()).toBe("");
     expect(output.stderr()).toBe("Split artifact output requires --output <directory>.\n");
+  });
+
+  it("returns artifact validation errors with the validation exit code", async () => {
+    const root = await createTempWorkspace();
+    const artifactPath = join(root, "artifact.json");
+
+    await runIndexerCli(
+      [
+        "index",
+        "--repo-id",
+        "repo_test",
+        "--commit-sha",
+        "abcdef1",
+        "--workspace",
+        root,
+        "--output",
+        artifactPath,
+      ],
+      memoryIo().io,
+    );
+    const artifact = JSON.parse(await readFile(artifactPath, "utf8")) as {
+      readonly manifest: Readonly<Record<string, unknown>> & { readonly recordCount: number };
+      readonly records: readonly unknown[];
+    };
+    await writeFile(
+      artifactPath,
+      `${JSON.stringify({
+        ...artifact,
+        manifest: {
+          ...artifact.manifest,
+          recordCount: artifact.manifest.recordCount + 1,
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    const output = memoryIo();
+    const exitCode = await runIndexerCli(["validate", "--artifact", artifactPath], output.io);
+
+    expect(exitCode).toBe(6);
+    expect(output.stderr()).toBe("");
+    expect(JSON.parse(output.stdout())).toEqual(
+      expect.objectContaining({
+        errorCount: expect.any(Number),
+        errors: expect.arrayContaining([expect.stringContaining("recordCount")]),
+        valid: false,
+      }),
+    );
   });
 });
 

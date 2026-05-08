@@ -1,7 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IndexManifest, IndexRecord } from "@repo/index-schema";
+import { validateIndexArtifact } from "@repo/indexer-driver";
 import { createTypeScriptIndexerDriver } from "@repo/indexer-ts";
 
 /** Artifact output layouts supported by the CLI. */
@@ -111,6 +112,7 @@ const HELP_TEXT = `Usage:
   indexer capabilities --json
   indexer index --repo-id <repo_id> --commit-sha <sha> --workspace <path> [--output <path>] [--format json|split] [--pretty]
   indexer index --request <request.json> [--output <path>] [--format json|split] [--pretty]
+  indexer validate --artifact <path>
 
 Options:
   capabilities --json                Print indexer capability metadata as JSON.
@@ -121,6 +123,7 @@ Options:
   --request <path>                 JSON request with repoId, commitSha, and workspacePath.
   --output <path>                  Artifact output path. Use "-" or omit for JSON stdout.
   --format <json|split>            Artifact output layout. Defaults to json.
+  --artifact <path>                Artifact JSON file or split artifact directory to validate.
   --pretty                         Format JSON artifact output with indentation.
 `;
 
@@ -131,6 +134,9 @@ export async function runIndexerCli(
 ): Promise<number> {
   if (argv[0] === "capabilities") {
     return runCapabilitiesCommand(argv.slice(1), io);
+  }
+  if (argv[0] === "validate") {
+    return runValidateCommand(argv.slice(1), io);
   }
 
   const parsed = await parseIndexerCliArgs(argv);
@@ -206,6 +212,49 @@ export async function runIndexerCli(
   io.stdout.write("\n");
 
   return 0;
+}
+
+/** Validates a JSON or split index artifact from disk. */
+async function runValidateCommand(flags: readonly string[], io: IndexerCliIo): Promise<number> {
+  const parsed = parseValidateCommandFlags(flags);
+  if (!parsed.ok) {
+    io[parsed.help ? "stdout" : "stderr"].write(
+      `${parsed.message ? `${parsed.message}\n\n` : ""}${HELP_TEXT}`,
+    );
+    return parsed.help ? 0 : 1;
+  }
+
+  try {
+    const artifact = await readIndexArtifactPath(resolve(parsed.artifactPath));
+    const validationErrors = validateIndexArtifact(artifact);
+    if (validationErrors.length > 0) {
+      io.stdout.write(
+        `${JSON.stringify({
+          errorCount: validationErrors.length,
+          errors: validationErrors,
+          valid: false,
+        })}\n`,
+      );
+      return 6;
+    }
+
+    io.stdout.write(
+      `${JSON.stringify({
+        artifactId: artifact.manifest.artifactId,
+        chunkCount: artifact.manifest.chunkCount,
+        edgeCount: artifact.manifest.edgeCount,
+        fileCount: artifact.manifest.fileCount,
+        recordCount: artifact.manifest.recordCount,
+        symbolCount: artifact.manifest.symbolCount,
+        valid: true,
+      })}\n`,
+    );
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    io.stderr.write(`Could not validate artifact: ${message}\n`);
+    return 1;
+  }
 }
 
 /** Prints TypeScript indexer capabilities as machine-readable JSON. */
@@ -305,6 +354,35 @@ function parseFlagValues(flags: readonly string[]): ParseIndexerCliFlagsResult {
   return { ok: true, flags: values };
 }
 
+/** Parses validate command flags into an artifact path. */
+function parseValidateCommandFlags(
+  flags: readonly string[],
+):
+  | { readonly ok: true; readonly artifactPath: string }
+  | { readonly ok: false; readonly help: boolean; readonly message?: string } {
+  if (flags.length === 0 || (flags.length === 1 && (flags[0] === "--help" || flags[0] === "-h"))) {
+    return { ok: false, help: flags.length === 1 };
+  }
+
+  let artifactPath: string | undefined;
+  for (let index = 0; index < flags.length; index += 1) {
+    const flag = flags[index];
+    const value = flags[index + 1];
+    if (flag !== "--artifact") {
+      return { ok: false, help: false, message: `Unknown validate option: ${flag}` };
+    }
+    if (!value || value.startsWith("--")) {
+      return { ok: false, help: false, message: "Missing value for --artifact" };
+    }
+    artifactPath = value;
+    index += 1;
+  }
+
+  return artifactPath
+    ? { ok: true, artifactPath }
+    : { ok: false, help: false, message: "Missing value for --artifact" };
+}
+
 /** Reads request JSON from disk. */
 async function readRequestFile(
   requestPath: string,
@@ -373,6 +451,48 @@ function completeRequest(
 /** Returns the split artifact output directory when the request has one. */
 function splitArtifactOutputPath(request: IndexerCliRequest): string | undefined {
   return request.outputPath && request.outputPath !== "-" ? request.outputPath : undefined;
+}
+
+/** Reads either a whole JSON artifact file or a split artifact directory. */
+async function readIndexArtifactPath(artifactPath: string): Promise<WritableIndexArtifact> {
+  const artifactStats = await stat(artifactPath);
+  if (artifactStats.isDirectory()) {
+    return readSplitIndexArtifact(artifactPath);
+  }
+
+  return JSON.parse(await readFile(artifactPath, "utf8")) as WritableIndexArtifact;
+}
+
+/** Reads the canonical split artifact files from a directory. */
+async function readSplitIndexArtifact(artifactPath: string): Promise<WritableIndexArtifact> {
+  const [manifest, records] = await Promise.all([
+    readJsonFile<IndexManifest>(join(artifactPath, INDEX_MANIFEST_FILE_NAME)),
+    readJsonlRecords(join(artifactPath, INDEX_RECORDS_FILE_NAME)),
+  ]);
+
+  return { manifest, records };
+}
+
+/** Reads a JSON file and narrows it to the caller-provided type. */
+async function readJsonFile<T>(path: string): Promise<T> {
+  return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+/** Reads compact JSONL index records while rejecting blank middle lines. */
+async function readJsonlRecords(path: string): Promise<readonly IndexRecord[]> {
+  const text = await readFile(path, "utf8");
+  if (text.length === 0) {
+    return [];
+  }
+
+  const lines = text.endsWith("\n") ? text.slice(0, -1).split(/\r?\n/u) : text.split(/\r?\n/u);
+  return lines.map((line, index) => {
+    if (line.trim().length === 0) {
+      throw new Error(`${INDEX_RECORDS_FILE_NAME} line ${index + 1} is blank.`);
+    }
+
+    return JSON.parse(line) as IndexRecord;
+  });
 }
 
 /** Writes an index artifact as a canonical split artifact directory. */
