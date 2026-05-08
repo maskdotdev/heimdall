@@ -311,6 +311,34 @@ type IndexImportPlan = {
   readonly testMappings: readonly TestMappingRecord[];
 };
 
+type IndexImportRecordWriter = {
+  /** Persists normalized chunk records. */
+  readonly writeChunks: (records: IndexImportPlan["chunks"]) => Promise<void>;
+  /** Persists normalized dependency records. */
+  readonly writeDependencies: (records: IndexImportPlan["dependencies"]) => Promise<void>;
+  /** Persists normalized diagnostic records. */
+  readonly writeDiagnostics: (records: IndexImportPlan["diagnostics"]) => Promise<void>;
+  /** Persists normalized edge records. */
+  readonly writeEdges: (records: IndexImportPlan["edgeRecords"]) => Promise<void>;
+  /** Persists normalized file records. */
+  readonly writeFiles: (records: IndexImportPlan["files"]) => Promise<void>;
+  /** Persists normalized route records. */
+  readonly writeRoutes: (records: IndexImportPlan["routes"]) => Promise<void>;
+  /** Persists normalized symbol records. */
+  readonly writeSymbols: (records: IndexImportPlan["symbolRecords"]) => Promise<void>;
+  /** Persists normalized test mapping records. */
+  readonly writeTestMappings: (records: IndexImportPlan["testMappings"]) => Promise<void>;
+};
+
+type DrizzleBatchIndexImportRecordWriterOptions = {
+  /** Maximum number of normalized records written per insert. */
+  readonly batchSize: number;
+  /** Index version attached to every normalized record row. */
+  readonly indexVersionId: string;
+  /** Transaction-scoped database facade used for record writes. */
+  readonly tx: Pick<HeimdallDatabase, "insert">;
+};
+
 type ExistingIndexVersionForImport = {
   /** Artifact hash stored for the existing index version, when present. */
   readonly artifactHash: string | null;
@@ -586,171 +614,19 @@ export async function importIndexArtifact(
         })
         .where(eq(indexImportBatches.indexImportBatchId, importPlan.importBatchId));
 
-      if (importPlan.files.length > 0) {
-        const fileRows = importPlan.files.map((file) => ({
-          fileId: file.fileId,
-          indexVersionId: importPlan.indexVersionId,
-          repoId: file.repoId,
-          commitSha: file.commitSha,
-          path: file.path,
-          language: file.language,
-          contentHash: file.contentHash,
-          sizeBytes: file.sizeBytes,
-          lineCount: file.lineCount,
-          isBinary: file.isBinary,
-          isGenerated: file.isGenerated,
-          isTest: file.isTest,
-          isVendored: file.isVendored,
-          metadata: file.metadata,
-        }));
-        for (const batch of batchRecords(fileRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(indexedFiles).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.symbolRecords.length > 0) {
-        const symbolRows = importPlan.symbolRecords.map((symbol) => ({
-          symbolId: symbol.symbolId,
-          indexVersionId: importPlan.indexVersionId,
-          fileId: symbol.fileId,
-          repoId: symbol.repoId,
-          commitSha: symbol.commitSha,
-          path: symbol.path,
-          language: symbol.language,
-          name: symbol.name,
-          qualifiedName: symbol.qualifiedName,
-          kind: symbol.kind,
-          startLine: symbol.range.startLine,
-          endLine: symbol.range.endLine,
-          contentHash: symbol.contentHash,
-          metadata: { ...symbol.metadata, signature: symbol.signature },
-        }));
-        for (const batch of batchRecords(symbolRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(symbols).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.edgeRecords.length > 0) {
-        const edgeRows = importPlan.edgeRecords.map((edge) => ({
-          edgeId: edge.edgeId,
-          indexVersionId: importPlan.indexVersionId,
-          repoId: edge.repoId,
-          commitSha: edge.commitSha,
-          fromId: edge.fromId,
-          toId: edge.toId,
-          fromKind: edge.fromKind,
-          toKind: edge.toKind,
-          kind: edge.kind,
-          confidence: edge.confidence,
-          metadata: edge.metadata,
-        }));
-        for (const batch of batchRecords(edgeRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(codeEdges).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.chunks.length > 0) {
-        const chunkRows = importPlan.chunks.map((chunk) => ({
-          chunkId: chunk.chunkId,
-          indexVersionId: importPlan.indexVersionId,
-          fileId: chunk.fileId,
-          symbolId: chunk.symbolId,
-          repoId: chunk.repoId,
-          path: chunk.path,
-          startLine: chunk.range.startLine,
-          endLine: chunk.range.endLine,
-          contentHash: chunk.contentHash,
-          embeddingStatus: "pending",
-          metadata: {
-            ...chunk.metadata,
-            language: chunk.language,
-            kind: chunk.kind,
-            text: chunk.text,
-            tokenEstimate: chunk.tokenEstimate,
-          },
-        }));
-        for (const batch of batchRecords(chunkRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(codeChunks).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.dependencies.length > 0) {
-        const dependencyRows = importPlan.dependencies.map((dependency) => ({
-          dependencyId: dependency.dependencyId,
-          indexVersionId: importPlan.indexVersionId,
-          repoId: dependency.repoId,
-          commitSha: dependency.commitSha,
-          manifestPath: dependency.manifestPath,
-          packageManager: dependency.packageManager,
-          name: dependency.name,
-          versionSpec: dependency.versionSpec,
-          resolvedVersion: dependency.resolvedVersion,
-          dependencyType: dependency.dependencyType,
-          metadata: dependency.metadata,
-        }));
-        for (const batch of batchRecords(dependencyRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(codeDependencies).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.routes.length > 0) {
-        const routeRows = importPlan.routes.map((route) => ({
-          routeId: route.routeId,
-          indexVersionId: importPlan.indexVersionId,
-          repoId: route.repoId,
-          commitSha: route.commitSha,
-          path: route.path,
-          language: route.language,
-          routePattern: route.routePattern,
-          methods: route.methods,
-          handlerSymbolId: route.handlerSymbolId,
-          startLine: route.range?.startLine,
-          endLine: route.range?.endLine,
-          framework: route.framework,
-          confidence: route.confidence,
-          metadata: route.metadata,
-        }));
-        for (const batch of batchRecords(routeRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(codeRoutes).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.testMappings.length > 0) {
-        const testMappingRows = importPlan.testMappings.map((testMapping) => ({
-          testMappingId: testMapping.testMappingId,
-          indexVersionId: importPlan.indexVersionId,
-          repoId: testMapping.repoId,
-          commitSha: testMapping.commitSha,
-          testFileId: testMapping.testFileId,
-          targetFileId: testMapping.targetFileId,
-          targetSymbolId: testMapping.targetSymbolId,
-          confidence: testMapping.confidence,
-          metadata: testMapping.metadata,
-        }));
-        for (const batch of batchRecords(testMappingRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(codeTestMappings).values(batch).onConflictDoNothing();
-        }
-      }
-
-      if (importPlan.diagnostics.length > 0) {
-        const diagnosticRows = importPlan.diagnostics.map((diagnostic) => ({
-          diagnosticId: diagnostic.diagnosticId,
-          indexVersionId: importPlan.indexVersionId,
-          repoId: diagnostic.repoId,
-          commitSha: diagnostic.commitSha,
-          path: diagnostic.path,
-          startLine: diagnostic.range?.startLine,
-          endLine: diagnostic.range?.endLine,
-          source: diagnostic.source,
-          severity: diagnostic.severity,
-          code: diagnostic.code,
-          message: diagnostic.message,
-          metadata: diagnostic.metadata,
-        }));
-        for (const batch of batchRecords(diagnosticRows, importPlan.importRecordBatchSize)) {
-          await tx.insert(codeIndexDiagnostics).values(batch).onConflictDoNothing();
-        }
-      }
+      const recordWriter = createDrizzleBatchIndexImportRecordWriter({
+        batchSize: importPlan.importRecordBatchSize,
+        indexVersionId: importPlan.indexVersionId,
+        tx,
+      });
+      await recordWriter.writeFiles(importPlan.files);
+      await recordWriter.writeSymbols(importPlan.symbolRecords);
+      await recordWriter.writeEdges(importPlan.edgeRecords);
+      await recordWriter.writeChunks(importPlan.chunks);
+      await recordWriter.writeDependencies(importPlan.dependencies);
+      await recordWriter.writeRoutes(importPlan.routes);
+      await recordWriter.writeTestMappings(importPlan.testMappings);
+      await recordWriter.writeDiagnostics(importPlan.diagnostics);
     });
 
     let embeddingJobCount = 0;
@@ -1570,6 +1446,204 @@ function boundedReconciliationLimit(value: number | undefined): number {
 /** Returns unique strings while preserving first-seen order. */
 function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
+}
+
+/** Creates the default bounded Drizzle insert writer for normalized index records. */
+function createDrizzleBatchIndexImportRecordWriter(
+  options: DrizzleBatchIndexImportRecordWriterOptions,
+): IndexImportRecordWriter {
+  return {
+    writeChunks: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((chunk) => ({
+        chunkId: chunk.chunkId,
+        indexVersionId: options.indexVersionId,
+        fileId: chunk.fileId,
+        symbolId: chunk.symbolId,
+        repoId: chunk.repoId,
+        path: chunk.path,
+        startLine: chunk.range.startLine,
+        endLine: chunk.range.endLine,
+        contentHash: chunk.contentHash,
+        embeddingStatus: "pending",
+        metadata: {
+          ...chunk.metadata,
+          language: chunk.language,
+          kind: chunk.kind,
+          text: chunk.text,
+          tokenEstimate: chunk.tokenEstimate,
+        },
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(codeChunks).values(batch).onConflictDoNothing();
+      }
+    },
+    writeDependencies: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((dependency) => ({
+        dependencyId: dependency.dependencyId,
+        indexVersionId: options.indexVersionId,
+        repoId: dependency.repoId,
+        commitSha: dependency.commitSha,
+        manifestPath: dependency.manifestPath,
+        packageManager: dependency.packageManager,
+        name: dependency.name,
+        versionSpec: dependency.versionSpec,
+        resolvedVersion: dependency.resolvedVersion,
+        dependencyType: dependency.dependencyType,
+        metadata: dependency.metadata,
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(codeDependencies).values(batch).onConflictDoNothing();
+      }
+    },
+    writeDiagnostics: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((diagnostic) => ({
+        diagnosticId: diagnostic.diagnosticId,
+        indexVersionId: options.indexVersionId,
+        repoId: diagnostic.repoId,
+        commitSha: diagnostic.commitSha,
+        path: diagnostic.path,
+        startLine: diagnostic.range?.startLine,
+        endLine: diagnostic.range?.endLine,
+        source: diagnostic.source,
+        severity: diagnostic.severity,
+        code: diagnostic.code,
+        message: diagnostic.message,
+        metadata: diagnostic.metadata,
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(codeIndexDiagnostics).values(batch).onConflictDoNothing();
+      }
+    },
+    writeEdges: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((edge) => ({
+        edgeId: edge.edgeId,
+        indexVersionId: options.indexVersionId,
+        repoId: edge.repoId,
+        commitSha: edge.commitSha,
+        fromId: edge.fromId,
+        toId: edge.toId,
+        fromKind: edge.fromKind,
+        toKind: edge.toKind,
+        kind: edge.kind,
+        confidence: edge.confidence,
+        metadata: edge.metadata,
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(codeEdges).values(batch).onConflictDoNothing();
+      }
+    },
+    writeFiles: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((file) => ({
+        fileId: file.fileId,
+        indexVersionId: options.indexVersionId,
+        repoId: file.repoId,
+        commitSha: file.commitSha,
+        path: file.path,
+        language: file.language,
+        contentHash: file.contentHash,
+        sizeBytes: file.sizeBytes,
+        lineCount: file.lineCount,
+        isBinary: file.isBinary,
+        isGenerated: file.isGenerated,
+        isTest: file.isTest,
+        isVendored: file.isVendored,
+        metadata: file.metadata,
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(indexedFiles).values(batch).onConflictDoNothing();
+      }
+    },
+    writeRoutes: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((route) => ({
+        routeId: route.routeId,
+        indexVersionId: options.indexVersionId,
+        repoId: route.repoId,
+        commitSha: route.commitSha,
+        path: route.path,
+        language: route.language,
+        routePattern: route.routePattern,
+        methods: route.methods,
+        handlerSymbolId: route.handlerSymbolId,
+        startLine: route.range?.startLine,
+        endLine: route.range?.endLine,
+        framework: route.framework,
+        confidence: route.confidence,
+        metadata: route.metadata,
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(codeRoutes).values(batch).onConflictDoNothing();
+      }
+    },
+    writeSymbols: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((symbol) => ({
+        symbolId: symbol.symbolId,
+        indexVersionId: options.indexVersionId,
+        fileId: symbol.fileId,
+        repoId: symbol.repoId,
+        commitSha: symbol.commitSha,
+        path: symbol.path,
+        language: symbol.language,
+        name: symbol.name,
+        qualifiedName: symbol.qualifiedName,
+        kind: symbol.kind,
+        startLine: symbol.range.startLine,
+        endLine: symbol.range.endLine,
+        contentHash: symbol.contentHash,
+        metadata: { ...symbol.metadata, signature: symbol.signature },
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(symbols).values(batch).onConflictDoNothing();
+      }
+    },
+    writeTestMappings: async (records) => {
+      if (records.length === 0) {
+        return;
+      }
+
+      const rows = records.map((testMapping) => ({
+        testMappingId: testMapping.testMappingId,
+        indexVersionId: options.indexVersionId,
+        repoId: testMapping.repoId,
+        commitSha: testMapping.commitSha,
+        testFileId: testMapping.testFileId,
+        targetFileId: testMapping.targetFileId,
+        targetSymbolId: testMapping.targetSymbolId,
+        confidence: testMapping.confidence,
+        metadata: testMapping.metadata,
+      }));
+      for (const batch of batchRecords(rows, options.batchSize)) {
+        await options.tx.insert(codeTestMappings).values(batch).onConflictDoNothing();
+      }
+    },
+  };
 }
 
 /** Yields stable slices of row values for bounded batch inserts. */
