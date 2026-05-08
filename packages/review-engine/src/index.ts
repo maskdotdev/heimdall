@@ -179,6 +179,8 @@ export type SelectReviewPassesInput = {
   readonly snapshot: PullRequestSnapshot;
   /** Optional retrieved context used for security and architecture signals. */
   readonly contextBundle?: ContextBundle;
+  /** Whether a static-analysis report is available for synthesis. */
+  readonly hasStaticAnalysisReport?: boolean;
   /** Review pass mode. Defaults to `normal`. */
   readonly mode?: ReviewPassMode;
   /** Optional pass budget. Defaults to `DEFAULT_REVIEW_BUDGETS`. */
@@ -414,6 +416,7 @@ export function createReviewEngine(): ReviewEngine {
       const selectedPassIds = selectReviewPasses({
         ...(input.budgets ? { budgets: input.budgets } : {}),
         ...(input.context.contextBundle ? { contextBundle: input.context.contextBundle } : {}),
+        ...(input.context.staticAnalysisReport ? { hasStaticAnalysisReport: true } : {}),
         ...(input.mode ? { mode: input.mode } : {}),
         snapshot: input.context.snapshot,
       });
@@ -806,6 +809,9 @@ export function selectReviewPasses(input: SelectReviewPassesInput): readonly Rev
 
   const hasSourceChanges = pullRequestHasSourceChanges(input.snapshot);
   if (hasSourceChanges) {
+    if (input.hasStaticAnalysisReport) {
+      passes.push("static_tool_synthesis");
+    }
     passes.push("correctness", "test_coverage");
   }
   if (hasSecuritySensitiveChanges(input.snapshot, input.contextBundle)) {

@@ -607,6 +607,22 @@ describe("selectReviewPasses", () => {
     ]);
   });
 
+  it("selects static-analysis synthesis when a report is available", () => {
+    expect(
+      selectReviewPasses({
+        hasStaticAnalysisReport: true,
+        snapshot: validPullRequestSnapshotFixture,
+      }),
+    ).toEqual([
+      "pr_summary",
+      "behavior_change",
+      "static_tool_synthesis",
+      "correctness",
+      "test_coverage",
+      "finding_judge",
+    ]);
+  });
+
   it("selects security for security-sensitive changes", () => {
     expect(
       selectReviewPasses({

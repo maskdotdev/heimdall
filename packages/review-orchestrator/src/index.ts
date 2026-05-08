@@ -60,12 +60,7 @@ import {
   syncRepositoryWorkspace,
 } from "@repo/repo-sync";
 import { createDatabaseRetrievalIndex, retrieveContext } from "@repo/retrieval";
-import {
-  llmReviewPass,
-  runReviewPasses,
-  staticAnalysisReviewPass,
-  validateCandidateFindings,
-} from "@repo/review-engine";
+import { createReviewEngine, validateCandidateFindings } from "@repo/review-engine";
 import {
   buildReviewPolicySnapshot,
   type ReviewPolicySnapshot,
@@ -1205,15 +1200,12 @@ export async function runPullRequestReview(
       now().toISOString(),
     );
     currentStage = "review";
-    const candidateFindings = await runReviewTelemetryStage(
+    const reviewEngineResult = await runReviewTelemetryStage(
       dependencies,
       "review",
       () =>
-        runReviewPasses({
+        createReviewEngine().run({
           metrics: dependencies.metrics,
-          passes: staticAnalysisReport
-            ? [staticAnalysisReviewPass, llmReviewPass]
-            : [llmReviewPass],
           traceContext: dependencies.traceContext,
           traces: dependencies.traces,
           context: {
@@ -1249,11 +1241,16 @@ export async function runPullRequestReview(
           "review.static_analysis_reported": staticAnalysisReport !== undefined,
         },
         logContext: reviewStageLogContext,
-        endAttributes: (findings) => ({
-          "review.candidate_finding_count": findings.length,
+        endAttributes: (result) => ({
+          "review.candidate_finding_count": result.findings.length,
+          "review.failed_pass_count": result.passResults.filter(
+            (passResult) => passResult.status === "failed",
+          ).length,
+          "review.selected_pass_count": result.selectedPassIds.length,
         }),
       },
     );
+    const candidateFindings = reviewEngineResult.findings;
     for (const finding of candidateFindings) {
       await reviewRepository.insertCandidateFinding(finding);
     }
@@ -1261,7 +1258,13 @@ export async function runPullRequestReview(
       reviewRunId,
       stage: "review",
       status: "completed",
-      metadata: { candidateFindingCount: candidateFindings.length },
+      metadata: {
+        candidateFindingCount: candidateFindings.length,
+        failedPassCount: reviewEngineResult.passResults.filter(
+          (passResult) => passResult.status === "failed",
+        ).length,
+        selectedPassIds: reviewEngineResult.selectedPassIds,
+      },
     });
 
     reviewRun = await transitionReviewRunStage(
@@ -1385,6 +1388,28 @@ export async function runPullRequestReview(
       payload: { schemaVersion: "candidate_findings.v1", findings: candidateFindings },
       createdAt: now().toISOString(),
     });
+    const reviewEngineArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
+      reviewRunId,
+      repoId: snapshot.repoId,
+      kind: "review_output",
+      name: "review-engine-pass-results.json",
+      payload: {
+        schemaVersion: "review_engine_pass_results.v1",
+        selectedPassIds: reviewEngineResult.selectedPassIds,
+        passResults: reviewEngineResult.passResults.map((passResult) => ({
+          passName: passResult.passName,
+          passVersion: passResult.passVersion,
+          status: passResult.status,
+          startedAt: passResult.startedAt,
+          finishedAt: passResult.finishedAt,
+          durationMs: passResult.durationMs,
+          candidateCount: passResult.candidates.length,
+          candidateFindingIds: passResult.candidates.map((finding) => finding.findingId),
+          ...(passResult.error ? { error: passResult.error } : {}),
+        })),
+      },
+      createdAt: now().toISOString(),
+    });
     const validatedArtifact = await persistArtifact(reviewRepository, artifactPayloadStore, {
       reviewRunId,
       repoId: snapshot.repoId,
@@ -1476,6 +1501,7 @@ export async function runPullRequestReview(
       contextArtifact,
       retrievalTraceArtifact,
       candidateArtifact,
+      reviewEngineArtifact,
       validatedArtifact,
       rejectedArtifact,
       rankingArtifact,
