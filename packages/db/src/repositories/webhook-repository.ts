@@ -1,5 +1,5 @@
 import type { ContractError, WebhookEvent } from "@repo/contracts";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import { webhookEvents } from "../schema";
 import { toWebhookEvent } from "./row-mappers";
@@ -39,6 +39,26 @@ export type MarkWebhookFailedInput = {
   readonly error: ContractError;
   /** Processing completion timestamp, defaulting to now. */
   readonly processedAt?: string;
+};
+
+/** Latest webhook delivery details for product activity summaries. */
+export type LatestWebhookActivityRecord = {
+  /** Provider event name. */
+  readonly eventName: string;
+  /** Provider event action when available. */
+  readonly action: string | null;
+  /** Current processing status. */
+  readonly status: string;
+  /** Provider delivery receipt timestamp. */
+  readonly receivedAt: Date;
+};
+
+/** Persisted webhook activity summary. */
+export type WebhookActivitySummaryRecord = {
+  /** Total persisted webhook deliveries. */
+  readonly totalDeliveries: number;
+  /** Latest persisted webhook delivery when any delivery exists. */
+  readonly latest?: LatestWebhookActivityRecord | undefined;
 };
 
 /** Query helper for inbound webhook event idempotency and status transitions. */
@@ -113,6 +133,28 @@ export class WebhookRepository {
       .limit(1);
 
     return row ? toWebhookEvent(row) : undefined;
+  }
+
+  /** Summarizes persisted webhook delivery activity. */
+  public async getWebhookActivitySummary(): Promise<WebhookActivitySummaryRecord> {
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(webhookEvents);
+    const [latest] = await this.db
+      .select({
+        action: webhookEvents.action,
+        eventName: webhookEvents.eventName,
+        receivedAt: webhookEvents.receivedAt,
+        status: webhookEvents.status,
+      })
+      .from(webhookEvents)
+      .orderBy(desc(webhookEvents.receivedAt), desc(webhookEvents.webhookEventId))
+      .limit(1);
+
+    return {
+      ...(latest ? { latest } : {}),
+      totalDeliveries: countRow?.count ?? 0,
+    };
   }
 
   /** Marks a webhook event as actively processing. */

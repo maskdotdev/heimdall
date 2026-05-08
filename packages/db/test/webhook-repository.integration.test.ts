@@ -131,6 +131,16 @@ describe.runIf(integrationDatabaseUrl)("WebhookRepository integration", () => {
       provider: "github",
     });
     expect(fetched?.webhookEventId).toBe("webhook_repository_delivery");
+
+    await expect(webhookRepository.getWebhookActivitySummary()).resolves.toEqual({
+      latest: {
+        action: null,
+        eventName: "push",
+        receivedAt: new Date("2026-05-08T00:03:00.000Z"),
+        status: "failed",
+      },
+      totalDeliveries: 2,
+    });
   });
 });
 

@@ -130,7 +130,7 @@ import {
   userProviderAccounts,
   userSessions,
   users,
-  webhookEvents,
+  WebhookRepository,
 } from "@repo/db";
 import {
   type AdminControlPlaneTelemetryEventInput,
@@ -8959,20 +8959,11 @@ async function listProductReviewRuns(
 
 /** Summarizes persisted webhook activity for the product dashboard. */
 async function getProductWebhookSummary(db: HeimdallDatabase): Promise<ProductWebhookSummary> {
-  const [countRow] = await db.select({ count: sql<number>`count(*)::int` }).from(webhookEvents);
-  const [latest] = await db
-    .select({
-      action: webhookEvents.action,
-      eventName: webhookEvents.eventName,
-      receivedAt: webhookEvents.receivedAt,
-      status: webhookEvents.status,
-    })
-    .from(webhookEvents)
-    .orderBy(desc(webhookEvents.receivedAt))
-    .limit(1);
+  const summary = await new WebhookRepository(db).getWebhookActivitySummary();
+  const latest = summary.latest;
 
   return {
-    totalDeliveries: countRow?.count ?? 0,
+    totalDeliveries: summary.totalDeliveries,
     ...(latest
       ? {
           ...(latest.action ? { latestAction: latest.action } : {}),
