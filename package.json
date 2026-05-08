@@ -39,6 +39,7 @@
     "infra:observability:up": "docker compose --profile observability up -d",
     "infra:observability:config": "docker compose --profile observability config",
     "infra:prepare": "pnpm infra:up && pnpm --filter @repo/admin-tools infra:db:prepare",
+    "index-schema": "pnpm --filter @repo/index-schema cli --",
     "admin": "pnpm --filter @repo/admin-tools admin --",
     "admin:inspect-review": "pnpm --filter @repo/admin-tools admin -- review inspect",
     "admin:replay-review": "pnpm --filter @repo/admin-tools admin -- review replay",
