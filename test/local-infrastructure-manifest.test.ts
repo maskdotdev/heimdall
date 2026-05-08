@@ -8,6 +8,12 @@ const COMPOSE_FILE = resolve("compose.yaml");
 /** Local infrastructure documentation path. */
 const INFRA_README_FILE = resolve("infra/README.md");
 
+/** Local Prometheus configuration path. */
+const PROMETHEUS_CONFIG_FILE = resolve("infra/observability/prometheus.yaml");
+
+/** Local Prometheus alert rules path. */
+const PROMETHEUS_RULES_FILE = resolve("infra/observability/prometheus-rules.yaml");
+
 /** Local Grafana datasource provisioning path. */
 const GRAFANA_DATASOURCES_FILE = resolve(
   "infra/observability/grafana/provisioning/datasources/datasources.yaml",
@@ -72,6 +78,50 @@ const EXPECTED_GRAFANA_DASHBOARDS = [
   },
 ] as const;
 
+/** Starter Prometheus alerts expected in the local observability bundle. */
+const EXPECTED_PROMETHEUS_ALERTS = [
+  {
+    alert: "HeimdallApiHighErrorRate",
+    metric: "code_review_agent_api_requests_total",
+    runbook: "docs/runbooks/observability-alerts.md#api-down",
+  },
+  {
+    alert: "HeimdallWebhookIngestionFailures",
+    metric: "code_review_agent_webhook_rejections_total",
+    runbook: "docs/runbooks/observability-alerts.md#webhook-ingestion-failures",
+  },
+  {
+    alert: "HeimdallReviewQueueRetrySpike",
+    metric: "code_review_agent_queue_retries_total",
+    runbook: "docs/runbooks/observability-alerts.md#review-queue-backlog",
+  },
+  {
+    alert: "HeimdallReviewFailureRate",
+    metric: "code_review_agent_review_stages_total",
+    runbook: "docs/runbooks/observability-alerts.md#review-failure-rate",
+  },
+  {
+    alert: "HeimdallPublishingFailureRate",
+    metric: "code_review_agent_publisher_runs_total",
+    runbook: "docs/runbooks/observability-alerts.md#publishing-failure-rate",
+  },
+  {
+    alert: "HeimdallLlmProviderOutage",
+    metric: "code_review_agent_llm_calls_total",
+    runbook: "docs/runbooks/observability-alerts.md#llm-provider-outage",
+  },
+  {
+    alert: "HeimdallIndexingFailures",
+    metric: "code_review_agent_indexer_driver_runs_total",
+    runbook: "docs/runbooks/observability-alerts.md#indexing-failures",
+  },
+  {
+    alert: "HeimdallSandboxViolationSpike",
+    metric: "code_review_agent_sandbox_violations_total",
+    runbook: "docs/runbooks/observability-alerts.md#sandbox-violation-spike",
+  },
+] as const;
+
 describe("local infrastructure manifest", () => {
   it("starts object storage alongside Postgres and Redis", () => {
     const compose = readFileSync(COMPOSE_FILE, "utf8");
@@ -119,6 +169,24 @@ describe("local infrastructure manifest", () => {
 
       expect(dashboardJson).toMatchObject({ title: dashboard.title });
       expect(JSON.stringify(dashboardJson)).toContain(dashboard.metric);
+    }
+  });
+
+  it("provisions local Prometheus alert rules for MVP telemetry risks", () => {
+    const compose = readFileSync(COMPOSE_FILE, "utf8");
+    const prometheus = readFileSync(PROMETHEUS_CONFIG_FILE, "utf8");
+    const rules = readFileSync(PROMETHEUS_RULES_FILE, "utf8");
+
+    expect(compose).toContain(
+      "./infra/observability/prometheus-rules.yaml:/etc/prometheus/prometheus-rules.yaml:ro",
+    );
+    expect(prometheus).toContain("rule_files:");
+    expect(prometheus).toContain("/etc/prometheus/prometheus-rules.yaml");
+
+    for (const alert of EXPECTED_PROMETHEUS_ALERTS) {
+      expect(rules).toContain(`alert: ${alert.alert}`);
+      expect(rules).toContain(alert.metric);
+      expect(rules).toContain(alert.runbook);
     }
   });
 });

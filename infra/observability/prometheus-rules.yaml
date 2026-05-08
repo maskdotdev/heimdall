@@ -1,0 +1,114 @@
+groups:
+  - name: heimdall-local-alerts
+    rules:
+      - alert: HeimdallApiHighErrorRate
+        expr: |
+          sum(rate(code_review_agent_api_requests_total{http_response_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(code_review_agent_api_requests_total[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels:
+          owner: platform
+          severity: page
+        annotations:
+          dashboard_url: /admin/overview
+          runbook_url: docs/runbooks/observability-alerts.md#api-down
+          summary: API 5xx rate is above 5%.
+
+      - alert: HeimdallWebhookIngestionFailures
+        expr: |
+          sum(rate(code_review_agent_webhook_rejections_total[10m])) > 0
+        for: 10m
+        labels:
+          owner: integrations
+          severity: page
+        annotations:
+          dashboard_url: /admin/debug/webhooks
+          runbook_url: docs/runbooks/observability-alerts.md#webhook-ingestion-failures
+          summary: Webhook rejections are present.
+
+      - alert: HeimdallReviewQueueRetrySpike
+        expr: |
+          sum(rate(code_review_agent_queue_retries_total{job_type=~".*review.*"}[15m])) > 0.1
+        for: 15m
+        labels:
+          owner: platform
+          severity: ticket
+        annotations:
+          dashboard_url: /admin/debug/jobs
+          runbook_url: docs/runbooks/observability-alerts.md#review-queue-backlog
+          summary: Review queue retry volume is elevated.
+
+      - alert: HeimdallReviewFailureRate
+        expr: |
+          sum(rate(code_review_agent_review_stages_total{status="failed"}[15m]))
+          /
+          clamp_min(sum(rate(code_review_agent_review_stages_total[15m])), 0.001)
+          > 0.1
+        for: 15m
+        labels:
+          owner: review-pipeline
+          severity: page
+        annotations:
+          dashboard_url: /admin/overview
+          runbook_url: docs/runbooks/observability-alerts.md#review-failure-rate
+          summary: Review stage failure rate is above 10%.
+
+      - alert: HeimdallPublishingFailureRate
+        expr: |
+          sum(rate(code_review_agent_publisher_runs_total{status="failed"}[15m]))
+          /
+          clamp_min(sum(rate(code_review_agent_publisher_runs_total[15m])), 0.001)
+          > 0.05
+        for: 15m
+        labels:
+          owner: integrations
+          severity: page
+        annotations:
+          dashboard_url: /admin/debug/publisher
+          runbook_url: docs/runbooks/observability-alerts.md#publishing-failure-rate
+          summary: Publisher failure rate is above 5%.
+
+      - alert: HeimdallLlmProviderOutage
+        expr: |
+          (
+            sum(rate(code_review_agent_llm_rate_limited_total[10m]))
+            +
+            sum(rate(code_review_agent_llm_structured_output_failures_total[10m]))
+          )
+          /
+          clamp_min(sum(rate(code_review_agent_llm_calls_total[10m])), 0.001)
+          > 0.2
+        for: 10m
+        labels:
+          owner: ai-platform
+          severity: page
+        annotations:
+          dashboard_url: /admin/overview
+          runbook_url: docs/runbooks/observability-alerts.md#llm-provider-outage
+          summary: LLM rate-limit and structured-output failure ratio is above 20%.
+
+      - alert: HeimdallIndexingFailures
+        expr: |
+          sum(rate(code_review_agent_indexer_driver_runs_total{status="failed"}[15m])) > 0
+        for: 15m
+        labels:
+          owner: indexing
+          severity: ticket
+        annotations:
+          dashboard_url: /admin/overview
+          runbook_url: docs/runbooks/observability-alerts.md#indexing-failures
+          summary: Indexer driver failures are present.
+
+      - alert: HeimdallSandboxViolationSpike
+        expr: |
+          sum(rate(code_review_agent_sandbox_violations_total[15m])) > 0
+        for: 15m
+        labels:
+          owner: security
+          severity: ticket
+        annotations:
+          dashboard_url: /admin/overview
+          runbook_url: docs/runbooks/observability-alerts.md#sandbox-violation-spike
+          summary: Sandbox policy violations are present.

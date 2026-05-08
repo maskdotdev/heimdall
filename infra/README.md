@@ -44,6 +44,9 @@ OBSERVABILITY_SERVICE_NAME=code-review-api
 Use `code-review-worker` as `OBSERVABILITY_SERVICE_NAME` for worker processes. Grafana provisions
 Prometheus and Tempo datasources automatically, plus starter dashboards for the API, queue, review
 pipeline, LLM and retrieval paths, indexing and embedding, publishing, and webhook delivery.
+Prometheus also loads starter alert rules for API error rate, webhook failures, review queue retry
+spikes, review failures, publishing failures, LLM provider outages, indexing failures, and sandbox
+violations. The alert annotations link back to `docs/runbooks/observability-alerts.md`.
 
 The local MinIO bootstrap creates the `heimdall-review-artifacts` bucket for review artifact
 payloads. Use these environment variables when running the API or worker against local object
