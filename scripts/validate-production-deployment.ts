@@ -5,8 +5,25 @@ import { resolve } from "node:path";
 /** Default production deployment manifest path. */
 const DEFAULT_MANIFEST_FILE = "infra/production/railway-admin-control-plane.json";
 
+/** Required role-specific worker services for the production deployment. */
+const REQUIRED_WORKER_SERVICE_ROLES = {
+  "worker-general": "repo-sync,memory,billing,security",
+  "worker-index": "index",
+  "worker-review": "review",
+  "worker-embedding": "embedding",
+  "worker-publisher": "publisher",
+  "worker-maintenance": "maintenance",
+} as const;
+
 /** Required production services for the admin control-plane deployment. */
-const REQUIRED_SERVICES = ["api", "dashboard", "admin-gateway", "worker", "postgres", "redis"];
+const REQUIRED_SERVICES = [
+  "api",
+  "dashboard",
+  "admin-gateway",
+  ...Object.keys(REQUIRED_WORKER_SERVICE_ROLES),
+  "postgres",
+  "redis",
+];
 
 /** Required production alert IDs for admin control-plane operations. */
 const REQUIRED_ALERT_IDS = [
@@ -20,7 +37,12 @@ const REQUIRED_ALERT_IDS = [
 ];
 
 /** Services that must use Railway config-as-code. */
-const REQUIRED_RAILWAY_CONFIG_SERVICES = ["api", "dashboard", "admin-gateway", "worker"];
+const REQUIRED_RAILWAY_CONFIG_SERVICES = [
+  "api",
+  "dashboard",
+  "admin-gateway",
+  ...Object.keys(REQUIRED_WORKER_SERVICE_ROLES),
+];
 
 /** Required production artifact-storage policy fields. */
 const REQUIRED_ARTIFACT_STORAGE_POLICY = {
@@ -54,11 +76,18 @@ const REQUIRED_REVIEW_ARTIFACT_ENV = [
   "HEIMDALL_REVIEW_ARTIFACT_SECRET_ACCESS_KEY",
 ];
 
+/** Required AWS environment variables for production SecretRef resolution. */
+const REQUIRED_AWS_SECRET_RESOLUTION_ENV = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_REGION",
+  "AWS_SECRET_ACCESS_KEY",
+];
+
 /** Required API environment variables for production admin routes. */
 const REQUIRED_API_ENV = [
   "DATABASE_URL",
   "REDIS_URL",
-  "GITHUB_WEBHOOK_SECRET",
+  "GITHUB_WEBHOOK_SECRET_REF",
   "HEIMDALL_ADMIN_ENABLED",
   "HEIMDALL_ADMIN_ROUTE_EXPOSURE",
   "HEIMDALL_ADMIN_IDENTITY_PROVIDER",
@@ -67,6 +96,7 @@ const REQUIRED_API_ENV = [
   "HEIMDALL_ADMIN_ALLOWED_ORIGINS",
   "HEIMDALL_ADMIN_GITHUB_ORG",
   "WEB_URL",
+  ...REQUIRED_AWS_SECRET_RESOLUTION_ENV,
   ...REQUIRED_REVIEW_ARTIFACT_ENV,
 ];
 
@@ -95,9 +125,23 @@ const REQUIRED_WORKER_ENV = [
   "DATABASE_URL",
   "REDIS_URL",
   "GITHUB_APP_ID",
-  "GITHUB_PRIVATE_KEY",
-  "GITHUB_WEBHOOK_SECRET",
+  "GITHUB_APP_PRIVATE_KEY_SECRET_REF",
+  ...REQUIRED_AWS_SECRET_RESOLUTION_ENV,
   ...REQUIRED_REVIEW_ARTIFACT_ENV,
+];
+
+/** Required review worker environment variables for live LLM review work. */
+const REQUIRED_REVIEW_WORKER_ENV = [
+  "HEIMDALL_LLM_MODEL",
+  "HEIMDALL_LLM_PROVIDER",
+  "HEIMDALL_LLM_PROVIDER_API_KEY_SECRET_REF",
+];
+
+/** Required embedding worker environment variables for live embedding work. */
+const REQUIRED_EMBEDDING_WORKER_ENV = [
+  "HEIMDALL_EMBEDDING_API_KEY_SECRET_REF",
+  "HEIMDALL_EMBEDDING_MODEL",
+  "HEIMDALL_EMBEDDING_PROVIDER",
 ];
 
 /** JSON object shape used by deployment manifests. */
@@ -170,7 +214,6 @@ export function productionDeploymentIssues(
   const apiService = serviceByName(services, "api");
   const dashboardService = serviceByName(services, "dashboard");
   const gatewayService = serviceByName(services, "admin-gateway");
-  const workerService = serviceByName(services, "worker");
   const scripts = recordField(input.packageJson, "scripts");
 
   return [
@@ -192,9 +235,7 @@ export function productionDeploymentIssues(
     ...REQUIRED_GATEWAY_ENV.filter((envName) => !requiredEnv(gatewayService).includes(envName)).map(
       (envName) => `admin-gateway requiredEnv must include ${envName}`,
     ),
-    ...REQUIRED_WORKER_ENV.filter((envName) => !requiredEnv(workerService).includes(envName)).map(
-      (envName) => `worker requiredEnv must include ${envName}`,
-    ),
+    ...workerServiceIssues(services),
     ...artifactStoragePolicyIssues(input.manifest),
     ...REQUIRED_RELEASE_GATE_COMMANDS.filter(
       (command) => !releaseGateCommands(input.manifest).includes(command),
@@ -214,6 +255,31 @@ export function productionDeploymentIssues(
       ? "rollback checks are required"
       : undefined,
   ].filter((issue): issue is string => typeof issue === "string");
+}
+
+/** Returns issues for role-specific worker service deployment records. */
+function workerServiceIssues(services: readonly JsonRecord[]): readonly string[] {
+  return Object.entries(REQUIRED_WORKER_SERVICE_ROLES).flatMap(
+    ([serviceName, expectedWorkerRole]) => {
+      const service = serviceByName(services, serviceName);
+      const serviceRequiredEnv = requiredEnv(service);
+      const extraEnv =
+        serviceName === "worker-review"
+          ? REQUIRED_REVIEW_WORKER_ENV
+          : serviceName === "worker-embedding"
+            ? REQUIRED_EMBEDDING_WORKER_ENV
+            : [];
+
+      return [
+        stringField(service, "workerRole") !== expectedWorkerRole
+          ? `${serviceName} workerRole must be ${expectedWorkerRole}`
+          : undefined,
+        ...[...REQUIRED_WORKER_ENV, ...extraEnv]
+          .filter((envName) => !serviceRequiredEnv.includes(envName))
+          .map((envName) => `${serviceName} requiredEnv must include ${envName}`),
+      ].filter((issue): issue is string => typeof issue === "string");
+    },
+  );
 }
 
 /** Returns issues for the production review artifact-storage policy. */

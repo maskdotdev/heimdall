@@ -60,11 +60,13 @@ evidence from every gate:
    `HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET`, `HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET`, and the
    GitHub OAuth client secret. Optionally set `HEIMDALL_ADMIN_SUPPORT_SESSION_SECRET` when
    support-session token rotation should be separate from admin-session rotation.
-4. Deploy the API, dashboard, and gateway to Railway with admin access still disabled on the API:
-   `HEIMDALL_ADMIN_ENABLED=false` or `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`.
-   In Railway service settings, set each service config path to the committed config-as-code file:
-   `/infra/railway/api.railway.json`, `/infra/railway/dashboard.railway.json`,
-   `/infra/railway/admin-gateway.railway.json`, and `/infra/railway/worker.railway.json`.
+4. Deploy the API, dashboard, gateway, and role-specific worker services to Railway with admin
+   access still disabled on the API: `HEIMDALL_ADMIN_ENABLED=false` or
+   `HEIMDALL_ADMIN_ROUTE_EXPOSURE=disabled`. In Railway service settings, set each service config
+   path to the committed config-as-code file under `/infra/railway/`, including
+   `worker-general.railway.json`, `worker-index.railway.json`, `worker-review.railway.json`,
+   `worker-embedding.railway.json`, `worker-publisher.railway.json`, and
+   `worker-maintenance.railway.json`.
 5. Verify health for the API, dashboard, and gateway. Verify that admin API routes return 404 while
    disabled.
 6. Configure the gateway with `HEIMDALL_ADMIN_GATEWAY_ALLOW_ALL_ORG_MEMBERS=false`, an explicit

@@ -64,11 +64,11 @@ HEIMDALL_REVIEW_ARTIFACT_FORCE_PATH_STYLE=true
 ## Production Deployment Manifest
 
 `infra/production/railway-admin-control-plane.json` codifies the initial Railway production
-deployment for the admin control plane. It lists the API, dashboard, admin gateway, worker,
-Postgres, and Redis services; required non-secret environment variable names; release gates;
-rollback checks; alert coverage; and the review artifact storage policy. Production review
-artifact storage must use a private S3-compatible bucket with public access blocked,
-provider-managed encryption, and support-session-gated raw download access.
+deployment for the admin control plane. It lists the API, dashboard, admin gateway, role-specific
+worker, Postgres, and Redis services; required environment variable names; release gates; rollback
+checks; alert coverage; and the review artifact storage policy. Production review artifact storage
+must use a private S3-compatible bucket with public access blocked, provider-managed encryption,
+and support-session-gated raw download access.
 
 The deployable Railway services use config-as-code files under `infra/railway/`. In each Railway
 service, set the custom config path to the corresponding absolute repository path:
@@ -78,7 +78,12 @@ service, set the custom config path to the corresponding absolute repository pat
 | API | `/infra/railway/api.railway.json` |
 | Dashboard | `/infra/railway/dashboard.railway.json` |
 | Admin gateway | `/infra/railway/admin-gateway.railway.json` |
-| Worker | `/infra/railway/worker.railway.json` |
+| Worker general | `/infra/railway/worker-general.railway.json` |
+| Worker index | `/infra/railway/worker-index.railway.json` |
+| Worker review | `/infra/railway/worker-review.railway.json` |
+| Worker embedding | `/infra/railway/worker-embedding.railway.json` |
+| Worker publisher | `/infra/railway/worker-publisher.railway.json` |
+| Worker maintenance | `/infra/railway/worker-maintenance.railway.json` |
 
 Run this audit before promoting or changing the production admin control plane:
 

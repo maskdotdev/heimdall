@@ -26,7 +26,12 @@ and rollback plan.
 - API Railway config: `/infra/railway/api.railway.json`
 - Dashboard Railway config: `/infra/railway/dashboard.railway.json`
 - Admin gateway Railway config: `/infra/railway/admin-gateway.railway.json`
-- Worker Railway config: `/infra/railway/worker.railway.json`
+- Worker general Railway config: `/infra/railway/worker-general.railway.json`
+- Worker index Railway config: `/infra/railway/worker-index.railway.json`
+- Worker review Railway config: `/infra/railway/worker-review.railway.json`
+- Worker embedding Railway config: `/infra/railway/worker-embedding.railway.json`
+- Worker publisher Railway config: `/infra/railway/worker-publisher.railway.json`
+- Worker maintenance Railway config: `/infra/railway/worker-maintenance.railway.json`
 - Staging proof evidence: `docs/evidence/admin-control-plane-staging-proof.json`
 - Runbook: `docs/runbooks/admin-control-plane.md`
 
