@@ -256,6 +256,59 @@ export type RepositoryCommitAvailability = RepositoryMirrorRef & {
   readonly fetched: boolean;
 };
 
+/** Reason a repository worktree lease was acquired. */
+export type RepositoryWorktreePurpose = "debug" | "index" | "replay" | "review" | "static_analysis";
+
+/** Input required to create a detached worktree lease from a mirror. */
+export type CreateRepositoryWorktreeLeaseInput = {
+  /** Runtime repo-sync configuration. */
+  readonly config: RepoSyncConfig;
+  /** Stable product repository ID. */
+  readonly repoId: string;
+  /** Commit SHA to check out in detached mode. */
+  readonly commitSha: string;
+  /** Bare mirror path that owns the worktree. */
+  readonly mirrorPath: string;
+  /** Purpose attached to lease metadata. */
+  readonly purpose: RepositoryWorktreePurpose;
+  /** Optional deterministic lease ID. */
+  readonly leaseId?: string;
+  /** Optional lease TTL in seconds. */
+  readonly ttlSeconds?: number;
+};
+
+/** Dependencies for detached worktree lease creation. */
+export type CreateRepositoryWorktreeLeaseDependencies = {
+  /** Optional Git command runner for tests or hosted runtimes. */
+  readonly gitRunner?: GitCommandRunner;
+  /** Optional lease ID factory for deterministic tests. */
+  readonly leaseIdFactory?: () => string;
+  /** Optional clock for deterministic lease timestamps. */
+  readonly now?: () => Date;
+};
+
+/** Detached repository worktree lease with idempotent release. */
+export type RepositoryWorktreeLease = {
+  /** Stable product repository ID. */
+  readonly repoId: string;
+  /** Lease ID used as the worktree path segment. */
+  readonly leaseId: string;
+  /** Commit SHA checked out in detached mode. */
+  readonly commitSha: string;
+  /** Worktree path on disk. */
+  readonly path: string;
+  /** Bare mirror path that owns the worktree. */
+  readonly mirrorPath: string;
+  /** ISO timestamp when the lease was created. */
+  readonly createdAt: string;
+  /** ISO timestamp when the lease should be considered expired. */
+  readonly expiresAt: string;
+  /** Purpose attached to the lease. */
+  readonly purpose: RepositoryWorktreePurpose;
+  /** Removes the worktree and prunes stale mirror metadata. */
+  readonly release: () => Promise<void>;
+};
+
 /** Product-safe captured Git command output attached to failures. */
 export type CapturedGitOutput = {
   /** Redacted captured text, truncated when needed. */
@@ -537,6 +590,63 @@ export async function ensureRepositoryCommit(
   throw new Error(
     `Repository mirror does not contain commit ${input.commitSha} after fetching requested refs.`,
   );
+}
+
+/** Creates a detached repository worktree lease from an existing mirror. */
+export async function createRepositoryWorktreeLease(
+  input: CreateRepositoryWorktreeLeaseInput,
+  dependencies: CreateRepositoryWorktreeLeaseDependencies = {},
+): Promise<RepositoryWorktreeLease> {
+  assertFullCommitSha(input.commitSha);
+  const leaseId = input.leaseId ?? dependencies.leaseIdFactory?.() ?? `lease_${randomUUID()}`;
+  const workspacePath = getRepoSyncWorktreePath(input.config, leaseId);
+  const layout = getRepoSyncCacheLayout(input.config);
+  await mkdir(layout.worktreesRoot, { recursive: true });
+
+  const git = dependencies.gitRunner ?? runGit;
+  try {
+    await git(
+      buildWorktreeAddArgs({
+        commitSha: input.commitSha,
+        mirrorPath: input.mirrorPath,
+        workspacePath,
+      }),
+      { timeoutMs: input.config.defaultWorktreeTimeoutMs },
+    );
+  } catch (error) {
+    await rm(workspacePath, { force: true, recursive: true });
+    throw error;
+  }
+
+  const createdAtDate = dependencies.now?.() ?? new Date();
+  const ttlSeconds = input.ttlSeconds ?? input.config.defaultLeaseTtlSeconds;
+  const expiresAtDate = new Date(createdAtDate.getTime() + ttlSeconds * 1_000);
+  let released = false;
+
+  return {
+    commitSha: input.commitSha,
+    createdAt: createdAtDate.toISOString(),
+    expiresAt: expiresAtDate.toISOString(),
+    leaseId,
+    mirrorPath: input.mirrorPath,
+    path: workspacePath,
+    purpose: input.purpose,
+    release: async () => {
+      if (released) {
+        return;
+      }
+
+      await git(buildWorktreeRemoveArgs({ mirrorPath: input.mirrorPath, workspacePath }), {
+        timeoutMs: input.config.defaultWorktreeTimeoutMs,
+      });
+      await rm(workspacePath, { force: true, recursive: true });
+      await git(buildWorktreePruneArgs({ mirrorPath: input.mirrorPath }), {
+        timeoutMs: input.config.defaultWorktreeTimeoutMs,
+      });
+      released = true;
+    },
+    repoId: input.repoId,
+  };
 }
 
 /** Input required to sync one repository workspace. */

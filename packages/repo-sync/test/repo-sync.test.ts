@@ -26,6 +26,7 @@ import {
   createAuthenticatedCloneUrl,
   createGitRunner,
   createRepoSyncConfig,
+  createRepositoryWorktreeLease,
   ensureRepositoryCommit,
   ensureRepositoryMirror,
   type GitCommandRunner,
@@ -536,6 +537,93 @@ describe("repo sync workspace", () => {
       ["-C", getRepoSyncMirrorPath(config, "repo_123"), "fetch", "--no-tags", "origin", commitSha],
       ["-C", getRepoSyncMirrorPath(config, "repo_123"), "cat-file", "-e", `${commitSha}^{commit}`],
     ]);
+  });
+
+  it("creates and releases detached worktree leases idempotently", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-worktree-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot, defaultLeaseTtlSeconds: 60 });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const mutableCommands: string[][] = [];
+    const gitRunner: GitCommandRunner = async (args) => {
+      mutableCommands.push([...args]);
+      if (args[2] === "worktree" && args[3] === "add") {
+        await mkdir(worktreePath, { recursive: true });
+      }
+      if (args[2] === "worktree" && args[3] === "remove") {
+        await rm(worktreePath, { force: true, recursive: true });
+      }
+      return "";
+    };
+
+    const lease = await createRepositoryWorktreeLease(
+      {
+        commitSha,
+        config,
+        leaseId: "lease_123",
+        mirrorPath,
+        purpose: "index",
+        repoId: "repo_123",
+      },
+      {
+        gitRunner,
+        now: () => new Date("2026-01-01T00:00:00.000Z"),
+      },
+    );
+
+    expect(lease).toMatchObject({
+      commitSha,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2026-01-01T00:01:00.000Z",
+      leaseId: "lease_123",
+      mirrorPath,
+      path: worktreePath,
+      purpose: "index",
+      repoId: "repo_123",
+    });
+    await expect(access(worktreePath)).resolves.toBeUndefined();
+
+    await lease.release();
+    await lease.release();
+
+    await expect(access(worktreePath)).rejects.toThrow();
+    expect(mutableCommands).toEqual([
+      ["-C", mirrorPath, "worktree", "add", "--detach", worktreePath, commitSha],
+      ["-C", mirrorPath, "worktree", "remove", "--force", worktreePath],
+      ["-C", mirrorPath, "worktree", "prune"],
+    ]);
+  });
+
+  it("removes residual worktree paths when detached worktree creation fails", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "heimdall-repo-sync-worktree-failure-test-"));
+    workspaceRoots.push(cacheRoot);
+    const config = createRepoSyncConfig({ cacheRoot });
+    const mirrorPath = getRepoSyncMirrorPath(config, "repo_123");
+    const worktreePath = getRepoSyncWorktreePath(config, "lease_123");
+    const gitRunner: GitCommandRunner = async (args) => {
+      if (args[2] === "worktree" && args[3] === "add") {
+        await mkdir(worktreePath, { recursive: true });
+        throw new Error("worktree add failed");
+      }
+      return "";
+    };
+
+    await expect(
+      createRepositoryWorktreeLease(
+        {
+          commitSha,
+          config,
+          leaseId: "lease_123",
+          mirrorPath,
+          purpose: "review",
+          repoId: "repo_123",
+        },
+        { gitRunner },
+      ),
+    ).rejects.toThrow("worktree add failed");
+
+    await expect(access(worktreePath)).rejects.toThrow();
   });
 
   it("fetches an exact commit with GitHub clone auth and cleans up the workspace", async () => {
