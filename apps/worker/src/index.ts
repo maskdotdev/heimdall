@@ -889,13 +889,25 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
       const repository = await loadGitHubRepositoryRef(options.db, payload);
 
       await throwIfWorkerJobCanceled(context);
-      const workspace = await workspaceAcquirer({
-        commitSha: payload.commitSha,
-        gitProvider: options.gitProvider,
-        repoId: payload.repoId,
-        repoSyncConfig,
-        repository,
-      });
+      let workspace: WorkerRepositoryWorkspaceLease;
+      try {
+        workspace = await workspaceAcquirer({
+          commitSha: payload.commitSha,
+          gitProvider: options.gitProvider,
+          repoId: payload.repoId,
+          repoSyncConfig,
+          repository,
+        });
+      } catch (error) {
+        recordWorkerGitHubProviderSecurityEvent({
+          error,
+          operation: "index_clone_auth",
+          repoId: payload.repoId,
+          repository,
+          securityEventSink: options.securityEventSink,
+        });
+        throw error;
+      }
       options.logger?.info("repo-sync workspace lease acquired", {
         attributes: {
           "event.name": "worker.repo_sync.workspace_acquired",
@@ -1821,10 +1833,14 @@ type RecordWorkerComplianceEvidenceSecurityEventInput = {
 type RecordWorkerGitHubProviderSecurityEventInput = {
   /** Error returned by the GitHub provider. */
   readonly error: unknown;
-  /** GitHub installation affected by the worker operation. */
-  readonly installation: GitHubInstallationRuntimeRef;
   /** Worker-owned GitHub operation that failed. */
-  readonly operation: "sync_installation";
+  readonly operation: "index_clone_auth" | "sync_installation";
+  /** GitHub installation affected by the worker operation. */
+  readonly installation?: GitHubInstallationRuntimeRef | undefined;
+  /** Repository affected by the worker operation. */
+  readonly repository?: GitHubRepositoryRef | undefined;
+  /** Heimdall repository ID affected by the worker operation. */
+  readonly repoId?: string | undefined;
   /** Optional sink configured by the worker runtime. */
   readonly securityEventSink?: SecurityEventSink | undefined;
 };
@@ -2605,21 +2621,32 @@ function recordWorkerGitHubProviderSecurityEvent(
     return;
   }
 
+  const installationId = input.installation?.installationId ?? input.repository?.installationId;
+  const providerInstallationId =
+    input.installation?.providerInstallationId ?? input.repository?.providerInstallationId;
+  const resourceId =
+    input.operation === "sync_installation" ? input.installation?.installationId : input.repoId;
+  const resourceType =
+    input.operation === "sync_installation" ? "github_installation" : "repository";
+
   recordSecurityEvent(input.securityEventSink, {
     metadata: withoutUndefinedValues({
       githubReason: input.error.code,
       githubRequestId: input.error.requestId,
       githubStatus: input.error.status,
-      installationId: input.installation.installationId,
+      installationId,
       operation: input.operation,
-      providerInstallationId: input.installation.providerInstallationId,
+      providerInstallationId,
+      providerRepoId: input.repository?.providerRepoId,
       rateLimitRemaining: input.error.rateLimit?.remaining,
       rateLimitBucket: input.error.rateLimit?.resource,
+      repoId: input.repoId,
       retryAfterSeconds: input.error.retryAfterSeconds,
     }),
-    orgId: input.installation.orgId,
-    resourceId: input.installation.installationId,
-    resourceType: "github_installation",
+    orgId: input.installation?.orgId,
+    repoId: input.repoId,
+    resourceId,
+    resourceType,
     severity: workerGitHubProviderSecurityEventSeverity(input.error.code),
     source: "github",
     type: eventType,
@@ -2631,26 +2658,36 @@ function workerGitHubProviderSecurityEventType(
   code: GitHubErrorCode,
   operation: RecordWorkerGitHubProviderSecurityEventInput["operation"],
 ): string | undefined {
-  if (operation !== "sync_installation") {
-    return undefined;
-  }
-
   switch (code) {
     case "github_installation_suspended":
-      return "github_worker_sync_installation_suspended";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_suspended"
+        : "github_worker_index_clone_auth_installation_suspended";
     case "github_permission":
-      return "github_worker_sync_installation_permission_denied";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_permission_denied"
+        : "github_worker_index_clone_auth_permission_denied";
     case "github_rate_limit":
-      return "github_worker_sync_installation_rate_limited";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_rate_limited"
+        : "github_worker_index_clone_auth_rate_limited";
     case "github_secondary_rate_limit":
-      return "github_worker_sync_installation_secondary_rate_limited";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_secondary_rate_limited"
+        : "github_worker_index_clone_auth_secondary_rate_limited";
     case "github_token":
-      return "github_worker_sync_installation_token_failed";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_token_failed"
+        : "github_worker_index_clone_auth_token_failed";
     case "github_unavailable":
-      return "github_worker_sync_installation_unavailable";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_unavailable"
+        : "github_worker_index_clone_auth_unavailable";
     case "github_unknown":
     case "github_validation":
-      return "github_worker_sync_installation_provider_failed";
+      return operation === "sync_installation"
+        ? "github_worker_sync_installation_provider_failed"
+        : "github_worker_index_clone_auth_provider_failed";
     default:
       return undefined;
   }

@@ -10,6 +10,7 @@ import {
   validDataDeletionPlanJobPayloadFixture,
   validEmbeddingBatchJobPayloadFixture,
   validEmbeddingRepairJobPayloadFixture,
+  validIndexRepoCommitJobPayloadFixture,
   validReviewArtifactCleanupJobPayloadFixture,
   validSandboxCleanupJobPayloadFixture,
   validSyncInstallationJobPayloadFixture,
@@ -1086,6 +1087,80 @@ describe("createWorkerHandlers", () => {
         type: "github_worker_sync_installation_permission_denied",
       },
     ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain(
+      "Resource not accessible by integration.",
+    );
+  });
+
+  it("records GitHub provider security events when index clone auth fails", async () => {
+    const securityEventSink = createMemorySecurityEventSink();
+    const payload = validIndexRepoCommitJobPayloadFixture;
+    const handlers = createWorkerHandlers({
+      db: createWorkerSequentialDatabaseStub({
+        insertedRows: [],
+        selectRows: [
+          [
+            {
+              installationId: payload.installationId,
+              owner: "acme",
+              provider: "github",
+              providerInstallationId: "12345",
+              providerRepoId: "98765",
+              repo: "api",
+            },
+          ],
+        ],
+      }),
+      gitProvider: {} as never,
+      securityEventSink,
+      workspaceAcquirer: async () => {
+        throw new GitHubPermissionError("Resource not accessible by integration.", {
+          rateLimit: { remaining: 24, resource: "core" },
+          requestId: "github_request_index_clone_auth",
+          retryAfterSeconds: 30,
+          status: 403,
+        });
+      },
+    });
+
+    await expect(
+      handlers[JOB_TYPES.IndexRepoCommit]?.({
+        attempt: 0,
+        createdAt: "2026-05-08T12:00:00.000Z",
+        idempotencyKey: "github:index:repo_01HXAMPLE:2222222",
+        jobId: "job_index_clone_auth",
+        jobType: JOB_TYPES.IndexRepoCommit,
+        maxAttempts: 3,
+        payload,
+        schemaVersion: "index_repo_commit_job.v1",
+      }),
+    ).rejects.toThrow("Resource not accessible by integration.");
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: {
+          githubReason: "github_permission",
+          githubRequestId: "github_request_index_clone_auth",
+          githubStatus: 403,
+          installationId: payload.installationId,
+          operation: "index_clone_auth",
+          providerInstallationId: "12345",
+          providerRepoId: "98765",
+          rateLimitBucket: "core",
+          rateLimitRemaining: 24,
+          repoId: payload.repoId,
+          retryAfterSeconds: 30,
+        },
+        repoId: payload.repoId,
+        resourceId: payload.repoId,
+        resourceType: "repository",
+        severity: "high",
+        source: "github",
+        status: "new",
+        type: "github_worker_index_clone_auth_permission_denied",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("acme");
     expect(JSON.stringify(securityEventSink.events())).not.toContain(
       "Resource not accessible by integration.",
     );
