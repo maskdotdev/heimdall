@@ -13,7 +13,9 @@ import {
   stringifyIndexRecordsJsonl,
 } from "../src";
 import {
+  createIndexArtifactWriter,
   createIndexRecordWriter,
+  type IndexArtifactWriterManifestBase,
   openIndexArtifact,
   readSplitIndexArtifactDirectory,
   writeSplitIndexArtifactDirectory,
@@ -28,6 +30,28 @@ afterEach(async () => {
 });
 
 describe("index artifact Node helpers", () => {
+  it("streams a complete split artifact and derives manifest metadata", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithTwoFiles();
+    const writer = createIndexArtifactWriter({ artifactDir: root });
+
+    for (const record of artifact.records) {
+      await writer.writeRecord(record);
+    }
+
+    const result = await writer.close({ manifestBase: manifestBaseFrom(artifact.manifest) });
+    const expectedManifest = {
+      ...artifact.manifest,
+      recordFiles: [recordFileFor("records.jsonl", artifact.records)],
+    };
+
+    expect(result).toEqual({ artifactDir: root, manifest: expectedManifest });
+    await expect(readSplitIndexArtifactDirectory(root)).resolves.toEqual({
+      manifest: expectedManifest,
+      records: artifact.records,
+    });
+  });
+
   it("writes the canonical single-record-file split layout", async () => {
     const root = await createTempRoot();
     const artifact = artifactWithTwoFiles();
@@ -73,6 +97,24 @@ describe("index artifact Node helpers", () => {
         filePath: join(root, "records.jsonl.gz"),
       }),
     ).toThrow("Unsupported index artifact record writer compression gzip.");
+  });
+
+  it("rejects out-of-order records when streaming a complete artifact", async () => {
+    const root = await createTempRoot();
+    const artifact = artifactWithTwoFiles();
+    const [firstRecord] = artifact.records;
+    if (!firstRecord) {
+      throw new Error("Artifact fixture must include a file record.");
+    }
+    const edgeRecord = edgeRecordFor(firstRecord);
+    const writer = createIndexArtifactWriter({ artifactDir: root });
+
+    await writer.writeRecord(edgeRecord);
+
+    await expect(writer.writeRecord(firstRecord)).rejects.toThrow(
+      "Index artifact record type file cannot be written after edge records.",
+    );
+    await writer.close({ manifestBase: manifestBaseFrom(artifact.manifest) });
   });
 
   it("reads manifest-declared partitioned record files in order", async () => {
@@ -173,6 +215,22 @@ function recordFileFor(
   };
 }
 
+/** Removes record-derived manifest fields so tests can finalize a streaming writer. */
+function manifestBaseFrom(manifest: IndexManifest): IndexArtifactWriterManifestBase {
+  const {
+    chunkCount: _chunkCount,
+    edgeCount: _edgeCount,
+    fileCount: _fileCount,
+    languages: _languages,
+    recordCount: _recordCount,
+    recordFiles: _recordFiles,
+    symbolCount: _symbolCount,
+    ...manifestBase
+  } = manifest;
+
+  return manifestBase;
+}
+
 /** Creates a temporary directory and schedules cleanup after the test. */
 async function createTempRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "heimdall-index-schema-"));
@@ -240,5 +298,26 @@ function fileRecord(fileId: string, path: string, hashCharacter: string): IndexR
     schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
     sizeBytes: 64,
     type: "file",
+  };
+}
+
+/** Creates a deterministic edge record for ordering tests. */
+function edgeRecordFor(record: IndexRecord): IndexRecord {
+  if (record.type !== "file") {
+    throw new Error("Ordering fixture must start from a file record.");
+  }
+
+  return {
+    commitSha: record.commitSha,
+    confidence: 1,
+    edgeId: "edge_node_helper_fixture",
+    fromId: record.fileId,
+    fromKind: "file",
+    kind: "imports",
+    repoId: record.repoId,
+    schemaVersion: INDEX_RECORD_SCHEMA_VERSION,
+    toId: "external:node:test",
+    toKind: "external",
+    type: "edge",
   };
 }

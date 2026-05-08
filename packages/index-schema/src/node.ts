@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
+  type CodeLanguage,
   INDEX_MANIFEST_FILE_NAME,
   INDEX_RECORDS_FILE_NAME,
   type IndexArtifact,
@@ -20,6 +21,18 @@ import {
   parseIndexRecordJsonlLine,
   stringifyIndexManifestJson,
 } from "./index";
+
+/** Canonical record-type order used by the streaming artifact writer. */
+const INDEX_RECORD_TYPE_ORDER = {
+  file: 0,
+  symbol: 1,
+  chunk: 2,
+  dependency: 3,
+  route: 4,
+  test_mapping: 5,
+  edge: 6,
+  diagnostic: 7,
+} satisfies Record<IndexRecord["type"], number>;
 
 /** Byte-level integrity metadata for one parsed JSONL record file. */
 type IndexRecordsJsonlFileReadMetadata = {
@@ -81,6 +94,54 @@ export type CreateIndexRecordWriterInput = {
   readonly filePath: string;
   /** Optional compression mode. MVP writers support only uncompressed JSONL. */
   readonly compression?: IndexRecordFileCompression;
+};
+
+/** Manifest fields supplied by artifact producers before record metadata is known. */
+export type IndexArtifactWriterManifestBase = Omit<
+  IndexManifest,
+  | "chunkCount"
+  | "edgeCount"
+  | "fileCount"
+  | "languages"
+  | "recordCount"
+  | "recordFiles"
+  | "symbolCount"
+>;
+
+/** Input accepted when finalizing a streaming split-artifact writer. */
+export type IndexArtifactWriterCloseInput = {
+  /** Manifest fields that are independent of the streamed record file. */
+  readonly manifestBase: IndexArtifactWriterManifestBase;
+  /** Optional language list override when a producer wants to preserve explicit manifest values. */
+  readonly languages?: readonly CodeLanguage[];
+};
+
+/** Result returned after finalizing a split-artifact writer. */
+export type IndexArtifactWriterCloseResult = {
+  /** Directory containing the finalized split artifact. */
+  readonly artifactDir: string;
+  /** Final manifest written to index-manifest.json. */
+  readonly manifest: IndexManifest;
+};
+
+/** Streaming writer for a complete split index artifact directory. */
+export type IndexArtifactWriter = {
+  /** Writes one canonical record into the artifact's JSONL record file. */
+  writeRecord(record: IndexRecord): Promise<void>;
+  /** Closes the record file and writes the manifest last. */
+  close(input: IndexArtifactWriterCloseInput): Promise<IndexArtifactWriterCloseResult>;
+};
+
+/** Input for creating a streaming split-artifact writer. */
+export type CreateIndexArtifactWriterInput = {
+  /** Directory where the split artifact should be written. */
+  readonly artifactDir: string;
+  /** Repo-relative record-file path inside the artifact directory. */
+  readonly recordFileName?: string;
+  /** Optional compression mode. MVP writers support only uncompressed JSONL. */
+  readonly compression?: IndexRecordFileCompression;
+  /** Whether to reject records that move backward in canonical record-type order. */
+  readonly enforceOrdering?: boolean;
 };
 
 /** Reads either a whole-artifact JSON file or a split artifact directory. */
@@ -187,6 +248,83 @@ export function createIndexRecordWriter(input: CreateIndexRecordWriterInput): In
   };
 }
 
+/** Creates a streaming split-artifact writer that writes the manifest after records are closed. */
+export function createIndexArtifactWriter(
+  input: CreateIndexArtifactWriterInput,
+): IndexArtifactWriter {
+  const recordFileName = input.recordFileName ?? INDEX_RECORDS_FILE_NAME;
+  assertSafeRecordFilePath(recordFileName);
+
+  const compression = input.compression ?? "none";
+  if (compression !== "none") {
+    throw new Error(`Unsupported index artifact record writer compression ${compression}.`);
+  }
+
+  const artifactDir = input.artifactDir;
+  const recordFilePath = join(artifactDir, recordFileName);
+  const writerPromise = mkdir(dirname(recordFilePath), { recursive: true }).then(() =>
+    createIndexRecordWriter({ compression, filePath: recordFilePath }),
+  );
+  const counters = createEmptyArtifactWriterCounters();
+  const enforceOrdering = input.enforceOrdering ?? true;
+  let closed = false;
+  let highestRecordTypeOrder = -1;
+  let highestRecordType: IndexRecord["type"] | undefined;
+
+  return {
+    close: async (closeInput) => {
+      if (closed) {
+        throw new Error("Index artifact writer is already closed.");
+      }
+
+      closed = true;
+      const writer = await writerPromise;
+      const metadata = await writer.close();
+      const manifest = createFinalManifest({
+        closeInput,
+        counters,
+        recordFile: {
+          ...metadata,
+          compression,
+          encoding: "utf-8",
+          mediaType: "application/jsonl",
+          path: recordFileName,
+          recordKind: "mixed",
+        },
+      });
+
+      await writeFile(
+        join(artifactDir, INDEX_MANIFEST_FILE_NAME),
+        stringifyIndexManifestJson(manifest),
+        "utf8",
+      );
+
+      return { artifactDir, manifest };
+    },
+    writeRecord: async (record) => {
+      if (closed) {
+        throw new Error("Cannot write to a closed index artifact writer.");
+      }
+      if (enforceOrdering) {
+        const order = INDEX_RECORD_TYPE_ORDER[record.type];
+        if (order < highestRecordTypeOrder) {
+          throw new Error(
+            `Index artifact record type ${record.type} cannot be written after ${highestRecordType} records.`,
+          );
+        }
+        if (order > highestRecordTypeOrder) {
+          highestRecordTypeOrder = order;
+          highestRecordType = record.type;
+        }
+      }
+
+      const writer = await writerPromise;
+      await writer.write(record);
+      collectArtifactWriterCounters(counters, record);
+    },
+  };
+}
+
 /** Reads a compact JSONL records file and returns integrity metadata. */
 async function readIndexRecordsJsonlFileWithMetadata(
   recordsPath: string,
@@ -256,15 +394,15 @@ export async function writeSplitIndexArtifactDirectory(
   directoryPath: string,
   artifact: IndexArtifactInput,
 ): Promise<void> {
-  await mkdir(directoryPath, { recursive: true });
-  const recordFile = await writeCanonicalRecordsFile(directoryPath, artifact.records);
-  const manifest = withCanonicalRecordFile(artifact.manifest, recordFile);
+  const writer = createIndexArtifactWriter({ artifactDir: directoryPath });
+  for (const record of artifact.records) {
+    await writer.writeRecord(record);
+  }
 
-  await writeFile(
-    join(directoryPath, INDEX_MANIFEST_FILE_NAME),
-    stringifyIndexManifestJson(manifest),
-    "utf8",
-  );
+  await writer.close({
+    languages: artifact.manifest.languages,
+    manifestBase: manifestBaseFromManifest(artifact.manifest),
+  });
 }
 
 /** Streams all record files declared by the manifest, or the canonical MVP record file. */
@@ -338,42 +476,6 @@ function validateRecordFileMetadata(
   }
 }
 
-/** Returns a manifest that declares the canonical single records.jsonl file. */
-function withCanonicalRecordFile(
-  manifest: IndexManifest,
-  recordFile: IndexRecordFile,
-): IndexManifest {
-  return {
-    ...manifest,
-    recordFiles: [recordFile],
-  };
-}
-
-/** Writes the canonical single records.jsonl file and returns manifest metadata. */
-async function writeCanonicalRecordsFile(
-  directoryPath: string,
-  records: readonly IndexRecord[],
-): Promise<IndexRecordFile> {
-  const writer = createIndexRecordWriter({
-    filePath: join(directoryPath, INDEX_RECORDS_FILE_NAME),
-  });
-
-  for (const record of records) {
-    await writer.write(record);
-  }
-
-  const metadata = await writer.close();
-
-  return {
-    ...metadata,
-    compression: "none",
-    encoding: "utf-8",
-    mediaType: "application/jsonl",
-    path: INDEX_RECORDS_FILE_NAME,
-    recordKind: "mixed",
-  };
-}
-
 /** Waits for a writable stream to drain or throw its write error. */
 async function waitForDrain(stream: WriteStream): Promise<void> {
   await Promise.race([
@@ -405,6 +507,111 @@ function throwStreamError(error: unknown): void {
 /** Returns a record-limit option object without writing exact-optional undefined fields. */
 function recordLimitOption(options: ReadIndexArtifactPathOptions): ReadIndexArtifactPathOptions {
   return options.recordLimits === undefined ? {} : { recordLimits: options.recordLimits };
+}
+
+/** Mutable record counters tracked by the streaming artifact writer. */
+type IndexArtifactWriterCounters = {
+  /** Number of chunk records written. */
+  chunkCount: number;
+  /** Number of edge records written. */
+  edgeCount: number;
+  /** Number of file records written. */
+  fileCount: number;
+  /** Languages observed in records that carry a language field. */
+  languages: Set<CodeLanguage>;
+  /** Total records written. */
+  recordCount: number;
+  /** Number of symbol records written. */
+  symbolCount: number;
+};
+
+/** Input used to build the final manifest from writer state. */
+type CreateFinalManifestInput = {
+  /** Manifest finalization input supplied by the caller. */
+  readonly closeInput: IndexArtifactWriterCloseInput;
+  /** Counters collected while records streamed. */
+  readonly counters: IndexArtifactWriterCounters;
+  /** Final JSONL record file metadata. */
+  readonly recordFile: IndexRecordFile;
+};
+
+/** Creates an empty mutable counter bag for streamed record metadata. */
+function createEmptyArtifactWriterCounters(): IndexArtifactWriterCounters {
+  return {
+    chunkCount: 0,
+    edgeCount: 0,
+    fileCount: 0,
+    languages: new Set<CodeLanguage>(),
+    recordCount: 0,
+    symbolCount: 0,
+  };
+}
+
+/** Updates manifest counters from one streamed record. */
+function collectArtifactWriterCounters(
+  counters: IndexArtifactWriterCounters,
+  record: IndexRecord,
+): void {
+  counters.recordCount += 1;
+
+  switch (record.type) {
+    case "chunk":
+      counters.chunkCount += 1;
+      counters.languages.add(record.language);
+      return;
+    case "edge":
+      counters.edgeCount += 1;
+      return;
+    case "file":
+      counters.fileCount += 1;
+      counters.languages.add(record.language);
+      return;
+    case "symbol":
+      counters.symbolCount += 1;
+      counters.languages.add(record.language);
+      return;
+    case "route":
+      counters.languages.add(record.language);
+      return;
+    case "dependency":
+    case "diagnostic":
+    case "test_mapping":
+      return;
+  }
+}
+
+/** Builds the final manifest from the immutable base plus streamed record metadata. */
+function createFinalManifest(input: CreateFinalManifestInput): IndexManifest {
+  const languages = input.closeInput.languages
+    ? [...input.closeInput.languages].sort()
+    : [...input.counters.languages].sort();
+
+  return {
+    ...input.closeInput.manifestBase,
+    chunkCount: input.counters.chunkCount,
+    edgeCount: input.counters.edgeCount,
+    fileCount: input.counters.fileCount,
+    languages,
+    recordCount: input.counters.recordCount,
+    recordFiles: [input.recordFile],
+    symbolCount: input.counters.symbolCount,
+  };
+}
+
+/** Removes record-derived manifest fields so the streaming writer can regenerate them. */
+function manifestBaseFromManifest(manifest: IndexManifest): IndexArtifactWriterManifestBase {
+  const {
+    chunkCount: _chunkCount,
+    edgeCount: _edgeCount,
+    fileCount: _fileCount,
+    languages: _languages,
+    recordCount: _recordCount,
+    recordFiles: _recordFiles,
+    symbolCount: _symbolCount,
+    ...manifestBase
+  } = manifest;
+
+  return manifestBase;
 }
 
 /** Reads the canonical split artifact manifest file. */
