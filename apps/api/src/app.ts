@@ -104,7 +104,7 @@ import {
   MemoryCandidateRepository,
   type MemoryFactRecord,
   MemoryFactRepository,
-  memoryCandidates,
+  type memoryCandidates,
   memoryFacts,
   oauthStates,
   orgMemberships,
@@ -11020,18 +11020,13 @@ async function markMemoryCandidateApproved(
 ): Promise<AdminMemoryCandidateSummary> {
   const decisionAt = new Date();
   const decidedByUserId = await existingUserId(db, request.actor.actorUserId);
-  const [updated] = await db
-    .update(memoryCandidates)
-    .set({
-      approvedMemoryFactId: memoryFactId,
-      decidedAt: decisionAt,
-      decidedByUserId,
-      metadata: memoryCandidateDecisionMetadata(candidate, "approved", request, memoryFactId),
-      status: "approved",
-      updatedAt: decisionAt,
-    })
-    .where(eq(memoryCandidates.memoryCandidateId, candidate.memoryCandidateId))
-    .returning();
+  const updated = await new MemoryCandidateRepository(db).approveMemoryCandidate({
+    decidedAt: decisionAt,
+    decidedByUserId,
+    memoryCandidateId: candidate.memoryCandidateId,
+    memoryFactId,
+    metadata: memoryCandidateDecisionMetadata(candidate, "approved", request, memoryFactId),
+  });
 
   return toAdminMemoryCandidateSummary(requireReturnedRow(updated));
 }
@@ -11044,17 +11039,12 @@ async function markMemoryCandidateRejected(
 ): Promise<AdminMemoryCandidateSummary> {
   const decisionAt = new Date();
   const decidedByUserId = await existingUserId(db, request.actor.actorUserId);
-  const [updated] = await db
-    .update(memoryCandidates)
-    .set({
-      decidedAt: decisionAt,
-      decidedByUserId,
-      metadata: memoryCandidateDecisionMetadata(candidate, "rejected", request),
-      status: "rejected",
-      updatedAt: decisionAt,
-    })
-    .where(eq(memoryCandidates.memoryCandidateId, candidate.memoryCandidateId))
-    .returning();
+  const updated = await new MemoryCandidateRepository(db).rejectMemoryCandidate({
+    decidedAt: decisionAt,
+    decidedByUserId,
+    memoryCandidateId: candidate.memoryCandidateId,
+    metadata: memoryCandidateDecisionMetadata(candidate, "rejected", request),
+  });
 
   return toAdminMemoryCandidateSummary(requireReturnedRow(updated));
 }

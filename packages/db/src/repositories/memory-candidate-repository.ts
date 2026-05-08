@@ -66,6 +66,32 @@ export type ListRepositoryMemoryCandidatesInput = {
   readonly limit?: number | undefined;
 };
 
+/** Input used to approve one durable memory candidate. */
+export type ApproveMemoryCandidateInput = {
+  /** Stable memory candidate ID. */
+  readonly memoryCandidateId: string;
+  /** Durable memory fact created from the candidate. */
+  readonly memoryFactId: string;
+  /** User that made the moderation decision when present. */
+  readonly decidedByUserId: string | null;
+  /** Product metadata to store with the approved candidate. */
+  readonly metadata: unknown;
+  /** Decision timestamp to store on the candidate. */
+  readonly decidedAt?: Date | undefined;
+};
+
+/** Input used to reject one durable memory candidate. */
+export type RejectMemoryCandidateInput = {
+  /** Stable memory candidate ID. */
+  readonly memoryCandidateId: string;
+  /** User that made the moderation decision when present. */
+  readonly decidedByUserId: string | null;
+  /** Product metadata to store with the rejected candidate. */
+  readonly metadata: unknown;
+  /** Decision timestamp to store on the candidate. */
+  readonly decidedAt?: Date | undefined;
+};
+
 /** Query helper for durable memory candidates. */
 export class MemoryCandidateRepository {
   /** Creates a memory candidate query helper. */
@@ -80,6 +106,47 @@ export class MemoryCandidateRepository {
       .from(memoryCandidates)
       .where(eq(memoryCandidates.memoryCandidateId, memoryCandidateId))
       .limit(1);
+
+    return row ? toMemoryCandidateRecord(row) : undefined;
+  }
+
+  /** Marks one durable memory candidate approved and returns the stored row when it exists. */
+  public async approveMemoryCandidate(
+    input: ApproveMemoryCandidateInput,
+  ): Promise<MemoryCandidateRecord | undefined> {
+    const decidedAt = input.decidedAt ?? new Date();
+    const [row] = await this.db
+      .update(memoryCandidates)
+      .set({
+        approvedMemoryFactId: input.memoryFactId,
+        decidedAt,
+        decidedByUserId: input.decidedByUserId,
+        metadata: input.metadata,
+        status: "approved",
+        updatedAt: decidedAt,
+      })
+      .where(eq(memoryCandidates.memoryCandidateId, input.memoryCandidateId))
+      .returning();
+
+    return row ? toMemoryCandidateRecord(row) : undefined;
+  }
+
+  /** Marks one durable memory candidate rejected and returns the stored row when it exists. */
+  public async rejectMemoryCandidate(
+    input: RejectMemoryCandidateInput,
+  ): Promise<MemoryCandidateRecord | undefined> {
+    const decidedAt = input.decidedAt ?? new Date();
+    const [row] = await this.db
+      .update(memoryCandidates)
+      .set({
+        decidedAt,
+        decidedByUserId: input.decidedByUserId,
+        metadata: input.metadata,
+        status: "rejected",
+        updatedAt: decidedAt,
+      })
+      .where(eq(memoryCandidates.memoryCandidateId, input.memoryCandidateId))
+      .returning();
 
     return row ? toMemoryCandidateRecord(row) : undefined;
   }

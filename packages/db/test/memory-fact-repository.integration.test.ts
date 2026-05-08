@@ -261,6 +261,59 @@ describe.runIf(integrationDatabaseUrl)("MemoryFactRepository integration", () =>
       "memcand_memory_fact_repo_recent",
     ]);
   });
+
+  it("approves and rejects memory candidates", async () => {
+    const approvedAt = new Date("2026-05-08T14:00:00.000Z");
+    const approved = await memoryCandidateRepository.approveMemoryCandidate({
+      decidedAt: approvedAt,
+      decidedByUserId: null,
+      memoryCandidateId: "memcand_memory_fact_approval_target",
+      memoryFactId: "mem_memory_fact_other_repo",
+      metadata: { decision: "approved", source: "manual" },
+    });
+    expect(approved).toMatchObject({
+      approvedMemoryFactId: "mem_memory_fact_other_repo",
+      decidedAt: approvedAt,
+      decidedByUserId: null,
+      memoryCandidateId: "memcand_memory_fact_approval_target",
+      metadata: { decision: "approved", source: "manual" },
+      status: "approved",
+      updatedAt: approvedAt,
+    });
+
+    const rejectedAt = new Date("2026-05-08T15:00:00.000Z");
+    const rejected = await memoryCandidateRepository.rejectMemoryCandidate({
+      decidedAt: rejectedAt,
+      decidedByUserId: null,
+      memoryCandidateId: "memcand_memory_fact_rejection_target",
+      metadata: { decision: "rejected", reason: "duplicate", source: "manual" },
+    });
+    expect(rejected).toMatchObject({
+      approvedMemoryFactId: null,
+      decidedAt: rejectedAt,
+      decidedByUserId: null,
+      memoryCandidateId: "memcand_memory_fact_rejection_target",
+      metadata: { decision: "rejected", reason: "duplicate", source: "manual" },
+      status: "rejected",
+      updatedAt: rejectedAt,
+    });
+
+    await expect(
+      memoryCandidateRepository.approveMemoryCandidate({
+        decidedByUserId: null,
+        memoryCandidateId: "memcand_memory_fact_missing",
+        memoryFactId: "mem_memory_fact_other_repo",
+        metadata: { decision: "approved", source: "manual" },
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      memoryCandidateRepository.rejectMemoryCandidate({
+        decidedByUserId: null,
+        memoryCandidateId: "memcand_memory_fact_missing",
+        metadata: { decision: "rejected", source: "manual" },
+      }),
+    ).resolves.toBeUndefined();
+  });
 });
 
 /** Applies all generated SQL migrations in lexical order to a test schema. */
@@ -533,6 +586,40 @@ async function seedMemoryCandidates(sql: postgres.Sql): Promise<void> {
         ${JSON.stringify({ source: "manual" })}::jsonb,
         '2026-05-08T00:00:00.000Z',
         '2026-05-08T00:04:00.000Z'
+      ),
+      (
+        'memcand_memory_fact_approval_target',
+        'org_memory_fact_other',
+        'repo_memory_fact_other',
+        'manual',
+        'team_preference',
+        'Approve this repository candidate.',
+        ${JSON.stringify({ scope: "repository" })}::jsonb,
+        ${JSON.stringify({})}::jsonb,
+        0.75,
+        'admin',
+        'pending',
+        'owner',
+        ${JSON.stringify({ source: "manual" })}::jsonb,
+        '2026-05-08T00:00:00.000Z',
+        '2026-05-08T00:05:00.000Z'
+      ),
+      (
+        'memcand_memory_fact_rejection_target',
+        'org_memory_fact_other',
+        'repo_memory_fact_other',
+        'manual',
+        'team_preference',
+        'Reject this repository candidate.',
+        ${JSON.stringify({ scope: "repository" })}::jsonb,
+        ${JSON.stringify({})}::jsonb,
+        0.65,
+        'admin',
+        'pending',
+        'owner',
+        ${JSON.stringify({ source: "manual" })}::jsonb,
+        '2026-05-08T00:00:00.000Z',
+        '2026-05-08T00:06:00.000Z'
       )
   `;
 }
