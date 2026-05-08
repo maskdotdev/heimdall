@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { REVIEW_ARTIFACT_PAYLOAD_DELETION_METADATA_KEY } from "@repo/artifacts";
 import { JOB_TYPES } from "@repo/contracts";
 import {
@@ -11,6 +12,7 @@ import {
   validSandboxCleanupJobPayloadFixture,
 } from "@repo/contracts/fixtures/jobs.fixture";
 import type { GitHubRepositoryRef } from "@repo/github";
+import type { IndexArtifact } from "@repo/index-schema";
 import { createFakeIndexerDriver } from "@repo/indexer-driver";
 import {
   OBSERVABILITY_METRIC_NAMES,
@@ -42,6 +44,7 @@ import {
   createWorkerStaticAnalysisRunnerFromEnvironment,
   enqueueWaitingReviewRunsForIndex,
   loadGitHubInstallationRef,
+  persistIndexArtifactForImport,
   type RedisPublishThrottleClient,
   resolveWorkerEmbeddingApiKey,
   resolveWorkerGitHubPrivateKey,
@@ -1854,6 +1857,61 @@ describe("createWorkerIndexerDriverFromEnvironment", () => {
   });
 });
 
+describe("persistIndexArtifactForImport", () => {
+  it("writes local artifact files when upload mode is local-only", async () => {
+    const artifact = workerIndexArtifact();
+    const root = await mkdtemp(join(tmpdir(), "heimdall-worker-index-artifact-"));
+
+    try {
+      const artifactUri = await persistIndexArtifactForImport({
+        artifact,
+        root,
+        uploadMode: "local_only",
+      });
+
+      expect(artifactUri.startsWith("file:")).toBe(true);
+      await expect(readFile(fileURLToPath(artifactUri), "utf8").then(JSON.parse)).resolves.toEqual(
+        artifact,
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("uploads artifacts to the configured store when upload mode is object storage", async () => {
+    const artifact = workerIndexArtifact();
+    const artifactStore = {
+      putArtifact: vi.fn(async () => ({
+        hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
+        sizeBytes: 128,
+        uri: "s3://heimdall-index-artifacts/index-artifacts/repo_1/artifact.json",
+      })),
+    };
+
+    await expect(
+      persistIndexArtifactForImport({
+        artifact,
+        artifactStore,
+        root: "/tmp/unused",
+        uploadMode: "object_storage",
+      }),
+    ).resolves.toBe("s3://heimdall-index-artifacts/index-artifacts/repo_1/artifact.json");
+    expect(artifactStore.putArtifact).toHaveBeenCalledWith(artifact);
+  });
+
+  it("fails object-storage upload mode without an artifact store", async () => {
+    await expect(
+      persistIndexArtifactForImport({
+        artifact: workerIndexArtifact(),
+        root: "/tmp/unused",
+        uploadMode: "object_storage",
+      }),
+    ).rejects.toThrow(
+      "Index artifact object-storage upload mode requires an index artifact store.",
+    );
+  });
+});
+
 describe("verifyWorkerIndexerCapabilities", () => {
   it("returns capabilities when the selected indexer supports the current artifact schema", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
@@ -2273,6 +2331,31 @@ function createBackgroundJobInsertedRow(values: unknown): unknown {
     scheduledAt: row.scheduledAt ?? null,
     startedAt: row.startedAt ?? null,
     updatedAt: row.updatedAt ?? timestamp,
+  };
+}
+
+/** Creates a minimal valid index artifact for worker persistence tests. */
+function workerIndexArtifact(): IndexArtifact {
+  return {
+    manifest: {
+      artifactId: "art_repo_1_abc1234",
+      chunkCount: 0,
+      chunkerVersion: "chunker.v1",
+      commitSha: "abc1234",
+      edgeCount: 0,
+      fileCount: 0,
+      generatedAt: "2026-05-08T00:00:00.000Z",
+      indexerName: "worker-test-indexer",
+      indexerVersion: "0.0.0",
+      languages: [],
+      parserVersions: {},
+      recordCount: 0,
+      recordSchemaVersion: "index_record.v1",
+      repoId: "repo_1",
+      schemaVersion: "index_artifact.v1",
+      symbolCount: 0,
+    },
+    records: [],
   };
 }
 

@@ -73,11 +73,16 @@ import {
   type GitProvider,
 } from "@repo/github";
 import {
+  createIndexArtifactResolverFromEnvironment,
+  createIndexArtifactStoreFromEnvironment,
   createIndexImportLimitsFromEnvironment,
+  type IndexArtifactResolver,
+  type IndexArtifactStore,
   importIndexArtifact,
   importIndexArtifactFromUri,
   reconcileStaleIndexImports,
 } from "@repo/index-importer";
+import type { IndexArtifact } from "@repo/index-schema";
 import {
   assertIndexerSupportsCurrentArtifactSchema,
   type CodeIndexerDriver,
@@ -282,6 +287,12 @@ export type CreateWorkerHandlersOptions = {
   readonly workspaceAcquirer?: WorkerRepositoryWorkspaceAcquirer;
   /** Durable directory used to store imported index artifacts before workspace cleanup. */
   readonly indexArtifactRoot?: string;
+  /** Index artifact upload mode selected by runtime configuration. */
+  readonly indexArtifactUploadMode?: IndexerConfig["artifactUploadMode"];
+  /** Optional object-storage writer used for durable index artifact URI handoff. */
+  readonly indexArtifactStore?: IndexArtifactStore;
+  /** Optional resolver used when importing index artifacts from durable URIs. */
+  readonly indexArtifactResolver?: IndexArtifactResolver;
   /** Optional indexer driver selected by runtime configuration or tests. */
   readonly indexerDriver?: CodeIndexerDriver;
   /** Maximum time allowed for one indexer run. */
@@ -655,7 +666,8 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         }
 
         const importLimits = createIndexImportLimitsFromEnvironment(process.env);
-        if (result.artifactUri) {
+        const artifactUploadMode = options.indexArtifactUploadMode ?? "local_only";
+        if (result.artifactUri && artifactUploadMode !== "object_storage") {
           await importIndexArtifact(result.artifact, {
             artifactUri: result.artifactUri,
             db: options.db,
@@ -666,11 +678,18 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
             ...(options.traces ? { traces: options.traces } : {}),
           });
         } else {
-          const artifactUri = await persistIndexArtifact(
-            result.artifact,
-            options.indexArtifactRoot ?? DEFAULT_INDEX_ARTIFACT_ROOT,
-          );
+          const artifactUri =
+            result.artifactUri ??
+            (await persistIndexArtifactForImport({
+              artifact: result.artifact,
+              root: options.indexArtifactRoot ?? DEFAULT_INDEX_ARTIFACT_ROOT,
+              ...(options.indexArtifactStore ? { artifactStore: options.indexArtifactStore } : {}),
+              uploadMode: artifactUploadMode,
+            }));
           await importIndexArtifactFromUri({
+            artifactResolver:
+              options.indexArtifactResolver ??
+              createIndexArtifactResolverFromEnvironment(process.env),
             artifactUri,
             db: options.db,
             enqueueEmbeddings: true,
@@ -1403,6 +1422,11 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     defaultArtifactRootPath: DEFAULT_INDEX_ARTIFACT_ROOT,
     defaultTimeoutMs: DEFAULT_INDEXER_TIMEOUT_MS,
   });
+  const indexArtifactResolver = createIndexArtifactResolverFromEnvironment(process.env);
+  const indexArtifactStore =
+    indexerConfig.artifactUploadMode === "object_storage"
+      ? createIndexArtifactStoreFromEnvironment(process.env)
+      : undefined;
   const indexerTimeoutMs = indexerConfig.defaultTimeoutMs;
   const workspaceRoot = process.env.REPO_SYNC_WORKSPACE_ROOT;
   const repoSyncConfig = createRepoSyncConfig({
@@ -1440,6 +1464,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       repoSyncConfig,
       ...(workspaceRoot ? { workspaceRoot } : {}),
       indexArtifactRoot,
+      indexArtifactUploadMode: indexerConfig.artifactUploadMode,
+      ...(indexArtifactStore ? { indexArtifactStore } : {}),
+      indexArtifactResolver,
       indexerDriver,
       ...(indexerTimeoutMs ? { indexerTimeoutMs } : {}),
       logger: observability.logger,
@@ -2345,10 +2372,7 @@ export async function loadGitHubInstallationRef(
 }
 
 /** Writes an index artifact to durable local storage and returns its file URI. */
-export async function persistIndexArtifact(
-  artifact: Parameters<typeof importIndexArtifact>[0],
-  root: string,
-): Promise<string> {
+export async function persistIndexArtifact(artifact: IndexArtifact, root: string): Promise<string> {
   const artifactPath = join(
     resolve(root),
     artifact.manifest.repoId,
@@ -2361,8 +2385,33 @@ export async function persistIndexArtifact(
   return pathToFileURL(artifactPath).toString();
 }
 
+/** Stores an index artifact for importer URI handoff according to the selected upload mode. */
+export async function persistIndexArtifactForImport(input: {
+  /** Complete artifact returned by the selected indexer driver. */
+  readonly artifact: IndexArtifact;
+  /** Local artifact root used when upload mode is `local_only`. */
+  readonly root: string;
+  /** Upload mode selected by central indexer runtime configuration. */
+  readonly uploadMode: IndexerConfig["artifactUploadMode"];
+  /** Object-storage writer required when upload mode is `object_storage`. */
+  readonly artifactStore?: IndexArtifactStore;
+}): Promise<string> {
+  if (input.uploadMode === "object_storage") {
+    if (!input.artifactStore) {
+      throw new Error(
+        "Index artifact object-storage upload mode requires an index artifact store.",
+      );
+    }
+
+    const storedArtifact = await input.artifactStore.putArtifact(input.artifact);
+    return storedArtifact.uri;
+  }
+
+  return persistIndexArtifact(input.artifact, input.root);
+}
+
 /** Creates a filesystem-safe artifact filename from the artifact content hash. */
-function artifactFileName(artifact: Parameters<typeof importIndexArtifact>[0]): string {
+function artifactFileName(artifact: IndexArtifact): string {
   const artifactHash =
     artifact.manifest.artifactHash ??
     `sha256:${createHash("sha256").update(JSON.stringify(artifact)).digest("hex")}`;

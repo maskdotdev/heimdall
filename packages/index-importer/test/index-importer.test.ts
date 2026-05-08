@@ -34,8 +34,10 @@ import {
   cleanupIndexImportRows,
   createFileSystemIndexArtifactResolver,
   createIndexArtifactResolverFromEnvironment,
+  createIndexArtifactStoreFromEnvironment,
   createIndexImportLimitsFromEnvironment,
   createS3CompatibleIndexArtifactResolver,
+  createS3CompatibleIndexArtifactStore,
   importIndexArtifact,
   readIndexArtifactFromUri,
   reconcileStaleIndexImports,
@@ -315,6 +317,91 @@ describe("createFileSystemIndexArtifactResolver", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("writes whole-artifact JSON to S3-compatible object storage", async () => {
+    const requests: { readonly body: unknown; readonly init: RequestInit; readonly url: string }[] =
+      [];
+    const store = createS3CompatibleIndexArtifactStore({
+      accessKeyId: "AKIA_TEST",
+      bucket: "heimdall-index-artifacts",
+      endpoint: "https://objects.example.test",
+      fetch: async (input, init) => {
+        requests.push({
+          body: JSON.parse(new TextDecoder().decode(init?.body as ArrayBuffer)) as unknown,
+          init: init ?? {},
+          url: input.toString(),
+        });
+
+        return new Response(null, { status: 200 });
+      },
+      keyPrefix: "indexer",
+      now: () => new Date("2026-05-07T12:00:00.000Z"),
+      region: "auto",
+      secretAccessKey: "secret",
+    });
+
+    const result = await store.putArtifact(emptyArtifact());
+
+    expect(result).toMatchObject({
+      hash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      sizeBytes: expect.any(Number),
+      uri: expect.stringMatching(
+        /^s3:\/\/heimdall-index-artifacts\/indexer\/index-artifacts\/repo_1\/abc1234-[a-f0-9]+\.json$/u,
+      ),
+    });
+    expect(requests).toEqual([
+      expect.objectContaining({
+        body: emptyArtifact(),
+        init: expect.objectContaining({
+          headers: expect.objectContaining({
+            authorization: expect.stringContaining("AWS4-HMAC-SHA256 Credential=AKIA_TEST/"),
+            "x-amz-date": "20260507T120000Z",
+          }),
+          method: "PUT",
+        }),
+        url: expect.stringMatching(
+          /^https:\/\/objects\.example\.test\/heimdall-index-artifacts\/indexer\/index-artifacts\/repo_1\/abc1234-[a-f0-9]+\.json$/u,
+        ),
+      }),
+    ]);
+  });
+
+  it("creates an S3-compatible store from environment object-storage settings", async () => {
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+    const fakeFetch: typeof globalThis.fetch = async (input) => {
+      requestedUrls.push(input.toString());
+
+      return new Response(null, { status: 200 });
+    };
+    globalThis.fetch = fakeFetch;
+
+    try {
+      const store = createIndexArtifactStoreFromEnvironment({
+        HEIMDALL_INDEX_ARTIFACT_ACCESS_KEY_ID: "AKIA_TEST",
+        HEIMDALL_INDEX_ARTIFACT_BUCKET: "heimdall-index-artifacts",
+        HEIMDALL_INDEX_ARTIFACT_ENDPOINT: "https://objects.example.test",
+        HEIMDALL_INDEX_ARTIFACT_KEY_PREFIX: "prod",
+        HEIMDALL_INDEX_ARTIFACT_REGION: "auto",
+        HEIMDALL_INDEX_ARTIFACT_SECRET_ACCESS_KEY: "secret",
+      });
+
+      await expect(store.putArtifact(emptyArtifact())).resolves.toMatchObject({
+        uri: expect.stringContaining("s3://heimdall-index-artifacts/prod/index-artifacts/repo_1/"),
+      });
+      expect(requestedUrls[0]).toContain(
+        "https://objects.example.test/heimdall-index-artifacts/prod/index-artifacts/repo_1/",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("requires object-storage settings before creating an index artifact store", () => {
+    expect(() => createIndexArtifactStoreFromEnvironment({})).toThrow(
+      "Index artifact object storage requires",
+    );
   });
 });
 

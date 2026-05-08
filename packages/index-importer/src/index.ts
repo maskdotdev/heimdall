@@ -124,8 +124,33 @@ export type S3CompatibleIndexArtifactResolverOptions = {
   readonly now?: () => Date;
 };
 
+/** Durable index artifact location returned after storing artifact bytes. */
+export type StoredIndexArtifact = {
+  /** Durable URI that an importer can resolve later. */
+  readonly uri: string;
+  /** SHA-256 hash for the serialized artifact payload. */
+  readonly hash: `sha256:${string}`;
+  /** Serialized artifact size in bytes. */
+  readonly sizeBytes: number;
+};
+
+/** Store that writes index artifacts to durable storage before import. */
+export type IndexArtifactStore = {
+  /** Stores one complete index artifact and returns its durable URI metadata. */
+  readonly putArtifact: (artifact: IndexArtifact) => Promise<StoredIndexArtifact>;
+};
+
+/** Options for S3/R2-compatible whole-artifact JSON storage. */
+export type S3CompatibleIndexArtifactStoreOptions = S3CompatibleIndexArtifactResolverOptions & {
+  /** Optional key prefix within the object-storage bucket. */
+  readonly keyPrefix?: string;
+};
+
 /** Environment values used to choose the runtime index artifact resolver. */
 export type IndexArtifactResolverEnvironment = Readonly<Record<string, string | undefined>>;
+
+/** Environment values used to choose the runtime index artifact store. */
+export type IndexArtifactStoreEnvironment = IndexArtifactResolverEnvironment;
 
 /** Configurable safety limits for one index artifact import. */
 export type IndexImportLimits = {
@@ -392,6 +417,39 @@ export function createS3CompatibleIndexArtifactResolver(
   };
 }
 
+/** Creates an S3/R2-compatible store for whole-artifact JSON objects. */
+export function createS3CompatibleIndexArtifactStore(
+  options: S3CompatibleIndexArtifactStoreOptions,
+): IndexArtifactStore {
+  const store = new S3CompatibleReviewArtifactPayloadStore(options);
+
+  return {
+    putArtifact: async (artifact) => {
+      const result = await store.putJson({
+        kind: artifact.manifest.repoId,
+        metadata: {
+          artifactId: artifact.manifest.artifactId,
+          artifactKind: "index_artifact",
+          commitSha: artifact.manifest.commitSha,
+          indexerName: artifact.manifest.indexerName,
+          indexerVersion: artifact.manifest.indexerVersion,
+          recordCount: artifact.manifest.recordCount,
+          repoId: artifact.manifest.repoId,
+        },
+        name: artifact.manifest.commitSha,
+        payload: artifact,
+        reviewRunId: "index-artifacts",
+      });
+
+      return {
+        hash: result.hash,
+        sizeBytes: result.sizeBytes,
+        uri: result.uri,
+      };
+    },
+  };
+}
+
 /** Creates the configured index artifact resolver from environment variables. */
 export function createIndexArtifactResolverFromEnvironment(
   env: IndexArtifactResolverEnvironment,
@@ -427,6 +485,40 @@ export function createIndexArtifactResolverFromEnvironment(
   }
 
   return createFileSystemIndexArtifactResolver();
+}
+
+/** Creates the configured index artifact object store from environment variables. */
+export function createIndexArtifactStoreFromEnvironment(
+  env: IndexArtifactStoreEnvironment,
+): IndexArtifactStore {
+  const bucket = env.HEIMDALL_INDEX_ARTIFACT_BUCKET ?? env.OBJECT_STORAGE_BUCKET;
+  const accessKeyId = env.HEIMDALL_INDEX_ARTIFACT_ACCESS_KEY_ID ?? env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey =
+    env.HEIMDALL_INDEX_ARTIFACT_SECRET_ACCESS_KEY ?? env.AWS_SECRET_ACCESS_KEY;
+  if (!bucket || !accessKeyId || !secretAccessKey) {
+    throw new Error(
+      "Index artifact object storage requires HEIMDALL_INDEX_ARTIFACT_BUCKET or OBJECT_STORAGE_BUCKET, HEIMDALL_INDEX_ARTIFACT_ACCESS_KEY_ID or AWS_ACCESS_KEY_ID, and HEIMDALL_INDEX_ARTIFACT_SECRET_ACCESS_KEY or AWS_SECRET_ACCESS_KEY.",
+    );
+  }
+
+  const forcePathStyle = booleanEnv(env.HEIMDALL_INDEX_ARTIFACT_FORCE_PATH_STYLE);
+  const sessionToken = env.HEIMDALL_INDEX_ARTIFACT_SESSION_TOKEN ?? env.AWS_SESSION_TOKEN;
+
+  return createS3CompatibleIndexArtifactStore({
+    accessKeyId,
+    bucket,
+    ...(env.HEIMDALL_INDEX_ARTIFACT_ENDPOINT
+      ? { endpoint: env.HEIMDALL_INDEX_ARTIFACT_ENDPOINT }
+      : {}),
+    ...(forcePathStyle === undefined ? {} : { forcePathStyle }),
+    ...(env.HEIMDALL_INDEX_ARTIFACT_KEY_PREFIX
+      ? { keyPrefix: env.HEIMDALL_INDEX_ARTIFACT_KEY_PREFIX }
+      : {}),
+    region:
+      env.HEIMDALL_INDEX_ARTIFACT_REGION ?? env.AWS_REGION ?? env.AWS_DEFAULT_REGION ?? "us-east-1",
+    secretAccessKey,
+    ...(sessionToken ? { sessionToken } : {}),
+  });
 }
 
 /** Creates fully resolved index import safety limits from environment variables. */
