@@ -9,22 +9,20 @@ import {
 } from "@repo/contracts";
 import {
   BackgroundJobRepository,
-  codeChunkEmbeddings,
-  codeChunks,
-  codeDependencies,
-  codeEdges,
-  codeIndexDiagnostics,
-  codeRoutes,
-  codeTestMappings,
-  embeddingJobItems,
-  embeddingJobs,
+  type CodeChunkImportRow,
+  type CodeDependencyImportRow,
+  type CodeDiagnosticImportRow,
+  type CodeEdgeImportRow,
+  type CodeRouteImportRow,
+  type CodeTestMappingImportRow,
+  type EmbeddingJobItemImportRow,
   type HeimdallDatabase,
+  type IndexedFileImportRow,
+  IndexImportRepository,
   type IndexVersionImportRecord,
   IndexVersionRepository,
-  indexedFiles,
-  indexImportBatches,
   RepositoryRepository,
-  symbols,
+  type SymbolImportRow,
 } from "@repo/db";
 import {
   type ChunkRecord,
@@ -47,7 +45,6 @@ import {
   type TelemetryTraceContextInput,
 } from "@repo/observability";
 import { QUEUE_NAMES } from "@repo/queue";
-import { and, asc, eq, inArray, lt, not } from "drizzle-orm";
 
 export const packageName = "@repo/index-importer" as const;
 
@@ -369,13 +366,13 @@ type IndexImportRecordWriter = {
   readonly writeTestMappings: (records: IndexImportPlan["testMappings"]) => Promise<void>;
 };
 
-type DrizzleBatchIndexImportRecordWriterOptions = {
+type RepositoryIndexImportRecordWriterOptions = {
   /** Maximum number of normalized records written per insert. */
   readonly batchSize: number;
   /** Index version attached to every normalized record row. */
   readonly indexVersionId: string;
-  /** Transaction-scoped database facade used for record writes. */
-  readonly tx: Pick<HeimdallDatabase, "insert">;
+  /** Repository used to persist normalized records. */
+  readonly repository: IndexImportRepository;
 };
 
 type ExistingIndexVersionForImport = IndexVersionImportRecord;
@@ -682,19 +679,16 @@ export async function importIndexArtifact(
         repoId: artifact.manifest.repoId,
       });
 
-      await tx
-        .update(indexImportBatches)
-        .set({
-          indexVersionId: importPlan.indexVersionId,
-          phase: "writing_records",
-          updatedAt: new Date(),
-        })
-        .where(eq(indexImportBatches.indexImportBatchId, importPlan.importBatchId));
+      const indexImportRepository = new IndexImportRepository(tx);
+      await indexImportRepository.markWritingRecords({
+        indexImportBatchId: importPlan.importBatchId,
+        indexVersionId: importPlan.indexVersionId,
+      });
 
-      const recordWriter = createDrizzleBatchIndexImportRecordWriter({
+      const recordWriter = createRepositoryIndexImportRecordWriter({
         batchSize: importPlan.importRecordBatchSize,
         indexVersionId: importPlan.indexVersionId,
-        tx,
+        repository: indexImportRepository,
       });
       await recordWriter.writeFiles(importPlan.files);
       await recordWriter.writeSymbols(importPlan.symbolRecords);
@@ -763,20 +757,8 @@ export async function reconcileStaleIndexImports(
   const now = options.now ?? new Date();
   const cutoff = staleIndexImportCutoff(now, options.staleAfterMs);
   const limit = boundedReconciliationLimit(options.limit);
-  const rows = await options.db
-    .select({
-      importBatchId: indexImportBatches.indexImportBatchId,
-      indexVersionId: indexImportBatches.indexVersionId,
-    })
-    .from(indexImportBatches)
-    .where(
-      and(
-        not(inArray(indexImportBatches.status, ["complete", "failed"])),
-        lt(indexImportBatches.updatedAt, cutoff),
-      ),
-    )
-    .orderBy(asc(indexImportBatches.updatedAt))
-    .limit(limit);
+  const indexImportRepository = new IndexImportRepository(options.db);
+  const rows = await indexImportRepository.listStaleRunningBatches({ cutoff, limit });
   const importBatchIds = rows.map((row) => row.importBatchId);
   const indexVersionIds = uniqueStrings(
     rows
@@ -795,17 +777,13 @@ export async function reconcileStaleIndexImports(
 
   const serializedError = staleIndexImportError(cutoff);
   await options.db.transaction(async (tx) => {
+    const transactionIndexImportRepository = new IndexImportRepository(tx);
     for (const importBatchId of importBatchIds) {
-      await tx
-        .update(indexImportBatches)
-        .set({
-          error: serializedError,
-          finishedAt: now,
-          phase: "failed",
-          status: "failed",
-          updatedAt: now,
-        })
-        .where(eq(indexImportBatches.indexImportBatchId, importBatchId));
+      await transactionIndexImportRepository.markFailed({
+        error: serializedError,
+        indexImportBatchId: importBatchId,
+        now,
+      });
     }
 
     for (const indexVersionId of indexVersionIds) {
@@ -846,18 +824,13 @@ export async function cleanupIndexImportRows(
     );
   }
 
-  const embeddingJobIds = await loadEmbeddingJobIdsForIndexVersion(
-    options.db,
-    options.indexVersionId,
-  );
-  await cleanupFailedIndexVersionRows(options.db, {
-    embeddingJobIds,
+  const cleanup = await cleanupFailedIndexVersionRows(options.db, {
     indexVersionId: options.indexVersionId,
   });
 
   return {
     cleaned: true,
-    embeddingJobIds,
+    embeddingJobIds: cleanup.embeddingJobIds,
     force: options.force ?? false,
     indexVersionId: options.indexVersionId,
     status,
@@ -1001,76 +974,36 @@ async function markIndexImportBatchRunning(
     readonly phase: IndexImportBatchPhase;
   },
 ): Promise<void> {
-  const now = new Date();
   const indexVersionId = importBatchPhaseHasIndexVersion(input.phase) ? plan.indexVersionId : null;
 
-  await db
-    .insert(indexImportBatches)
-    .values({
-      indexImportBatchId: plan.importBatchId,
-      repoId: artifact.manifest.repoId,
-      commitSha: artifact.manifest.commitSha,
-      indexKey: plan.indexKey,
-      indexVersionId,
-      artifactUri: options.artifactUri,
-      artifactHash: plan.artifactHash,
-      status: "running",
-      phase: input.phase,
-      recordCount: artifact.manifest.recordCount,
-      fileCount: plan.files.length,
-      symbolCount: plan.symbolRecords.length,
-      edgeCount: plan.edgeRecords.length,
-      chunkCount: plan.chunks.length,
-      diagnosticCount: plan.diagnostics.length,
-      dependencyCount: plan.dependencies.length,
-      routeCount: plan.routes.length,
-      testMappingCount: plan.testMappings.length,
-      embeddingJobCount: 0,
-      error: null,
-      metadata: {
-        artifactId: artifact.manifest.artifactId,
-        chunkerVersion: artifact.manifest.chunkerVersion,
-        importLimits: plan.importLimits,
-        importRecordBatchSize: plan.importRecordBatchSize,
-        indexerName: artifact.manifest.indexerName,
-        indexerVersion: artifact.manifest.indexerVersion,
-        schemaVersion: artifact.manifest.schemaVersion,
-      },
-      startedAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: indexImportBatches.indexImportBatchId,
-      set: {
-        indexVersionId,
-        artifactUri: options.artifactUri,
-        artifactHash: plan.artifactHash,
-        status: "running",
-        phase: input.phase,
-        recordCount: artifact.manifest.recordCount,
-        fileCount: plan.files.length,
-        symbolCount: plan.symbolRecords.length,
-        edgeCount: plan.edgeRecords.length,
-        chunkCount: plan.chunks.length,
-        diagnosticCount: plan.diagnostics.length,
-        dependencyCount: plan.dependencies.length,
-        routeCount: plan.routes.length,
-        testMappingCount: plan.testMappings.length,
-        error: null,
-        metadata: {
-          artifactId: artifact.manifest.artifactId,
-          chunkerVersion: artifact.manifest.chunkerVersion,
-          importLimits: plan.importLimits,
-          importRecordBatchSize: plan.importRecordBatchSize,
-          indexerName: artifact.manifest.indexerName,
-          indexerVersion: artifact.manifest.indexerVersion,
-          schemaVersion: artifact.manifest.schemaVersion,
-        },
-        startedAt: now,
-        finishedAt: null,
-        updatedAt: now,
-      },
-    });
+  await new IndexImportRepository(db).upsertRunningImportBatch({
+    artifactHash: plan.artifactHash,
+    artifactUri: options.artifactUri,
+    chunkCount: plan.chunks.length,
+    commitSha: artifact.manifest.commitSha,
+    dependencyCount: plan.dependencies.length,
+    diagnosticCount: plan.diagnostics.length,
+    edgeCount: plan.edgeRecords.length,
+    fileCount: plan.files.length,
+    indexImportBatchId: plan.importBatchId,
+    indexKey: plan.indexKey,
+    indexVersionId,
+    metadata: {
+      artifactId: artifact.manifest.artifactId,
+      chunkerVersion: artifact.manifest.chunkerVersion,
+      importLimits: plan.importLimits,
+      importRecordBatchSize: plan.importRecordBatchSize,
+      indexerName: artifact.manifest.indexerName,
+      indexerVersion: artifact.manifest.indexerVersion,
+      schemaVersion: artifact.manifest.schemaVersion,
+    },
+    phase: input.phase,
+    recordCount: artifact.manifest.recordCount,
+    repoId: artifact.manifest.repoId,
+    routeCount: plan.routes.length,
+    symbolCount: plan.symbolRecords.length,
+    testMappingCount: plan.testMappings.length,
+  });
 }
 
 /** Marks an import batch complete and activates its index version atomically. */
@@ -1091,16 +1024,11 @@ async function completeIndexImportBatch(
       indexVersionId: plan.indexVersionId,
     });
 
-    await tx
-      .update(indexImportBatches)
-      .set({
-        embeddingJobCount: input.embeddingJobCount,
-        finishedAt: now,
-        phase: "complete",
-        status: "complete",
-        updatedAt: now,
-      })
-      .where(eq(indexImportBatches.indexImportBatchId, plan.importBatchId));
+    await new IndexImportRepository(tx).markComplete({
+      embeddingJobCount: input.embeddingJobCount,
+      indexImportBatchId: plan.importBatchId,
+      now,
+    });
   });
 }
 
@@ -1127,16 +1055,11 @@ async function markIndexImportBatchFailed(
   const now = new Date();
   const serializedError = serializeIndexImportError(error);
 
-  await db
-    .update(indexImportBatches)
-    .set({
-      error: serializedError,
-      finishedAt: now,
-      phase: "failed",
-      status: "failed",
-      updatedAt: now,
-    })
-    .where(eq(indexImportBatches.indexImportBatchId, plan.importBatchId));
+  await new IndexImportRepository(db).markFailed({
+    error: serializedError,
+    indexImportBatchId: plan.importBatchId,
+    now,
+  });
 
   await new IndexVersionRepository(db).markIndexVersionFailedRecord({
     error: serializedError,
@@ -1166,53 +1089,8 @@ async function cleanupFailedIndexVersionRows(
     /** Failed index version whose partial child rows should be deleted. */
     readonly indexVersionId: string;
   },
-): Promise<void> {
-  const embeddingJobIds =
-    input.embeddingJobIds ?? (await loadEmbeddingJobIdsForIndexVersion(db, input.indexVersionId));
-
-  await db.transaction(async (tx) => {
-    const backgroundJobRepository = new BackgroundJobRepository(tx);
-
-    for (const embeddingJobId of embeddingJobIds) {
-      await backgroundJobRepository.deleteEmbeddingBackgroundJobsForEmbeddingJob(embeddingJobId);
-    }
-    if (embeddingJobIds.length > 0) {
-      await tx
-        .delete(embeddingJobItems)
-        .where(inArray(embeddingJobItems.embeddingJobId, [...embeddingJobIds]));
-    }
-    await tx
-      .delete(codeChunkEmbeddings)
-      .where(eq(codeChunkEmbeddings.indexVersionId, input.indexVersionId));
-    await tx.delete(embeddingJobs).where(eq(embeddingJobs.indexVersionId, input.indexVersionId));
-    await tx
-      .delete(codeIndexDiagnostics)
-      .where(eq(codeIndexDiagnostics.indexVersionId, input.indexVersionId));
-    await tx
-      .delete(codeTestMappings)
-      .where(eq(codeTestMappings.indexVersionId, input.indexVersionId));
-    await tx.delete(codeRoutes).where(eq(codeRoutes.indexVersionId, input.indexVersionId));
-    await tx
-      .delete(codeDependencies)
-      .where(eq(codeDependencies.indexVersionId, input.indexVersionId));
-    await tx.delete(codeEdges).where(eq(codeEdges.indexVersionId, input.indexVersionId));
-    await tx.delete(codeChunks).where(eq(codeChunks.indexVersionId, input.indexVersionId));
-    await tx.delete(symbols).where(eq(symbols.indexVersionId, input.indexVersionId));
-    await tx.delete(indexedFiles).where(eq(indexedFiles.indexVersionId, input.indexVersionId));
-  });
-}
-
-/** Loads embedding job IDs attached to an index version for stale import cleanup. */
-async function loadEmbeddingJobIdsForIndexVersion(
-  db: HeimdallDatabase,
-  indexVersionId: string,
-): Promise<readonly string[]> {
-  const rows = await db
-    .select({ embeddingJobId: embeddingJobs.embeddingJobId })
-    .from(embeddingJobs)
-    .where(eq(embeddingJobs.indexVersionId, indexVersionId));
-
-  return rows.map((row) => row.embeddingJobId);
+): Promise<{ readonly embeddingJobIds: readonly string[] }> {
+  return new IndexImportRepository(db).deleteIndexVersionChildRows(input);
 }
 
 /** Serializes an import failure into product-safe database metadata. */
@@ -1487,9 +1365,9 @@ function uniqueStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
 }
 
-/** Creates the default bounded Drizzle insert writer for normalized index records. */
-function createDrizzleBatchIndexImportRecordWriter(
-  options: DrizzleBatchIndexImportRecordWriterOptions,
+/** Creates the default bounded repository writer for normalized index records. */
+function createRepositoryIndexImportRecordWriter(
+  options: RepositoryIndexImportRecordWriterOptions,
 ): IndexImportRecordWriter {
   return {
     writeChunks: async (records) => {
@@ -1497,7 +1375,7 @@ function createDrizzleBatchIndexImportRecordWriter(
         return;
       }
 
-      const rows = records.map((chunk) => ({
+      const rows: CodeChunkImportRow[] = records.map((chunk) => ({
         chunkId: chunk.chunkId,
         indexVersionId: options.indexVersionId,
         fileId: chunk.fileId,
@@ -1516,16 +1394,14 @@ function createDrizzleBatchIndexImportRecordWriter(
           tokenEstimate: chunk.tokenEstimate,
         },
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(codeChunks).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeChunks(rows, options.batchSize);
     },
     writeDependencies: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((dependency) => ({
+      const rows: CodeDependencyImportRow[] = records.map((dependency) => ({
         dependencyId: dependency.dependencyId,
         indexVersionId: options.indexVersionId,
         repoId: dependency.repoId,
@@ -1538,16 +1414,14 @@ function createDrizzleBatchIndexImportRecordWriter(
         dependencyType: dependency.dependencyType,
         metadata: dependency.metadata,
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(codeDependencies).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeDependencies(rows, options.batchSize);
     },
     writeDiagnostics: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((diagnostic) => ({
+      const rows: CodeDiagnosticImportRow[] = records.map((diagnostic) => ({
         diagnosticId: diagnostic.diagnosticId,
         indexVersionId: options.indexVersionId,
         repoId: diagnostic.repoId,
@@ -1561,16 +1435,14 @@ function createDrizzleBatchIndexImportRecordWriter(
         message: diagnostic.message,
         metadata: diagnostic.metadata,
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(codeIndexDiagnostics).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeDiagnostics(rows, options.batchSize);
     },
     writeEdges: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((edge) => ({
+      const rows: CodeEdgeImportRow[] = records.map((edge) => ({
         edgeId: edge.edgeId,
         indexVersionId: options.indexVersionId,
         repoId: edge.repoId,
@@ -1583,16 +1455,14 @@ function createDrizzleBatchIndexImportRecordWriter(
         confidence: edge.confidence,
         metadata: edge.metadata,
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(codeEdges).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeEdges(rows, options.batchSize);
     },
     writeFiles: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((file) => ({
+      const rows: IndexedFileImportRow[] = records.map((file) => ({
         fileId: file.fileId,
         indexVersionId: options.indexVersionId,
         repoId: file.repoId,
@@ -1608,16 +1478,14 @@ function createDrizzleBatchIndexImportRecordWriter(
         isVendored: file.isVendored,
         metadata: file.metadata,
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(indexedFiles).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeFiles(rows, options.batchSize);
     },
     writeRoutes: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((route) => ({
+      const rows: CodeRouteImportRow[] = records.map((route) => ({
         routeId: route.routeId,
         indexVersionId: options.indexVersionId,
         repoId: route.repoId,
@@ -1633,16 +1501,14 @@ function createDrizzleBatchIndexImportRecordWriter(
         confidence: route.confidence,
         metadata: route.metadata,
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(codeRoutes).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeRoutes(rows, options.batchSize);
     },
     writeSymbols: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((symbol) => ({
+      const rows: SymbolImportRow[] = records.map((symbol) => ({
         symbolId: symbol.symbolId,
         indexVersionId: options.indexVersionId,
         fileId: symbol.fileId,
@@ -1658,16 +1524,14 @@ function createDrizzleBatchIndexImportRecordWriter(
         contentHash: symbol.contentHash,
         metadata: { ...symbol.metadata, signature: symbol.signature },
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(symbols).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeSymbols(rows, options.batchSize);
     },
     writeTestMappings: async (records) => {
       if (records.length === 0) {
         return;
       }
 
-      const rows = records.map((testMapping) => ({
+      const rows: CodeTestMappingImportRow[] = records.map((testMapping) => ({
         testMappingId: testMapping.testMappingId,
         indexVersionId: options.indexVersionId,
         repoId: testMapping.repoId,
@@ -1678,18 +1542,9 @@ function createDrizzleBatchIndexImportRecordWriter(
         confidence: testMapping.confidence,
         metadata: testMapping.metadata,
       }));
-      for (const batch of batchRecords(rows, options.batchSize)) {
-        await options.tx.insert(codeTestMappings).values(batch).onConflictDoNothing();
-      }
+      await options.repository.writeTestMappings(rows, options.batchSize);
     },
   };
-}
-
-/** Yields stable slices of row values for bounded batch inserts. */
-function* batchRecords<T>(records: readonly T[], batchSize: number): Generator<T[]> {
-  for (let offset = 0; offset < records.length; offset += batchSize) {
-    yield records.slice(offset, offset + batchSize);
-  }
 }
 
 /** Enqueues durable embedding batch jobs and records phase-specific embedding planner state. */
@@ -1716,42 +1571,36 @@ async function enqueueEmbeddingBatches(input: {
   const importRecordBatchSize = input.plan.importRecordBatchSize;
   const orgId = await loadRepositoryOrgId(options.db, input.repoId);
   const embeddingJobId = input.plan.embeddingJobId;
+  const indexImportRepository = new IndexImportRepository(options.db);
   let count = 0;
 
-  await options.db
-    .insert(embeddingJobs)
-    .values({
-      embeddingJobId,
-      orgId,
-      repoId: input.repoId,
-      indexVersionId: input.plan.indexVersionId,
-      commitSha: input.artifact.manifest.commitSha,
-      status: "pending",
-      reason: "index_import",
-      embeddingProfileVersion,
-      provider: embeddingProvider,
-      model: embeddingModel,
-      dimensions: embeddingDimensions,
-      chunkCountPlanned: input.plan.chunks.length,
-      metadata: {
-        artifactId: input.artifact.manifest.artifactId,
-        artifactUri: options.artifactUri,
-        batchSize,
-        indexerName: input.artifact.manifest.indexerName,
-        indexerVersion: input.artifact.manifest.indexerVersion,
-      },
-    })
-    .onConflictDoNothing();
+  await indexImportRepository.createEmbeddingJob({
+    chunkCountPlanned: input.plan.chunks.length,
+    commitSha: input.artifact.manifest.commitSha,
+    dimensions: embeddingDimensions,
+    embeddingJobId,
+    embeddingProfileVersion,
+    indexVersionId: input.plan.indexVersionId,
+    metadata: {
+      artifactId: input.artifact.manifest.artifactId,
+      artifactUri: options.artifactUri,
+      batchSize,
+      indexerName: input.artifact.manifest.indexerName,
+      indexerVersion: input.artifact.manifest.indexerVersion,
+    },
+    model: embeddingModel,
+    orgId,
+    provider: embeddingProvider,
+    repoId: input.repoId,
+  });
 
-  const embeddingJobItemRows = input.plan.chunks.map((chunk) => ({
+  const embeddingJobItemRows: EmbeddingJobItemImportRow[] = input.plan.chunks.map((chunk) => ({
     embeddingJobItemId: createStableId("embitem", [embeddingJobId, chunk.chunkId]),
     embeddingJobId,
     chunkId: chunk.chunkId,
     status: "pending",
   }));
-  for (const batch of batchRecords(embeddingJobItemRows, importRecordBatchSize)) {
-    await options.db.insert(embeddingJobItems).values(batch).onConflictDoNothing();
-  }
+  await indexImportRepository.writeEmbeddingJobItems(embeddingJobItemRows, importRecordBatchSize);
 
   const backgroundJobRepository = new BackgroundJobRepository(options.db);
 
