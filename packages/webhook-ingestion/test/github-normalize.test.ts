@@ -34,6 +34,25 @@ describe("GitHub webhook normalization", () => {
     expect(pullRequest.snapshot.diffHash).toMatch(/^sha256:[a-f0-9]{64}$/u);
   });
 
+  it("normalizes pull request payloads when installation account is omitted", () => {
+    const payload = {
+      ...pullRequestPayload,
+      installation: {
+        id: pullRequestPayload.installation.id,
+      },
+    };
+
+    const installation = normalizeGitHubInstallation(payload);
+    const pullRequest = normalizeGitHubPullRequest(payload);
+
+    expect(installation).toMatchObject({
+      accountLogin: "acme",
+      accountType: "organization",
+      providerInstallationId: "123456",
+    });
+    expect(pullRequest.snapshot.pullRequestNumber).toBe(7);
+  });
+
   it("normalizes pull request comments and reactions as feedback", () => {
     const comment = normalizeGitHubFeedback(issueCommentPayload, "issue_comment");
     const reaction = normalizeGitHubFeedback(reactionPayload, "reaction");

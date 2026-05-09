@@ -56,6 +56,21 @@ const optionalProviderId = (record: JsonRecord, key: string): string | undefined
 const withOptional = <K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> =>
   value === undefined ? {} : ({ [key]: value } as Record<K, V>);
 
+/** Returns the account associated with a GitHub App installation webhook payload. */
+const installationAccount = (payload: JsonRecord): JsonRecord => {
+  const installation = asRecord(payload.installation, "installation");
+  const account =
+    optionalRecord(installation.account) ??
+    optionalRecord(optionalRecord(payload.repository)?.owner) ??
+    optionalRecord(payload.sender);
+
+  if (!account) {
+    throw new WebhookPayloadError("GitHub payload is missing installation.account.");
+  }
+
+  return account;
+};
+
 const numberValue = (record: JsonRecord, key: string): number => {
   const value = record[key];
   if (typeof value === "number") {
@@ -165,9 +180,8 @@ export type NormalizedGitHubFeedback = {
 
 /** Extracts a GitHub installation account. */
 export function normalizeGitHubAccount(payload: JsonRecord): NormalizedGitHubAccount {
-  const installation = asRecord(payload.installation, "installation");
-  const account = asRecord(installation.account, "installation.account");
-  const providerAccountId = stringValue(account, "id");
+  const account = installationAccount(payload);
+  const providerAccountId = optionalProviderId(account, "id") ?? stringValue(account, "login");
   const login = stringValue(account, "login");
   const rawType = optionalString(account, "type")?.toLowerCase();
   const accountType =

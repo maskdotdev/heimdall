@@ -25,7 +25,9 @@ export const installationPayload = {
       default_branch: "main",
       clone_url: "https://github.com/acme/heimdall.git",
       owner: {
+        id: 42,
         login: "acme",
+        type: "Organization",
       },
     },
   ],
