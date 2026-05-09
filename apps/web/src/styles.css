@@ -1270,6 +1270,26 @@ button.small {
   grid-column: 1 / -1;
 }
 
+.product-next-step {
+  margin-bottom: 1.25rem;
+}
+
+.next-step-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 0.875rem;
+}
+
+.next-step-grid article {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding: 1rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
 .setup-list,
 .install-list {
   display: flex;
@@ -1551,6 +1571,24 @@ button.small {
 .button-link:hover {
   background: var(--accent-primary-hover);
   border-color: var(--accent-primary-hover);
+}
+
+.button-link.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.button-link.ghost:hover {
+  background: var(--surface-3);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.button-link.small {
+  min-height: 2rem;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8rem;
 }
 
 .muted-link {
@@ -2016,6 +2054,7 @@ tbody tr:hover {
 
   .overview-grid,
   .product-grid,
+  .next-step-grid,
   .org-settings-grid,
   .product-resource-grid,
   .product-review-grid,

@@ -3597,6 +3597,11 @@ async function handleClick(event: MouseEvent): Promise<void> {
     return;
   }
 
+  if (action === "reindex-product-repository") {
+    await reindexProductRepository(requiredDatasetValue(element, "repoId"));
+    return;
+  }
+
   if (action === "open-product-repository-settings") {
     await loadProductRepositorySettings(requiredDatasetValue(element, "repoId"), "push");
     return;
@@ -4353,6 +4358,39 @@ async function setProductRepositoryEnabled(repoId: string, enabled: boolean): Pr
     await requestProductData<unknown>(
       `/api/v1/repositories/${encodeURIComponent(repoId)}/${enabled ? "enable" : "disable"}`,
       { method: "POST" },
+    );
+    await loadProductResources(resources.selectedOrgId);
+  } catch (error) {
+    state.product.resources = {
+      ...resources,
+      error: errorMessage(error),
+    };
+    render();
+  }
+}
+
+/** Enqueues a default-branch repository reindex through the authenticated product API. */
+async function reindexProductRepository(repoId: string): Promise<void> {
+  const resources = defaultProductResources(state.product.resources);
+  state.product.resources = {
+    ...resources,
+    loading: "Queueing repository reindex",
+  };
+  render();
+
+  try {
+    await requestProductData<unknown>(
+      `/api/v1/repositories/${encodeURIComponent(repoId)}/reindex`,
+      {
+        body: JSON.stringify({
+          force: true,
+          reason: "Manual product dashboard reindex",
+        }),
+        headers: {
+          "idempotency-key": `product-reindex-${repoId}-${crypto.randomUUID()}`,
+        },
+        method: "POST",
+      },
     );
     await loadProductResources(resources.selectedOrgId);
   } catch (error) {
@@ -6815,12 +6853,69 @@ function renderProductReadiness(data: ProductOnboardingSummary): string {
       ${renderMetric("Repositories", String(data.repositories.length))}
       ${renderMetric("Webhooks", String(data.webhook.totalDeliveries))}
     </section>
+    ${renderProductNextStepPanel(data)}
     ${state.product.session ? renderProductWorkspace() : ""}
     <section class="product-grid">
       ${renderProductSetupPanel(data)}
       ${renderProductInstallations(data.installations)}
       ${renderProductRepositories(data.repositories)}
       ${renderProductReviews(data.recentReviews)}
+    </section>
+  `;
+}
+
+/** Renders the main product workflow as actionable steps. */
+function renderProductNextStepPanel(data: ProductOnboardingSummary): string {
+  const firstRepository = data.repositories[0];
+  const repoUrl = firstRepository ? githubRepositoryUrl(firstRepository.fullName) : undefined;
+  const pullsUrl = firstRepository ? `${repoUrl}/pulls` : undefined;
+  const webhookLabel = data.webhook.latestEventName
+    ? `${data.webhook.latestEventName}${data.webhook.latestAction ? `:${data.webhook.latestAction}` : ""} ${data.webhook.latestStatus ?? ""}`.trim()
+    : "No GitHub webhook has been received yet.";
+
+  return `
+    <section class="panel product-panel product-next-step">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Next step</p>
+          <h3>Trigger a review from GitHub</h3>
+        </div>
+        <span class="status ${data.webhook.latestStatus === "processed" ? "ok" : "muted"}">
+          ${escapeHtml(webhookLabel)}
+        </span>
+      </div>
+      <div class="next-step-grid">
+        <article>
+          <strong>1. Open or update a pull request</strong>
+          <p class="muted-text">A GitHub pull request event is what starts a new Heimdall review.</p>
+          <div class="row-actions">
+            ${
+              repoUrl
+                ? `<a class="button-link ghost small" href="${escapeAttribute(repoUrl)}" target="_blank" rel="noreferrer">Open repo</a>`
+                : ""
+            }
+            ${
+              pullsUrl
+                ? `<a class="button-link small" href="${escapeAttribute(pullsUrl)}" target="_blank" rel="noreferrer">Open PRs</a>`
+                : ""
+            }
+          </div>
+        </article>
+        <article>
+          <strong>2. Refresh this dashboard</strong>
+          <p class="muted-text">Use this after pushing a commit, opening a PR, or redelivering a webhook.</p>
+          <button class="ghost small" data-action="load-product" type="button">Refresh status</button>
+        </article>
+        <article>
+          <strong>3. Sign in for controls</strong>
+          <p class="muted-text">Signed-in users can inspect repositories, settings, review runs, memory, and reruns.</p>
+          ${
+            state.product.session
+              ? `<button class="ghost small" data-action="load-product-resources" type="button">Load workspace</button>`
+              : `<button class="small" data-action="login-product-github" type="button">Sign in with GitHub</button>`
+          }
+        </article>
+      </div>
     </section>
   `;
 }
@@ -7274,6 +7369,15 @@ function renderAuthenticatedProductRepository(
           type="button"
         >
           Settings
+        </button>
+        <button
+          class="ghost small"
+          data-action="reindex-product-repository"
+          data-repo-id="${escapeAttribute(repository.repoId)}"
+          type="button"
+          ${canManageRepositories ? "" : "disabled"}
+        >
+          Reindex
         </button>
         <button
           class="ghost small"
@@ -8315,6 +8419,7 @@ function renderProductRepositories(rows: readonly ProductRepositorySummary[]): s
 
 /** Renders one product repository card without admin-only controls. */
 function renderProductRepositoryCard(repository: ProductRepositorySummary): string {
+  const repoUrl = githubRepositoryUrl(repository.fullName);
   return `
     <article class="repo-card">
       <div>
@@ -8328,13 +8433,26 @@ function renderProductRepositoryCard(repository: ProductRepositorySummary): stri
           ${escapeHtml(repository.visibility)}${repository.defaultBranch ? ` · ${escapeHtml(repository.defaultBranch)}` : ""}
         </p>
       </div>
-      ${
-        repository.latestReviewStatus
-          ? `<span class="status ${statusClass(repository.latestReviewStatus)}">${escapeHtml(repository.latestReviewStatus)}</span>`
-          : `<span class="status muted">waiting for PR</span>`
-      }
+      <div class="row-actions">
+        ${
+          repository.latestReviewStatus
+            ? `<span class="status ${statusClass(repository.latestReviewStatus)}">${escapeHtml(repository.latestReviewStatus)}</span>`
+            : `<span class="status muted">waiting for PR</span>`
+        }
+        <a class="button-link ghost small" href="${escapeAttribute(repoUrl)}" target="_blank" rel="noreferrer">
+          Repo
+        </a>
+        <a class="button-link small" href="${escapeAttribute(`${repoUrl}/pulls`)}" target="_blank" rel="noreferrer">
+          PRs
+        </a>
+      </div>
     </article>
   `;
+}
+
+/** Returns the GitHub repository URL for a provider full name. */
+function githubRepositoryUrl(fullName: string): string {
+  return `https://github.com/${encodeURI(fullName)}`;
 }
 
 /** Renders product review activity. */
