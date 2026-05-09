@@ -10,6 +10,7 @@ import {
   asc,
   desc,
   eq,
+  ilike,
   inArray,
   isNotNull,
   like,
@@ -18,6 +19,7 @@ import {
   not,
   or,
   type SQL,
+  sql,
 } from "drizzle-orm";
 import type { HeimdallDatabase } from "../client";
 import {
@@ -29,6 +31,7 @@ import {
   publishedFindings,
   publishedSummaryComments,
   publishPlans,
+  pullRequestSnapshots,
   repositories,
   reviewArtifacts,
   reviewRunDependencies,
@@ -242,6 +245,140 @@ export type ReviewDependencyRecord = typeof reviewRunDependencies.$inferSelect;
 
 /** Review artifact row returned for debug artifact inspection. */
 export type ReviewArtifactRecord = typeof reviewArtifacts.$inferSelect;
+
+/** Latest review-run row fields used by repository dashboards. */
+export type LatestReviewRunForRepositoryRecord = {
+  /** Durable review run ID. */
+  readonly reviewRunId: string;
+  /** Current review status. */
+  readonly status: string;
+  /** Last review row update timestamp. */
+  readonly updatedAt: Date;
+};
+
+/** Input used to list review runs for admin inspection surfaces. */
+export type ListReviewRunsForInspectionInput = {
+  /** Organization scopes allowed by the caller. Use "*" to disable org filtering. */
+  readonly orgIds?: readonly string[] | undefined;
+  /** Repository scopes allowed by the caller. Use "*" to disable repository filtering. */
+  readonly repoIds?: readonly string[] | undefined;
+  /** Optional repository filter. */
+  readonly repoId?: string | undefined;
+  /** Optional review-run status filter. */
+  readonly status?: string | undefined;
+  /** Optional search text matched against repository, PR title, author, or PR number. */
+  readonly search?: string | undefined;
+  /** Maximum number of rows to return. */
+  readonly limit?: number | undefined;
+};
+
+/** Joined review-run row used by admin inspection APIs. */
+export type ReviewRunInspectionRecord = {
+  /** Review run ID. */
+  readonly reviewRunId: string;
+  /** Repository ID. */
+  readonly repoId: string;
+  /** Organization ID. */
+  readonly orgId: string;
+  /** Repository full name. */
+  readonly repoFullName: string;
+  /** Pull request number. */
+  readonly pullRequestNumber: number;
+  /** Pull request title from the snapshot. */
+  readonly pullRequestTitle: string | null;
+  /** Pull request author from the snapshot. */
+  readonly authorLogin: string | null;
+  /** Changed file count from the snapshot. */
+  readonly changedFileCount: number | null;
+  /** Review trigger. */
+  readonly trigger: string;
+  /** Review status. */
+  readonly status: string;
+  /** Base commit SHA. */
+  readonly baseSha: string;
+  /** Head commit SHA. */
+  readonly headSha: string;
+  /** Review summary. */
+  readonly summary: string | null;
+  /** Persisted finding counts. */
+  readonly counts: unknown;
+  /** Structured review run error payload. */
+  readonly error: unknown;
+  /** Creation timestamp. */
+  readonly createdAt: Date;
+  /** Update timestamp. */
+  readonly updatedAt: Date;
+  /** Start timestamp. */
+  readonly startedAt: Date | null;
+  /** Completion timestamp. */
+  readonly completedAt: Date | null;
+};
+
+/** Aggregate review-run metrics used by admin dashboards. */
+export type ReviewMetricsSummaryRecord = {
+  /** Candidate finding total. */
+  readonly candidateFindings: number;
+  /** Completed review-run count. */
+  readonly completedRuns: number;
+  /** Estimated cost total serialized from the numeric column. */
+  readonly estimatedCostUsd: string;
+  /** Failed review-run count. */
+  readonly failedRuns: number;
+  /** Median review duration in milliseconds. */
+  readonly medianDurationMs: number | null;
+  /** P95 review duration in milliseconds. */
+  readonly p95DurationMs: number | null;
+  /** Published finding total. */
+  readonly publishedFindings: number;
+  /** Rejected finding total. */
+  readonly rejectedFindings: number;
+  /** Skipped review-run count. */
+  readonly skippedRuns: number;
+  /** Superseded review-run count. */
+  readonly supersededRuns: number;
+  /** Total review-run count. */
+  readonly totalRuns: number;
+  /** Validated finding total. */
+  readonly validatedFindings: number;
+};
+
+/** Input used to read one review artifact with repository scope. */
+export type GetReviewArtifactAccessRecordInput = {
+  /** Review run that owns the artifact. */
+  readonly reviewRunId: string;
+  /** Artifact row to inspect. */
+  readonly reviewArtifactId: string;
+};
+
+/** Review artifact row joined with organization scope for audited payload access. */
+export type ReviewArtifactAccessRecord = {
+  /** Artifact classification label. */
+  readonly classification: string;
+  /** Artifact creation timestamp. */
+  readonly createdAt: Date;
+  /** Artifact content hash. */
+  readonly hash: string;
+  /** Artifact kind. */
+  readonly kind: string;
+  /** Artifact metadata JSON. */
+  readonly metadata: unknown;
+  /** Artifact display name. */
+  readonly name: string;
+  /** Organization that owns the artifact repository. */
+  readonly orgId: string;
+  /** Repository that owns the artifact. */
+  readonly repoId: string;
+  /** Artifact retention expiration when set. */
+  readonly retentionUntil: Date | null;
+  /** Artifact row ID. */
+  readonly reviewArtifactId: string;
+  /** Review run that produced the artifact. */
+  readonly reviewRunId: string;
+  /** Serialized artifact size in bytes. */
+  readonly sizeBytes: number;
+  /** Durable artifact URI. */
+  readonly uri: string;
+};
 
 /** Candidate finding row returned for debug finding inspection. */
 export type CandidateFindingRecord = typeof candidateFindings.$inferSelect;
@@ -565,6 +702,100 @@ export class ReviewRepository {
     return row ? toReviewRun(row) : undefined;
   }
 
+  /** Gets the latest review-run row for one repository. */
+  public async getLatestReviewRunForRepository(
+    repoId: string,
+  ): Promise<LatestReviewRunForRepositoryRecord | undefined> {
+    const [row] = await this.db
+      .select({
+        reviewRunId: reviewRuns.reviewRunId,
+        status: reviewRuns.status,
+        updatedAt: reviewRuns.updatedAt,
+      })
+      .from(reviewRuns)
+      .where(eq(reviewRuns.repoId, repoId))
+      .orderBy(desc(reviewRuns.updatedAt))
+      .limit(1);
+
+    return row;
+  }
+
+  /** Lists review runs joined with repository and pull-request context for inspection. */
+  public async listReviewRunsForInspection(
+    input: ListReviewRunsForInspectionInput,
+  ): Promise<readonly ReviewRunInspectionRecord[]> {
+    const conditions = reviewRunInspectionFilters(input);
+
+    return this.db
+      .select(reviewRunInspectionSelect())
+      .from(reviewRuns)
+      .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+      .leftJoin(
+        pullRequestSnapshots,
+        eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
+      )
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(reviewRuns.updatedAt))
+      .limit(repositoryInspectionLimit(input.limit));
+  }
+
+  /** Gets one review run joined with repository and pull-request context for inspection. */
+  public async getReviewRunForInspection(
+    reviewRunId: string,
+  ): Promise<ReviewRunInspectionRecord | undefined> {
+    const [row] = await this.db
+      .select(reviewRunInspectionSelect())
+      .from(reviewRuns)
+      .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+      .leftJoin(
+        pullRequestSnapshots,
+        eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
+      )
+      .where(eq(reviewRuns.reviewRunId, reviewRunId))
+      .limit(1);
+
+    return row;
+  }
+
+  /** Gets aggregate review metrics for the same filters as review-run inspection. */
+  public async getReviewMetricsSummary(
+    input: ListReviewRunsForInspectionInput,
+  ): Promise<ReviewMetricsSummaryRecord> {
+    const conditions = reviewRunInspectionFilters(input);
+    const [row] = await this.db
+      .select({
+        candidateFindings: sql<number>`coalesce(sum(${reviewRunMetrics.candidateFindings}), 0)::int`,
+        completedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'completed')::int`,
+        estimatedCostUsd: sql<string>`coalesce(sum(${reviewRunMetrics.estimatedCostUsd}), 0)::text`,
+        failedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'failed')::int`,
+        medianDurationMs: sql<number | null>`round(
+          percentile_cont(0.5) within group (order by ${reviewRunMetrics.totalDurationMs})
+          filter (where ${reviewRunMetrics.totalDurationMs} is not null)
+        )::int`,
+        p95DurationMs: sql<number | null>`round(
+          percentile_cont(0.95) within group (order by ${reviewRunMetrics.totalDurationMs})
+          filter (where ${reviewRunMetrics.totalDurationMs} is not null)
+        )::int`,
+        publishedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.publishedFindings}), 0)::int`,
+        rejectedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.rejectedFindings}), 0)::int`,
+        skippedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'skipped')::int`,
+        supersededRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'superseded')::int`,
+        totalRuns: sql<number>`count(*)::int`,
+        validatedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.validatedFindings}), 0)::int`,
+      })
+      .from(reviewRuns)
+      .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
+      .leftJoin(reviewRunMetrics, eq(reviewRuns.reviewRunId, reviewRunMetrics.reviewRunId))
+      .leftJoin(
+        pullRequestSnapshots,
+        eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
+      )
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .limit(1);
+
+    return row ?? emptyReviewMetricsSummary();
+  }
+
   /** Lists recent completed review runs for one repository. */
   public async listRecentCompletedReviewRuns(
     input: ListRecentCompletedReviewRunsInput,
@@ -647,6 +878,39 @@ export class ReviewRepository {
       .from(reviewArtifacts)
       .where(eq(reviewArtifacts.reviewRunId, reviewRunId))
       .orderBy(asc(reviewArtifacts.createdAt), asc(reviewArtifacts.reviewArtifactId));
+  }
+
+  /** Gets one review artifact with repository organization scope for audited payload access. */
+  public async getReviewArtifactAccessRecord(
+    input: GetReviewArtifactAccessRecordInput,
+  ): Promise<ReviewArtifactAccessRecord | undefined> {
+    const [row] = await this.db
+      .select({
+        classification: reviewArtifacts.classification,
+        createdAt: reviewArtifacts.createdAt,
+        hash: reviewArtifacts.hash,
+        kind: reviewArtifacts.kind,
+        metadata: reviewArtifacts.metadata,
+        name: reviewArtifacts.name,
+        orgId: repositories.orgId,
+        repoId: reviewArtifacts.repoId,
+        retentionUntil: reviewArtifacts.retentionUntil,
+        reviewArtifactId: reviewArtifacts.reviewArtifactId,
+        reviewRunId: reviewArtifacts.reviewRunId,
+        sizeBytes: reviewArtifacts.sizeBytes,
+        uri: reviewArtifacts.uri,
+      })
+      .from(reviewArtifacts)
+      .innerJoin(repositories, eq(reviewArtifacts.repoId, repositories.repoId))
+      .where(
+        and(
+          eq(reviewArtifacts.reviewRunId, input.reviewRunId),
+          eq(reviewArtifacts.reviewArtifactId, input.reviewArtifactId),
+        ),
+      )
+      .limit(1);
+
+    return row;
   }
 
   /** Gets the newest review artifact for one review run and artifact kind. */
@@ -1266,6 +1530,105 @@ function repositorySuppressionMatchLimit(limit: number | undefined): number {
   }
 
   return limit;
+}
+
+/** Builds the joined review-run inspection projection. */
+function reviewRunInspectionSelect() {
+  return {
+    authorLogin: pullRequestSnapshots.authorLogin,
+    baseSha: reviewRuns.baseSha,
+    changedFileCount: pullRequestSnapshots.changedFileCount,
+    completedAt: reviewRuns.completedAt,
+    counts: reviewRuns.counts,
+    createdAt: reviewRuns.createdAt,
+    error: reviewRuns.error,
+    headSha: reviewRuns.headSha,
+    orgId: repositories.orgId,
+    pullRequestNumber: reviewRuns.pullRequestNumber,
+    pullRequestTitle: pullRequestSnapshots.title,
+    repoFullName: repositories.fullName,
+    repoId: reviewRuns.repoId,
+    reviewRunId: reviewRuns.reviewRunId,
+    startedAt: reviewRuns.startedAt,
+    status: reviewRuns.status,
+    summary: reviewRuns.summary,
+    trigger: reviewRuns.trigger,
+    updatedAt: reviewRuns.updatedAt,
+  };
+}
+
+/** Builds SQL predicates for review-run inspection queries. */
+function reviewRunInspectionFilters(input: ListReviewRunsForInspectionInput): SQL[] {
+  const conditions: SQL[] = [];
+  const scopedConditions = scopedReviewRunInspectionFilter(input);
+  if (scopedConditions) {
+    conditions.push(scopedConditions);
+  }
+  if (input.repoId) {
+    conditions.push(eq(reviewRuns.repoId, input.repoId));
+  }
+  if (input.status) {
+    conditions.push(eq(reviewRuns.status, input.status));
+  }
+
+  const search = input.search?.trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    const prNumber = Number(search);
+    const searchCondition = or(
+      ilike(repositories.fullName, pattern),
+      ilike(pullRequestSnapshots.title, pattern),
+      ilike(pullRequestSnapshots.authorLogin, pattern),
+      Number.isSafeInteger(prNumber) ? eq(reviewRuns.pullRequestNumber, prNumber) : undefined,
+    );
+    if (searchCondition) {
+      conditions.push(searchCondition);
+    }
+  }
+
+  return conditions;
+}
+
+/** Builds a repository scope predicate for review-run inspection queries. */
+function scopedReviewRunInspectionFilter(input: ListReviewRunsForInspectionInput): SQL | undefined {
+  const orgIds = input.orgIds ?? [];
+  const repoIds = input.repoIds ?? [];
+  const hasExplicitScope = input.orgIds !== undefined || input.repoIds !== undefined;
+  if (orgIds.includes("*") || repoIds.includes("*")) {
+    return undefined;
+  }
+
+  const conditions: SQL[] = [];
+  if (orgIds.length > 0) {
+    conditions.push(inArray(repositories.orgId, [...orgIds]));
+  }
+  if (repoIds.length > 0) {
+    conditions.push(inArray(reviewRuns.repoId, [...repoIds]));
+  }
+  if (conditions.length === 0) {
+    return hasExplicitScope ? sql`false` : undefined;
+  }
+
+  const [condition] = conditions;
+  return conditions.length === 1 ? (condition ?? sql`false`) : or(...conditions);
+}
+
+/** Builds an empty aggregate review metrics row. */
+function emptyReviewMetricsSummary(): ReviewMetricsSummaryRecord {
+  return {
+    candidateFindings: 0,
+    completedRuns: 0,
+    estimatedCostUsd: "0",
+    failedRuns: 0,
+    medianDurationMs: null,
+    p95DurationMs: null,
+    publishedFindings: 0,
+    rejectedFindings: 0,
+    skippedRuns: 0,
+    supersededRuns: 0,
+    totalRuns: 0,
+    validatedFindings: 0,
+  };
 }
 
 /** Selects joined review finding inspection columns. */
