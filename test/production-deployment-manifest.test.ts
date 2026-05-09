@@ -95,6 +95,7 @@ describe("production deployment manifest", () => {
       expect.arrayContaining([
         "observability alert admin_auth_failure_rate is required",
         "package script preflight:control-plane:staging is required",
+        "package script proof:sandbox:staging is required",
       ]),
     );
   });
@@ -326,6 +327,7 @@ function validManifest() {
       gate("pnpm smoke:control-plane:staging"),
       gate("pnpm e2e:dashboard"),
       gate("pnpm proof:control-plane:staging"),
+      gate("pnpm proof:sandbox:staging"),
       gate("pnpm readiness:control-plane:production"),
     ],
     rollback: {
@@ -417,6 +419,7 @@ function validPackageJson() {
       "e2e:dashboard": "bun run scripts/control-plane-dashboard-e2e.ts",
       "preflight:control-plane:staging": "bun run scripts/control-plane-staging-preflight.ts",
       "proof:control-plane:staging": "bun run scripts/control-plane-staging-proof.ts",
+      "proof:sandbox:staging": "bun run scripts/sandbox-staging-proof.ts",
       "readiness:control-plane:production": "bun run scripts/control-plane-production-readiness.ts",
       "release:control-plane:railway": "bun run scripts/control-plane-railway-release.ts",
       "smoke:control-plane:staging": "bun run scripts/control-plane-staging-smoke.ts",

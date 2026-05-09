@@ -159,6 +159,10 @@
       "name": "staging proof"
     },
     {
+      "command": "pnpm proof:sandbox:staging",
+      "name": "sandbox staging proof"
+    },
+    {
       "command": "pnpm readiness:control-plane:production",
       "name": "production readiness"
     }

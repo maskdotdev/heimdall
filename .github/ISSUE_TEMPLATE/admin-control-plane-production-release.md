@@ -33,11 +33,13 @@ and rollback plan.
 - Worker publisher Railway config: `/infra/railway/worker-publisher.railway.json`
 - Worker maintenance Railway config: `/infra/railway/worker-maintenance.railway.json`
 - Staging proof evidence: `docs/evidence/admin-control-plane-staging-proof.json`
+- Sandbox staging proof evidence: `docs/evidence/sandbox-staging-proof.json`
 - Runbook: `docs/runbooks/admin-control-plane.md`
 
 ## Pre-Enablement Gates
 
 - [ ] `pnpm ci:control-plane:release` passed on the release commit.
+- [ ] `pnpm proof:sandbox:staging` passed against the deployed staging worker sandbox evidence.
 - [ ] CI passed on `main` for the release commit.
 - [ ] Railway services use the config paths listed above.
 - [ ] API, dashboard, admin gateway, worker, Postgres, and Redis services exist in production.
