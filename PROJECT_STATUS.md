@@ -745,7 +745,8 @@ tracked milestone.
   the Railway-first production deployment decision, rollout owners, enablement order, acceptance
   gates, go/no-go criteria, gateway hardening checklist, secret rotation procedure, monitoring
   checks, and emergency disable path. `pnpm readiness:control-plane:production` validates the
-  committed staging proof and runbook coverage before production handoff.
+  committed staging proof, runbook coverage, required release proof commands, and supplied sandbox
+  staging proof evidence before production handoff.
 - Latest admin usage/cost inspector milestone: `@repo/admin-tools` now exposes review-run usage
   inspections that summarize usage ledger rows, cost rollups, customer-understandable billable
   units, and quota reservation state through the package service and `admin usage inspect` CLI

@@ -501,7 +501,9 @@ The deployment audit verifies that the Railway production manifest includes all 
 release gates, environment variable names, rollback checks, and alert coverage. The readiness gate
 verifies that the committed staging proof passed, includes actor, scope, audit, command, and
 rollback evidence, and that this runbook covers rollout, hardening, rotation, monitoring, rollback,
-emergency disable, and the persisted replay audit action names.
+emergency disable, sandbox proof, and the persisted replay audit action names. When
+`HEIMDALL_SANDBOX_STAGING_EVIDENCE_FILE` is set, the readiness gate also validates the sandbox
+staging proof evidence before production rollout.
 
 ### Post-Release Monitoring and Follow-Up Tracking
 
