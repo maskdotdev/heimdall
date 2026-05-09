@@ -159,6 +159,32 @@ describe("checkReviewRunCurrent", () => {
       ),
     ).resolves.toBe("unknown");
   });
+
+  it("reports provider check failures while preserving unknown status behavior", async () => {
+    const providerError = new GitHubProviderError("github_permission", "missing contents access", {
+      requestId: "req_current_state",
+      status: 403,
+    });
+    const observedErrors: unknown[] = [];
+
+    await expect(
+      checkReviewRunCurrent(
+        {
+          fetchPullRequestSnapshot: async () => {
+            throw providerError;
+          },
+        },
+        currentCheckInput,
+        {
+          onProviderError: (error) => {
+            observedErrors.push(error);
+          },
+        },
+      ),
+    ).resolves.toBe("unknown");
+
+    expect(observedErrors).toEqual([providerError]);
+  });
 });
 
 describe("loadTrustedRepoLocalConfig", () => {
@@ -723,6 +749,39 @@ describe("recordReviewGitHubProviderSecurityEvent", () => {
     });
 
     expect(securityEventSink.events()).toEqual([]);
+  });
+
+  it("records current-state checkpoint metadata without raw provider messages", () => {
+    const securityEventSink = createMemorySecurityEventSink();
+
+    recordReviewGitHubProviderSecurityEvent({
+      error: new GitHubProviderError("github_rate_limit", "provider returned a noisy message", {
+        rateLimit: { remaining: 0, resource: "graphql" },
+        requestId: "req_review_current_state",
+        retryAfterSeconds: 60,
+        status: 403,
+      }),
+      orgId: "org_test",
+      reviewInput,
+      reviewRunId: "rrn_test",
+      reviewStage: "current_state",
+      reviewStalenessCheckpoint: "before_publish",
+      securityEventSink,
+      timestamp: "2026-05-08T18:41:00.000Z",
+    });
+
+    expect(securityEventSink.events()).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          githubReason: "github_rate_limit",
+          githubRequestId: "req_review_current_state",
+          reviewStage: "current_state",
+          reviewStalenessCheckpoint: "before_publish",
+        }),
+        type: "github_review_rate_limited",
+      }),
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("provider returned");
   });
 });
 
