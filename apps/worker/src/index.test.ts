@@ -2153,6 +2153,93 @@ describe("createWorkerHandlers", () => {
     ]);
   });
 
+  it("records GitHub provider security events when review thread reconciliation fails", async () => {
+    const selectRows: unknown[][] = [
+      [
+        {
+          installationId: "inst_1",
+          owner: "acme",
+          provider: "github",
+          providerInstallationId: "123456",
+          providerRepoId: "987654",
+          repo: "heimdall",
+        },
+      ],
+      [
+        {
+          pullRequestNumber: 7,
+          reviewRunId: "rrn_1",
+        },
+      ],
+    ];
+    const securityEventSink = createMemorySecurityEventSink();
+    const db = createWorkerSequentialDatabaseStub({ insertedRows: [], selectRows });
+    const handlers = createWorkerHandlers({
+      db: db as never,
+      gitProvider: {
+        provider: "github",
+        fetchReviewThreadStates: async () => {
+          throw new GitHubPermissionError("Resource not accessible by integration.", {
+            rateLimit: { remaining: 13, resource: "graphql" },
+            requestId: "github_request_thread_reconcile",
+            retryAfterSeconds: 60,
+            status: 403,
+          });
+        },
+      } as never,
+      securityEventSink,
+    });
+
+    await expect(
+      handlers[JOB_TYPES.UpdateMemory]?.({
+        attempt: 0,
+        createdAt: "2026-05-07T12:00:00.000Z",
+        idempotencyKey: "github:memory:thread-reconcile:repo_1",
+        jobId: "job_memory_thread_reconcile",
+        jobType: JOB_TYPES.UpdateMemory,
+        maxAttempts: 3,
+        payload: {
+          provider: "github",
+          pullRequestNumber: 7,
+          reason: "scheduled",
+          repoId: "repo_1",
+        },
+        schemaVersion: "job_envelope.v1",
+      }),
+    ).rejects.toThrow("Resource not accessible by integration.");
+
+    expect(securityEventSink.events()).toMatchObject([
+      {
+        metadata: {
+          githubReason: "github_permission",
+          githubRequestId: "github_request_thread_reconcile",
+          githubStatus: 403,
+          installationId: "inst_1",
+          operation: "review_thread_reconcile",
+          providerInstallationId: "123456",
+          providerRepoId: "987654",
+          pullRequestNumber: 7,
+          rateLimitBucket: "graphql",
+          rateLimitRemaining: 13,
+          repoId: "repo_1",
+          retryAfterSeconds: 60,
+          reviewRunId: "rrn_1",
+        },
+        repoId: "repo_1",
+        resourceId: "rrn_1",
+        resourceType: "review_run",
+        severity: "high",
+        source: "github",
+        status: "new",
+        type: "github_worker_review_thread_reconcile_permission_denied",
+      },
+    ]);
+    expect(JSON.stringify(securityEventSink.events())).not.toContain("acme");
+    expect(JSON.stringify(securityEventSink.events())).not.toContain(
+      "Resource not accessible by integration.",
+    );
+  });
+
   it("creates pending memory candidates from trusted provider feedback commands", async () => {
     const selectRows: unknown[][] = [
       [
