@@ -219,14 +219,23 @@ class GatewayHttpError extends Error {
   /** Machine-readable error code. */
   public readonly code: string;
 
+  /** Product-safe structured details for response and log triage. */
+  public readonly details: Readonly<Record<string, string | number | boolean>> | undefined;
+
   /** HTTP status code. */
   public readonly status: number;
 
   /** Creates a structured gateway error. */
-  public constructor(status: number, code: string, message: string) {
+  public constructor(
+    status: number,
+    code: string,
+    message: string,
+    details?: Readonly<Record<string, string | number | boolean>> | undefined,
+  ) {
     super(message);
     this.name = "GatewayHttpError";
     this.code = code;
+    this.details = details;
     this.status = status;
   }
 }
@@ -828,7 +837,7 @@ async function getGitHubUser(
   accessToken: string,
   fetchFn: GitHubAdminGatewayFetch,
 ): Promise<GitHubUser> {
-  const json = await fetchGitHubJson("https://api.github.com/user", accessToken, fetchFn);
+  const json = await fetchGitHubJson("https://api.github.com/user", accessToken, fetchFn, "user");
   if (!Value.Check(GitHubUserSchema, json)) {
     throw new GatewayHttpError(
       502,
@@ -847,7 +856,7 @@ async function getGitHubMembership(
   fetchFn: GitHubAdminGatewayFetch,
 ): Promise<GitHubMembership> {
   const url = `https://api.github.com/user/memberships/orgs/${encodeURIComponent(githubOrg)}`;
-  const json = await fetchGitHubJson(url, accessToken, fetchFn);
+  const json = await fetchGitHubJson(url, accessToken, fetchFn, "membership");
   if (!Value.Check(GitHubMembershipSchema, json)) {
     throw new GatewayHttpError(
       502,
@@ -892,6 +901,7 @@ async function fetchGitHubJson(
   url: string,
   accessToken: string,
   fetchFn: GitHubAdminGatewayFetch,
+  step: "membership" | "user",
 ): Promise<unknown> {
   const response = await fetchFn(url, {
     headers: {
@@ -907,6 +917,10 @@ async function fetchGitHubJson(
       response.status === 404 ? 403 : 502,
       "admin_gateway.github_api_failed",
       "GitHub API validation failed.",
+      {
+        githubStatus: response.status,
+        githubStep: step,
+      },
     );
   }
 
@@ -1174,12 +1188,14 @@ function handleGatewayError(error: unknown, logger: GitHubAdminGatewayLogger): R
   if (error instanceof GatewayHttpError) {
     logger.warn?.("admin gateway request rejected", {
       code: error.code,
+      ...(error.details ? { details: error.details } : {}),
       status: error.status,
     });
     return jsonResponse(
       {
         error: {
           code: error.code,
+          ...(error.details ? { details: error.details } : {}),
           message: error.message,
         },
       },
