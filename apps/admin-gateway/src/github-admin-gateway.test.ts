@@ -35,6 +35,13 @@ type RecordedSpan = {
   readonly traceContext?: TelemetrySpanOptions["traceContext"] | undefined;
 };
 
+type RecordedGatewayWarning = {
+  /** Product-safe gateway warning fields. */
+  readonly fields?: Record<string, unknown> | undefined;
+  /** Warning message emitted by the gateway. */
+  readonly message: string;
+};
+
 describe("GitHub admin gateway", () => {
   it("emits product-safe request telemetry and propagates request IDs", async () => {
     const metrics: RecordedMetric[] = [];
@@ -224,6 +231,50 @@ describe("GitHub admin gateway", () => {
     await expect(callback.json()).resolves.toMatchObject({
       error: { code: "admin_gateway.github_org_forbidden" },
     });
+  });
+
+  it("reports product-safe GitHub API validation failure details", async () => {
+    const warnings: RecordedGatewayWarning[] = [];
+    const gateway = createGitHubAdminGateway(baseConfig(), {
+      ...deterministicDependencies(),
+      fetch: async (input) => githubResponse(input.toString(), "allowed-admin", "missing"),
+      logger: {
+        warn: (message, fields) => {
+          warnings.push({ fields, message });
+        },
+      },
+    });
+    const start = await gateway.handle(new Request("https://gateway.test/auth/github/start"));
+    const state = requiredOAuthState(start);
+
+    const callback = await gateway.handle(
+      new Request(`https://gateway.test/auth/github/callback?code=oauth-code&state=${state}`, {
+        headers: { cookie: cookiePair(start, "heimdall_admin_gateway_oauth_state") },
+      }),
+    );
+
+    expect(callback.status).toBe(403);
+    await expect(callback.json()).resolves.toMatchObject({
+      error: {
+        code: "admin_gateway.github_api_failed",
+        details: {
+          githubStatus: 404,
+          githubStep: "membership",
+        },
+      },
+    });
+    expect(warnings).toContainEqual({
+      fields: {
+        code: "admin_gateway.github_api_failed",
+        details: {
+          githubStatus: 404,
+          githubStep: "membership",
+        },
+        status: 403,
+      },
+      message: "admin gateway request rejected",
+    });
+    expect(JSON.stringify(warnings)).not.toContain("github-access-token");
   });
 
   it("permits allowlisted GitHub users when user owner fallback is explicitly enabled", async () => {
@@ -517,6 +568,10 @@ function githubResponse(url: string, login: string, membershipState: string): Re
     });
   }
   if (url === "https://api.github.com/user/memberships/orgs/octo-org") {
+    if (membershipState === "missing") {
+      return Response.json({ message: "not found" }, { status: 404 });
+    }
+
     return Response.json({
       organization: { login: "octo-org" },
       role: "admin",
