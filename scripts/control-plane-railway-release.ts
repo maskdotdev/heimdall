@@ -54,6 +54,12 @@ const LIVE_RELEASE_STEPS: readonly ReleaseStep[] = [
     name: "staging proof evidence",
     requiresLiveDeployment: true,
   },
+  {
+    args: ["proof:sandbox:staging"],
+    command: "pnpm",
+    name: "sandbox staging proof evidence",
+    requiresLiveDeployment: true,
+  },
 ];
 
 const LOCAL_ENV_PREFIXES_TO_UNSET = ["HEIMDALL_ADMIN_", "VITE_HEIMDALL_ADMIN_"] as const;
@@ -104,7 +110,7 @@ function printHelpAndExit(): never {
   pnpm release:control-plane:railway
   pnpm release:control-plane:railway -- --local-only
 
-The full command runs local release gates, then deployed preflight, smoke, dashboard E2E, and proof.
+The full command runs local release gates, then deployed preflight, smoke, dashboard E2E, control-plane proof, and sandbox proof.
 Use --local-only before Railway deploys or when fresh gateway/CDP proof inputs are unavailable.`);
   process.exit(0);
 }

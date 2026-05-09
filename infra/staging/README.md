@@ -36,12 +36,14 @@ After deployment, authenticate through the gateway and run:
 ```sh
 pnpm preflight:control-plane:staging
 pnpm proof:control-plane:staging
+pnpm proof:sandbox:staging
 ```
 
 Run these commands from the repository root with `.env.smoke.local` populated from
 `.env.smoke.example` using the deployed staging API, dashboard, gateway, GitHub OAuth, scope, replay,
-manual drill, and rollback evidence values. The package scripts load `.env.smoke.local`
-automatically and fail closed when required staging values are missing or point at localhost.
+manual drill, rollback evidence, and sandbox proof values. The package scripts load
+`.env.smoke.local` automatically and fail closed when required staging values are missing or point at
+localhost.
 
 The preflight fails if the dashboard bundle does not contain the configured `API_URL` and gateway
 URL, or if the gateway-issued assertion does not verify against the API assertion secret, GitHub

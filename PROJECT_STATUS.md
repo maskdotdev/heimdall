@@ -861,8 +861,8 @@ tracked milestone.
   release ticket, and `infra/railway/*.railway.json` codifies Railway build/deploy settings for
   the API, dashboard, admin gateway, and role-specific worker services.
 - Latest deployment-streamlining milestone: `pnpm release:control-plane:railway` wraps the local
-  release gates and deployed Railway proof gates in one operator command, with `--local-only`
-  available before fresh deployed OAuth/CDP inputs are ready.
+  release gates and deployed Railway proof gates, including the sandbox staging proof, in one
+  operator command, with `--local-only` available before fresh deployed OAuth/CDP inputs are ready.
 - Latest evaluation milestone: `packages/evaluation` now implements the first deterministic
   `26A` gate with `smoke-full-pipeline-v1`, 12 curated no-live-model cases, exact finding matching,
   line-anchor grading, retrieval recall, latency/cost metrics, Markdown/JSON/HTML/JUnit reports,

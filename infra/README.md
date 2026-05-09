@@ -93,7 +93,7 @@ pnpm audit:control-plane:deployment
 ```
 
 Run the full Railway release gate sequence from one command after `.env.smoke.local` contains the
-deployed API, dashboard, gateway, OAuth, CDP, replay, and proof values:
+deployed API, dashboard, gateway, OAuth, CDP, replay, control-plane proof, and sandbox proof values:
 
 ```sh
 pnpm release:control-plane:railway

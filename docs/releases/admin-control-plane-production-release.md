@@ -24,6 +24,7 @@ configuration files, release gates, and rollback plan.
 | Worker publisher Railway config | `/infra/railway/worker-publisher.railway.json` |
 | Worker maintenance Railway config | `/infra/railway/worker-maintenance.railway.json` |
 | Staging proof evidence | `docs/evidence/admin-control-plane-staging-proof.json` |
+| Sandbox staging proof evidence | `docs/evidence/sandbox-staging-proof.json` |
 | Production runbook | `docs/runbooks/admin-control-plane.md` |
 | CI release gate | `pnpm ci:control-plane:release` |
 
@@ -41,6 +42,7 @@ configuration files, release gates, and rollback plan.
 
 - [ ] Release commit is selected.
 - [ ] `pnpm ci:control-plane:release` passed locally or in CI on the release commit.
+- [ ] `pnpm proof:sandbox:staging` passed against the deployed staging worker sandbox evidence.
 - [ ] CI passed on `main` for the release commit.
 - [ ] Railway service settings point to the committed config-as-code files.
 - [ ] API, dashboard, admin gateway, worker, Postgres, and Redis services exist in production.

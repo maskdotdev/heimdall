@@ -290,7 +290,7 @@ Run `pnpm proof:control-plane:staging` with `HEIMDALL_CONTROL_PLANE_MANUAL_DRILL
 evidence record with top-level actor, scope, gateway, and audit summaries.
 
 For the Railway rollout path, use one wrapper command after `.env.smoke.local` contains the deployed
-API, dashboard, gateway, OAuth, CDP, replay, and proof values:
+API, dashboard, gateway, OAuth, CDP, replay, control-plane proof, and sandbox proof values:
 
 ```bash
 pnpm release:control-plane:railway

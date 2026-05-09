@@ -71,6 +71,7 @@ const REQUIRED_PACKAGE_SCRIPTS = [
   "smoke:control-plane:staging",
   "e2e:dashboard",
   "proof:control-plane:staging",
+  "proof:sandbox:staging",
   "readiness:control-plane:production",
   "release:control-plane:railway",
 ];

@@ -52,8 +52,9 @@ evidence from every gate:
 
 ### Enablement Order
 
-1. Freeze the staging proof evidence and confirm that `pnpm proof:control-plane:staging` passed
-   against the current API, dashboard, and gateway revisions.
+1. Freeze the staging proof evidence and confirm that `pnpm proof:control-plane:staging` and
+   `pnpm proof:sandbox:staging` passed against the current API, dashboard, gateway, and worker
+   revisions.
 2. Create a dedicated production GitHub OAuth app for the admin gateway. Configure only the exact
    callback URL `https://<gateway-production-origin>/auth/github/callback`.
 3. Generate distinct production secrets: `HEIMDALL_ADMIN_SESSION_SECRET`,
@@ -97,6 +98,7 @@ All gates must pass before the release owner marks the rollout complete:
 | --- | --- |
 | Repository verification | `pnpm check` passes on the release commit |
 | Staging proof | `pnpm proof:control-plane:staging` passes with committed or attached evidence |
+| Sandbox staging proof | `pnpm proof:sandbox:staging` passes with committed or attached evidence |
 | Production health | API `/healthz`, gateway `/healthz`, and dashboard root return healthy responses from production |
 | Gateway auth | Allowlisted active GitHub org member can login and request a signed assertion; unallowlisted login cannot |
 | Origin controls | API and gateway accept only the production dashboard origin and reject wildcard, missing, or unrelated origins |
@@ -139,7 +141,7 @@ Use this checklist for production and for every gateway configuration change:
 Run these gates before enabling or changing the admin control plane in production:
 
 The preferred Railway release command runs the local release gates first, then the deployed
-preflight, smoke, dashboard E2E, and proof gates in order:
+preflight, smoke, dashboard E2E, control-plane proof, and sandbox proof gates in order:
 
 ```sh
 pnpm release:control-plane:railway
@@ -249,7 +251,22 @@ pnpm release:control-plane:railway -- --local-only
    scope, and audit summaries to `HEIMDALL_CONTROL_PLANE_EVIDENCE_FILE`, or
    `docs/evidence/admin-control-plane-staging-proof.json` by default.
 
-7. Run the staging smoke against a staging API and staging admin identity gateway when you need to
+7. Run the sandbox staging proof and write the sandbox evidence record:
+
+   ```sh
+   HEIMDALL_SANDBOX_SMOKE_STATUS=succeeded \
+   HEIMDALL_SANDBOX_SMOKE_REVIEW_RUN_ID=review_run_staging \
+   pnpm proof:sandbox:staging
+   ```
+
+   The sandbox proof command logs in through the same admin identity gateway, reads scoped
+   `/admin/sandbox/runs` history, and fails unless it finds deployed HTTPS evidence with the
+   requested org/repo/review scope, a non-`local_process` runner, zero denied policy decisions,
+   untruncated stdout/stderr, and collected artifact hashes. It writes
+   `HEIMDALL_SANDBOX_STAGING_EVIDENCE_FILE`, or
+   `docs/evidence/sandbox-staging-proof.json` by default.
+
+8. Run the staging smoke against a staging API and staging admin identity gateway when you need to
    rerun only the API gate:
 
    ```sh
