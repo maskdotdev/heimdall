@@ -9,7 +9,11 @@ import {
 } from "@repo/observability";
 import { createMemorySecurityEventSink, verifyAdminIdentityAssertion } from "@repo/security";
 import { describe, expect, it } from "vitest";
-import { createGitHubAdminGateway, type GitHubAdminGatewayConfig } from "./github-admin-gateway";
+import {
+  createGitHubAdminGateway,
+  type GitHubAdminGatewayConfig,
+  readGitHubAdminGatewayConfig,
+} from "./github-admin-gateway";
 
 type RecordedMetric = {
   /** Low-cardinality metric labels captured by the test recorder. */
@@ -410,6 +414,28 @@ describe("GitHub admin gateway", () => {
     });
   });
 
+  it("keeps CORS headers on rejected assertion responses for allowed origins", async () => {
+    const gateway = createGitHubAdminGateway(baseConfig(), deterministicDependencies());
+
+    const assertionResponse = await gateway.handle(
+      new Request("https://gateway.test/assertion", {
+        body: JSON.stringify({ purpose: "dashboard-login" }),
+        headers: {
+          "content-type": "application/json",
+          origin: "https://admin.test",
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(assertionResponse.status).toBe(401);
+    expect(assertionResponse.headers.get("access-control-allow-origin")).toBe("https://admin.test");
+    expect(assertionResponse.headers.get("access-control-allow-credentials")).toBe("true");
+    await expect(assertionResponse.json()).resolves.toMatchObject({
+      error: { code: "admin_gateway.unauthorized" },
+    });
+  });
+
   it("normalizes configured allowed origins before request checks", () => {
     const gateway = createGitHubAdminGateway({
       ...baseConfig(),
@@ -417,6 +443,24 @@ describe("GitHub admin gateway", () => {
     });
 
     expect(gateway.config.allowedOrigins).toEqual(["https://admin.test"]);
+  });
+
+  it("defaults cross-origin deployment session cookies to SameSite=None", () => {
+    const config = readGitHubAdminGatewayConfig({
+      GITHUB_CLIENT_ID: "github-client-id",
+      GITHUB_CLIENT_SECRET: "github-client-secret",
+      HEIMDALL_ADMIN_GATEWAY_ALLOWED_LOGINS: "allowed-admin",
+      HEIMDALL_ADMIN_GATEWAY_DASHBOARD_URL: "https://admin.test",
+      HEIMDALL_ADMIN_GATEWAY_ORG_IDS: "org_1",
+      HEIMDALL_ADMIN_GATEWAY_PERMISSIONS: "admin.inspect",
+      HEIMDALL_ADMIN_GATEWAY_PUBLIC_URL: "https://gateway.test",
+      HEIMDALL_ADMIN_GATEWAY_SESSION_SECRET: "gateway-session-secret-with-at-least-32-chars",
+      HEIMDALL_ADMIN_GITHUB_ORG: "octo-org",
+      HEIMDALL_ADMIN_IDENTITY_ASSERTION_SECRET: "assertion-secret-with-at-least-32-chars",
+      NODE_ENV: "production",
+    });
+
+    expect(config.sessionCookieSameSite).toBe("None");
   });
 
   it("rejects unsafe production gateway configuration", () => {
@@ -434,6 +478,14 @@ describe("GitHub admin gateway", () => {
         nodeEnv: "production",
       }),
     ).toThrow(/HEIMDALL_ADMIN_GATEWAY_ALLOWED_ORIGINS must use https in production/);
+
+    expect(() =>
+      createGitHubAdminGateway({
+        ...baseConfig(),
+        secureCookies: false,
+        sessionCookieSameSite: "None",
+      }),
+    ).toThrow(/SameSite=None gateway session cookies require secure cookies/);
 
     expect(() =>
       createGitHubAdminGateway({
@@ -489,6 +541,7 @@ function baseConfig(): GitHubAdminGatewayConfig {
     repoIds: ["repo_1"],
     secureCookies: true,
     sessionCookieName: "heimdall_admin_gateway_session",
+    sessionCookieSameSite: "Lax",
     sessionMaxAgeSeconds: 3600,
     sessionSecret: "gateway-session-secret-with-at-least-32-chars",
     stateCookieName: "heimdall_admin_gateway_oauth_state",
