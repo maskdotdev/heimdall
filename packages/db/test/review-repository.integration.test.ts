@@ -79,6 +79,15 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         updatedAt: "2026-05-08T00:04:00.000Z",
       }),
     );
+    await reviewRepository.upsertReviewRunMetrics({
+      reviewRunId: "rrn_review_repository",
+      candidateFindings: 2,
+      estimatedCostUsd: "0.123456",
+      publishedFindings: 1,
+      rejectedFindings: 1,
+      totalDurationMs: 1000,
+      validatedFindings: 2,
+    });
     await expect(
       reviewRepository.listRecentCompletedReviewRuns({
         limit: 2,
@@ -104,6 +113,51 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         repoId: "repo_review_repository_test",
       }),
     ).rejects.toThrow(/limit must be an integer/u);
+    await expect(
+      reviewRepository.listReviewRunsForInspection({
+        limit: 10,
+        repoId: "repo_review_repository_test",
+        search: "43",
+        status: "completed",
+      }),
+    ).resolves.toMatchObject([
+      {
+        authorLogin: "octocat",
+        orgId: "org_review_repository_test",
+        pullRequestNumber: 43,
+        pullRequestTitle: "Improve validation",
+        repoFullName: "acme/heimdall",
+        reviewRunId: "rrn_review_repository_recent_completed",
+        status: "completed",
+      },
+    ]);
+    await expect(
+      reviewRepository.getReviewRunForInspection("rrn_review_repository"),
+    ).resolves.toMatchObject({
+      authorLogin: "octocat",
+      changedFileCount: 1,
+      orgId: "org_review_repository_test",
+      pullRequestTitle: "Improve validation",
+      repoFullName: "acme/heimdall",
+      reviewRunId: "rrn_review_repository",
+    });
+    await expect(
+      reviewRepository.getReviewMetricsSummary({
+        repoId: "repo_review_repository_test",
+        status: "completed",
+      }),
+    ).resolves.toMatchObject({
+      candidateFindings: 2,
+      completedRuns: 3,
+      estimatedCostUsd: "0.123456",
+      failedRuns: 0,
+      medianDurationMs: 1000,
+      p95DurationMs: 1000,
+      publishedFindings: 1,
+      rejectedFindings: 1,
+      totalRuns: 3,
+      validatedFindings: 2,
+    });
     await reviewRepository.upsertReviewRun(
       reviewRunFixture({
         headSha: "3333333",
@@ -113,6 +167,12 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
         updatedAt: "2026-05-08T00:04:30.000Z",
       }),
     );
+    await expect(
+      reviewRepository.getLatestReviewRunForRepository("repo_review_repository_test"),
+    ).resolves.toMatchObject({
+      reviewRunId: "rrn_review_repository_waiting_for_index",
+      status: "waiting_for_index",
+    });
     await expect(
       reviewRepository.listReviewRunsWaitingForIndex({
         headSha: "3333333",
@@ -218,6 +278,18 @@ describe.runIf(integrationDatabaseUrl)("ReviewRepository integration", () => {
       }),
     ).resolves.toMatchObject({
       reviewArtifactId: "art_review_repository_expired",
+    });
+    await expect(
+      reviewRepository.getReviewArtifactAccessRecord({
+        reviewArtifactId: "art_review_repository_expired",
+        reviewRunId: "rrn_review_repository",
+      }),
+    ).resolves.toMatchObject({
+      kind: "context_bundle",
+      orgId: "org_review_repository_test",
+      repoId: "repo_review_repository_test",
+      reviewArtifactId: "art_review_repository_expired",
+      uri: "db://review_artifacts/rrn_review_repository/context_bundle/context-bundle.json",
     });
     await expect(
       reviewRepository.listExpiredReviewArtifactCleanupTargets({

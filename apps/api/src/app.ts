@@ -113,7 +113,6 @@ import {
   type OrganizationSummaryRecord,
   ProductAuthRepository,
   ProviderInstallationRepository,
-  pullRequestSnapshots,
   QueueHealthRepository,
   type QueueHealthSnapshotRecord,
   quotaCounters,
@@ -121,14 +120,12 @@ import {
   RepoRuleRepository,
   RepositoryRepository,
   type RepositorySuppressionMatchRecord,
+  type ReviewArtifactAccessRecord,
   type ReviewFindingInspectionRecord,
   ReviewRepository,
   repoRuleScope,
   repoRuleType,
   repositories,
-  reviewArtifacts,
-  reviewRunMetrics,
-  reviewRuns,
   SecurityAuditRepository,
   subscriptions,
   usageEvents,
@@ -221,7 +218,7 @@ import {
   type WebhookIngestionResult,
   WebhookPayloadError,
 } from "@repo/webhook-ingestion";
-import { and, asc, desc, eq, gte, ilike, inArray, lt, or, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, or, type SQL, sql } from "drizzle-orm";
 import { Elysia } from "elysia";
 
 /** Authentication settings for admin control-plane routes. */
@@ -9207,8 +9204,9 @@ async function listRepositories(
     ...(!wildcardScope && query.orgIds !== undefined ? { orgIds: query.orgIds } : {}),
     ...(!wildcardScope && query.repoIds !== undefined ? { repoIds: query.repoIds } : {}),
   });
+  const reviewRepository = new ReviewRepository(db);
   const latestReviews = await Promise.all(
-    rows.map((repository) => latestReviewForRepository(db, repository.repoId)),
+    rows.map((repository) => reviewRepository.getLatestReviewRunForRepository(repository.repoId)),
   );
 
   return rows.map((repository, index) => {
@@ -9224,35 +9222,6 @@ async function listRepositories(
         : {}),
     };
   });
-}
-
-/** Gets the latest review row for one repository. */
-async function latestReviewForRepository(
-  db: HeimdallDatabase,
-  repoId: string,
-): Promise<
-  | {
-      /** Review run ID. */
-      readonly reviewRunId: string;
-      /** Current review status. */
-      readonly status: string;
-      /** Last update timestamp. */
-      readonly updatedAt: Date;
-    }
-  | undefined
-> {
-  const [row] = await db
-    .select({
-      reviewRunId: reviewRuns.reviewRunId,
-      status: reviewRuns.status,
-      updatedAt: reviewRuns.updatedAt,
-    })
-    .from(reviewRuns)
-    .where(eq(reviewRuns.repoId, repoId))
-    .orderBy(desc(reviewRuns.updatedAt))
-    .limit(1);
-
-  return row;
 }
 
 /** Converts a repository row into a dashboard repository summary. */
@@ -9283,38 +9252,10 @@ async function listReviewRuns(
   db: HeimdallDatabase,
   query: AdminReviewRunListQuery,
 ): Promise<readonly AdminReviewRunSummary[]> {
-  const conditions = reviewRunListConditions(query);
-  const rows = await db
-    .select({
-      authorLogin: pullRequestSnapshots.authorLogin,
-      baseSha: reviewRuns.baseSha,
-      changedFileCount: pullRequestSnapshots.changedFileCount,
-      completedAt: reviewRuns.completedAt,
-      counts: reviewRuns.counts,
-      createdAt: reviewRuns.createdAt,
-      error: reviewRuns.error,
-      headSha: reviewRuns.headSha,
-      orgId: repositories.orgId,
-      pullRequestNumber: reviewRuns.pullRequestNumber,
-      pullRequestTitle: pullRequestSnapshots.title,
-      repoFullName: repositories.fullName,
-      repoId: reviewRuns.repoId,
-      reviewRunId: reviewRuns.reviewRunId,
-      startedAt: reviewRuns.startedAt,
-      status: reviewRuns.status,
-      summary: reviewRuns.summary,
-      trigger: reviewRuns.trigger,
-      updatedAt: reviewRuns.updatedAt,
-    })
-    .from(reviewRuns)
-    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
-    .leftJoin(
-      pullRequestSnapshots,
-      eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
-    )
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(reviewRuns.updatedAt))
-    .limit(boundedListLimit(query.limit));
+  const rows = await new ReviewRepository(db).listReviewRunsForInspection({
+    ...query,
+    limit: boundedListLimit(query.limit),
+  });
 
   return rows.map(toAdminReviewRunSummary);
 }
@@ -9324,51 +9265,7 @@ async function getReviewMetricsSummary(
   db: HeimdallDatabase,
   query: AdminReviewRunListQuery,
 ): Promise<AdminReviewMetricsSummary> {
-  const conditions = reviewRunListConditions(query);
-  const [row] = await db
-    .select({
-      candidateFindings: sql<number>`coalesce(sum(${reviewRunMetrics.candidateFindings}), 0)::int`,
-      completedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'completed')::int`,
-      estimatedCostUsd: sql<string>`coalesce(sum(${reviewRunMetrics.estimatedCostUsd}), 0)::text`,
-      failedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'failed')::int`,
-      medianDurationMs: sql<number | null>`round(
-        percentile_cont(0.5) within group (order by ${reviewRunMetrics.totalDurationMs})
-        filter (where ${reviewRunMetrics.totalDurationMs} is not null)
-      )::int`,
-      p95DurationMs: sql<number | null>`round(
-        percentile_cont(0.95) within group (order by ${reviewRunMetrics.totalDurationMs})
-        filter (where ${reviewRunMetrics.totalDurationMs} is not null)
-      )::int`,
-      publishedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.publishedFindings}), 0)::int`,
-      rejectedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.rejectedFindings}), 0)::int`,
-      skippedRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'skipped')::int`,
-      supersededRuns: sql<number>`count(*) filter (where ${reviewRuns.status} = 'superseded')::int`,
-      totalRuns: sql<number>`count(*)::int`,
-      validatedFindings: sql<number>`coalesce(sum(${reviewRunMetrics.validatedFindings}), 0)::int`,
-    })
-    .from(reviewRuns)
-    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
-    .leftJoin(reviewRunMetrics, eq(reviewRuns.reviewRunId, reviewRunMetrics.reviewRunId))
-    .leftJoin(
-      pullRequestSnapshots,
-      eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
-    )
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .limit(1);
-  const metrics = row ?? {
-    candidateFindings: 0,
-    completedRuns: 0,
-    estimatedCostUsd: "0",
-    failedRuns: 0,
-    medianDurationMs: null,
-    p95DurationMs: null,
-    publishedFindings: 0,
-    rejectedFindings: 0,
-    skippedRuns: 0,
-    supersededRuns: 0,
-    totalRuns: 0,
-    validatedFindings: 0,
-  };
+  const metrics = await new ReviewRepository(db).getReviewMetricsSummary(query);
 
   return {
     averagePublishedFindings:
@@ -9565,36 +9462,7 @@ async function getReviewRun(
   db: HeimdallDatabase,
   reviewRunId: string,
 ): Promise<AdminReviewRunSummary> {
-  const [row] = await db
-    .select({
-      authorLogin: pullRequestSnapshots.authorLogin,
-      baseSha: reviewRuns.baseSha,
-      changedFileCount: pullRequestSnapshots.changedFileCount,
-      completedAt: reviewRuns.completedAt,
-      counts: reviewRuns.counts,
-      createdAt: reviewRuns.createdAt,
-      error: reviewRuns.error,
-      headSha: reviewRuns.headSha,
-      orgId: repositories.orgId,
-      pullRequestNumber: reviewRuns.pullRequestNumber,
-      pullRequestTitle: pullRequestSnapshots.title,
-      repoFullName: repositories.fullName,
-      repoId: reviewRuns.repoId,
-      reviewRunId: reviewRuns.reviewRunId,
-      startedAt: reviewRuns.startedAt,
-      status: reviewRuns.status,
-      summary: reviewRuns.summary,
-      trigger: reviewRuns.trigger,
-      updatedAt: reviewRuns.updatedAt,
-    })
-    .from(reviewRuns)
-    .innerJoin(repositories, eq(reviewRuns.repoId, repositories.repoId))
-    .leftJoin(
-      pullRequestSnapshots,
-      eq(reviewRuns.pullRequestSnapshotId, pullRequestSnapshots.snapshotId),
-    )
-    .where(eq(reviewRuns.reviewRunId, reviewRunId))
-    .limit(1);
+  const row = await new ReviewRepository(db).getReviewRunForInspection(reviewRunId);
 
   if (!row) {
     throw new AdminControlPlaneNotFoundError("review_run", reviewRunId);
@@ -9678,59 +9546,12 @@ function toAdminBackgroundJobSummary(row: {
   };
 }
 
-/** Review artifact row shape used for audited payload access. */
-type ReviewArtifactAccessRow = {
-  /** Artifact classification label. */
-  readonly classification: string;
-  /** Artifact creation timestamp. */
-  readonly createdAt: Date;
-  /** Artifact content hash. */
-  readonly hash: string;
-  /** Artifact kind. */
-  readonly kind: string;
-  /** Artifact metadata JSON. */
-  readonly metadata: unknown;
-  /** Artifact display name. */
-  readonly name: string;
-  /** Organization that owns the artifact repository. */
-  readonly orgId: string;
-  /** Repository that owns the artifact. */
-  readonly repoId: string;
-  /** Artifact retention expiration when set. */
-  readonly retentionUntil: Date | null;
-  /** Artifact row ID. */
-  readonly reviewArtifactId: string;
-  /** Review run that produced the artifact. */
-  readonly reviewRunId: string;
-  /** Serialized artifact size in bytes. */
-  readonly sizeBytes: number;
-  /** Durable artifact URI. */
-  readonly uri: string;
-};
-
 /** Lists review artifact metadata without returning stored artifact payloads. */
 async function listReviewArtifacts(
   db: HeimdallDatabase,
   reviewRunId: string,
 ): Promise<readonly AdminReviewArtifactSummary[]> {
-  const rows = await db
-    .select({
-      classification: reviewArtifacts.classification,
-      createdAt: reviewArtifacts.createdAt,
-      hash: reviewArtifacts.hash,
-      kind: reviewArtifacts.kind,
-      metadata: reviewArtifacts.metadata,
-      name: reviewArtifacts.name,
-      repoId: reviewArtifacts.repoId,
-      retentionUntil: reviewArtifacts.retentionUntil,
-      reviewArtifactId: reviewArtifacts.reviewArtifactId,
-      reviewRunId: reviewArtifacts.reviewRunId,
-      sizeBytes: reviewArtifacts.sizeBytes,
-      uri: reviewArtifacts.uri,
-    })
-    .from(reviewArtifacts)
-    .where(eq(reviewArtifacts.reviewRunId, reviewRunId))
-    .orderBy(asc(reviewArtifacts.createdAt), asc(reviewArtifacts.reviewArtifactId));
+  const rows = await new ReviewRepository(db).listReviewArtifactsForRun(reviewRunId);
 
   return rows.map(toAdminReviewArtifactSummary);
 }
@@ -9830,32 +9651,11 @@ async function getReviewArtifactAccessRow(
   db: HeimdallDatabase,
   reviewRunId: string,
   reviewArtifactId: string,
-): Promise<ReviewArtifactAccessRow> {
-  const [row] = await db
-    .select({
-      classification: reviewArtifacts.classification,
-      createdAt: reviewArtifacts.createdAt,
-      hash: reviewArtifacts.hash,
-      kind: reviewArtifacts.kind,
-      metadata: reviewArtifacts.metadata,
-      name: reviewArtifacts.name,
-      orgId: repositories.orgId,
-      repoId: reviewArtifacts.repoId,
-      retentionUntil: reviewArtifacts.retentionUntil,
-      reviewArtifactId: reviewArtifacts.reviewArtifactId,
-      reviewRunId: reviewArtifacts.reviewRunId,
-      sizeBytes: reviewArtifacts.sizeBytes,
-      uri: reviewArtifacts.uri,
-    })
-    .from(reviewArtifacts)
-    .innerJoin(repositories, eq(reviewArtifacts.repoId, repositories.repoId))
-    .where(
-      and(
-        eq(reviewArtifacts.reviewRunId, reviewRunId),
-        eq(reviewArtifacts.reviewArtifactId, reviewArtifactId),
-      ),
-    )
-    .limit(1);
+): Promise<ReviewArtifactAccessRecord> {
+  const row = await new ReviewRepository(db).getReviewArtifactAccessRecord({
+    reviewArtifactId,
+    reviewRunId,
+  });
 
   if (!row) {
     throw new AdminControlPlaneNotFoundError("review_artifact", reviewArtifactId);
@@ -11118,62 +10918,6 @@ function memoryFactStatusFromString(value: string): MemoryFactStatus {
 function memoryFactSourceFromMetadata(metadata: Record<string, unknown>): MemoryFactSource {
   const source = stringField(metadata, "source");
   return source && isMemoryFactSource(source) ? source : "manual";
-}
-
-/** Builds SQL predicates for review history discovery. */
-function reviewRunListConditions(query: AdminReviewRunListQuery): SQL[] {
-  const conditions: SQL[] = [];
-  const scopedConditions = scopedReviewRunRepositoryConditions(query);
-  if (scopedConditions) {
-    conditions.push(scopedConditions);
-  }
-  if (query.repoId) {
-    conditions.push(eq(reviewRuns.repoId, query.repoId));
-  }
-  if (query.status) {
-    conditions.push(eq(reviewRuns.status, query.status));
-  }
-
-  const search = query.search?.trim();
-  if (search) {
-    const pattern = `%${search}%`;
-    const prNumber = Number(search);
-    const searchCondition = or(
-      ilike(repositories.fullName, pattern),
-      ilike(pullRequestSnapshots.title, pattern),
-      ilike(pullRequestSnapshots.authorLogin, pattern),
-      Number.isSafeInteger(prNumber) ? eq(reviewRuns.pullRequestNumber, prNumber) : undefined,
-    );
-    if (searchCondition) {
-      conditions.push(searchCondition);
-    }
-  }
-
-  return conditions;
-}
-
-/** Builds a repository scope predicate for review history. */
-function scopedReviewRunRepositoryConditions(query: AdminReviewRunListQuery): SQL | undefined {
-  const orgIds = query.orgIds ?? [];
-  const repoIds = query.repoIds ?? [];
-  const hasExplicitScope = query.orgIds !== undefined || query.repoIds !== undefined;
-  if (orgIds.includes("*") || repoIds.includes("*")) {
-    return undefined;
-  }
-
-  const conditions: SQL[] = [];
-  if (orgIds.length > 0) {
-    conditions.push(inArray(repositories.orgId, [...orgIds]));
-  }
-  if (repoIds.length > 0) {
-    conditions.push(inArray(reviewRuns.repoId, [...repoIds]));
-  }
-  if (conditions.length === 0) {
-    return hasExplicitScope ? sql`false` : undefined;
-  }
-
-  const [condition] = conditions;
-  return conditions.length === 1 ? (condition ?? sql`false`) : or(...conditions);
 }
 
 /** Converts a joined review history row into a dashboard DTO. */
