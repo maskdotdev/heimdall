@@ -1124,6 +1124,7 @@ export function createWorkerHandlers(options: CreateWorkerHandlersOptions): Dura
         envelope.createdAt,
         {
           ...(options.metrics ? { metrics: options.metrics } : {}),
+          ...(options.securityEventSink ? { securityEventSink: options.securityEventSink } : {}),
           ...(envelope.traceContext ? { traceContext: envelope.traceContext } : {}),
           ...(options.traces ? { traces: options.traces } : {}),
         },
@@ -1834,11 +1835,23 @@ type RecordWorkerGitHubProviderSecurityEventInput = {
   /** Error returned by the GitHub provider. */
   readonly error: unknown;
   /** Worker-owned GitHub operation that failed. */
-  readonly operation: "index_clone_auth" | "sync_installation";
+  readonly operation: "index_clone_auth" | "review_thread_reconcile" | "sync_installation";
   /** GitHub installation affected by the worker operation. */
   readonly installation?: GitHubInstallationRuntimeRef | undefined;
   /** Repository affected by the worker operation. */
   readonly repository?: GitHubRepositoryRef | undefined;
+  /** Review-thread reconciliation target affected by the worker operation. */
+  readonly reviewThreadTarget?:
+    | Pick<
+        ReviewThreadReconciliationTarget,
+        | "installationId"
+        | "providerInstallationId"
+        | "providerRepoId"
+        | "pullRequestNumber"
+        | "repoId"
+        | "reviewRunId"
+      >
+    | undefined;
   /** Heimdall repository ID affected by the worker operation. */
   readonly repoId?: string | undefined;
   /** Optional sink configured by the worker runtime. */
@@ -2621,13 +2634,29 @@ function recordWorkerGitHubProviderSecurityEvent(
     return;
   }
 
-  const installationId = input.installation?.installationId ?? input.repository?.installationId;
+  const installationId =
+    input.installation?.installationId ??
+    input.repository?.installationId ??
+    input.reviewThreadTarget?.installationId;
   const providerInstallationId =
-    input.installation?.providerInstallationId ?? input.repository?.providerInstallationId;
+    input.installation?.providerInstallationId ??
+    input.repository?.providerInstallationId ??
+    input.reviewThreadTarget?.providerInstallationId;
+  const providerRepoId =
+    input.repository?.providerRepoId ?? input.reviewThreadTarget?.providerRepoId;
+  const repoId = input.repoId ?? input.reviewThreadTarget?.repoId;
   const resourceId =
-    input.operation === "sync_installation" ? input.installation?.installationId : input.repoId;
+    input.operation === "sync_installation"
+      ? input.installation?.installationId
+      : input.operation === "review_thread_reconcile"
+        ? input.reviewThreadTarget?.reviewRunId
+        : repoId;
   const resourceType =
-    input.operation === "sync_installation" ? "github_installation" : "repository";
+    input.operation === "sync_installation"
+      ? "github_installation"
+      : input.operation === "review_thread_reconcile"
+        ? "review_run"
+        : "repository";
 
   recordSecurityEvent(input.securityEventSink, {
     metadata: withoutUndefinedValues({
@@ -2637,14 +2666,16 @@ function recordWorkerGitHubProviderSecurityEvent(
       installationId,
       operation: input.operation,
       providerInstallationId,
-      providerRepoId: input.repository?.providerRepoId,
+      providerRepoId,
+      pullRequestNumber: input.reviewThreadTarget?.pullRequestNumber,
       rateLimitRemaining: input.error.rateLimit?.remaining,
       rateLimitBucket: input.error.rateLimit?.resource,
-      repoId: input.repoId,
+      repoId,
+      reviewRunId: input.reviewThreadTarget?.reviewRunId,
       retryAfterSeconds: input.error.retryAfterSeconds,
     }),
     orgId: input.installation?.orgId,
-    repoId: input.repoId,
+    repoId,
     resourceId,
     resourceType,
     severity: workerGitHubProviderSecurityEventSeverity(input.error.code),
@@ -2658,38 +2689,40 @@ function workerGitHubProviderSecurityEventType(
   code: GitHubErrorCode,
   operation: RecordWorkerGitHubProviderSecurityEventInput["operation"],
 ): string | undefined {
+  const prefix = workerGitHubProviderSecurityEventPrefix(operation);
+
   switch (code) {
     case "github_installation_suspended":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_suspended"
-        : "github_worker_index_clone_auth_installation_suspended";
+      return `${prefix}_installation_suspended`;
     case "github_permission":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_permission_denied"
-        : "github_worker_index_clone_auth_permission_denied";
+      return `${prefix}_permission_denied`;
     case "github_rate_limit":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_rate_limited"
-        : "github_worker_index_clone_auth_rate_limited";
+      return `${prefix}_rate_limited`;
     case "github_secondary_rate_limit":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_secondary_rate_limited"
-        : "github_worker_index_clone_auth_secondary_rate_limited";
+      return `${prefix}_secondary_rate_limited`;
     case "github_token":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_token_failed"
-        : "github_worker_index_clone_auth_token_failed";
+      return `${prefix}_token_failed`;
     case "github_unavailable":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_unavailable"
-        : "github_worker_index_clone_auth_unavailable";
+      return `${prefix}_unavailable`;
     case "github_unknown":
     case "github_validation":
-      return operation === "sync_installation"
-        ? "github_worker_sync_installation_provider_failed"
-        : "github_worker_index_clone_auth_provider_failed";
+      return `${prefix}_provider_failed`;
     default:
       return undefined;
+  }
+}
+
+/** Returns the security-event type prefix for one worker-owned GitHub operation. */
+function workerGitHubProviderSecurityEventPrefix(
+  operation: RecordWorkerGitHubProviderSecurityEventInput["operation"],
+): string {
+  switch (operation) {
+    case "index_clone_auth":
+      return "github_worker_index_clone_auth";
+    case "review_thread_reconcile":
+      return "github_worker_review_thread_reconcile";
+    case "sync_installation":
+      return "github_worker_sync_installation";
   }
 }
 
@@ -4767,13 +4800,19 @@ async function updateMemoryFromFindingOutcome(
   );
 }
 
+/** Options used while reconciling provider review-thread state. */
+type ReviewThreadReconciliationOptions = MemoryTelemetryOptions & {
+  /** Optional sink configured by the worker runtime. */
+  readonly securityEventSink?: SecurityEventSink | undefined;
+};
+
 /** Reconciles recent provider thread state when a scheduled memory job requests it. */
 async function reconcileScheduledProviderThreadFeedback(
   db: HeimdallDatabase,
   gitProvider: GitProvider,
   payload: UpdateMemoryJobPayload,
   receivedAt: string,
-  telemetry: MemoryTelemetryOptions = {},
+  options: ReviewThreadReconciliationOptions = {},
 ): Promise<void> {
   if (payload.reason !== "scheduled" || !gitProvider.fetchReviewThreadStates) {
     return;
@@ -4781,16 +4820,27 @@ async function reconcileScheduledProviderThreadFeedback(
 
   const targets = await loadRecentReviewThreadReconciliationTargets(db, payload);
   for (const target of targets) {
-    const states = await gitProvider.fetchReviewThreadStates({
-      provider: "github",
-      installationId: target.installationId,
-      providerInstallationId: target.providerInstallationId,
-      owner: target.owner,
-      repo: target.repo,
-      providerRepoId: target.providerRepoId,
-      pullRequestNumber: target.pullRequestNumber,
-    });
-    await recordReconciledReviewThreadStates(db, target, states, receivedAt, telemetry);
+    const states = await gitProvider
+      .fetchReviewThreadStates({
+        provider: "github",
+        installationId: target.installationId,
+        providerInstallationId: target.providerInstallationId,
+        owner: target.owner,
+        repo: target.repo,
+        providerRepoId: target.providerRepoId,
+        pullRequestNumber: target.pullRequestNumber,
+      })
+      .catch((error: unknown) => {
+        recordWorkerGitHubProviderSecurityEvent({
+          error,
+          operation: "review_thread_reconcile",
+          repoId: target.repoId,
+          reviewThreadTarget: target,
+          securityEventSink: options.securityEventSink,
+        });
+        throw error;
+      });
+    await recordReconciledReviewThreadStates(db, target, states, receivedAt, options);
   }
 }
 
