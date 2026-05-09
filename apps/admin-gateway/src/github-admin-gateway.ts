@@ -170,6 +170,8 @@ export type GitHubAdminGatewayConfig = {
   readonly oauthScopes: readonly string[];
   /** Gateway session cookie name. */
   readonly sessionCookieName: string;
+  /** SameSite policy used for the gateway session cookie. */
+  readonly sessionCookieSameSite: "Strict" | "Lax" | "None";
   /** OAuth state cookie name. */
   readonly stateCookieName: string;
   /** Whether gateway cookies require HTTPS. */
@@ -316,6 +318,9 @@ export function readGitHubAdminGatewayConfig(
     sessionCookieName:
       emptyToUndefined(env.HEIMDALL_ADMIN_GATEWAY_SESSION_COOKIE_NAME) ??
       "heimdall_admin_gateway_session",
+    sessionCookieSameSite:
+      parseCookieSameSite(env.HEIMDALL_ADMIN_GATEWAY_SESSION_COOKIE_SAME_SITE) ??
+      (new URL(publicUrl).origin === new URL(dashboardUrl).origin ? "Lax" : "None"),
     sessionMaxAgeSeconds: parsePositiveInteger(
       env.HEIMDALL_ADMIN_GATEWAY_SESSION_MAX_AGE_SECONDS,
       8 * 60 * 60,
@@ -372,7 +377,7 @@ async function handleGatewayRequestWithTelemetry(
     tryRecordGatewaySecurityEvent(runtime.securityEventSink, request, requestId, route, error, {
       createdAt: runtime.now().toISOString(),
     });
-    const response = handleGatewayError(error, runtime.logger);
+    const response = handleGatewayError(error, runtime.logger, request, config);
     const durationMs = Math.max(0, runtime.now().getTime() - startedAt.getTime());
     recordGatewayRequestMetrics(runtime.metrics, {
       durationMs,
@@ -708,7 +713,7 @@ async function finishGitHubLogin(
   const headers = redirectHeaders(statePayload.returnTo);
   headers.append(
     "set-cookie",
-    clearCookie(config.stateCookieName, "/auth/github/callback", config),
+    clearCookie(config.stateCookieName, "/auth/github/callback", config, "Lax"),
   );
   headers.append(
     "set-cookie",
@@ -716,7 +721,7 @@ async function finishGitHubLogin(
       httpOnly: true,
       maxAgeSeconds: config.sessionMaxAgeSeconds,
       path: "/",
-      sameSite: "Lax",
+      sameSite: config.sessionCookieSameSite,
       secure: config.secureCookies,
     }),
   );
@@ -727,7 +732,10 @@ async function finishGitHubLogin(
 function logoutGatewaySession(request: Request, config: GitHubAdminGatewayConfig): Response {
   assertAllowedOrigin(request, config);
   const headers = secureHeaders(request, config);
-  headers.append("set-cookie", clearCookie(config.sessionCookieName, "/", config));
+  headers.append(
+    "set-cookie",
+    clearCookie(config.sessionCookieName, "/", config, config.sessionCookieSameSite),
+  );
   return jsonResponse({ ok: true }, 200, request, config, headers);
 }
 
@@ -1093,6 +1101,9 @@ function validateGatewayConfig(config: GitHubAdminGatewayConfig): GitHubAdminGat
   if (config.nodeEnv === "production" && !config.secureCookies) {
     throw new Error("Production admin gateway sessions require secure cookies.");
   }
+  if (config.sessionCookieSameSite === "None" && !config.secureCookies) {
+    throw new Error("SameSite=None gateway session cookies require secure cookies.");
+  }
   if (!config.githubClientId || !config.githubClientSecret) {
     throw new Error("GitHub OAuth client configuration is required.");
   }
@@ -1140,6 +1151,7 @@ function validateGatewayConfig(config: GitHubAdminGatewayConfig): GitHubAdminGat
     allowedOrigins: normalizeAllowedOrigins(config.allowedOrigins, dashboardUrl, config.nodeEnv),
     githubOrg: config.githubOrg.trim(),
     publicUrl: publicUrl.toString().replace(/\/$/u, ""),
+    sessionCookieSameSite: config.sessionCookieSameSite,
   };
 }
 
@@ -1184,7 +1196,12 @@ function assertAllowedOrigin(request: Request, config: GitHubAdminGatewayConfig)
 }
 
 /** Converts a gateway error into a structured HTTP response. */
-function handleGatewayError(error: unknown, logger: GitHubAdminGatewayLogger): Response {
+function handleGatewayError(
+  error: unknown,
+  logger: GitHubAdminGatewayLogger,
+  request: Request,
+  config: GitHubAdminGatewayConfig,
+): Response {
   if (error instanceof GatewayHttpError) {
     logger.warn?.("admin gateway request rejected", {
       code: error.code,
@@ -1200,6 +1217,8 @@ function handleGatewayError(error: unknown, logger: GitHubAdminGatewayLogger): R
         },
       },
       error.status,
+      request,
+      config,
     );
   }
 
@@ -1214,6 +1233,8 @@ function handleGatewayError(error: unknown, logger: GitHubAdminGatewayLogger): R
       },
     },
     500,
+    request,
+    config,
   );
 }
 
@@ -1331,14 +1352,38 @@ function serializeCookie(
 }
 
 /** Returns a Set-Cookie header value that clears a cookie. */
-function clearCookie(name: string, path: string, config: GitHubAdminGatewayConfig): string {
+function clearCookie(
+  name: string,
+  path: string,
+  config: GitHubAdminGatewayConfig,
+  sameSite: "Strict" | "Lax" | "None",
+): string {
   return serializeCookie(name, "", {
     httpOnly: true,
     maxAgeSeconds: 0,
     path,
-    sameSite: "Lax",
+    sameSite,
     secure: config.secureCookies,
   });
+}
+
+/** Parses a cookie SameSite policy from deployment configuration. */
+function parseCookieSameSite(value: string | undefined): "Strict" | "Lax" | "None" | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized === "strict") {
+    return "Strict";
+  }
+  if (normalized === "lax") {
+    return "Lax";
+  }
+  if (normalized === "none") {
+    return "None";
+  }
+
+  throw new Error("HEIMDALL_ADMIN_GATEWAY_SESSION_COOKIE_SAME_SITE must be Strict, Lax, or None.");
 }
 
 /** Parses a Cookie header into a lookup map. */
