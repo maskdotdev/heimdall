@@ -284,6 +284,12 @@ export type ReviewRunCurrentCheckInput = GitHubPullRequestRef & {
 /** Current-head state for a review run just before publish handoff. */
 export type ReviewRunCurrentStatus = "current" | "superseded" | "closed" | "unknown";
 
+/** Options used while checking provider current-head state. */
+export type ReviewRunCurrentCheckOptions = {
+  /** Callback invoked when the provider current-state check fails. */
+  readonly onProviderError?: ((error: unknown) => void) | undefined;
+};
+
 /** Staleness checkpoints where orchestration verifies the PR still targets the expected head. */
 export type ReviewStalenessCheckpoint =
   | "after_snapshot"
@@ -585,6 +591,8 @@ export type RecordReviewGitHubProviderSecurityEventInput = {
   readonly reviewRunId?: string | undefined;
   /** Review orchestration stage where the provider failure surfaced. */
   readonly reviewStage: string;
+  /** Staleness checkpoint that triggered the provider current-state check. */
+  readonly reviewStalenessCheckpoint?: ReviewStalenessCheckpoint | undefined;
   /** Optional sink configured by the worker runtime. */
   readonly securityEventSink?: SecurityEventSink | undefined;
   /** Deterministic event creation timestamp for tests. */
@@ -1014,6 +1022,7 @@ export async function runPullRequestReview(
       dependencies,
       logContext: reviewStageLogContext,
       now,
+      orgId: repositoryRecord.orgId,
       pullRequestRef,
       quotaReservation,
       quotaService,
@@ -1401,6 +1410,7 @@ export async function runPullRequestReview(
       dependencies,
       logContext: reviewStageLogContext,
       now,
+      orgId: repositoryRecord.orgId,
       pullRequestRef,
       quotaReservation,
       quotaService,
@@ -1507,6 +1517,7 @@ export async function runPullRequestReview(
       dependencies,
       logContext: reviewStageLogContext,
       now,
+      orgId: repositoryRecord.orgId,
       pullRequestRef,
       quotaReservation,
       quotaService,
@@ -1905,6 +1916,7 @@ export async function runPullRequestReview(
         publishPlanId,
       },
       now,
+      orgId: repositoryRecord.orgId,
       pullRequestRef,
       quotaReservation,
       quotaService,
@@ -2528,6 +2540,7 @@ export function recordReviewGitHubProviderSecurityEvent(
       input.reviewRunId ?? "pending",
       input.reviewInput.pullRequestNumber,
       input.reviewInput.headSha,
+      input.reviewStalenessCheckpoint ?? "none",
       input.error.code,
       input.error.requestId ?? "unknown",
     ]),
@@ -2548,6 +2561,9 @@ export function recordReviewGitHubProviderSecurityEvent(
         : {}),
       ...(input.reviewRunId ? { reviewRunId: input.reviewRunId } : {}),
       reviewStage: input.reviewStage,
+      ...(input.reviewStalenessCheckpoint
+        ? { reviewStalenessCheckpoint: input.reviewStalenessCheckpoint }
+        : {}),
     },
     orgId: input.orgId,
     repoId,
@@ -2971,6 +2987,7 @@ async function fetchPullRequestSnapshotForReview(
 export async function checkReviewRunCurrent(
   gitProvider: Pick<GitProvider, "fetchPullRequestSnapshot">,
   input: ReviewRunCurrentCheckInput,
+  options: ReviewRunCurrentCheckOptions = {},
 ): Promise<ReviewRunCurrentStatus> {
   try {
     const snapshot = await gitProvider.fetchPullRequestSnapshot(input);
@@ -2985,7 +3002,8 @@ export async function checkReviewRunCurrent(
     }
 
     return "current";
-  } catch {
+  } catch (error) {
+    options.onProviderError?.(error);
     return "unknown";
   }
 }
@@ -3027,7 +3045,7 @@ async function stopReviewRunIfStale(input: {
   /** Review orchestration dependencies used for provider checks and telemetry. */
   readonly dependencies: Pick<
     ReviewOrchestratorDependencies,
-    "gitProvider" | "logger" | "metrics" | "traceContext" | "traces"
+    "gitProvider" | "logger" | "metrics" | "securityEventSink" | "traceContext" | "traces"
   >;
   /** Product-safe context attached to structured staleness stage logs. */
   readonly logContext: ReviewStageLogContext;
@@ -3035,6 +3053,8 @@ async function stopReviewRunIfStale(input: {
   readonly metadata?: Record<string, unknown> | undefined;
   /** Clock used for deterministic tests. */
   readonly now: () => Date;
+  /** Organization that owns the review. */
+  readonly orgId: string;
   /** Provider pull request reference to check. */
   readonly pullRequestRef: GitHubPullRequestRef;
   /** Reserved quota to release if this checkpoint stops the run. */
@@ -3052,10 +3072,31 @@ async function stopReviewRunIfStale(input: {
     input.dependencies,
     "staleness",
     () =>
-      checkReviewRunCurrent(input.dependencies.gitProvider, {
-        ...input.pullRequestRef,
-        expectedHeadSha: input.snapshot.headSha,
-      }),
+      checkReviewRunCurrent(
+        input.dependencies.gitProvider,
+        {
+          ...input.pullRequestRef,
+          expectedHeadSha: input.snapshot.headSha,
+        },
+        {
+          onProviderError: (error) => {
+            recordReviewGitHubProviderSecurityEvent({
+              error,
+              orgId: input.orgId,
+              reviewInput: {
+                headSha: input.snapshot.headSha,
+                pullRequestNumber: input.snapshot.pullRequestNumber,
+                repoId: input.snapshot.repoId,
+              },
+              reviewRunId: input.reviewRun.reviewRunId,
+              reviewStage: "current_state",
+              reviewStalenessCheckpoint: input.checkpoint,
+              securityEventSink: input.dependencies.securityEventSink,
+              timestamp: input.now().toISOString(),
+            });
+          },
+        },
+      ),
     {
       attributes: {
         "review.staleness_checkpoint": input.checkpoint,
