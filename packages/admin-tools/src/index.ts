@@ -13,13 +13,12 @@ import type {
 } from "@repo/contracts";
 import { ContextBundleSchema, JOB_TYPES, parseWithSchema } from "@repo/contracts";
 import {
+  AdminDebugRepository,
   type AuditLogRecord,
-  adminActions,
   type BackgroundJobRecord,
   BackgroundJobRepository,
   type CandidateFindingRecord,
   CodeIntelligenceRepository,
-  debugExports,
   type EmbeddingJobItemRecord,
   type EmbeddingJobRecord,
   EmbeddingRepository,
@@ -50,8 +49,6 @@ import {
   type ReviewDependencyRecord,
   ReviewRepository,
   type ReviewStageEventRecord,
-  replayRuns,
-  replayStageRuns,
   type SandboxArtifactRecord,
   type SandboxPolicyDecisionRecord,
   SandboxRepository,
@@ -2120,6 +2117,7 @@ export async function cancelBackgroundJob(
   const auditLogId = newId("audit");
   const result = await dependencies.db.transaction(async (tx) => {
     const repository = new BackgroundJobRepository(tx);
+    const adminDebugRepository = new AdminDebugRepository(tx);
     const cancelResult = await repository.cancelBackgroundJobById({
       backgroundJobId,
       now: canceledAt,
@@ -2135,7 +2133,7 @@ export async function cancelBackgroundJob(
 
     const job = toBackgroundJobDebugSummary(cancelResult.job);
     const previousStatus = cancelResult.previousStatus ?? existing.status;
-    await tx.insert(adminActions).values({
+    await adminDebugRepository.recordAdminAction({
       adminActionId,
       actorType: actor.actorType,
       actorUserId: actor.actorUserId,
@@ -2397,7 +2395,8 @@ export async function exportReviewRunDebugBundle(
   const actorSummary = debugBundleActorSummary(actor);
 
   await dependencies.db.transaction(async (tx) => {
-    await tx.insert(adminActions).values({
+    const adminDebugRepository = new AdminDebugRepository(tx);
+    await adminDebugRepository.recordAdminAction({
       adminActionId,
       actorType: actor.actorType,
       actorUserId: actor.actorUserId,
@@ -2420,7 +2419,7 @@ export async function exportReviewRunDebugBundle(
       status: "completed",
       ...(actor.supportSessionId ? { supportSessionId: actor.supportSessionId } : {}),
     });
-    await tx.insert(debugExports).values({
+    await adminDebugRepository.recordDebugExport({
       adminActionId,
       artifactHash: payloadHash,
       completedAt: generatedAt,
@@ -2498,7 +2497,8 @@ export async function createReviewRunEvalImportDraft(
   const files = evalImportDraftFiles(evalCase, reviewDetails, request, warnings);
 
   await dependencies.db.transaction(async (tx) => {
-    await tx.insert(adminActions).values({
+    const adminDebugRepository = new AdminDebugRepository(tx);
+    await adminDebugRepository.recordAdminAction({
       adminActionId,
       actorType: actor.actorType,
       actorUserId: actor.actorUserId,
@@ -5195,6 +5195,7 @@ async function insertReplayJobs(input: {
     const adminActionId = newId("admact");
     const replayRunId = newId("rply");
     const insertedJobIds: string[] = [];
+    const adminDebugRepository = new AdminDebugRepository(tx);
     const backgroundJobRepository = new BackgroundJobRepository(tx as HeimdallDatabase);
     for (const job of input.jobs) {
       const result = await backgroundJobRepository.insertBackgroundJob({
@@ -5248,7 +5249,7 @@ async function insertReplayJobs(input: {
       source: job.source,
       stage: replayStageNameForJob(input.action, job, index),
     }));
-    await tx.insert(adminActions).values({
+    await adminDebugRepository.recordAdminAction({
       adminActionId,
       actorType: input.audit.actor.actorType,
       actorUserId: input.audit.actor.actorUserId,
@@ -5272,7 +5273,7 @@ async function insertReplayJobs(input: {
         ? { supportSessionId: input.audit.actor.supportSessionId }
         : {}),
     });
-    await tx.insert(replayRuns).values({
+    await adminDebugRepository.recordReplayRun({
       replayRunId,
       adminActionId,
       completedAt,
@@ -5292,27 +5293,25 @@ async function insertReplayJobs(input: {
         ? { supportSessionId: input.audit.actor.supportSessionId }
         : {}),
     });
-    if (replayStageSummaries.length > 0) {
-      await tx.insert(replayStageRuns).values(
-        replayStageSummaries.map((stageSummary) => ({
-          replayStageRunId: newId("rplystg"),
-          replayRunId,
-          completedAt,
-          inputArtifactRef: {
-            replayJobKey: stageSummary.replayJobKey,
-          },
-          metrics: {
-            replayJobCount: 1,
-          },
-          outputArtifactRef: {
-            replayJobKey: stageSummary.replayJobKey,
-          },
-          stage: stageSummary.stage,
-          startedAt: completedAt,
-          status: "completed",
-        })),
-      );
-    }
+    await adminDebugRepository.recordReplayStageRuns(
+      replayStageSummaries.map((stageSummary) => ({
+        replayStageRunId: newId("rplystg"),
+        replayRunId,
+        completedAt,
+        inputArtifactRef: {
+          replayJobKey: stageSummary.replayJobKey,
+        },
+        metrics: {
+          replayJobCount: 1,
+        },
+        outputArtifactRef: {
+          replayJobKey: stageSummary.replayJobKey,
+        },
+        stage: stageSummary.stage,
+        startedAt: completedAt,
+        status: "completed",
+      })),
+    );
     const auditLogId = await insertReplayAuditLog(tx, {
       ...input.audit,
       action: input.action,

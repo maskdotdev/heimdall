@@ -1,4 +1,5 @@
 export * from "./client";
+export * from "./repositories/admin-debug-repository";
 export * from "./repositories/background-job-repository";
 export * from "./repositories/billing-repository";
 export * from "./repositories/code-intelligence-repository";
