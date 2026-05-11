@@ -2,16 +2,19 @@
 
 Heimdall should scale by separating control-plane work from heavy background work.
 
-MVP:
+## MVP
 
-- `apps/api` handles control-plane requests.
-- `apps/worker` runs background review jobs.
-- Packages define reusable review, repository intelligence, and security behavior.
+- `apps/web` handles the dashboard.
+- `services/api` handles control-plane requests.
+- `services/workflows` handles durable orchestration.
+- `workers/code-intel` handles repository analysis.
+- `workers/review` handles LLM review work.
+- `contracts` defines shared system language.
+- `tests/evals` tracks review quality.
 
-Later:
+## Later
 
-- Split worker pools by queue when code intelligence, scanner, review, or publishing work begins competing for resources.
-- Introduce generated contracts under `contracts/`.
-- Add production deployment manifests under `infra/k8s` and `infra/terraform`.
-- Move hot indexing paths behind the existing repo-intel boundaries.
-
+- Add `workers/scanner` for Semgrep, CodeQL, and secret scanning.
+- Add `workers/publisher` when publishing needs separate rate-limit handling.
+- Add `workers/indexer` only when indexing throughput requires it.
+- Add Kubernetes, Terraform, and production Temporal configuration under `infra/`.

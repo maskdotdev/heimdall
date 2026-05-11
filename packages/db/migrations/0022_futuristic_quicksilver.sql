@@ -1,2 +1,0 @@
-DROP INDEX "code_index_versions_repo_commit_key_unique";--> statement-breakpoint
-CREATE UNIQUE INDEX "code_index_versions_repo_commit_key_artifact_unique" ON "code_index_versions" USING btree ("repo_id","commit_sha","index_key","artifact_hash");

@@ -13,5 +13,11 @@ Validation should check:
 - Duplicate findings are removed.
 - Secrets and sensitive payloads are redacted.
 
-Validation belongs in `packages/review-engine` and should be covered by deterministic tests and eval fixtures.
+Primary ownership:
 
+- `contracts/schemas/llm` defines the external LLM output schemas.
+- `workers/review` validates, deduplicates, ranks, and calibrates findings.
+- `services/api` persists and serves only validated findings.
+- `workers/publisher` publishes only approved publishable reviews.
+
+Validation should be covered by deterministic tests and review-quality eval fixtures.

@@ -1,44 +1,49 @@
 # Architecture Overview
 
-Heimdall is organized as a TypeScript monorepo with clear app and package boundaries.
-
-The MVP keeps the API, worker, review logic, contracts, repository intelligence, persistence, and provider integrations in TypeScript packages. Future cross-language boundaries can be added under `contracts/` and `infra/` without moving core product concepts out of the monorepo.
+Heimdall uses a monorepo with service, worker, contract, infrastructure, and test boundaries.
 
 ## Main Components
 
 ```txt
 apps/web
-  Review dashboard for repositories, change requests, review runs, findings, and settings.
+  Review dashboard for repositories, change requests, review runs, findings, diff views, and settings.
 
-apps/api
-  API/control-plane boundary. Owns routes, application use cases, provider ingress, authorization checks, and job dispatch.
+services/api
+  API and control-plane service. Owns authentication, provider ingress, repository and change request APIs, review-run lifecycle commands, findings APIs, and publishing commands.
 
-apps/worker
-  Background pipeline boundary. Owns clone, diff, code graph, context, review, validation, and publishing jobs.
+services/workflows
+  Durable workflow service. Owns Temporal workflow definitions, activities, task queues, payload conversion, and workflow tests.
 
-packages/contracts
-  Shared TypeScript contracts for repository, VCS, diff, code graph, review run, event, and finding shapes.
+workers/code-intel
+  Repository intelligence worker. Owns clone, fetch, diff parsing, language detection, code graph construction, changed symbol detection, dependency frontier detection, and related test detection.
 
-packages/review-engine
-  Review orchestration, validation, ranking, and report construction.
+workers/scanner
+  Deterministic scanner worker. Owns Semgrep, CodeQL, secret scanning, rulesets, parser adapters, and scanner finding normalization.
 
-packages/context-builder
-  Context bundle assembly from diffs, code graph data, related tests, standards, and prior comments.
+workers/review
+  Review intelligence worker. Owns context bundle assembly, reviewer agents, model provider gateways, structured output validation, finding ranking, finding deduplication, and review-quality logic.
 
-packages/repo-intel
-  Language detection, dependency graph, symbol graph, ownership, and test impact helpers.
+workers/publisher
+  Publishing worker. Owns provider-specific comment formatting, inline comments, summary comments, existing comment updates, rate limits, and backoff.
 
-packages/security
-  Redaction, permissions, and token handling.
+workers/indexer
+  Optional later high-performance indexer. Owns large-repository indexing, fast symbol extraction, dependency graph construction, and high-throughput source scanning when Python is not enough.
+
+contracts
+  Shared language for repository references, change requests, diffs, code graphs, context bundles, findings, review runs, events, and publishable reviews.
+
+packages
+  Frontend support packages such as `ts-api-client` and `ui`.
 ```
 
 ## Dependency Direction
 
 ```txt
-apps -> packages
-packages -> packages/contracts
-packages must not depend on apps
+apps/web -> packages/ts-api-client -> contracts/generated
+services/* -> contracts
+workers/* -> contracts
+contracts -> no runtime app, service, or worker dependency
+infra/tools/docs/tests -> no runtime application ownership
 ```
 
-Use public package exports and `@repo/*` imports when package manifests are present. Avoid deep imports into another package's internals.
-
+Use contracts for data that crosses service or worker boundaries. Do not let services and workers each invent local versions of a finding, diff, context bundle, or review event.

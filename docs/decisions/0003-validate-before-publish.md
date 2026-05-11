@@ -14,6 +14,6 @@ Reviewer output may be incomplete, duplicated, unsupported by evidence, or unsaf
 
 ## Consequences
 
-- Validation belongs in `packages/review-engine`.
+- `workers/review` owns structured output validation, ranking, and deduplication.
+- `contracts/schemas/llm` owns the external shape of LLM outputs.
 - Tests and evals must cover invalid locations, weak evidence, duplicates, secret exposure, and unsafe suggested fixes.
-

@@ -8,39 +8,43 @@ The review pipeline turns a repository change request into validated findings an
 apps/web
   User selects a repository and change request.
 
-apps/api
-  Creates a review run, stores state, checks permissions, and queues work.
+services/api
+  Creates a review run.
+  Stores state in Postgres.
+  Starts a Temporal workflow.
 
-apps/worker
-  Runs the background pipeline.
+services/workflows
+  Orchestrates durable review steps.
 
-packages/git and packages/vcs
-  Fetch repository data and normalize provider-specific change request data.
+workers/code-intel
+  Clones the repository.
+  Parses the diff.
+  Builds code graph context.
+  Finds changed symbols and related files.
 
-packages/repo-intel
-  Detects languages, parses changed files, builds code graph context, and identifies related tests.
+workers/scanner
+  Runs Semgrep, CodeQL, and secret checks when enabled.
+  Normalizes scanner output into review signals.
 
-packages/context-builder
-  Builds the review context bundle.
+workers/review
+  Builds the context bundle.
+  Runs reviewer agents.
+  Validates, deduplicates, and ranks findings.
 
-packages/agents
-  Runs specialized reviewers.
-
-packages/review-engine
-  Validates, deduplicates, ranks, and reports findings.
-
-packages/persistence
-  Persists review state, artifacts, and findings.
-
-apps/api
+services/api
   Serves findings and review-run state back to the web app.
+
+workers/publisher
+  Publishes approved comments back to GitHub or GitLab.
 ```
 
 ## Ownership
 
-- `apps/api` owns request authorization and review-run lifecycle commands.
-- `apps/worker` owns asynchronous execution.
-- `packages/review-engine` owns validation and ranking behavior.
-- `packages/security` owns redaction and permission primitives.
-- `packages/contracts` owns shared data shapes.
-
+- `apps/web` owns user-facing workflows.
+- `services/api` owns control-plane requests, authorization, persistence ingress, and workflow starts.
+- `services/workflows` owns durable orchestration.
+- `workers/code-intel` owns repository analysis.
+- `workers/scanner` owns deterministic scanner execution.
+- `workers/review` owns LLM review intelligence and finding quality.
+- `workers/publisher` owns provider publishing behavior.
+- `contracts` owns shared data shapes across the system.

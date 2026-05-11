@@ -2,11 +2,16 @@
 
 Code intelligence provides repository context for review decisions.
 
-Current TypeScript package ownership:
+`workers/code-intel` owns:
 
-- `packages/git`: clone, fetch, diff, patch, and blame helpers.
-- `packages/repo-intel`: language detection, indexing, dependency graph, symbol graph, ownership, and test impact.
-- `packages/context-builder`: converts repository intelligence into bounded review context.
+- Repository clone and fetch operations.
+- Diff parsing and patch handling.
+- Language and framework detection.
+- Source range extraction.
+- Changed symbol extraction.
+- File, symbol, dependency, and test graph construction.
+- Related test detection.
+- Repository metadata extraction.
+- Code graph, diff, and snapshot artifacts.
 
-Future high-throughput indexing can be added behind these package boundaries without changing API or worker callers.
-
+`workers/indexer` is optional later. Add it only when the default code intelligence worker and native tools are not enough for large repositories or hot indexing paths.

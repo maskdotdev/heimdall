@@ -1,66 +1,96 @@
 # Heimdall
 
-Heimdall is a TypeScript monorepo for automated code review. The repository is organized around service boundaries, shared contracts, review orchestration, repository intelligence, and deterministic validation.
+Heimdall is an automated code review system. The repository is structured as a monorepo with strong service boundaries.
 
 ## Repository Layout
 
 ```txt
 apps/
-  web/        User-facing review dashboard.
-  api/        API and control-plane boundary.
-  worker/     Background review pipeline boundary.
+  web/                    User-facing review dashboard.
 
-packages/
-  contracts/        Shared TypeScript request, event, review, diff, VCS, and code graph types.
-  agents/           Reviewer implementations and prompt assembly.
-  review-engine/    Orchestration, validation, ranking, and reporting.
-  context-builder/  Review context construction.
-  repo-intel/       Repository analysis and code graph helpers.
-  git/              Git operations and diff helpers.
-  vcs/              Provider abstractions and normalization.
-  persistence/      Storage repositories.
-  security/         Permission, redaction, and token boundaries.
-  standards/        Review standard extraction and storage.
-  observability/    Logging, metrics, tracing, and eval telemetry.
-  ts-api-client/    Future generated or handwritten frontend API client.
-  ui/               Future shared UI primitives.
+services/
+  api/                    API and control-plane service.
+  workflows/              Temporal workflow definitions and worker service.
+
+workers/
+  code-intel/       Clone, diff, parsing, graph, and related-file worker.
+  review/           LLM agents, context packing, validation, and ranking worker.
+  scanner/          Semgrep, CodeQL, secrets, and deterministic scanner worker.
+  publisher/        GitHub and GitLab publishing worker.
+  indexer/              Optional high-performance indexer for later.
 
 contracts/
-  proto/       Future cross-language Protobuf contracts.
-  openapi/     Future public and internal HTTP API contracts.
-  schemas/     JSON schemas for LLM and event payload validation.
-  generated/   Generated contract outputs.
+  proto/                   Internal cross-language Protobuf contracts.
+  openapi/                 Public and internal HTTP API contracts.
+  schemas/                 LLM and event JSON schemas.
+  generated/               Generated Go, TypeScript, and Python contract outputs.
+
+packages/
+  ts-api-client/            Typed frontend API client.
+  ui/                       Shared frontend UI components.
 
 infra/
-  docker/      Local and deployable container definitions.
-  k8s/         Production Kubernetes manifests.
-  terraform/   Cloud infrastructure modules and environments.
-  temporal/    Workflow/task-queue configuration.
-  migrations/  Database migrations.
-
-tests/
-  fixtures/     Repository, diff, and provider payload fixtures.
-  integration/  Cross-boundary integration tests.
-  evals/        Review-quality evaluation datasets and runners.
-
-docs/
-  architecture/  System design and pipeline documentation.
-  decisions/     Architecture decision records.
-  runbooks/      Operational response guides.
+  docker/                  Container definitions.
+  k8s/                     Kubernetes base manifests and overlays.
+  terraform/               Cloud infrastructure modules and environments.
+  temporal/                Task queue and worker configuration.
+  migrations/              Database migrations.
 
 tools/
-  scripts/  Repository automation scripts.
-  dev/      Local development helpers.
-  ci/       CI-only helpers.
+  scripts/                 Reusable repository automation scripts.
+  dev/                     Local development helpers.
+  ci/                      CI-only helpers.
+
+docs/
+  architecture/            System design and pipeline documentation.
+  decisions/               Architecture decision records.
+  runbooks/                Operational response guides.
+
+tests/
+  fixtures/                Repository, diff, and provider fixtures.
+  integration/             Cross-service integration tests.
+  evals/                   Review-quality evaluation datasets and runners.
 ```
 
 ## Boundary Rules
 
-- App code may depend on package code.
-- Package code must not depend on app code.
-- Shared data shapes belong in `packages/contracts` today and in `contracts/` when generated cross-language contracts are introduced.
-- LLM output is untrusted and must be validated before persistence or publishing.
-- Secrets, tokens, private keys, and unredacted provider payloads must not be logged.
+- `apps/` contains user-facing applications only.
+- `services/` contains durable backend and control-plane services.
+- `workers/` contains asynchronous execution pools.
+- `contracts/` defines shared API, event, model, and generated contract artifacts.
+- `packages/` contains frontend-only shared packages unless a future package has a documented owner.
+- `infra/` contains deployment and environment setup.
+- `tests/` contains integration fixtures and review-quality evals.
+
+Keep service and worker boundaries explicit. Do not let the web app invent its own versions of review runs, diffs, context bundles, findings, or provider references.
+
+## Review Pipeline
+
+```txt
+apps/web
+  User selects a repository and change request.
+
+services/api
+  Creates a review run, stores state, and starts a workflow.
+
+services/workflows
+  Orchestrates durable review steps.
+
+workers/code-intel
+  Clones the repository, parses the diff, builds code graph context, and finds related files.
+
+workers/scanner
+  Runs deterministic static-analysis and secret-scanning tools.
+
+workers/review
+  Builds context bundles, runs reviewer agents, validates findings, deduplicates findings, and ranks output.
+
+services/api
+  Serves review state and findings back to the web app.
+
+workers/publisher
+  Publishes approved comments back to GitHub or GitLab.
+```
 
 ## Documentation Entry Points
 
@@ -73,4 +103,3 @@ tools/
 - [Sandboxing](docs/architecture/sandboxing.md)
 - [Scaling](docs/architecture/scaling.md)
 - [Tech stack](docs/tech-stack.md)
-
