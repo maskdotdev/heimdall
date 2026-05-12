@@ -1,0 +1,10 @@
+{
+  "exports": {
+    ".": "./index.ts"
+  },
+  "name": "@heimdall/contracts",
+  "private": true,
+  "type": "module",
+  "types": "./index.ts",
+  "version": "0.0.0"
+}

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "publish_42",
+  "reviewRunId": "run_42",
+  "provider": "github",
+  "repositoryId": "repo_heimdall",
+  "changeRequestId": "cr_42",
+  "mode": "review-with-summary",
+  "summary": "One validated finding is ready for publication.",
+  "comments": [
+    {
+      "id": "comment_1",
+      "findingId": "finding_1",
+      "body": "Validate findings before publishing them.",
+      "location": {
+        "path": "workers/review/validate-finding.ts",
+        "startLine": 11,
+        "endLine": 11,
+        "commitSha": "bbbbbbbb"
+      },
+      "dedupeKey": "workers/review/validate-finding.ts:11:validation"
+    }
+  ],
+  "approval": {
+    "state": "approved",
+    "approvedBy": {
+      "kind": "user",
+      "displayName": "A Reviewer"
+    },
+    "approvedAt": "2026-05-11T12:03:00Z"
+  },
+  "createdAt": "2026-05-11T12:03:00Z"
+}

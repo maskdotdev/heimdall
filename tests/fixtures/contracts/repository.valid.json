@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "repo_heimdall",
+  "provider": "github",
+  "providerRepositoryId": "123456789",
+  "owner": "acme",
+  "name": "heimdall",
+  "fullName": "acme/heimdall",
+  "defaultBranch": "main",
+  "visibility": "private",
+  "cloneUrl": "https://github.com/acme/heimdall.git",
+  "webUrl": "https://github.com/acme/heimdall",
+  "archived": false,
+  "redaction": {
+    "redacted": false,
+    "strategy": "none"
+  }
+}

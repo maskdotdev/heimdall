@@ -1,0 +1,14 @@
+{
+  "name": "heimdall",
+  "private": true,
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "contracts:validate": "python3 tools/scripts/validate-json-schemas.py --fixtures",
+    "contracts:generate": "python3 tools/scripts/generate-contracts.py",
+    "contracts:check": "python3 tools/scripts/check-contracts.py",
+    "check": "pnpm contracts:check"
+  }
+}

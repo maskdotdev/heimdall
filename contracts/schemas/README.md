@@ -67,10 +67,18 @@ See [examples/review-flow.example.json](examples/review-flow.example.json) for a
 
 ## Local Checks
 
-Run this check from the repository root:
+Run the schema and fixture validation check from the repository root:
 
 ```sh
-python3 tools/scripts/validate-json-schemas.py
+pnpm contracts:validate
 ```
 
-The script checks that schema files contain valid JSON, top-level `$id` values are unique, and local relative `$ref` targets resolve to existing files and definitions.
+The script checks that schema files contain valid JSON, top-level `$id` values are unique, local relative `$ref` targets resolve to existing files and definitions, and valid fixtures under `tests/fixtures/contracts` conform to their matching schemas.
+
+Run the full contract gate before handoff:
+
+```sh
+pnpm contracts:check
+```
+
+That command also verifies generated TypeScript, Python, and Go artifacts under `contracts/generated` are current.

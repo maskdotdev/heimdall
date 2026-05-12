@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "run_42",
+  "changeRequestId": "cr_42",
+  "repositoryId": "repo_heimdall",
+  "workflowId": "workflow_42",
+  "correlationId": "corr-00042",
+  "state": "completed",
+  "phase": "done",
+  "trigger": "webhook",
+  "requestedBy": {
+    "kind": "provider",
+    "displayName": "GitHub"
+  },
+  "findingsSummary": {
+    "total": 1,
+    "bySeverity": {
+      "medium": 1
+    },
+    "publishable": 1,
+    "dismissed": 0
+  },
+  "createdAt": "2026-05-11T12:00:00Z",
+  "startedAt": "2026-05-11T12:00:10Z",
+  "completedAt": "2026-05-11T12:02:00Z",
+  "updatedAt": "2026-05-11T12:02:00Z"
+}

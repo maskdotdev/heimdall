@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "diff_42",
+  "changeRequestId": "cr_42",
+  "baseSha": "aaaaaaaa",
+  "headSha": "bbbbbbbb",
+  "summary": {
+    "fileCount": 1,
+    "additions": 2,
+    "deletions": 1,
+    "languages": ["TypeScript"]
+  },
+  "files": [
+    {
+      "path": "workers/review/validate-finding.ts",
+      "status": "modified",
+      "language": "TypeScript",
+      "additions": 2,
+      "deletions": 1,
+      "hunks": [
+        {
+          "header": "@@ -10,2 +10,3 @@",
+          "oldStart": 10,
+          "oldLines": 2,
+          "newStart": 10,
+          "newLines": 3,
+          "lines": [
+            {
+              "kind": "context",
+              "oldLine": 10,
+              "newLine": 10,
+              "content": "export function validateFinding(finding: unknown) {"
+            },
+            {
+              "kind": "added",
+              "newLine": 11,
+              "content": "  return findingSchema.parse(finding);"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "truncated": false,
+  "redaction": {
+    "redacted": false,
+    "strategy": "none"
+  }
+}

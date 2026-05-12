@@ -60,5 +60,35 @@ Use the schemas for payloads that need runtime validation, especially raw LLM ou
 Run the local schema check from the repository root:
 
 ```sh
-python3 tools/scripts/validate-json-schemas.py
+pnpm contracts:validate
 ```
+
+## Generated Contracts
+
+`contracts/schemas` is the source of truth. Generated runtime types live under:
+
+- `generated/ts`: TypeScript interfaces and literal unions exported as `@heimdall/contracts`.
+- `generated/python`: Python 3.12 dataclasses and type aliases exported by `contract_types`.
+- `generated/go`: Go structs and aliases in package `contracts`.
+
+Regenerate all targets after changing a schema:
+
+```sh
+pnpm contracts:generate
+```
+
+Before handoff, run the single contract check:
+
+```sh
+pnpm contracts:check
+```
+
+The check validates schema structure, validates representative fixtures in `tests/fixtures/contracts`, and fails if generated artifacts drift from `contracts/schemas`.
+
+## Update Workflow
+
+1. Edit the JSON Schema files in `contracts/schemas`.
+2. Add or update representative fixtures in `tests/fixtures/contracts`. Name valid fixtures as `<schema-name>.valid.json`; nested fixtures mirror schema subdirectories such as `events/` and `llm/`.
+3. Run `pnpm contracts:generate`.
+4. Run `pnpm contracts:check`.
+5. Review compatibility before merging. Additive optional fields are usually compatible. Removing fields, adding required fields, changing enum meanings, or changing validation semantics is breaking and requires a schema version bump.

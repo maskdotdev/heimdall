@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "ctx_42",
+  "reviewRunId": "run_42",
+  "changeRequest": {
+    "schemaVersion": "1.0.0",
+    "id": "cr_42",
+    "repository": {
+      "schemaVersion": "1.0.0",
+      "id": "repo_heimdall",
+      "provider": "github",
+      "owner": "acme",
+      "name": "heimdall",
+      "defaultBranch": "main"
+    },
+    "provider": "github",
+    "providerChangeRequestId": "42",
+    "title": "Harden review finding validation",
+    "state": "open",
+    "base": {
+      "ref": "main",
+      "sha": "aaaaaaaa"
+    },
+    "head": {
+      "ref": "feature/contracts",
+      "sha": "bbbbbbbb"
+    }
+  },
+  "diff": {
+    "schemaVersion": "1.0.0",
+    "id": "diff_42",
+    "changeRequestId": "cr_42",
+    "baseSha": "aaaaaaaa",
+    "headSha": "bbbbbbbb",
+    "summary": {
+      "fileCount": 1,
+      "additions": 2,
+      "deletions": 1
+    },
+    "files": [
+      {
+        "path": "workers/review/validate-finding.ts",
+        "status": "modified",
+        "additions": 2,
+        "deletions": 1,
+        "hunks": []
+      }
+    ]
+  },
+  "sourceSnippets": [
+    {
+      "location": {
+        "path": "workers/review/validate-finding.ts",
+        "startLine": 10,
+        "endLine": 12,
+        "commitSha": "bbbbbbbb"
+      },
+      "content": "export function validateFinding(finding: unknown) { return findingSchema.parse(finding); }",
+      "reason": "changed-file"
+    }
+  ],
+  "limits": {
+    "maxFiles": 50,
+    "maxBytes": 200000,
+    "maxSnippetBytes": 40000,
+    "truncated": false
+  },
+  "redaction": {
+    "redacted": false,
+    "strategy": "none"
+  },
+  "createdAt": "2026-05-11T12:00:00Z"
+}

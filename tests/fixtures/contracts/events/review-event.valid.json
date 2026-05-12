@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "event_42",
+  "type": "findings.validated",
+  "occurredAt": "2026-05-11T12:02:00Z",
+  "correlationId": "corr-00042",
+  "reviewRunId": "run_42",
+  "repositoryId": "repo_heimdall",
+  "changeRequestId": "cr_42",
+  "payload": {
+    "candidateCount": 1,
+    "validatedCount": 1,
+    "dismissedCount": 0,
+    "findingIds": ["finding_1"]
+  }
+}

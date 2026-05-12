@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "finding_1",
+  "reviewRunId": "run_42",
+  "source": "llm",
+  "title": "Validate findings before publication",
+  "body": "The publisher should only receive findings that passed schema and location validation.",
+  "category": "reliability",
+  "severity": "medium",
+  "confidence": "high",
+  "location": {
+    "path": "workers/review/validate-finding.ts",
+    "startLine": 11,
+    "endLine": 11,
+    "commitSha": "bbbbbbbb"
+  },
+  "evidence": [
+    {
+      "kind": "diff-line",
+      "summary": "The changed line now validates the finding through the schema parser.",
+      "location": {
+        "path": "workers/review/validate-finding.ts",
+        "startLine": 11,
+        "endLine": 11,
+        "commitSha": "bbbbbbbb"
+      },
+      "quote": "return findingSchema.parse(finding);"
+    }
+  ],
+  "suggestions": [
+    {
+      "summary": "Keep this validation at the worker boundary.",
+      "safety": "safe"
+    }
+  ],
+  "dedupeKey": "workers/review/validate-finding.ts:11:validation",
+  "rank": 1,
+  "status": "validated",
+  "validation": {
+    "schemaValid": true,
+    "locationValid": true,
+    "evidenceValid": true,
+    "redactionValid": true,
+    "validatorVersion": "fixture"
+  },
+  "createdAt": "2026-05-11T12:01:00Z"
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0.0",
+  "summary": "The change adds schema-backed validation before publishing.",
+  "findings": [
+    {
+      "title": "Validate findings before publication",
+      "body": "The publisher should only receive findings that passed schema and location validation.",
+      "category": "reliability",
+      "severity": "medium",
+      "confidence": "high",
+      "location": {
+        "path": "workers/review/validate-finding.ts",
+        "startLine": 11,
+        "endLine": 11,
+        "commitSha": "bbbbbbbb"
+      },
+      "evidence": [
+        {
+          "kind": "diff-line",
+          "summary": "The changed line now validates the finding through the schema parser."
+        }
+      ],
+      "reviewStandardRuleIds": []
+    }
+  ],
+  "modelMetadata": {
+    "provider": "openai",
+    "model": "fixture",
+    "promptVersion": "1.0.0"
+  }
+}

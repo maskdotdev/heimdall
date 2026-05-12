@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "cr_42",
+  "repository": {
+    "schemaVersion": "1.0.0",
+    "id": "repo_heimdall",
+    "provider": "github",
+    "owner": "acme",
+    "name": "heimdall",
+    "defaultBranch": "main"
+  },
+  "provider": "github",
+  "providerChangeRequestId": "42",
+  "number": 42,
+  "title": "Harden review finding validation",
+  "description": "Adds validation before publishing findings.",
+  "state": "open",
+  "author": {
+    "kind": "user",
+    "displayName": "A Reviewer",
+    "login": "areviewer"
+  },
+  "base": {
+    "repositoryId": "repo_heimdall",
+    "ref": "main",
+    "sha": "aaaaaaaa"
+  },
+  "head": {
+    "repositoryId": "repo_heimdall",
+    "ref": "feature/contracts",
+    "sha": "bbbbbbbb"
+  },
+  "labels": ["contracts"],
+  "webUrl": "https://github.com/acme/heimdall/pull/42",
+  "redaction": {
+    "redacted": false,
+    "strategy": "none"
+  }
+}
