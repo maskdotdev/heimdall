@@ -9,6 +9,20 @@
     "contracts:validate": "python3 tools/scripts/validate-json-schemas.py --fixtures",
     "contracts:generate": "python3 tools/scripts/generate-contracts.py",
     "contracts:check": "python3 tools/scripts/check-contracts.py",
-    "check": "pnpm contracts:check"
+    "runtime:typecheck": "pnpm -r --if-present typecheck",
+    "runtime:build": "pnpm --filter @heimdall/web build",
+    "api:dev": "cd services/api && go run ./cmd/api",
+    "api:test": "cd services/api && go test ./...",
+    "python:test": "PYTHONPATH=contracts/generated/python:workers/code-intel/src:workers/review/src python3 -m unittest discover -s workers/code-intel/tests/unit -p 'test_*.py' && PYTHONPATH=contracts/generated/python:workers/code-intel/src:workers/review/src python3 -m unittest discover -s workers/review/tests/unit -p 'test_*.py'",
+    "runtime:test": "pnpm api:test && pnpm python:test",
+    "check": "pnpm contracts:check && pnpm runtime:typecheck && pnpm runtime:build && pnpm runtime:test"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

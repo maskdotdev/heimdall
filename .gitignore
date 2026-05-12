@@ -9,6 +9,8 @@ build/
 .tanstack/
 .vinxi/
 coverage/
+__pycache__/
+*.py[cod]
 
 # turbo/cache
 .turbo/

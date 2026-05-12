@@ -1,5 +1,6 @@
 """Generated Heimdall contract types."""
 
+from .serde import from_json, to_jsonable
 from .types import (
     ChangeRequest,
     ChangeRef,
@@ -71,6 +72,8 @@ from .types import (
 )
 
 __all__ = [
+    'from_json',
+    'to_jsonable',
     'ChangeRequest',
     'ChangeRef',
     'CodeGraph',

@@ -1,0 +1,6 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "contracts/generated/ts"
+allowBuilds:
+  esbuild: true
