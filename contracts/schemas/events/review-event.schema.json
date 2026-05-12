@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/events/review-event.schema.json",
+  "title": "Review Event",
+  "description": "Append-only event envelope for review run lifecycle, worker progress, findings, and publication state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "type", "occurredAt", "reviewRunId", "payload"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "../common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "../common.schema.json#/$defs/resourceId"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "review-run.created",
+        "review-run.started",
+        "review-run.phase-changed",
+        "review-run.completed",
+        "review-run.failed",
+        "context-bundle.created",
+        "scanner.completed",
+        "findings.validated",
+        "publish.requested",
+        "publish.completed",
+        "publish.failed"
+      ]
+    },
+    "occurredAt": {
+      "$ref": "../common.schema.json#/$defs/timestamp"
+    },
+    "correlationId": {
+      "$ref": "../common.schema.json#/$defs/correlationId"
+    },
+    "reviewRunId": {
+      "$ref": "../common.schema.json#/$defs/resourceId"
+    },
+    "repositoryId": {
+      "$ref": "../common.schema.json#/$defs/resourceId"
+    },
+    "changeRequestId": {
+      "$ref": "../common.schema.json#/$defs/resourceId"
+    },
+    "actor": {
+      "$ref": "../common.schema.json#/$defs/actor"
+    },
+    "payload": {
+      "oneOf": [
+        { "$ref": "#/$defs/reviewRunPayload" },
+        { "$ref": "#/$defs/phaseChangedPayload" },
+        { "$ref": "#/$defs/contextBundlePayload" },
+        { "$ref": "#/$defs/scannerCompletedPayload" },
+        { "$ref": "#/$defs/findingsValidatedPayload" },
+        { "$ref": "#/$defs/publishPayload" },
+        { "$ref": "#/$defs/errorPayload" }
+      ]
+    }
+  },
+  "$defs": {
+    "reviewRunPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewRun"],
+      "properties": {
+        "reviewRun": {
+          "$ref": "../review-run.schema.json"
+        }
+      }
+    },
+    "phaseChangedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase"],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["created", "code-intel", "scanner", "context", "review", "validation", "publishing", "done"]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      }
+    },
+    "contextBundlePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contextBundleId"],
+      "properties": {
+        "contextBundleId": {
+          "$ref": "../common.schema.json#/$defs/resourceId"
+        },
+        "artifact": {
+          "$ref": "../common.schema.json#/$defs/artifactRef"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "scannerCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "signalCount"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": ["semgrep", "codeql", "secret-scan", "dependency-audit", "custom"]
+        },
+        "signalCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "artifact": {
+          "$ref": "../common.schema.json#/$defs/artifactRef"
+        }
+      }
+    },
+    "findingsValidatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateCount", "validatedCount", "dismissedCount"],
+      "properties": {
+        "candidateCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "validatedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dismissedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "findingIds": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/resourceId"
+          }
+        }
+      }
+    },
+    "publishPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publishableReviewId", "commentCount"],
+      "properties": {
+        "publishableReviewId": {
+          "$ref": "../common.schema.json#/$defs/resourceId"
+        },
+        "commentCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "providerCommentIds": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/providerObjectId"
+          }
+        }
+      }
+    },
+    "errorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

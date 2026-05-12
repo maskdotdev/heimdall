@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/review-standard.schema.json",
+  "title": "Review Standard",
+  "description": "Policy, style, security, and correctness guidance that constrains automated review behavior.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "scope", "rules"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "scope": {
+      "$ref": "#/$defs/reviewStandardScope"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reviewRule"
+      },
+      "minItems": 1
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "reviewStandardScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repositoryIds": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/resourceId"
+          },
+          "uniqueItems": true
+        },
+        "pathGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "uniqueItems": true
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/provider"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "reviewRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "title", "instruction", "severityFloor"],
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["correctness", "security", "reliability", "performance", "maintainability", "test", "style", "documentation", "accessibility", "other"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "instruction": {
+          "type": "string",
+          "description": "Review instruction written as direct guidance. It must not contain secrets or provider-specific raw payloads.",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "severityFloor": {
+          "$ref": "common.schema.json#/$defs/severity"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "pathGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      }
+    }
+  }
+}

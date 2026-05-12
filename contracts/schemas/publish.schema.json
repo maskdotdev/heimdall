@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/publish.schema.json",
+  "title": "Publishable Review",
+  "description": "Provider-neutral review comments prepared for publication after validation and approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "reviewRunId", "provider", "repositoryId", "changeRequestId", "mode", "comments"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "reviewRunId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "provider": {
+      "$ref": "common.schema.json#/$defs/provider"
+    },
+    "repositoryId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "changeRequestId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "mode": {
+      "type": "string",
+      "description": "Publication strategy selected by the API service or reviewer.",
+      "enum": ["summary-only", "inline-comments", "review-with-summary", "dry-run"]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 20000
+    },
+    "comments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/publishableComment"
+      }
+    },
+    "approval": {
+      "$ref": "#/$defs/publishApproval"
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "publishableComment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "findingId", "body"],
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "findingId": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "body": {
+          "type": "string",
+          "description": "Provider-ready comment body after formatting and redaction.",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "providerThreadId": {
+          "$ref": "common.schema.json#/$defs/providerObjectId"
+        },
+        "dedupeKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "publishApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["not-required", "pending", "approved", "rejected"]
+        },
+        "approvedBy": {
+          "$ref": "common.schema.json#/$defs/actor"
+        },
+        "approvedAt": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    }
+  }
+}

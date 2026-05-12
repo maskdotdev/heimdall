@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/finding.schema.json",
+  "title": "Validated Review Finding",
+  "description": "Validated, normalized finding that may be persisted, ranked, displayed, or considered for provider publication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "reviewRunId", "title", "body", "category", "severity", "confidence", "evidence", "status", "validation"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "reviewRunId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "source": {
+      "type": "string",
+      "description": "Origin of the finding after normalization.",
+      "enum": ["llm", "scanner", "policy", "human", "mixed"]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "body": {
+      "type": "string",
+      "description": "User-facing explanation of the issue and impact.",
+      "minLength": 1,
+      "maxLength": 12000
+    },
+    "category": {
+      "type": "string",
+      "enum": ["correctness", "security", "reliability", "performance", "maintainability", "test", "style", "documentation", "accessibility", "other"]
+    },
+    "severity": {
+      "$ref": "common.schema.json#/$defs/severity"
+    },
+    "confidence": {
+      "$ref": "common.schema.json#/$defs/confidence"
+    },
+    "location": {
+      "$ref": "common.schema.json#/$defs/sourceLocation"
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Concrete evidence supporting the finding. At least one evidence item is required before persistence.",
+      "items": {
+        "$ref": "#/$defs/findingEvidence"
+      },
+      "minItems": 1
+    },
+    "suggestions": {
+      "type": "array",
+      "description": "Suggested fixes. Suggestions are advisory unless approved by a human or a later deterministic patch workflow.",
+      "items": {
+        "$ref": "#/$defs/fixSuggestion"
+      }
+    },
+    "dedupeKey": {
+      "type": "string",
+      "description": "Stable key used by the review worker to collapse equivalent findings.",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "rank": {
+      "type": "integer",
+      "description": "One-based ordering within a review run after ranking.",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "validated", "dismissed", "approved", "published", "failed-publication"]
+    },
+    "validation": {
+      "$ref": "#/$defs/findingValidation"
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "findingEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "summary"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["diff-line", "source-snippet", "scanner-signal", "dependency-edge", "test-signal", "review-standard", "prior-comment", "other"]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "artifact": {
+          "$ref": "common.schema.json#/$defs/artifactRef"
+        },
+        "quote": {
+          "type": "string",
+          "description": "Short redacted excerpt. Do not store secrets or large source blocks here.",
+          "maxLength": 2000
+        }
+      }
+    },
+    "fixSuggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "replacementPatch": {
+          "type": "string",
+          "description": "Optional minimal unified diff. Must be validated before any automated application.",
+          "maxLength": 20000
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "safety": {
+          "type": "string",
+          "enum": ["safe", "needs-review", "unsafe", "unknown"]
+        }
+      }
+    },
+    "findingValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaValid", "locationValid", "evidenceValid", "redactionValid"],
+      "properties": {
+        "schemaValid": {
+          "type": "boolean"
+        },
+        "locationValid": {
+          "type": "boolean"
+        },
+        "evidenceValid": {
+          "type": "boolean"
+        },
+        "redactionValid": {
+          "type": "boolean"
+        },
+        "duplicateOfFindingId": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "validatorVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      }
+    }
+  }
+}

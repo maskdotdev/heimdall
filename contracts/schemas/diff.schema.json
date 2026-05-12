@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/diff.schema.json",
+  "title": "Diff",
+  "description": "Normalized change diff and file-level patch metadata produced by code intelligence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "changeRequestId", "baseSha", "headSha", "files", "summary"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "changeRequestId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "baseSha": {
+      "$ref": "common.schema.json#/$defs/sha"
+    },
+    "headSha": {
+      "$ref": "common.schema.json#/$defs/sha"
+    },
+    "mergeBaseSha": {
+      "$ref": "common.schema.json#/$defs/sha"
+    },
+    "summary": {
+      "$ref": "#/$defs/diffSummary"
+    },
+    "files": {
+      "type": "array",
+      "description": "Changed files in provider-normalized order.",
+      "items": {
+        "$ref": "#/$defs/changedFile"
+      },
+      "minItems": 1
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when file or hunk data was omitted because of size limits.",
+      "default": false
+    },
+    "artifact": {
+      "$ref": "common.schema.json#/$defs/artifactRef"
+    },
+    "redaction": {
+      "$ref": "common.schema.json#/$defs/redactionSummary"
+    }
+  },
+  "$defs": {
+    "diffSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileCount", "additions", "deletions"],
+      "properties": {
+        "fileCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "additions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "changedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "status", "additions", "deletions", "hunks"],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/relativePath"
+        },
+        "previousPath": {
+          "$ref": "common.schema.json#/$defs/relativePath"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["added", "modified", "deleted", "renamed", "copied", "changed-mode", "unknown"]
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "binary": {
+          "type": "boolean",
+          "default": false
+        },
+        "generated": {
+          "type": "boolean",
+          "description": "True when generated-file detection classified the file as generated.",
+          "default": false
+        },
+        "additions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diffHunk"
+          }
+        }
+      }
+    },
+    "diffHunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["oldStart", "oldLines", "newStart", "newLines", "lines"],
+      "properties": {
+        "header": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "oldStart": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oldLines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "newStart": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "newLines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diffLine"
+          }
+        },
+        "truncated": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "diffLine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "content"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["context", "added", "deleted", "metadata"]
+        },
+        "oldLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "newLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      }
+    }
+  }
+}

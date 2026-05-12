@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/common.schema.json",
+  "title": "Heimdall Common Schema Definitions",
+  "description": "Shared JSON Schema definitions used by Heimdall contract schemas. These definitions are intentionally provider-neutral and safe to reuse across services, workers, and generated clients.",
+  "$defs": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Semantic version of the contract schema used to encode the payload.",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "examples": ["1.0.0"]
+    },
+    "resourceId": {
+      "type": "string",
+      "description": "Stable Heimdall resource identifier. Services may use UUID, ULID, or prefixed IDs, but must treat the value as opaque outside the owning boundary.",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "correlationId": {
+      "type": "string",
+      "description": "Opaque identifier used to correlate logs, traces, workflow events, and worker activity without exposing provider secrets.",
+      "minLength": 8,
+      "maxLength": 128
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "UTC timestamp in RFC 3339 date-time format.",
+      "format": "date-time"
+    },
+    "sha": {
+      "type": "string",
+      "description": "Git object SHA. SHA-1 and SHA-256 repositories are both supported.",
+      "pattern": "^[a-fA-F0-9]{7,64}$"
+    },
+    "refName": {
+      "type": "string",
+      "description": "Repository branch, tag, or symbolic ref name after provider normalization.",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "relativePath": {
+      "type": "string",
+      "description": "Repository-relative POSIX path. Values must not be absolute and must not contain parent-directory traversal.",
+      "minLength": 1,
+      "maxLength": 4096,
+      "not": {
+        "anyOf": [
+          { "pattern": "^/" },
+          { "pattern": "(^|/)\\.\\.(/|$)" },
+          { "pattern": "\\u0000" }
+        ]
+      }
+    },
+    "uri": {
+      "type": "string",
+      "description": "Absolute URI.",
+      "format": "uri",
+      "maxLength": 4096
+    },
+    "provider": {
+      "type": "string",
+      "description": "Source-code hosting or review provider after ingress normalization.",
+      "enum": ["github", "gitlab", "bitbucket", "azure-devops", "unknown"]
+    },
+    "providerObjectId": {
+      "type": "string",
+      "description": "Provider-owned identifier. Treat as opaque and never derive authorization decisions from its shape.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "actor": {
+      "type": "object",
+      "description": "Human, bot, service, or provider actor associated with an action.",
+      "additionalProperties": false,
+      "required": ["kind", "displayName"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["user", "bot", "service", "provider", "unknown"]
+        },
+        "id": {
+          "$ref": "#/$defs/resourceId"
+        },
+        "providerId": {
+          "$ref": "#/$defs/providerObjectId"
+        },
+        "login": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "webUrl": {
+          "$ref": "#/$defs/uri"
+        }
+      }
+    },
+    "sourceLocation": {
+      "type": "object",
+      "description": "Repository source location. Line values are one-based and inclusive.",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startColumn": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "commitSha": {
+          "$ref": "#/$defs/sha"
+        }
+      }
+    },
+    "textRange": {
+      "type": "object",
+      "description": "Character or byte range inside an artifact. Offsets are zero-based and end offset is exclusive.",
+      "additionalProperties": false,
+      "required": ["startOffset", "endOffset"],
+      "properties": {
+        "startOffset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endOffset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "encoding": {
+          "type": "string",
+          "enum": ["utf-8-codepoint", "utf-16-codeunit", "byte"]
+        }
+      }
+    },
+    "severity": {
+      "type": "string",
+      "description": "User-facing impact level. Critical and high findings must include concrete impact evidence before publication.",
+      "enum": ["critical", "high", "medium", "low", "info"]
+    },
+    "confidence": {
+      "type": "string",
+      "description": "Confidence after deterministic validation and ranking.",
+      "enum": ["high", "medium", "low"]
+    },
+    "artifactRef": {
+      "type": "object",
+      "description": "Pointer to a persisted artifact. Secrets and raw provider payloads must be redacted before artifact persistence.",
+      "additionalProperties": false,
+      "required": ["kind", "uri", "digest"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["diff", "context-bundle", "scanner-output", "llm-output", "review-report", "publish-log", "other"]
+        },
+        "uri": {
+          "$ref": "#/$defs/uri"
+        },
+        "digest": {
+          "type": "string",
+          "description": "Content digest, normally sha256:<hex>.",
+          "pattern": "^[a-z0-9]+:[a-fA-F0-9]{32,128}$"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "redactionSummary": {
+      "type": "object",
+      "description": "Summary of redaction performed before persistence, prompting, or publishing.",
+      "additionalProperties": false,
+      "required": ["redacted"],
+      "properties": {
+        "redacted": {
+          "type": "boolean"
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["none", "secret-pattern", "provider-payload", "permission-filter", "size-limit", "mixed"]
+        },
+        "redactedFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "uniqueItems": true
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      }
+    }
+  }
+}

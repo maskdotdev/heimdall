@@ -1,0 +1,129 @@
+{
+  "repository": {
+    "schemaVersion": "1.0.0",
+    "id": "repo_heimdall",
+    "provider": "github",
+    "providerRepositoryId": "123456789",
+    "owner": "example-org",
+    "name": "heimdall",
+    "fullName": "example-org/heimdall",
+    "defaultBranch": "main",
+    "visibility": "private",
+    "webUrl": "https://github.com/example-org/heimdall",
+    "redaction": {
+      "redacted": false,
+      "strategy": "none"
+    }
+  },
+  "reviewRun": {
+    "schemaVersion": "1.0.0",
+    "id": "run_01",
+    "changeRequestId": "cr_42",
+    "repositoryId": "repo_heimdall",
+    "correlationId": "corr_20260511_0001",
+    "state": "running",
+    "phase": "review",
+    "trigger": "webhook",
+    "createdAt": "2026-05-11T15:00:00Z"
+  },
+  "llmReviewerOutput": {
+    "schemaVersion": "1.0.0",
+    "summary": "One supported candidate finding was identified.",
+    "findings": [
+      {
+        "title": "Validate provider payload before use",
+        "body": "The change reads a provider field before normalized schema validation. A malformed webhook could bypass expected defaults.",
+        "category": "security",
+        "severity": "high",
+        "confidence": "medium",
+        "location": {
+          "path": "services/api/internal/transport/http/webhook.go",
+          "startLine": 42,
+          "endLine": 42
+        },
+        "evidence": [
+          {
+            "kind": "diff-line",
+            "summary": "The added code reads the provider payload before validation.",
+            "location": {
+              "path": "services/api/internal/transport/http/webhook.go",
+              "startLine": 42,
+              "endLine": 42
+            }
+          }
+        ],
+        "suggestedFix": "Parse and validate the normalized provider payload before reading nested fields."
+      }
+    ],
+    "modelMetadata": {
+      "provider": "example",
+      "model": "reviewer-model",
+      "promptVersion": "review-v1"
+    }
+  },
+  "validatedFinding": {
+    "schemaVersion": "1.0.0",
+    "id": "finding_01",
+    "reviewRunId": "run_01",
+    "source": "llm",
+    "title": "Validate provider payload before use",
+    "body": "The change reads a provider field before normalized schema validation. A malformed webhook could bypass expected defaults.",
+    "category": "security",
+    "severity": "high",
+    "confidence": "medium",
+    "location": {
+      "path": "services/api/internal/transport/http/webhook.go",
+      "startLine": 42,
+      "endLine": 42
+    },
+    "evidence": [
+      {
+        "kind": "diff-line",
+        "summary": "The added code reads the provider payload before validation.",
+        "location": {
+          "path": "services/api/internal/transport/http/webhook.go",
+          "startLine": 42,
+          "endLine": 42
+        }
+      }
+    ],
+    "dedupeKey": "security:services/api/internal/transport/http/webhook.go:42:provider-validation",
+    "rank": 1,
+    "status": "validated",
+    "validation": {
+      "schemaValid": true,
+      "locationValid": true,
+      "evidenceValid": true,
+      "redactionValid": true,
+      "validatorVersion": "finding-validator-v1"
+    },
+    "createdAt": "2026-05-11T15:01:00Z"
+  },
+  "publishableReview": {
+    "schemaVersion": "1.0.0",
+    "id": "publish_01",
+    "reviewRunId": "run_01",
+    "provider": "github",
+    "repositoryId": "repo_heimdall",
+    "changeRequestId": "cr_42",
+    "mode": "review-with-summary",
+    "summary": "Heimdall found one validated issue that should be reviewed before merge.",
+    "comments": [
+      {
+        "id": "comment_01",
+        "findingId": "finding_01",
+        "body": "Validate the normalized provider payload before reading nested fields. This prevents malformed webhook data from bypassing expected defaults.",
+        "location": {
+          "path": "services/api/internal/transport/http/webhook.go",
+          "startLine": 42,
+          "endLine": 42
+        },
+        "dedupeKey": "security:services/api/internal/transport/http/webhook.go:42:provider-validation"
+      }
+    ],
+    "approval": {
+      "state": "pending"
+    },
+    "createdAt": "2026-05-11T15:02:00Z"
+  }
+}

@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/code-graph.schema.json",
+  "title": "Code Graph",
+  "description": "Repository intelligence artifact that describes changed symbols, dependencies, and related tests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "repositoryId", "headSha", "symbols", "dependencies"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "repositoryId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "headSha": {
+      "$ref": "common.schema.json#/$defs/sha"
+    },
+    "languages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/languageSummary"
+      }
+    },
+    "symbols": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/symbol"
+      }
+    },
+    "changedSymbols": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/symbolRef"
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependencyEdge"
+      }
+    },
+    "relatedTests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relatedTest"
+      }
+    },
+    "truncated": {
+      "type": "boolean",
+      "default": false
+    },
+    "artifact": {
+      "$ref": "common.schema.json#/$defs/artifactRef"
+    }
+  },
+  "$defs": {
+    "languageSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "fileCount"],
+      "properties": {
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fileCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "primary": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "symbolRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["symbolId"],
+      "properties": {
+        "symbolId": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "path": {
+          "$ref": "common.schema.json#/$defs/relativePath"
+        }
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "location"],
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "qualifiedName": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["function", "method", "class", "interface", "type", "variable", "constant", "module", "package", "test", "unknown"]
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "exported": {
+          "type": "boolean"
+        }
+      }
+    },
+    "dependencyEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "kind"],
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/symbolRef"
+        },
+        "to": {
+          "$ref": "#/$defs/symbolRef"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["imports", "calls", "extends", "implements", "reads", "writes", "tests", "references", "unknown"]
+        },
+        "confidence": {
+          "$ref": "common.schema.json#/$defs/confidence"
+        }
+      }
+    },
+    "relatedTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/relativePath"
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbolRef"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["same-file", "naming-convention", "dependency-edge", "test-framework", "historical-change", "manual", "unknown"]
+        },
+        "confidence": {
+          "$ref": "common.schema.json#/$defs/confidence"
+        }
+      }
+    }
+  }
+}

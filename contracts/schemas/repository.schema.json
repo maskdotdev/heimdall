@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/repository.schema.json",
+  "title": "Repository",
+  "description": "Normalized repository metadata used across API, workflow, worker, and publisher boundaries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "provider", "owner", "name", "defaultBranch"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "provider": {
+      "$ref": "common.schema.json#/$defs/provider"
+    },
+    "providerRepositoryId": {
+      "$ref": "common.schema.json#/$defs/providerObjectId"
+    },
+    "owner": {
+      "type": "string",
+      "description": "Provider-normalized organization, namespace, group, or account owner.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "name": {
+      "type": "string",
+      "description": "Provider-normalized repository name.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "fullName": {
+      "type": "string",
+      "description": "Provider-normalized owner/name label for display and lookup.",
+      "minLength": 3,
+      "maxLength": 512
+    },
+    "defaultBranch": {
+      "$ref": "common.schema.json#/$defs/refName"
+    },
+    "visibility": {
+      "type": "string",
+      "enum": ["public", "private", "internal", "unknown"]
+    },
+    "cloneUrl": {
+      "$ref": "common.schema.json#/$defs/uri"
+    },
+    "webUrl": {
+      "$ref": "common.schema.json#/$defs/uri"
+    },
+    "archived": {
+      "type": "boolean",
+      "default": false
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "redaction": {
+      "$ref": "common.schema.json#/$defs/redactionSummary"
+    }
+  }
+}

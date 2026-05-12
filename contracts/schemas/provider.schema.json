@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/provider.schema.json",
+  "title": "Provider References",
+  "description": "Normalized provider references used without leaking raw provider payloads into review logic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "provider", "repository"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "provider": {
+      "$ref": "common.schema.json#/$defs/provider"
+    },
+    "repository": {
+      "$ref": "#/$defs/providerRepositoryRef"
+    },
+    "changeRequest": {
+      "$ref": "#/$defs/providerChangeRequestRef"
+    },
+    "comments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/providerCommentRef"
+      }
+    }
+  },
+  "$defs": {
+    "providerRepositoryRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerRepositoryId", "owner", "name"],
+      "properties": {
+        "providerRepositoryId": {
+          "$ref": "common.schema.json#/$defs/providerObjectId"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "webUrl": {
+          "$ref": "common.schema.json#/$defs/uri"
+        }
+      }
+    },
+    "providerChangeRequestRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerChangeRequestId"],
+      "properties": {
+        "providerChangeRequestId": {
+          "$ref": "common.schema.json#/$defs/providerObjectId"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "webUrl": {
+          "$ref": "common.schema.json#/$defs/uri"
+        }
+      }
+    },
+    "providerCommentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerCommentId", "kind"],
+      "properties": {
+        "providerCommentId": {
+          "$ref": "common.schema.json#/$defs/providerObjectId"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["inline", "summary", "thread", "review"]
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "webUrl": {
+          "$ref": "common.schema.json#/$defs/uri"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/llm/reviewer-output.schema.json",
+  "title": "LLM Reviewer Output",
+  "description": "Strict external schema for raw reviewer model output. This payload is untrusted and must be validated, redacted, deduplicated, and ranked before persistence or publication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "findings"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "../common.schema.json#/$defs/schemaVersion"
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short review summary. This text is not publishable until policy and redaction checks pass.",
+      "maxLength": 4000
+    },
+    "findings": {
+      "type": "array",
+      "description": "Candidate findings proposed by a reviewer model. Empty is valid when no supported issues are found.",
+      "items": {
+        "$ref": "#/$defs/reviewerFinding"
+      },
+      "maxItems": 100
+    },
+    "modelMetadata": {
+      "$ref": "#/$defs/modelMetadata"
+    }
+  },
+  "$defs": {
+    "reviewerFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "body", "category", "severity", "confidence", "evidence"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "body": {
+          "type": "string",
+          "description": "Clear explanation of the suspected issue and why it matters.",
+          "minLength": 1,
+          "maxLength": 6000
+        },
+        "category": {
+          "type": "string",
+          "enum": ["correctness", "security", "reliability", "performance", "maintainability", "test", "style", "documentation", "accessibility", "other"]
+        },
+        "severity": {
+          "$ref": "../common.schema.json#/$defs/severity"
+        },
+        "confidence": {
+          "$ref": "../common.schema.json#/$defs/confidence"
+        },
+        "location": {
+          "$ref": "../common.schema.json#/$defs/sourceLocation"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reviewerEvidence"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "suggestedFix": {
+          "type": "string",
+          "description": "Natural-language fix guidance. Unified diffs are intentionally not accepted in raw model output until a patch workflow exists.",
+          "maxLength": 4000
+        },
+        "reviewStandardRuleIds": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/resourceId"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "reviewerEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "summary"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["diff-line", "source-snippet", "scanner-signal", "dependency-edge", "test-signal", "review-standard", "other"]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "location": {
+          "$ref": "../common.schema.json#/$defs/sourceLocation"
+        }
+      }
+    },
+    "modelMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "promptVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

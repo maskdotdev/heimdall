@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/change-request.schema.json",
+  "title": "Change Request",
+  "description": "Normalized pull request, merge request, or equivalent provider change request metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "repository", "provider", "providerChangeRequestId", "title", "state", "base", "head"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "repository": {
+      "$ref": "repository.schema.json"
+    },
+    "provider": {
+      "$ref": "common.schema.json#/$defs/provider"
+    },
+    "providerChangeRequestId": {
+      "$ref": "common.schema.json#/$defs/providerObjectId"
+    },
+    "number": {
+      "type": "integer",
+      "description": "Provider-visible numeric change request number when one exists.",
+      "minimum": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "description": {
+      "type": "string",
+      "description": "Redacted provider body or description.",
+      "maxLength": 65536
+    },
+    "state": {
+      "type": "string",
+      "enum": ["open", "draft", "merged", "closed", "unknown"]
+    },
+    "author": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "base": {
+      "$ref": "#/$defs/changeRef"
+    },
+    "head": {
+      "$ref": "#/$defs/changeRef"
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "webUrl": {
+      "$ref": "common.schema.json#/$defs/uri"
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "redaction": {
+      "$ref": "common.schema.json#/$defs/redactionSummary"
+    }
+  },
+  "$defs": {
+    "changeRef": {
+      "type": "object",
+      "description": "Resolved branch and commit endpoint for a change request side.",
+      "additionalProperties": false,
+      "required": ["ref", "sha"],
+      "properties": {
+        "repositoryId": {
+          "$ref": "common.schema.json#/$defs/resourceId"
+        },
+        "ref": {
+          "$ref": "common.schema.json#/$defs/refName"
+        },
+        "sha": {
+          "$ref": "common.schema.json#/$defs/sha"
+        }
+      }
+    }
+  }
+}

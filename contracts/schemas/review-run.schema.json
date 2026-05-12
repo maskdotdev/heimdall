@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/review-run.schema.json",
+  "title": "Review Run",
+  "description": "Lifecycle state for one automated review execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "changeRequestId", "repositoryId", "state", "createdAt"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "changeRequestId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "repositoryId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "workflowId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "correlationId": {
+      "$ref": "common.schema.json#/$defs/correlationId"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["queued", "running", "needs-approval", "completed", "failed", "canceled"]
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["created", "code-intel", "scanner", "context", "review", "validation", "publishing", "done"]
+    },
+    "trigger": {
+      "type": "string",
+      "enum": ["manual", "webhook", "schedule", "retry", "api"]
+    },
+    "requestedBy": {
+      "$ref": "common.schema.json#/$defs/actor"
+    },
+    "findingsSummary": {
+      "$ref": "#/$defs/findingsSummary"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/artifactRef"
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/reviewRunError"
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "startedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "completedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "findingsSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total"],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bySeverity": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "propertyNames": {
+            "enum": ["critical", "high", "medium", "low", "info"]
+          }
+        },
+        "publishable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dismissed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reviewRunError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "phase": {
+          "type": "string",
+          "enum": ["created", "code-intel", "scanner", "context", "review", "validation", "publishing", "done"]
+        }
+      }
+    }
+  }
+}

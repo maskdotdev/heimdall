@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heimdall.dev/contracts/schemas/context-bundle.schema.json",
+  "title": "Context Bundle",
+  "description": "Bounded, redacted evidence package passed from code intelligence and scanner workers into review intelligence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "reviewRunId", "changeRequest", "diff", "limits", "redaction"],
+  "properties": {
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "id": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "reviewRunId": {
+      "$ref": "common.schema.json#/$defs/resourceId"
+    },
+    "changeRequest": {
+      "$ref": "change-request.schema.json"
+    },
+    "diff": {
+      "$ref": "diff.schema.json"
+    },
+    "codeGraph": {
+      "$ref": "code-graph.schema.json"
+    },
+    "sourceSnippets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceSnippet"
+      }
+    },
+    "dependencyFrontier": {
+      "type": "array",
+      "description": "Files or symbols adjacent to the changed code that may explain impact.",
+      "items": {
+        "$ref": "#/$defs/frontierItem"
+      }
+    },
+    "relatedTests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relatedTestRef"
+      }
+    },
+    "reviewStandards": {
+      "type": "array",
+      "items": {
+        "$ref": "review-standard.schema.json"
+      }
+    },
+    "priorComments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/priorReviewComment"
+      }
+    },
+    "scannerSignals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scannerSignal"
+      }
+    },
+    "limits": {
+      "$ref": "#/$defs/contextLimits"
+    },
+    "redaction": {
+      "$ref": "common.schema.json#/$defs/redactionSummary"
+    },
+    "artifact": {
+      "$ref": "common.schema.json#/$defs/artifactRef"
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "$defs": {
+    "sourceSnippet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["location", "content"],
+      "properties": {
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "content": {
+          "type": "string",
+          "description": "Redacted source content bounded by context limits.",
+          "minLength": 1,
+          "maxLength": 40000
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["changed-file", "related-symbol", "dependency", "test", "review-standard", "manual", "unknown"]
+        }
+      }
+    },
+    "frontierItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "reason"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["file", "symbol", "package", "service", "test"]
+        },
+        "path": {
+          "$ref": "common.schema.json#/$defs/relativePath"
+        },
+        "symbolName": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "confidence": {
+          "$ref": "common.schema.json#/$defs/confidence"
+        }
+      }
+    },
+    "relatedTestRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/relativePath"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "confidence": {
+          "$ref": "common.schema.json#/$defs/confidence"
+        }
+      }
+    },
+    "priorReviewComment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerCommentId", "body", "author"],
+      "properties": {
+        "providerCommentId": {
+          "$ref": "common.schema.json#/$defs/providerObjectId"
+        },
+        "author": {
+          "$ref": "common.schema.json#/$defs/actor"
+        },
+        "body": {
+          "type": "string",
+          "description": "Redacted provider comment body.",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "createdAt": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        }
+      }
+    },
+    "scannerSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "ruleId", "severity", "message"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": ["semgrep", "codeql", "secret-scan", "dependency-audit", "custom"]
+        },
+        "ruleId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "severity": {
+          "$ref": "common.schema.json#/$defs/severity"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "location": {
+          "$ref": "common.schema.json#/$defs/sourceLocation"
+        },
+        "artifact": {
+          "$ref": "common.schema.json#/$defs/artifactRef"
+        }
+      }
+    },
+    "contextLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxFiles", "maxBytes", "truncated"],
+      "properties": {
+        "maxFiles": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxSnippetBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "truncationReasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      }
+    }
+  }
+}
