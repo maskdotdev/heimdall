@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "findings": [
+    {
+      "title": "Validate findings before publication",
+      "body": "The publisher should only receive findings that passed schema and location validation.",
+      "category": "reliability",
+      "severity": "medium",
+      "confidence": "high",
+      "evidence": []
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "finding_bad_severity",
+  "reviewRunId": "run_42",
+  "title": "Validate findings before publication",
+  "body": "The publisher should only receive findings that passed schema and location validation.",
+  "category": "reliability",
+  "severity": "urgent",
+  "confidence": "high",
+  "evidence": [
+    {
+      "kind": "diff-line",
+      "summary": "The changed line now validates the finding through the schema parser."
+    }
+  ],
+  "status": "validated",
+  "validation": {
+    "schemaValid": true,
+    "locationValid": true,
+    "evidenceValid": true,
+    "redactionValid": true
+  }
+}

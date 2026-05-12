@@ -1,0 +1,4 @@
+{
+  "instancePath": "/rawProviderPayload",
+  "messageContains": "additional property is not allowed"
+}

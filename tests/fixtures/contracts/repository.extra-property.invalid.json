@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "repo_extra",
+  "provider": "github",
+  "owner": "acme",
+  "name": "heimdall",
+  "defaultBranch": "main",
+  "rawProviderPayload": {
+    "private": true
+  }
+}

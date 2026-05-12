@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "diff_bad_path",
+  "changeRequestId": "cr_42",
+  "baseSha": "aaaaaaaa",
+  "headSha": "bbbbbbbb",
+  "summary": {
+    "fileCount": 1,
+    "additions": 1,
+    "deletions": 0
+  },
+  "files": [
+    {
+      "path": "../secrets.env",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "hunks": []
+    }
+  ]
+}

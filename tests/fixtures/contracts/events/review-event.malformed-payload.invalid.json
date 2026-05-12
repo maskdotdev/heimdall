@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "event_bad_payload",
+  "type": "findings.validated",
+  "occurredAt": "2026-05-11T12:02:00Z",
+  "reviewRunId": "run_42",
+  "payload": {
+    "candidateCount": 1
+  }
+}

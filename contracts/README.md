@@ -83,12 +83,12 @@ Before handoff, run the single contract check:
 pnpm contracts:check
 ```
 
-The check validates schema structure, validates representative fixtures in `tests/fixtures/contracts`, and fails if generated artifacts drift from `contracts/schemas`.
+The check validates schema structure, validates representative valid and invalid fixtures in `tests/fixtures/contracts`, and fails if generated artifacts drift from `contracts/schemas`.
 
 ## Update Workflow
 
 1. Edit the JSON Schema files in `contracts/schemas`.
-2. Add or update representative fixtures in `tests/fixtures/contracts`. Name valid fixtures as `<schema-name>.valid.json`; nested fixtures mirror schema subdirectories such as `events/` and `llm/`.
+2. Add or update representative fixtures in `tests/fixtures/contracts`. Name valid fixtures as `<schema-name>.valid.json`; name invalid fixtures as `<schema-name>.<case>.invalid.json` with a matching `<schema-name>.<case>.expect.json`. Nested fixtures mirror schema subdirectories such as `events/` and `llm/`.
 3. Run `pnpm contracts:generate`.
 4. Run `pnpm contracts:check`.
 5. Review compatibility before merging. Additive optional fields are usually compatible. Removing fields, adding required fields, changing enum meanings, or changing validation semantics is breaking and requires a schema version bump.

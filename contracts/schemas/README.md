@@ -73,7 +73,7 @@ Run the schema and fixture validation check from the repository root:
 pnpm contracts:validate
 ```
 
-The script checks that schema files contain valid JSON, top-level `$id` values are unique, local relative `$ref` targets resolve to existing files and definitions, and valid fixtures under `tests/fixtures/contracts` conform to their matching schemas.
+The script checks that schema files contain valid JSON, top-level `$id` values are unique, local relative `$ref` targets resolve to existing files and definitions, valid fixtures under `tests/fixtures/contracts` conform to their matching schemas, and invalid fixtures fail for the expected reason.
 
 Run the full contract gate before handoff:
 
