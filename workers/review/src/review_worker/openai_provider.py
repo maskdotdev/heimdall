@@ -14,13 +14,14 @@ from contract_types import (
 )
 
 from .ports import ReviewRequest
+from .reviewer_output_schema import reviewer_output_response_format
 
 
 Transport = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
 PROMPT_VERSION = "baseline-reviewer-v1"
 REVIEW_TEMPERATURE = 0.1
 SYSTEM_PROMPT = (
-    "You are Heimdall's code reviewer. Return only valid JSON matching the reviewer output contract. "
+    "You are Heimdall's code reviewer. The API enforces the reviewer output JSON schema. "
     'schemaVersion must be exactly "1.0.0". Review only the changed files, changed hunks, source snippets, '
     "scanner signals, review standards, and related tests provided in the request. Do not report issues that "
     "are merely possible, pre-existing, outside the supplied changed-code context, or unsupported by concrete "
@@ -35,6 +36,10 @@ SYSTEM_PROMPT = (
     "Evidence must identify the exact changed file and line whenever a line is available. Do not include secrets, "
     "tokens, private keys, or raw sensitive provider payloads in the response."
 )
+
+
+class ReviewerRefusalError(ValueError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +71,7 @@ class OpenAICompatibleReviewerProvider:
             {
                 "model": self.config.model,
                 "temperature": REVIEW_TEMPERATURE,
-                "response_format": {"type": "json_object"},
+                "response_format": reviewer_output_response_format(),
                 "messages": [
                     {
                         "role": "system",
@@ -76,7 +81,11 @@ class OpenAICompatibleReviewerProvider:
                 ],
             },
         )
-        content = response["choices"][0]["message"]["content"]
+        message = response["choices"][0]["message"]
+        refusal = message.get("refusal")
+        if refusal:
+            raise ReviewerRefusalError(f"reviewer model refused the request: {refusal}")
+        content = message["content"]
         output = from_json(ReviewerOutput, json.loads(content))
         output.modelMetadata = output.modelMetadata or ModelMetadata()
         output.modelMetadata.provider = "openai-compatible"
@@ -133,7 +142,8 @@ def build_prompt(request: ReviewRequest) -> str:
         "- Findings must include title, body, category, severity, confidence, and evidence.\n"
         "- Evidence must include kind and summary, and should include location.path and location.startLine when tied to a changed line.\n"
         "- Only report findings supported by the changedFiles or sourceSnippets above.\n"
-        "- Return an empty findings array when the context does not prove a concrete issue."
+        "- Return an empty findings array when the context does not prove a concrete issue.\n"
+        "- Set modelMetadata to null; Heimdall fills provider metadata after parsing."
     )
 
 
