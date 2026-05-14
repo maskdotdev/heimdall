@@ -1,0 +1,115 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "ctx_eval_python_sql_injection",
+  "reviewRunId": "run_eval_python_sql_injection",
+  "changeRequest": {
+    "schemaVersion": "1.0.0",
+    "id": "cr_eval_python_sql_injection",
+    "repository": {
+      "schemaVersion": "1.0.0",
+      "id": "repo_eval",
+      "provider": "github",
+      "owner": "acme",
+      "name": "payments",
+      "defaultBranch": "main"
+    },
+    "provider": "github",
+    "providerChangeRequestId": "101",
+    "title": "Use request parameter in profile lookup",
+    "state": "open",
+    "base": {
+      "ref": "main",
+      "sha": "aaaaaaaa"
+    },
+    "head": {
+      "ref": "pull/101/head",
+      "sha": "bbbbbbbb"
+    }
+  },
+  "diff": {
+    "schemaVersion": "1.0.0",
+    "id": "diff_eval_python_sql_injection",
+    "changeRequestId": "cr_eval_python_sql_injection",
+    "baseSha": "aaaaaaaa",
+    "headSha": "bbbbbbbb",
+    "summary": {
+      "fileCount": 1,
+      "additions": 3,
+      "deletions": 1,
+      "languages": ["Python"]
+    },
+    "files": [
+      {
+        "path": "app/routes.py",
+        "status": "modified",
+        "additions": 3,
+        "deletions": 1,
+        "language": "Python",
+        "hunks": [
+          {
+            "oldStart": 4,
+            "oldLines": 4,
+            "newStart": 4,
+            "newLines": 5,
+            "lines": [
+              {
+                "kind": "context",
+                "oldLine": 4,
+                "newLine": 4,
+                "content": "def profile(request):"
+              },
+              {
+                "kind": "added",
+                "newLine": 5,
+                "content": "    user_id = request.GET[\"id\"]"
+              },
+              {
+                "kind": "deleted",
+                "oldLine": 5,
+                "content": "    return get_profile(request.user.id)"
+              },
+              {
+                "kind": "added",
+                "newLine": 6,
+                "content": "    query = f\"SELECT * FROM users WHERE id = {user_id}\""
+              },
+              {
+                "kind": "added",
+                "newLine": 7,
+                "content": "    return db.execute(query).fetchone()"
+              },
+              {
+                "kind": "context",
+                "oldLine": 6,
+                "newLine": 8,
+                "content": ""
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "sourceSnippets": [
+    {
+      "location": {
+        "path": "app/routes.py",
+        "startLine": 4,
+        "endLine": 8,
+        "commitSha": "bbbbbbbb"
+      },
+      "content": "def profile(request):\n    user_id = request.GET[\"id\"]\n    query = f\"SELECT * FROM users WHERE id = {user_id}\"\n    return db.execute(query).fetchone()\n",
+      "reason": "changed-file"
+    }
+  ],
+  "limits": {
+    "maxFiles": 50,
+    "maxBytes": 200000,
+    "maxSnippetBytes": 40000,
+    "truncated": false
+  },
+  "redaction": {
+    "redacted": false,
+    "strategy": "none"
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "1.0.0",
+  "summary": "The changed profile lookup introduces one supported security finding.",
+  "findings": [
+    {
+      "title": "Raw user id is interpolated into SQL",
+      "body": "The changed code reads a request parameter and interpolates it directly into a SQL string before executing it. A crafted id value can change the query semantics.",
+      "category": "security",
+      "severity": "high",
+      "confidence": "high",
+      "location": {
+        "path": "app/routes.py",
+        "startLine": 6
+      },
+      "evidence": [
+        {
+          "kind": "diff-line",
+          "summary": "Line 6 builds the SQL query with an f-string that includes user_id from the request parameter added on line 5.",
+          "location": {
+            "path": "app/routes.py",
+            "startLine": 6
+          }
+        }
+      ],
+      "suggestedFix": "Use a parameterized query or repository helper that binds user_id as a value instead of interpolating it into SQL."
+    },
+    {
+      "title": "Raw user id is interpolated into SQL",
+      "body": "Duplicate of the same SQL injection issue.",
+      "category": "security",
+      "severity": "medium",
+      "confidence": "high",
+      "location": {
+        "path": "app/routes.py",
+        "startLine": 6
+      },
+      "evidence": [
+        {
+          "kind": "diff-line",
+          "summary": "The changed hunk shows the query string is built using the user-controlled id value.",
+          "location": {
+            "path": "app/routes.py",
+            "startLine": 6
+          }
+        }
+      ]
+    },
+    {
+      "title": "Authentication check is missing in an unrelated file",
+      "body": "The auth module should verify the user before profile access.",
+      "category": "security",
+      "severity": "medium",
+      "confidence": "low",
+      "location": {
+        "path": "app/auth.py",
+        "startLine": 20
+      },
+      "evidence": [
+        {
+          "kind": "diff-line",
+          "summary": "The unrelated file might need an authentication check.",
+          "location": {
+            "path": "app/auth.py",
+            "startLine": 20
+          }
+        }
+      ]
+    },
+    {
+      "title": "Vague maintainability issue",
+      "body": "The code could be improved.",
+      "category": "maintainability",
+      "severity": "low",
+      "confidence": "low",
+      "location": {
+        "path": "app/routes.py",
+        "startLine": 5
+      },
+      "evidence": [
+        {
+          "kind": "other",
+          "summary": "Code"
+        }
+      ]
+    }
+  ],
+  "modelMetadata": {
+    "provider": "saved-output",
+    "model": "fixture",
+    "temperature": 0,
+    "promptVersion": "baseline-reviewer-v1"
+  }
+}

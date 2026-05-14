@@ -2,7 +2,7 @@ import json
 import unittest
 
 from review_worker.context_builder import build_diff_context_bundle
-from review_worker.openai_provider import OpenAICompatibleConfig, OpenAICompatibleReviewerProvider
+from review_worker.openai_provider import PROMPT_VERSION, OpenAICompatibleConfig, OpenAICompatibleReviewerProvider
 from review_worker.ports import ReviewRequest
 
 from test_context_builder import change_request, diff
@@ -14,8 +14,13 @@ class OpenAIProviderTests(unittest.TestCase):
             self.assertEqual(endpoint, "https://llm.example.test/chat/completions")
             self.assertEqual(headers["authorization"], "Bearer test-key")
             self.assertEqual(payload["model"], "test-model")
+            self.assertEqual(payload["temperature"], 0.1)
             self.assertIn('schemaVersion must be exactly "1.0.0"', payload["messages"][0]["content"])
-            self.assertIn('The schemaVersion value must be "1.0.0"', payload["messages"][1]["content"])
+            self.assertIn("Review only the changed files", payload["messages"][0]["content"])
+            self.assertIn("Prefer no finding over a speculative finding", payload["messages"][0]["content"])
+            self.assertIn('The "schemaVersion" value must be "1.0.0"', payload["messages"][1]["content"])
+            self.assertIn('"changedFiles"', payload["messages"][1]["content"])
+            self.assertIn("Return an empty findings array", payload["messages"][1]["content"])
             return {
                 "choices": [
                     {
@@ -49,6 +54,8 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual(output.findings[0].title, "Finding")
         self.assertEqual(output.modelMetadata.provider, "openai-compatible")
         self.assertEqual(output.modelMetadata.model, "test-model")
+        self.assertEqual(output.modelMetadata.temperature, 0.1)
+        self.assertEqual(output.modelMetadata.promptVersion, PROMPT_VERSION)
 
 
 if __name__ == "__main__":

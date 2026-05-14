@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "ctx_eval_docs_only",
+  "reviewRunId": "run_eval_docs_only",
+  "changeRequest": {
+    "schemaVersion": "1.0.0",
+    "id": "cr_eval_docs_only",
+    "repository": {
+      "schemaVersion": "1.0.0",
+      "id": "repo_eval",
+      "provider": "github",
+      "owner": "acme",
+      "name": "payments",
+      "defaultBranch": "main"
+    },
+    "provider": "github",
+    "providerChangeRequestId": "102",
+    "title": "Clarify local setup instructions",
+    "state": "open",
+    "base": {
+      "ref": "main",
+      "sha": "cccccccc"
+    },
+    "head": {
+      "ref": "pull/102/head",
+      "sha": "dddddddd"
+    }
+  },
+  "diff": {
+    "schemaVersion": "1.0.0",
+    "id": "diff_eval_docs_only",
+    "changeRequestId": "cr_eval_docs_only",
+    "baseSha": "cccccccc",
+    "headSha": "dddddddd",
+    "summary": {
+      "fileCount": 1,
+      "additions": 1,
+      "deletions": 0,
+      "languages": ["Markdown"]
+    },
+    "files": [
+      {
+        "path": "README.md",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 0,
+        "language": "Markdown",
+        "hunks": [
+          {
+            "oldStart": 10,
+            "oldLines": 2,
+            "newStart": 10,
+            "newLines": 3,
+            "lines": [
+              {
+                "kind": "context",
+                "oldLine": 10,
+                "newLine": 10,
+                "content": "## Local setup"
+              },
+              {
+                "kind": "added",
+                "newLine": 11,
+                "content": "Run `pnpm install` before starting the development server."
+              },
+              {
+                "kind": "context",
+                "oldLine": 11,
+                "newLine": 12,
+                "content": "Run `pnpm dev` to start the app."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "sourceSnippets": [
+    {
+      "location": {
+        "path": "README.md",
+        "startLine": 10,
+        "endLine": 12,
+        "commitSha": "dddddddd"
+      },
+      "content": "## Local setup\nRun `pnpm install` before starting the development server.\nRun `pnpm dev` to start the app.",
+      "reason": "changed-file"
+    }
+  ],
+  "limits": {
+    "maxFiles": 50,
+    "maxBytes": 200000,
+    "maxSnippetBytes": 40000,
+    "truncated": false
+  },
+  "redaction": {
+    "redacted": false,
+    "strategy": "none"
+  }
+}

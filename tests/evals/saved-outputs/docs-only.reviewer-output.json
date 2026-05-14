@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0.0",
+  "summary": "No supported findings.",
+  "findings": [],
+  "modelMetadata": {
+    "provider": "saved-output",
+    "model": "fixture",
+    "temperature": 0,
+    "promptVersion": "baseline-reviewer-v1"
+  }
+}

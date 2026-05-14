@@ -1,0 +1,17 @@
+{
+  "caseId": "python-sql-injection",
+  "rawFindingCount": 4,
+  "validatedFindingCount": 1,
+  "findings": [
+    {
+      "title": "Raw user id is interpolated into SQL",
+      "category": "security",
+      "severity": "high",
+      "confidence": "high",
+      "path": "app/routes.py",
+      "startLine": 6,
+      "dedupeKey": "app/routes.py:6:security:raw user id is interpolated into sql",
+      "rank": 1
+    }
+  ]
+}
