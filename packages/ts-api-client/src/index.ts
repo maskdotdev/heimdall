@@ -21,7 +21,7 @@ export class HeimdallApiClient {
 
   constructor(options: HeimdallApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = (options.fetch ?? globalThis.fetch).bind(globalThis);
   }
 
   async createReviewRunFromUrl(request: CreateReviewRunFromUrlRequest): Promise<ReviewRun> {
