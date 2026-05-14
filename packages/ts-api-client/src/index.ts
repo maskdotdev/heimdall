@@ -1,7 +1,5 @@
 import type { Finding, ReviewRun } from "@heimdall/contracts";
 
-export type { Finding, ReviewRun } from "@heimdall/contracts";
-
 export interface HeimdallApiClientOptions {
   readonly baseUrl: string;
   readonly fetch?: typeof fetch;
