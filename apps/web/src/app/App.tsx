@@ -1,48 +1,7 @@
-import type { Finding, ReviewRun } from "@heimdall/contracts";
 import { HeimdallApiClient } from "@heimdall/ts-api-client";
 import type { FormEvent } from "react";
 import { useMemo } from "react";
-import { create } from "zustand";
-
-type LoadState = "idle" | "submitting" | "complete" | "error";
-
-type ReviewState = {
-  error: string | null;
-  findings: Finding[];
-  reviewRun: ReviewRun | null;
-  state: LoadState;
-  url: string;
-  resetForSubmit: () => void;
-  setError: (error: string) => void;
-  setReviewComplete: (reviewRun: ReviewRun, findings: Finding[]) => void;
-  setUrl: (url: string) => void;
-};
-
-const useReviewStore = create<ReviewState>((set) => ({
-  error: null,
-  findings: [],
-  reviewRun: null,
-  state: "idle",
-  url: "",
-  resetForSubmit: () =>
-    set({
-      error: null,
-      findings: [],
-      state: "submitting",
-    }),
-  setError: (error) =>
-    set({
-      error,
-      state: "error",
-    }),
-  setReviewComplete: (reviewRun, findings) =>
-    set({
-      findings,
-      reviewRun,
-      state: "complete",
-    }),
-  setUrl: (url) => set({ url }),
-}));
+import { useReviewStore } from "../lib/stores/review-store";
 
 export function App() {
   const {
