@@ -130,6 +130,25 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertEqual(second_timing["initializeMs"], 0)
         self.assertTrue(process.terminated)
 
+    def test_reviewer_provider_keeps_timing_when_review_fails(self) -> None:
+        process = FakeProcess(
+            [
+                {"id": 1, "result": {"userAgent": "test"}},
+                {"id": 2, "result": {"thread": {"id": "thr_1"}}},
+                {"id": 3, "result": {"turn": {"id": "turn_1"}}},
+            ]
+        )
+        config = CodexAppServerConfig(command=("codex", "app-server"), model="test-model", timeout_seconds=1)
+        provider = CodexAppServerReviewerProvider(config)
+
+        with patch("review_worker.backends.codex_app_server.subprocess.Popen", return_value=process):
+            with self.assertRaisesRegex(RuntimeError, "exited before completing review"):
+                provider.review(request())
+
+        self.assertIn("threadStartMs", provider.last_timing or {})
+        self.assertIn("archiveMs", provider.last_timing or {})
+        self.assertTrue(process.terminated)
+
     def test_config_defaults_to_gpt_55_low_reasoning(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             config = CodexAppServerConfig.from_env()

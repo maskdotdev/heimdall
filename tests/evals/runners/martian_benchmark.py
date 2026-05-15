@@ -210,6 +210,8 @@ def run_martian_benchmark(
                 review_ms: int | None = None
                 judge_ms: int | None = None
                 review_phase_ms: dict[str, int] | None = None
+                review_started: float | None = None
+                active_provider: Any = None
                 try:
                     context_started = time.monotonic()
                     context_bundle = context_bundle_for_case(
@@ -224,6 +226,7 @@ def run_martian_benchmark(
                     if backend in AGENTIC_REVIEW_BACKENDS:
                         with reviewer_backend_environment(backend, case, repo_roots or {}):
                             case_provider = create_reviewer_provider(backend)
+                            active_provider = case_provider
                             try:
                                 result = ReviewEngine(case_provider).review(ReviewRequest(context_bundle=context_bundle))
                                 review_phase_ms = reviewer_phase_timing(case_provider)
@@ -232,11 +235,16 @@ def run_martian_benchmark(
                     else:
                         if shared_engine is None or shared_provider is None:
                             raise RuntimeError(f"reviewer provider was not initialized for backend {backend}")
+                        active_provider = shared_provider
                         result = shared_engine.review(ReviewRequest(context_bundle=context_bundle))
                         review_phase_ms = reviewer_phase_timing(shared_provider)
                     review_ms = elapsed_ms(review_started)
                     duration_ms = elapsed_ms(started)
                 except Exception as error:
+                    if review_ms is None and review_started is not None:
+                        review_ms = elapsed_ms(review_started)
+                    if review_phase_ms is None and active_provider is not None:
+                        review_phase_ms = reviewer_phase_timing(active_provider)
                     row = failed_row(backend, case.case_id, None, None, None, None, 0, len(case.golden_comments), elapsed_ms(started), error)
                     row = replace(row, context_ms=context_ms, review_ms=review_ms, total_ms=elapsed_ms(started), review_phase_ms=review_phase_ms)
                     rows.append(row)

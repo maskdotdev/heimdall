@@ -54,6 +54,7 @@ class CodexAppServerReviewerProvider:
         try:
             output = client.review(request)
         except Exception:
+            self.last_timing = client.last_timing
             self.close()
             raise
         self.last_timing = client.last_timing
