@@ -167,6 +167,86 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertIn("app/users.py", frontier_paths)
         self.assertIn("tests/test_profiles.py", test_paths)
 
+    def test_adds_enclosing_changed_symbol_and_referenced_type_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "app").mkdir()
+            (root / "app" / "profiles.py").write_text(
+                "\n".join(
+                    [
+                        "from app.models import ProfileStatus",
+                        "",
+                        "class UserProfile:",
+                        "    def __init__(self, status):",
+                        "        self.status = status",
+                        "",
+                        "    def save_profile(self, status: ProfileStatus):",
+                        "        self.status = status",
+                        "        return self.persist()",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "app" / "models.py").write_text(
+                "\n".join(
+                    [
+                        "class ProfileStatus:",
+                        "    def __init__(self, value):",
+                        "        self.value = value",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="app/profiles.py",
+                            status="modified",
+                            additions=1,
+                            deletions=0,
+                            language="Python",
+                            hunks=[
+                                DiffHunk(
+                                    oldStart=7,
+                                    oldLines=1,
+                                    newStart=7,
+                                    newLines=2,
+                                    lines=[
+                                        DiffLine(
+                                            kind="context",
+                                            oldLine=7,
+                                            newLine=7,
+                                            content="    def save_profile(self, status: ProfileStatus):",
+                                        ),
+                                        DiffLine(kind="added", newLine=8, content="        self.status = status"),
+                                    ],
+                                )
+                            ],
+                        )
+                    ]
+                ),
+                DiffContextOptions(repository_root=str(root), max_related_snippets=6),
+            )
+
+        snippets = bundle.sourceSnippets or []
+        enclosing = next(
+            snippet
+            for snippet in snippets
+            if snippet.location.path == "app/profiles.py" and snippet.reason == "related-symbol"
+        )
+        dependency = next(
+            snippet
+            for snippet in snippets
+            if snippet.location.path == "app/models.py" and snippet.reason == "dependency"
+        )
+
+        self.assertIn("def save_profile", enclosing.content)
+        self.assertIn("class ProfileStatus", dependency.content)
+
     def test_repository_exploration_marks_truncation_at_file_scan_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -115,7 +115,21 @@ class CodexAppServerClient:
             deadline,
         )
         thread_id = thread_result["thread"]["id"]
+        try:
+            return self._complete_text_in_thread(prompt, thread_id, deadline, turn_options=turn_options)
+        finally:
+            self.archive_thread(thread_id)
+
+    def _complete_text_in_thread(
+        self,
+        prompt: str,
+        thread_id: str,
+        deadline: float,
+        *,
+        turn_options: dict[str, Any] | None = None,
+    ) -> str:
         turn_id = self.next_id
+        self.next_id += 1
         turn_params: dict[str, Any] = {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
         if turn_options:
             turn_params.update(turn_options)
@@ -158,6 +172,12 @@ class CodexAppServerClient:
                 self.send({"id": message["id"], "result": {"decision": "decline"}})
 
         raise TimeoutError("timed out waiting for codex app-server review turn to complete")
+
+    def archive_thread(self, thread_id: str) -> None:
+        try:
+            self.request("thread/archive", {"threadId": thread_id}, time.monotonic() + min(self.config.timeout_seconds, 5.0))
+        except Exception:
+            return
 
     def request(self, method: str, params: dict[str, Any], deadline: float) -> dict[str, Any]:
         request_id = self.next_id

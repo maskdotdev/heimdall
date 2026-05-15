@@ -65,6 +65,7 @@ class CodexAppServerBackendTests(unittest.TestCase):
                     "params": {"item": {"type": "agentMessage", "id": "msg_1", "text": '{"schemaVersion":"1.0.0","summary":"Done","findings":[]}'}},
                 },
                 {"method": "thread/status/changed", "params": {"status": {"type": "idle"}}},
+                {"id": 4, "result": {}},
             ]
         )
 
@@ -77,6 +78,8 @@ class CodexAppServerBackendTests(unittest.TestCase):
 
         sent_messages = [json.loads(line) for line in process.stdin.lines]
         self.assertEqual([message["method"] for message in sent_messages[:4]], ["initialize", "initialized", "thread/start", "turn/start"])
+        self.assertEqual(sent_messages[4]["method"], "thread/archive")
+        self.assertEqual(sent_messages[4]["params"]["threadId"], "thr_1")
         self.assertEqual(sent_messages[2]["params"]["model"], "test-model")
         self.assertEqual(sent_messages[2]["params"]["reasoningEffort"], DEFAULT_REASONING_EFFORT)
         self.assertEqual(output.schemaVersion, "1.0.0")
@@ -110,6 +113,7 @@ class CodexAppServerBackendTests(unittest.TestCase):
                 {"id": 3, "result": {"turn": {"id": "turn_1"}}},
                 {"method": "item/agentMessage/delta", "params": {"itemId": "msg_1", "delta": '{"schemaVersion":"1.0.0","summary":"Done","findings":[]}'}},
                 {"method": "thread/status/changed", "params": {"status": {"type": "idle"}}},
+                {"id": 4, "result": {}},
             ]
         )
         config = CodexAppServerConfig(command=("codex", "app-server"), model="test-model", cwd="/repo", timeout_seconds=1)
@@ -123,6 +127,7 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertEqual(turn_params["cwd"], "/repo")
         self.assertEqual(turn_params["effort"], DEFAULT_REASONING_EFFORT)
         self.assertEqual(turn_params["sandboxPolicy"]["type"], "readOnly")
+        self.assertEqual(sent_messages[4]["method"], "thread/archive")
         self.assertEqual(output.modelMetadata.provider, "codex-app-server-agentic")
 
     def test_read_only_repository_turn_options_require_cwd(self) -> None:
