@@ -65,6 +65,39 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertTrue(bundle.limits.truncated)
         self.assertEqual(bundle.limits.truncationReasons, ["file-count-limit"])
 
+    def test_adds_python_scanner_signals_for_order_sensitive_diff_patterns(self) -> None:
+        bundle = build_diff_context_bundle(
+            "run_1",
+            change_request(),
+            diff(
+                [
+                    ChangedFile(
+                        path="review.py",
+                        status="modified",
+                        additions=2,
+                        deletions=0,
+                        language="Python",
+                        hunks=[
+                            DiffHunk(
+                                oldStart=1,
+                                oldLines=0,
+                                newStart=1,
+                                newLines=2,
+                                lines=[
+                                    DiffLine(kind="added", newLine=1, content='value = request.GET.get("id", load_id())'),
+                                    DiffLine(kind="added", newLine=2, content="pairs = zip(requested_ids, rows.values())"),
+                                ],
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        rule_ids = [signal.ruleId for signal in bundle.scannerSignals or []]
+        self.assertEqual(rule_ids, ["python-eager-default-call", "ordered-inputs-with-mapping-values"])
+        self.assertEqual((bundle.scannerSignals or [])[0].location.path, "review.py")
+
 
 def change_request() -> ChangeRequest:
     repository = Repository(

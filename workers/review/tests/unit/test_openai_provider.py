@@ -124,6 +124,41 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIn("return value or 0", prompt)
         self.assertIn("missing null/None checks", prompt)
         self.assertIn('"includedChangedFileCount"', prompt)
+        self.assertIn('"scannerSignalCount"', prompt)
+
+    def test_prompt_includes_scanner_signals(self) -> None:
+        from contract_types import ChangedFile, DiffHunk, DiffLine
+
+        bundle = build_diff_context_bundle(
+            "run_1",
+            change_request(),
+            diff(
+                [
+                    ChangedFile(
+                        path="app.py",
+                        status="modified",
+                        additions=1,
+                        deletions=0,
+                        language="Python",
+                        hunks=[
+                            DiffHunk(
+                                oldStart=1,
+                                oldLines=0,
+                                newStart=1,
+                                newLines=1,
+                                lines=[DiffLine(kind="added", newLine=1, content='value = request.GET.get("id", load_id())')],
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        prompt = build_prompt(ReviewRequest(bundle))
+
+        self.assertIn('"scannerSignals"', prompt)
+        self.assertIn('"ruleId": "python-eager-default-call"', prompt)
+        self.assertIn("Python evaluates default arguments", prompt)
 
     def test_prompt_prioritizes_high_signal_changed_files_before_truncating(self) -> None:
         from contract_types import ChangedFile, DiffHunk, DiffLine
@@ -182,6 +217,36 @@ class OpenAIProviderTests(unittest.TestCase):
             f"docs/generated_{MAX_PROMPT_FILES - 1}.md",
             [file["path"] for file in review_context["changedFiles"]],
         )
+
+    def test_prompt_respects_explicit_file_and_snippet_limits(self) -> None:
+        from contract_types import ChangedFile, DiffHunk, DiffLine
+
+        files = [
+            ChangedFile(
+                path=f"src/app/api/handler_{index}.py",
+                status="modified",
+                additions=1,
+                deletions=0,
+                language="Python",
+                hunks=[
+                    DiffHunk(
+                        oldStart=1,
+                        oldLines=0,
+                        newStart=1,
+                        newLines=1,
+                        lines=[DiffLine(kind="added", newLine=1, content=f"    value_{index} = state.get('value')")],
+                    )
+                ],
+            )
+            for index in range(3)
+        ]
+        bundle = build_diff_context_bundle("run_1", change_request(), diff(files), DiffContextOptions(max_files=3))
+
+        prompt = build_prompt(ReviewRequest(bundle), max_files=1, max_snippets=1)
+        review_context = json.loads(prompt.split("\n\n", 2)[1])
+
+        self.assertEqual(len(review_context["changedFiles"]), 1)
+        self.assertEqual(len(review_context["sourceSnippets"]), 1)
 
 
 if __name__ == "__main__":

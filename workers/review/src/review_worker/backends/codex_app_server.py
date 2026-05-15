@@ -21,6 +21,8 @@ DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "low"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
+CODEX_PROMPT_MAX_FILES = 8
+CODEX_PROMPT_MAX_SNIPPETS = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +230,7 @@ def build_codex_review_prompt(request: ReviewRequest) -> str:
         '- Evidence "kind" must be one of: "diff-line", "source-snippet", "scanner-signal", "dependency-edge", '
         '"test-signal", "review-standard", or "other". Use "diff-line" for changed diff lines; never use "changed_line".\n'
         '- Line locations must use objects like {"path":"app/routes.py","startLine":6}.\n\n'
-        f"{build_prompt(request)}"
+        f"{build_prompt(request, max_files=CODEX_PROMPT_MAX_FILES, max_snippets=CODEX_PROMPT_MAX_SNIPPETS)}"
     )
 
 

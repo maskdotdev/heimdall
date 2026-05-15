@@ -7,6 +7,7 @@ from contract_types import (
     ContextBundle,
     ContextLimits,
     Diff,
+    ScannerSignal,
     RedactionSummary,
     SourceLocation,
     SourceSnippet,
@@ -28,6 +29,7 @@ def build_diff_context_bundle(
 ) -> ContextBundle:
     opts = options or DiffContextOptions()
     snippets: list[SourceSnippet] = []
+    scanner_signals: list[ScannerSignal] = []
     used_bytes = 0
     truncated = False
     truncation_reasons: list[str] = []
@@ -61,6 +63,7 @@ def build_diff_context_bundle(
                 )
             )
             used_bytes += encoded_size
+            scanner_signals.extend(scanner_signals_for_hunk(diff.headSha, changed_file.path, hunk))
 
     if len(diff.files) > opts.max_files:
         truncated = True
@@ -73,6 +76,7 @@ def build_diff_context_bundle(
         changeRequest=change_request,
         diff=diff,
         sourceSnippets=snippets,
+        scannerSignals=scanner_signals or None,
         limits=ContextLimits(
             maxFiles=opts.max_files,
             maxBytes=opts.max_bytes,
@@ -82,3 +86,52 @@ def build_diff_context_bundle(
         ),
         redaction=RedactionSummary(redacted=False, strategy="none"),
     )
+
+
+def scanner_signals_for_hunk(commit_sha: str, path: str, hunk) -> list[ScannerSignal]:
+    if not path.endswith(".py"):
+        return []
+
+    signals: list[ScannerSignal] = []
+    for line in hunk.lines:
+        if line.kind != "added" or line.newLine is None:
+            continue
+        content = line.content.strip()
+        location = SourceLocation(path=path, startLine=line.newLine, endLine=line.newLine, commitSha=commit_sha)
+        if _has_eager_default_call(content):
+            signals.append(
+                ScannerSignal(
+                    tool="custom",
+                    ruleId="python-eager-default-call",
+                    severity="medium",
+                    message="Python evaluates default arguments before a call; avoid side-effecting or fallible calls as defaults to get().",
+                    location=location,
+                )
+            )
+        if _zips_mapping_values_with_ordered_inputs(content):
+            signals.append(
+                ScannerSignal(
+                    tool="custom",
+                    ruleId="ordered-inputs-with-mapping-values",
+                    severity="medium",
+                    message="Zipping ordered inputs with mapping values can pair data with the wrong key unless the mapping order is guaranteed to match.",
+                    location=location,
+                )
+            )
+    return signals
+
+
+def _has_eager_default_call(content: str) -> bool:
+    get_index = content.find(".get(")
+    if get_index < 0:
+        return False
+    comma_index = content.find(",", get_index)
+    close_index = content.rfind(")")
+    if comma_index < 0 or close_index <= comma_index:
+        return False
+    default_expression = content[comma_index + 1 : close_index]
+    return "(" in default_expression and ")" in default_expression
+
+
+def _zips_mapping_values_with_ordered_inputs(content: str) -> bool:
+    return "zip(" in content and ".values()" in content

@@ -109,11 +109,11 @@ def urlopen_transport(endpoint: str, headers: dict[str, str], payload: dict[str,
         return json.loads(response.read().decode("utf-8"))
 
 
-def build_prompt(request: ReviewRequest) -> str:
+def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, max_snippets: int = MAX_PROMPT_SNIPPETS) -> str:
     bundle = request.context_bundle
     ranked_files = rank_changed_files(list(bundle.diff.files))
     ranked_path_index = {file.path: index for index, file in enumerate(ranked_files)}
-    changed_files = [summarize_changed_file(file) for file in ranked_files[:MAX_PROMPT_FILES]]
+    changed_files = [summarize_changed_file(file) for file in ranked_files[:max_files]]
     snippets = [
         {
             "path": snippet.location.path,
@@ -122,7 +122,25 @@ def build_prompt(request: ReviewRequest) -> str:
             "reason": snippet.reason,
             "content": snippet.content,
         }
-        for snippet in rank_source_snippets(list(bundle.sourceSnippets or []), ranked_path_index)[:MAX_PROMPT_SNIPPETS]
+        for snippet in rank_source_snippets(list(bundle.sourceSnippets or []), ranked_path_index)[:max_snippets]
+    ]
+    scanner_signals = [
+        {
+            "tool": signal.tool,
+            "ruleId": signal.ruleId,
+            "severity": signal.severity,
+            "message": signal.message,
+            "location": (
+                {
+                    "path": signal.location.path,
+                    "startLine": signal.location.startLine,
+                    "endLine": signal.location.endLine,
+                }
+                if signal.location is not None
+                else None
+            ),
+        }
+        for signal in bundle.scannerSignals or []
     ]
     review_context = {
         "reviewRunId": bundle.reviewRunId,
@@ -138,8 +156,10 @@ def build_prompt(request: ReviewRequest) -> str:
             "includedChangedFileCount": len(changed_files),
             "sourceSnippetCount": len(bundle.sourceSnippets or []),
             "includedSourceSnippetCount": len(snippets),
+            "scannerSignalCount": len(bundle.scannerSignals or []),
         },
         "changedFiles": changed_files,
+        "scannerSignals": scanner_signals,
         "sourceSnippets": snippets,
     }
     return (
