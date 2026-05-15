@@ -14,6 +14,7 @@ from review_worker.backends.codex_app_server import (
     CodexAppServerReviewerProvider,
     build_agentic_codex_review_prompt,
     build_codex_review_prompt,
+    build_codex_review_prompt_with_profile,
     parse_reviewer_output,
     read_only_repository_turn_options,
 )
@@ -30,6 +31,19 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertIn("ReviewerOutput", prompt)
         self.assertIn('Use "correctness" for bugs', prompt)
         self.assertIn('Use "diff-line" for changed diff lines; never use "changed_line"', prompt)
+
+    def test_adapts_large_codex_review_prompt_budget(self) -> None:
+        _, profile = build_codex_review_prompt_with_profile(
+            request(),
+            max_files=8,
+            max_snippets=12,
+            large_prompt_char_threshold=1,
+            large_prompt_max_files=1,
+        )
+
+        self.assertEqual(profile["largePromptAdapted"], 1)
+        self.assertEqual(profile["promptMaxFiles"], 1)
+        self.assertGreater(profile["initialPromptChars"], 1)
 
     def test_builds_agentic_review_prompt_with_repository_exploration_bounds(self) -> None:
         prompt = build_agentic_codex_review_prompt(request())

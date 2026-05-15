@@ -24,6 +24,8 @@ DEFAULT_MAX_REVIEWS_PER_PROCESS = 6
 JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 CODEX_PROMPT_MAX_FILES = 8
 CODEX_PROMPT_MAX_SNIPPETS = 12
+CODEX_LARGE_PROMPT_CHAR_THRESHOLD = 0
+CODEX_LARGE_PROMPT_MAX_FILES = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,10 @@ class CodexAppServerConfig:
     cwd: str | None = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_reviews_per_process: int = DEFAULT_MAX_REVIEWS_PER_PROCESS
+    prompt_max_files: int = CODEX_PROMPT_MAX_FILES
+    prompt_max_snippets: int = CODEX_PROMPT_MAX_SNIPPETS
+    large_prompt_char_threshold: int = CODEX_LARGE_PROMPT_CHAR_THRESHOLD
+    large_prompt_max_files: int = CODEX_LARGE_PROMPT_MAX_FILES
 
     @classmethod
     def from_env(cls) -> CodexAppServerConfig:
@@ -43,6 +49,12 @@ class CodexAppServerConfig:
         cwd = os.environ.get("HEIMDALL_CODEX_APP_SERVER_CWD") or None
         timeout_seconds = float(os.environ.get("HEIMDALL_CODEX_APP_SERVER_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
         max_reviews_per_process = int(os.environ.get("HEIMDALL_CODEX_APP_SERVER_MAX_REVIEWS_PER_PROCESS", str(DEFAULT_MAX_REVIEWS_PER_PROCESS)))
+        prompt_max_files = int(os.environ.get("HEIMDALL_CODEX_APP_SERVER_PROMPT_MAX_FILES", str(CODEX_PROMPT_MAX_FILES)))
+        prompt_max_snippets = int(os.environ.get("HEIMDALL_CODEX_APP_SERVER_PROMPT_MAX_SNIPPETS", str(CODEX_PROMPT_MAX_SNIPPETS)))
+        large_prompt_char_threshold = int(
+            os.environ.get("HEIMDALL_CODEX_APP_SERVER_LARGE_PROMPT_CHAR_THRESHOLD", str(CODEX_LARGE_PROMPT_CHAR_THRESHOLD))
+        )
+        large_prompt_max_files = int(os.environ.get("HEIMDALL_CODEX_APP_SERVER_LARGE_PROMPT_MAX_FILES", str(CODEX_LARGE_PROMPT_MAX_FILES)))
         return cls(
             command=tuple(command),
             model=model,
@@ -50,6 +62,10 @@ class CodexAppServerConfig:
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             max_reviews_per_process=max_reviews_per_process,
+            prompt_max_files=prompt_max_files,
+            prompt_max_snippets=prompt_max_snippets,
+            large_prompt_char_threshold=large_prompt_char_threshold,
+            large_prompt_max_files=large_prompt_max_files,
         )
 
 
@@ -145,7 +161,13 @@ class CodexAppServerClient:
         self.last_input_profile: dict[str, int] | None = None
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
-        prompt, input_profile = build_codex_review_prompt_with_profile(request)
+        prompt, input_profile = build_codex_review_prompt_with_profile(
+            request,
+            max_files=self.config.prompt_max_files,
+            max_snippets=self.config.prompt_max_snippets,
+            large_prompt_char_threshold=self.config.large_prompt_char_threshold,
+            large_prompt_max_files=self.config.large_prompt_max_files,
+        )
         self.last_input_profile = input_profile
         text = self.complete_text(prompt)
         parse_started = time.monotonic()
@@ -312,11 +334,38 @@ def build_codex_review_prompt(request: ReviewRequest) -> str:
     return build_codex_review_prompt_with_profile(request)[0]
 
 
-def build_codex_review_prompt_with_profile(request: ReviewRequest) -> tuple[str, dict[str, int]]:
+def build_codex_review_prompt_with_profile(
+    request: ReviewRequest,
+    *,
+    max_files: int = CODEX_PROMPT_MAX_FILES,
+    max_snippets: int = CODEX_PROMPT_MAX_SNIPPETS,
+    large_prompt_char_threshold: int = CODEX_LARGE_PROMPT_CHAR_THRESHOLD,
+    large_prompt_max_files: int = CODEX_LARGE_PROMPT_MAX_FILES,
+) -> tuple[str, dict[str, int]]:
+    prompt, profile = build_codex_review_prompt_for_budget(request, max_files=max_files, max_snippets=max_snippets)
+    profile["promptMaxFiles"] = max_files
+    profile["promptMaxSnippets"] = max_snippets
+    profile["largePromptAdapted"] = 0
+    profile["initialPromptChars"] = profile["promptChars"]
+    initial_prompt_chars = profile["promptChars"]
+    if (
+        large_prompt_char_threshold > 0
+        and profile["promptChars"] > large_prompt_char_threshold
+        and large_prompt_max_files < max_files
+    ):
+        prompt, profile = build_codex_review_prompt_for_budget(request, max_files=large_prompt_max_files, max_snippets=max_snippets)
+        profile["promptMaxFiles"] = large_prompt_max_files
+        profile["promptMaxSnippets"] = max_snippets
+        profile["largePromptAdapted"] = 1
+        profile["initialPromptChars"] = initial_prompt_chars
+    return prompt, profile
+
+
+def build_codex_review_prompt_for_budget(request: ReviewRequest, *, max_files: int, max_snippets: int) -> tuple[str, dict[str, int]]:
     prompt_build = build_prompt_with_context(
         request,
-        max_files=CODEX_PROMPT_MAX_FILES,
-        max_snippets=CODEX_PROMPT_MAX_SNIPPETS,
+        max_files=max_files,
+        max_snippets=max_snippets,
     )
     prompt = (
         "You are the Codex backend for Heimdall's review worker. Review only the supplied Heimdall context bundle. "
