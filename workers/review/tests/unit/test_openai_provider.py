@@ -211,6 +211,59 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIn('"path": "src/caller.py"', prompt)
         self.assertIn('"path": "tests/test_service.py"', prompt)
 
+    def test_prompt_reserves_snippet_budget_for_repository_exploration_context(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from contract_types import ChangedFile, DiffHunk, DiffLine
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "caller.py").write_text(
+                "result = load_account(user_id)\n",
+                encoding="utf-8",
+            )
+            hunks = [
+                DiffHunk(
+                    oldStart=index + 1,
+                    oldLines=0,
+                    newStart=index + 1,
+                    newLines=1,
+                    lines=[
+                        DiffLine(
+                            kind="added",
+                            newLine=index + 1,
+                            content="def load_account(user_id):" if index == 0 else f"changed_line_{index} = user_id",
+                        )
+                    ],
+                )
+                for index in range(12)
+            ]
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="src/service.py",
+                            status="modified",
+                            additions=12,
+                            deletions=0,
+                            language="Python",
+                            hunks=hunks,
+                        )
+                    ]
+                ),
+                DiffContextOptions(repository_root=str(root)),
+            )
+
+        prompt = build_prompt(ReviewRequest(bundle), max_snippets=6)
+        review_context = json.loads(prompt.split("\n\n", 2)[1])
+
+        self.assertIn("src/caller.py", [snippet["path"] for snippet in review_context["sourceSnippets"]])
+        self.assertGreater(review_context["limits"]["includedRelatedSnippetCount"], 0)
+
     def test_prompt_prioritizes_high_signal_changed_files_before_truncating(self) -> None:
         from contract_types import ChangedFile, DiffHunk, DiffLine
 

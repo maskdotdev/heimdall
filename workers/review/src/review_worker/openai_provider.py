@@ -23,6 +23,7 @@ PROMPT_VERSION = "baseline-reviewer-v1"
 REVIEW_TEMPERATURE = 0.1
 MAX_PROMPT_FILES = 80
 MAX_PROMPT_SNIPPETS = 50
+MAX_PROMPT_RELATED_SNIPPETS = 16
 SYSTEM_PROMPT = (
     "You are Heimdall's code reviewer. The API enforces the reviewer output JSON schema. "
     'schemaVersion must be exactly "1.0.0". Review only the changed files, changed hunks, source snippets, '
@@ -115,6 +116,8 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
     ranked_files = rank_changed_files(list(bundle.diff.files))
     ranked_path_index = {file.path: index for index, file in enumerate(ranked_files)}
     changed_files = [summarize_changed_file(file) for file in ranked_files[:max_files]]
+    ranked_snippets = rank_source_snippets(list(bundle.sourceSnippets or []), ranked_path_index)
+    selected_snippets = select_prompt_snippets(ranked_snippets, max_snippets=max_snippets)
     snippets = [
         {
             "path": snippet.location.path,
@@ -123,7 +126,7 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
             "reason": snippet.reason,
             "content": snippet.content,
         }
-        for snippet in rank_source_snippets(list(bundle.sourceSnippets or []), ranked_path_index)[:max_snippets]
+        for snippet in selected_snippets
     ]
     scanner_signals = [
         {
@@ -175,6 +178,9 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
             "includedChangedFileCount": len(changed_files),
             "sourceSnippetCount": len(bundle.sourceSnippets or []),
             "includedSourceSnippetCount": len(snippets),
+            "includedRelatedSnippetCount": len(
+                [snippet for snippet in selected_snippets if snippet.reason != "changed-file"]
+            ),
             "dependencyFrontierCount": len(bundle.dependencyFrontier or []),
             "relatedTestCount": len(bundle.relatedTests or []),
             "scannerSignalCount": len(bundle.scannerSignals or []),
@@ -229,3 +235,18 @@ def summarize_changed_file(changed_file: Any) -> dict[str, Any]:
             for hunk in changed_file.hunks
         ],
     }
+
+
+def select_prompt_snippets(snippets: list[Any], *, max_snippets: int) -> list[Any]:
+    if max_snippets <= 0:
+        return []
+
+    related = [snippet for snippet in snippets if snippet.reason != "changed-file"]
+    if not related:
+        return snippets[:max_snippets]
+
+    related_budget = min(MAX_PROMPT_RELATED_SNIPPETS, max(max_snippets // 3, 1), len(related))
+    changed_budget = max_snippets - related_budget
+    selected = [snippet for snippet in snippets if snippet.reason == "changed-file"][:changed_budget]
+    selected.extend(related[: max_snippets - len(selected)])
+    return selected
