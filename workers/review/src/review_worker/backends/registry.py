@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from review_worker.backends.codex_app_server import CodexAppServerConfig, CodexAppServerReviewerProvider
+from review_worker.backends.codex_app_server import (
+    CodexAppServerAgenticReviewerProvider,
+    CodexAppServerConfig,
+    CodexAppServerReviewerProvider,
+)
 from review_worker.fake_provider import FakeReviewerProvider
 from review_worker.openai_provider import OpenAICompatibleConfig, OpenAICompatibleReviewerProvider
 from review_worker.ports import ReviewerProvider
@@ -26,6 +30,7 @@ def registered_backend_names() -> tuple[str, ...]:
 
 def _backend_factories() -> Mapping[str, BackendFactory]:
     return {
+        "codex-app-server-agentic": lambda: CodexAppServerAgenticReviewerProvider(CodexAppServerConfig.from_env()),
         "codex-app-server": lambda: CodexAppServerReviewerProvider(CodexAppServerConfig.from_env()),
         "fake": FakeReviewerProvider,
         "openai-compatible": lambda: OpenAICompatibleReviewerProvider(OpenAICompatibleConfig.from_env()),

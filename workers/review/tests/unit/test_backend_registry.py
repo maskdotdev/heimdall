@@ -12,6 +12,7 @@ class BackendRegistryTests(unittest.TestCase):
 
     def test_lists_registered_backend_names(self) -> None:
         self.assertIn("codex-app-server", registered_backend_names())
+        self.assertIn("codex-app-server-agentic", registered_backend_names())
         self.assertIn("fake", registered_backend_names())
         self.assertIn("openai-chat", registered_backend_names())
 

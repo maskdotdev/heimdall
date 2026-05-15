@@ -58,6 +58,31 @@ class CodexAppServerReviewerProvider:
         return output
 
 
+class CodexAppServerAgenticReviewerProvider:
+    def __init__(self, config: CodexAppServerConfig | None = None) -> None:
+        self.config = config or CodexAppServerConfig.from_env()
+
+    def review(self, request: ReviewRequest) -> ReviewerOutput:
+        if self.config.cwd is None:
+            raise ValueError("codex-app-server-agentic requires HEIMDALL_CODEX_APP_SERVER_CWD to point at a checked-out repository")
+
+        client = CodexAppServerClient(self.config)
+        try:
+            output = parse_reviewer_output(
+                client.complete_text(
+                    build_agentic_codex_review_prompt(request),
+                    turn_options=read_only_repository_turn_options(self.config),
+                )
+            )
+        finally:
+            client.close()
+        output.modelMetadata = output.modelMetadata or ModelMetadata()
+        output.modelMetadata.provider = "codex-app-server-agentic"
+        output.modelMetadata.model = self.config.model
+        output.modelMetadata.promptVersion = f"{PROMPT_VERSION}+agentic-v1"
+        return output
+
+
 class CodexAppServerClient:
     def __init__(self, config: CodexAppServerConfig) -> None:
         self.config = config
@@ -74,7 +99,7 @@ class CodexAppServerClient:
     def review(self, request: ReviewRequest) -> ReviewerOutput:
         return parse_reviewer_output(self.complete_text(build_codex_review_prompt(request)))
 
-    def complete_text(self, prompt: str) -> str:
+    def complete_text(self, prompt: str, *, turn_options: dict[str, Any] | None = None) -> str:
         deadline = time.monotonic() + self.config.timeout_seconds
         self.request("initialize", {"clientInfo": {"name": "heimdall", "title": "Heimdall", "version": "0.1.0"}}, deadline)
         self.notify("initialized", {})
@@ -89,7 +114,10 @@ class CodexAppServerClient:
         )
         thread_id = thread_result["thread"]["id"]
         turn_id = self.next_id
-        self.send({"method": "turn/start", "id": turn_id, "params": {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}})
+        turn_params: dict[str, Any] = {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
+        if turn_options:
+            turn_params.update(turn_options)
+        self.send({"method": "turn/start", "id": turn_id, "params": turn_params})
 
         agent_text_by_item: dict[str, str] = {}
         agent_text_parts: list[str] = []
@@ -202,6 +230,50 @@ def build_codex_review_prompt(request: ReviewRequest) -> str:
         '- Line locations must use objects like {"path":"app/routes.py","startLine":6}.\n\n'
         f"{build_prompt(request)}"
     )
+
+
+def build_agentic_codex_review_prompt(request: ReviewRequest) -> str:
+    return (
+        "You are the Codex backend for Heimdall's agentic review worker. Review the supplied Heimdall context bundle "
+        "and use the current working directory as a read-only checkout of the repository under review. You may inspect "
+        "files to understand changed code, nearby definitions, call sites, and directly related tests. Do not edit files, "
+        "publish comments, install dependencies, fetch remote resources, or run broad/slow test suites. Use short "
+        "read-only commands such as git diff, rg, sed, and targeted test discovery, and stop exploring once the supplied "
+        "diff and nearby repository context are enough to decide. Do not inspect benchmark goldens, expected findings, "
+        "cached judgments, prior run outputs, or any evaluation answer keys even if they exist in the checkout. Return "
+        "only one JSON object matching Heimdall's ReviewerOutput contract.\n"
+        "Contract requirements:\n"
+        '- The top-level object must contain "schemaVersion", "summary", and "findings".\n'
+        '- "findings" must be an array. Use an empty array when there are no concrete findings.\n'
+        '- Finding "category" must be one of: "correctness", "security", "reliability", "performance", '
+        '"maintainability", "test", "style", "documentation", "accessibility", or "other". Use "correctness" for bugs.\n'
+        '- Finding "severity" must be one of: "critical", "high", "medium", "low", or "info".\n'
+        '- Finding "confidence" must be one of: "high", "medium", or "low".\n'
+        '- Each finding "evidence" value must be an array, even when there is only one evidence item.\n'
+        '- Evidence "kind" must be one of: "diff-line", "source-snippet", "scanner-signal", "dependency-edge", '
+        '"test-signal", "review-standard", or "other". Use "diff-line" for changed diff lines; never use "changed_line".\n'
+        '- Line locations must use objects like {"path":"app/routes.py","startLine":6} and must refer to changed files.\n\n'
+        f"{build_prompt(request)}"
+    )
+
+
+def read_only_repository_turn_options(config: CodexAppServerConfig) -> dict[str, Any]:
+    if config.cwd is None:
+        raise ValueError("read-only repository turn options require a repository cwd")
+    return {
+        "cwd": config.cwd,
+        "model": config.model,
+        "effort": config.reasoning_effort,
+        "approvalPolicy": "never",
+        "sandboxPolicy": {
+            "type": "readOnly",
+            "access": {
+                "type": "restricted",
+                "includePlatformDefaults": True,
+                "readableRoots": [config.cwd],
+            },
+        },
+    }
 
 
 def parse_reviewer_output(text: str) -> ReviewerOutput:

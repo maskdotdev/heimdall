@@ -8,10 +8,13 @@ from contract_types import ReviewerOutput
 from review_worker.backends.codex_app_server import (
     DEFAULT_MODEL,
     DEFAULT_REASONING_EFFORT,
+    CodexAppServerAgenticReviewerProvider,
     CodexAppServerClient,
     CodexAppServerConfig,
+    build_agentic_codex_review_prompt,
     build_codex_review_prompt,
     parse_reviewer_output,
+    read_only_repository_turn_options,
 )
 
 from test_finding_quality import context_bundle
@@ -26,6 +29,15 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertIn("ReviewerOutput", prompt)
         self.assertIn('Use "correctness" for bugs', prompt)
         self.assertIn('Use "diff-line" for changed diff lines; never use "changed_line"', prompt)
+
+    def test_builds_agentic_review_prompt_with_repository_exploration_bounds(self) -> None:
+        prompt = build_agentic_codex_review_prompt(request())
+
+        self.assertIn("read-only checkout", prompt)
+        self.assertIn("Do not edit files", prompt)
+        self.assertIn("Do not inspect benchmark goldens", prompt)
+        self.assertIn('"changedFiles"', prompt)
+        self.assertIn("ReviewerOutput", prompt)
 
     def test_parses_reviewer_output_from_raw_json(self) -> None:
         output = parse_reviewer_output(json.dumps({"schemaVersion": "1.0.0", "summary": "Done", "findings": []}))
@@ -81,6 +93,40 @@ class CodexAppServerBackendTests(unittest.TestCase):
             config = CodexAppServerConfig.from_env()
 
         self.assertEqual(config.reasoning_effort, "medium")
+
+    def test_agentic_provider_requires_explicit_repository_checkout(self) -> None:
+        provider = CodexAppServerAgenticReviewerProvider(CodexAppServerConfig(command=("codex", "app-server"), model="test-model"))
+
+        with self.assertRaisesRegex(ValueError, "HEIMDALL_CODEX_APP_SERVER_CWD"):
+            provider.review(request())
+
+    def test_agentic_provider_uses_read_only_repository_turn_options(self) -> None:
+        process = FakeProcess(
+            [
+                {"id": 1, "result": {"userAgent": "test"}},
+                {"id": 2, "result": {"thread": {"id": "thr_1"}}},
+                {"id": 3, "result": {"turn": {"id": "turn_1"}}},
+                {"method": "item/agentMessage/delta", "params": {"itemId": "msg_1", "delta": '{"schemaVersion":"1.0.0","summary":"Done","findings":[]}'}},
+                {"method": "thread/status/changed", "params": {"status": {"type": "idle"}}},
+            ]
+        )
+        config = CodexAppServerConfig(command=("codex", "app-server"), model="test-model", cwd="/repo", timeout_seconds=1)
+        provider = CodexAppServerAgenticReviewerProvider(config)
+
+        with patch("review_worker.backends.codex_app_server.subprocess.Popen", return_value=process):
+            output = provider.review(request())
+
+        sent_messages = [json.loads(line) for line in process.stdin.lines]
+        turn_params = sent_messages[3]["params"]
+        self.assertEqual(turn_params["cwd"], "/repo")
+        self.assertEqual(turn_params["effort"], DEFAULT_REASONING_EFFORT)
+        self.assertEqual(turn_params["sandboxPolicy"]["type"], "readOnly")
+        self.assertEqual(turn_params["sandboxPolicy"]["access"]["readableRoots"], ["/repo"])
+        self.assertEqual(output.modelMetadata.provider, "codex-app-server-agentic")
+
+    def test_read_only_repository_turn_options_require_cwd(self) -> None:
+        with self.assertRaisesRegex(ValueError, "repository cwd"):
+            read_only_repository_turn_options(CodexAppServerConfig(command=("codex", "app-server"), model="test-model"))
 
 
 def request():
