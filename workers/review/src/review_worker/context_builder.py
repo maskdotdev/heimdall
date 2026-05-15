@@ -118,6 +118,16 @@ def scanner_signals_for_hunk(commit_sha: str, path: str, hunk) -> list[ScannerSi
                     location=location,
                 )
             )
+        if _indexes_nested_metadata(content):
+            signals.append(
+                ScannerSignal(
+                    tool="custom",
+                    ruleId="nested-metadata-indexing",
+                    severity="medium",
+                    message="Direct nested indexing into persisted metadata can raise before fallback handling when the stored shape is missing keys.",
+                    location=location,
+                )
+            )
     return signals
 
 
@@ -135,3 +145,7 @@ def _has_eager_default_call(content: str) -> bool:
 
 def _zips_mapping_values_with_ordered_inputs(content: str) -> bool:
     return "zip(" in content and ".values()" in content
+
+
+def _indexes_nested_metadata(content: str) -> bool:
+    return ".metadata[" in content and content.count("[") >= 2

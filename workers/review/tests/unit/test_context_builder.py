@@ -74,7 +74,7 @@ class ContextBuilderTests(unittest.TestCase):
                     ChangedFile(
                         path="review.py",
                         status="modified",
-                        additions=2,
+                        additions=3,
                         deletions=0,
                         language="Python",
                         hunks=[
@@ -82,10 +82,11 @@ class ContextBuilderTests(unittest.TestCase):
                                 oldStart=1,
                                 oldLines=0,
                                 newStart=1,
-                                newLines=2,
+                                newLines=3,
                                 lines=[
                                     DiffLine(kind="added", newLine=1, content='value = request.GET.get("id", load_id())'),
                                     DiffLine(kind="added", newLine=2, content="pairs = zip(requested_ids, rows.values())"),
+                                    DiffLine(kind="added", newLine=3, content='if actor != integration.metadata["sender"]["login"]:'),
                                 ],
                             )
                         ],
@@ -95,7 +96,7 @@ class ContextBuilderTests(unittest.TestCase):
         )
 
         rule_ids = [signal.ruleId for signal in bundle.scannerSignals or []]
-        self.assertEqual(rule_ids, ["python-eager-default-call", "ordered-inputs-with-mapping-values"])
+        self.assertEqual(rule_ids, ["python-eager-default-call", "ordered-inputs-with-mapping-values", "nested-metadata-indexing"])
         self.assertEqual((bundle.scannerSignals or [])[0].location.path, "review.py")
 
 
