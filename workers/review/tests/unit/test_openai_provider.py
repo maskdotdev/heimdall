@@ -121,18 +121,18 @@ class OpenAIProviderTests(unittest.TestCase):
 
         prompt = build_prompt(ReviewRequest(bundle))
 
-        self.assertIn('"kind": "deleted"', prompt)
         self.assertIn("return value or 0", prompt)
         self.assertIn("input validation", prompt)
         self.assertIn("error paths", prompt)
         self.assertIn("shared mutable state", prompt)
         self.assertIn("external API effects", prompt)
         self.assertIn("Do not collapse unrelated defects", prompt)
-        self.assertIn('"includedChangedFileCount"', prompt)
-        self.assertIn('"scannerSignalCount"', prompt)
 
         review_context = json.loads(prompt.split("\n\n", 2)[1])
         lines = review_context["changedFiles"][0]["hunks"][0]["lines"]
+        self.assertNotIn('\n  "changedFiles"', prompt)
+        self.assertIn("includedChangedFileCount", review_context["limits"])
+        self.assertIn("scannerSignalCount", review_context["limits"])
         self.assertEqual(lines[0], {"kind": "context", "oldLine": 1, "newLine": 1, "content": "def handle(value):"})
         self.assertEqual(lines[1], {"kind": "deleted", "oldLine": 2, "content": "    return value or 0"})
         self.assertEqual(lines[2], {"kind": "added", "newLine": 2, "content": "    return value.id"})
@@ -166,9 +166,9 @@ class OpenAIProviderTests(unittest.TestCase):
         )
 
         prompt = build_prompt(ReviewRequest(bundle))
+        review_context = json.loads(prompt.split("\n\n", 2)[1])
 
-        self.assertIn('"scannerSignals"', prompt)
-        self.assertIn('"ruleId": "python-eager-default-call"', prompt)
+        self.assertEqual(review_context["scannerSignals"][0]["ruleId"], "python-eager-default-call")
         self.assertIn("Python evaluates default arguments", prompt)
 
     def test_prompt_includes_portable_repository_exploration_context(self) -> None:
@@ -216,11 +216,10 @@ class OpenAIProviderTests(unittest.TestCase):
             )
 
         prompt = build_prompt(ReviewRequest(bundle))
+        review_context = json.loads(prompt.split("\n\n", 2)[1])
 
-        self.assertIn('"dependencyFrontier"', prompt)
-        self.assertIn('"relatedTests"', prompt)
-        self.assertIn('"path": "src/caller.py"', prompt)
-        self.assertIn('"path": "tests/test_service.py"', prompt)
+        self.assertEqual(review_context["dependencyFrontier"][0]["path"], "src/caller.py")
+        self.assertEqual(review_context["relatedTests"][0]["path"], "tests/test_service.py")
 
     def test_prompt_reserves_snippet_budget_for_repository_exploration_context(self) -> None:
         import tempfile
@@ -396,8 +395,11 @@ class OpenAIProviderTests(unittest.TestCase):
         prompt = build_prompt(ReviewRequest(bundle))
         review_context = json.loads(prompt.split("\n\n", 2)[1])
 
-        self.assertIn('"path": "src/app/api/auth_validator.py"', prompt)
         self.assertIn("state['token']", prompt)
+        self.assertIn(
+            "src/app/api/auth_validator.py",
+            [file["path"] for file in review_context["changedFiles"]],
+        )
         self.assertNotIn(
             f"docs/generated_{MAX_PROMPT_FILES - 1}.md",
             [file["path"] for file in review_context["changedFiles"]],

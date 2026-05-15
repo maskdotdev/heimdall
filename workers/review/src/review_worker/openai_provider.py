@@ -24,6 +24,8 @@ REVIEW_TEMPERATURE = 0.1
 MAX_PROMPT_FILES = 80
 MAX_PROMPT_SNIPPETS = 50
 MAX_PROMPT_RELATED_SNIPPETS = 16
+PROMPT_JSON_SEPARATORS = (",", ":")
+PROMPT_JSON_INDENT = 0
 SYSTEM_PROMPT = (
     "You are Heimdall's code reviewer. The API enforces the reviewer output JSON schema. "
     'schemaVersion must be exactly "1.0.0". Review only the changed files, changed hunks, source snippets, '
@@ -131,9 +133,14 @@ def build_prompt_with_context(
     max_snippets: int = MAX_PROMPT_SNIPPETS,
 ) -> PromptBuild:
     review_context = build_review_context(request, max_files=max_files, max_snippets=max_snippets)
-    context_json = json.dumps(review_context, indent=2, sort_keys=True)
+    context_json = json.dumps(
+        review_context,
+        indent=PROMPT_JSON_INDENT,
+        separators=PROMPT_JSON_SEPARATORS,
+        sort_keys=True,
+    )
     prompt = (
-        "Review the following JSON context.\n\n"
+        "Review the following condensed JSON context.\n\n"
         f"{context_json}\n\n"
         "Output requirements:\n"
         '- Return exactly one JSON object with keys "schemaVersion", "summary", "findings", and optional "modelMetadata".\n'
@@ -256,7 +263,14 @@ def prompt_input_profile(prompt: str, build: PromptBuild) -> dict[str, int]:
 
 
 def json_section_chars(value: Any) -> int:
-    return len(json.dumps(value, indent=2, sort_keys=True))
+    return len(
+        json.dumps(
+            value,
+            indent=PROMPT_JSON_INDENT,
+            separators=PROMPT_JSON_SEPARATORS,
+            sort_keys=True,
+        )
+    )
 
 
 def changed_file_line_profile(value: Any) -> dict[str, int]:
