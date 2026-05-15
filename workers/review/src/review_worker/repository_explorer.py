@@ -73,9 +73,7 @@ DEFINITION_PATTERNS = (
 )
 CALL_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\s*\(")
 IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b")
-MAX_ENCLOSING_SYMBOL_LINES = 24
-ENCLOSING_SYMBOL_LEADING_LINES = 8
-ENCLOSING_SYMBOL_TRAILING_LINES = 8
+MAX_ENCLOSING_SYMBOL_LINES = 40
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,8 +83,6 @@ class RepositoryExplorationOptions:
     max_file_bytes: int = 200_000
     max_symbols: int = 16
     max_related_snippets: int = 12
-    max_enclosing_symbol_snippets: int = 4
-    max_generic_related_symbol_snippets: int = 4
     max_related_tests: int = 8
     max_related_bytes: int = 80_000
     snippet_radius: int = 4
@@ -118,19 +114,17 @@ def explore_repository_context(diff: Diff, options: RepositoryExplorationOptions
     truncated = file_scan_truncated
     truncation_reasons: list[str] = ["repository-file-scan-limit"] if file_scan_truncated else []
     seen_snippets: set[tuple[str, int | None, str | None]] = set()
-    enclosing_symbol_count = 0
-    generic_related_symbol_count = 0
 
     for changed_file in diff.files:
         changed_path = options.root / changed_file.path
-        if enclosing_symbol_count >= options.max_enclosing_symbol_snippets or not changed_path.is_file():
+        if len(source_snippets) >= options.max_related_snippets or not changed_path.is_file():
             continue
         try:
             content = changed_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
         for line_number in _changed_line_numbers(changed_file):
-            if enclosing_symbol_count >= options.max_enclosing_symbol_snippets:
+            if len(source_snippets) >= options.max_related_snippets:
                 break
             snippet = _enclosing_symbol_snippet(changed_path, options.root, content, line_number, diff.headSha)
             if snippet is None:
@@ -147,7 +141,6 @@ def explore_repository_context(diff: Diff, options: RepositoryExplorationOptions
                 truncation_reasons.append("repository-context-size-limit")
                 used_bytes = options.max_related_bytes
                 break
-            enclosing_symbol_count += 1
         if used_bytes >= options.max_related_bytes:
             break
 
@@ -218,11 +211,8 @@ def explore_repository_context(diff: Diff, options: RepositoryExplorationOptions
                     confidence="medium",
                 )
             )
-        reason = "dependency" if definition_symbol is not None or _looks_like_symbol_file(relative_path) else "related-symbol"
-        if (
-            len(source_snippets) < options.max_related_snippets
-            and (reason != "related-symbol" or generic_related_symbol_count < options.max_generic_related_symbol_snippets)
-        ):
+        if len(source_snippets) < options.max_related_snippets:
+            reason = "dependency" if definition_symbol is not None or _looks_like_symbol_file(relative_path) else "related-symbol"
             snippet = (
                 _snippet_for_definition(path, options.root, content, matched_symbol, diff.headSha)
                 if definition_symbol is not None
@@ -248,8 +238,6 @@ def explore_repository_context(diff: Diff, options: RepositoryExplorationOptions
                 truncation_reasons.append("repository-context-size-limit")
                 used_bytes = options.max_related_bytes
                 break
-            if reason == "related-symbol":
-                generic_related_symbol_count += 1
 
         if len(source_snippets) >= options.max_related_snippets and len(related_tests) >= options.max_related_tests:
             break
@@ -363,22 +351,13 @@ def _enclosing_symbol_snippet(path: Path, root: Path, content: str, line_number:
         return None
 
     changed_index = line_number - 1
-    definition_start = _nearest_definition_start(lines, changed_index)
-    start = max(changed_index - ENCLOSING_SYMBOL_LEADING_LINES, 0)
-    if definition_start is not None and changed_index - definition_start <= ENCLOSING_SYMBOL_LEADING_LINES:
-        start = definition_start
-
-    end = min(changed_index + ENCLOSING_SYMBOL_TRAILING_LINES + 1, len(lines))
-    next_definition = _next_definition_start(lines, changed_index + 1)
-    if next_definition is not None:
-        end = min(end, next_definition)
-
-    if end - start > MAX_ENCLOSING_SYMBOL_LINES:
-        start = max(changed_index - ENCLOSING_SYMBOL_LEADING_LINES, 0)
+    start = _nearest_definition_start(lines, changed_index)
+    if start is None:
+        start = max(changed_index - 8, 0)
+    end = _next_definition_start(lines, start + 1)
+    if end is None or end <= changed_index:
         end = min(start + MAX_ENCLOSING_SYMBOL_LINES, len(lines))
-    if not (start <= changed_index < end):
-        start = max(changed_index - ENCLOSING_SYMBOL_LEADING_LINES, 0)
-        end = min(changed_index + ENCLOSING_SYMBOL_TRAILING_LINES + 1, len(lines))
+    end = min(end, len(lines), max(changed_index + 8, start + 1))
     return SourceSnippet(
         location=SourceLocation(
             path=_relative_posix_path(path, root),
