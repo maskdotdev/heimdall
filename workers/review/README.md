@@ -38,6 +38,11 @@ return a Heimdall `ReviewerOutput` JSON object. Configure it with:
 - `HEIMDALL_CODEX_APP_SERVER_REASONING_EFFORT`, default `low`.
 - `HEIMDALL_CODEX_APP_SERVER_CWD`, optional process working directory.
 - `HEIMDALL_CODEX_APP_SERVER_TIMEOUT_SECONDS`, default `300`.
+- `HEIMDALL_CODEX_APP_SERVER_MAX_REVIEWS_PER_PROCESS`, default `1`.
+- `HEIMDALL_CODEX_APP_SERVER_PROMPT_MAX_FILES`, default `8`.
+- `HEIMDALL_CODEX_APP_SERVER_PROMPT_MAX_SNIPPETS`, default `12`.
+- `HEIMDALL_CODEX_APP_SERVER_LARGE_PROMPT_CHAR_THRESHOLD`, default `0` (disabled).
+- `HEIMDALL_CODEX_APP_SERVER_LARGE_PROMPT_MAX_FILES`, default `4`.
 
 Use `pnpm review:live --backend codex-app-server --case docs-only` for opt-in live backend checks. Live runs write
 artifacts under `tests/evals/live-runs` by default and are intentionally not part of `pnpm check`.

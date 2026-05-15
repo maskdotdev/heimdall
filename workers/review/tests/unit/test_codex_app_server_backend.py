@@ -123,7 +123,7 @@ class CodexAppServerBackendTests(unittest.TestCase):
                 {"id": 7, "result": {}},
             ]
         )
-        config = CodexAppServerConfig(command=("codex", "app-server"), model="test-model", timeout_seconds=1)
+        config = CodexAppServerConfig(command=("codex", "app-server"), model="test-model", timeout_seconds=1, max_reviews_per_process=2)
         provider = CodexAppServerReviewerProvider(config)
 
         with patch("review_worker.backends.codex_app_server.subprocess.Popen", return_value=process) as popen:
@@ -216,6 +216,7 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertEqual(config.model, DEFAULT_MODEL)
         self.assertEqual(config.model, "gpt-5.5")
         self.assertEqual(config.reasoning_effort, "low")
+        self.assertEqual(config.max_reviews_per_process, 1)
 
     def test_config_allows_reasoning_effort_override(self) -> None:
         with patch.dict(os.environ, {"HEIMDALL_CODEX_APP_SERVER_REASONING_EFFORT": "medium"}):
