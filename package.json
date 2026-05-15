@@ -13,8 +13,10 @@
     "runtime:build": "pnpm --filter @heimdall/web build",
     "api:dev": "cd services/api && go run ./cmd/api",
     "api:test": "cd services/api && go test ./...",
-    "python:test": "PYTHONPATH=contracts/generated/python:workers/code-intel/src:workers/review/src:tests/evals/runners python3 -m unittest discover -s workers/code-intel/tests/unit -p 'test_*.py' && PYTHONPATH=contracts/generated/python:workers/code-intel/src:workers/review/src:tests/evals/runners python3 -m unittest discover -s workers/review/tests/unit -p 'test_*.py' && pnpm review:eval",
+    "python:test": "PYTHONPATH=contracts/generated/python:workers/code-intel/src:workers/review/src:tests/evals/runners python3 -m unittest discover -s workers/code-intel/tests/unit -p 'test_*.py' && PYTHONPATH=contracts/generated/python:workers/code-intel/src:workers/review/src:tests/evals/runners python3 -m unittest discover -s workers/review/tests/unit -p 'test_*.py' && PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 -m unittest discover -s tests/evals/runners -p 'test_*.py' && pnpm review:eval",
     "review:eval": "PYTHONPATH=contracts/generated/python:workers/review/src python3 tests/evals/runners/review_eval.py",
+    "review:live": "PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 tests/evals/runners/live_review.py",
+    "review:martian": "PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 tests/evals/runners/martian_benchmark.py",
     "runtime:test": "pnpm api:test && pnpm python:test",
     "check": "pnpm contracts:check && pnpm runtime:typecheck && pnpm runtime:build && pnpm runtime:test"
   },

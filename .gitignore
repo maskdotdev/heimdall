@@ -38,6 +38,9 @@ tmp/
 /artifacts/
 repo-cache/
 worktrees/
+tests/evals/live-runs/
+tests/evals/martian-diffs/
+tests/evals/martian-runs/
 
 # OS/editor
 .DS_Store
