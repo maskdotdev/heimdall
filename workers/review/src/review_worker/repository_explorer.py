@@ -73,7 +73,7 @@ DEFINITION_PATTERNS = (
 )
 CALL_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\s*\(")
 IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b")
-MAX_ENCLOSING_SYMBOL_LINES = 80
+MAX_ENCLOSING_SYMBOL_LINES = 40
 
 
 @dataclass(frozen=True, slots=True)
