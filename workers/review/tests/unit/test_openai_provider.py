@@ -31,6 +31,7 @@ class OpenAIProviderTests(unittest.TestCase):
             self.assertIn("Prefer no finding over a speculative finding", payload["messages"][0]["content"])
             self.assertIn('The "schemaVersion" value must be "1.0.0"', payload["messages"][1]["content"])
             self.assertIn('"changedFiles"', payload["messages"][1]["content"])
+            self.assertIn("multiple independent root causes", payload["messages"][1]["content"])
             self.assertIn("Return an empty findings array", payload["messages"][1]["content"])
             self.assertIn("Set modelMetadata to null", payload["messages"][1]["content"])
             return {
@@ -123,6 +124,8 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIn('"kind": "deleted"', prompt)
         self.assertIn("return value or 0", prompt)
         self.assertIn("missing null/None checks", prompt)
+        self.assertIn("concurrency or stale-cache regressions", prompt)
+        self.assertIn("Do not collapse unrelated defects", prompt)
         self.assertIn('"includedChangedFileCount"', prompt)
         self.assertIn('"scannerSignalCount"', prompt)
 
