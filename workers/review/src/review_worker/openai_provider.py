@@ -204,7 +204,7 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
         "- Only report findings supported by the changedFiles, dependencyFrontier, relatedTests, scannerSignals, "
         "or sourceSnippets above.\n"
         "- Use dependencyFrontier and relatedTests as repository exploration evidence, but findings must still point to changed code.\n"
-        "- Check changed code for concrete runtime exceptions, missing null/None checks, authorization or permission regressions, ordering assumptions, validation mistakes, response contract changes, data-shape mismatches, concurrency or stale-cache regressions, async race conditions, one-time-use token or credential mistakes, broad exception handling, test flakiness introduced by sleeps or mocked time, and documentation or localization mistakes in changed user-facing strings.\n"
+        "- Check changed code for contract changes, state transitions, shared mutable state, persistence effects, external API effects, input validation, error paths, resource lifetimes, ordering assumptions, data-shape assumptions, and test assertions that no longer prove the changed behavior.\n"
         "- Look for multiple independent root causes before returning. Do not collapse unrelated defects into one finding, and do not stop after the first valid finding when other changed hunks prove separate issues.\n"
         "- Return an empty findings array when the context does not prove a concrete issue.\n"
         "- Set modelMetadata to null; Heimdall fills provider metadata after parsing."

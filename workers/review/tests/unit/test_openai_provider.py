@@ -123,8 +123,10 @@ class OpenAIProviderTests(unittest.TestCase):
 
         self.assertIn('"kind": "deleted"', prompt)
         self.assertIn("return value or 0", prompt)
-        self.assertIn("missing null/None checks", prompt)
-        self.assertIn("concurrency or stale-cache regressions", prompt)
+        self.assertIn("input validation", prompt)
+        self.assertIn("error paths", prompt)
+        self.assertIn("shared mutable state", prompt)
+        self.assertIn("external API effects", prompt)
         self.assertIn("Do not collapse unrelated defects", prompt)
         self.assertIn('"includedChangedFileCount"', prompt)
         self.assertIn('"scannerSignalCount"', prompt)

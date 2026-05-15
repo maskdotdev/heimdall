@@ -10,6 +10,37 @@ evals/        Golden review cases, expected findings, and scoring runners.
 
 Review-quality evals should track true positives, false positives, missed issues, severity calibration, duplicate findings, unsupported findings, cost, and latency.
 
+## Eval Hygiene
+
+Keep evaluation sets separate by how much the team has learned from them:
+
+- `smoke`: Small cases used to verify that runners, schemas, backends, and artifacts work. Scores from these cases are not quality claims.
+- `dev`: Cases whose failures have been inspected. Use them for debugging, taxonomy, and regression checks, but not for unbiased score reporting.
+- `holdout`: Cases selected before running a reviewer version. Run once for measurement. If anyone inspects per-case failures, golden comments, or judge rationales to guide a change, move that set to `dev`.
+- `final`: Reserved cases for milestone measurement. Do not inspect failures or tune against them until after the milestone result is recorded.
+
+Allowed after inspecting a `dev` result:
+
+- Improve general mechanisms such as context selection, validation, candidate verification, scanner adapters, or language-agnostic review procedure.
+- Add tests that cover the mechanism without copying benchmark golden text or case-specific facts.
+- Report the result as a dev-set regression or debugging measurement.
+
+Not allowed for holdout or final score claims:
+
+- Adding prompt checklist items, scanner rules, or heuristics because they match inspected golden comments.
+- Mentioning benchmark case IDs, repositories, expected findings, line numbers, or golden-comment wording in reviewer prompts, scanners, or test fixtures.
+- Repeatedly tuning against the same holdout while continuing to call it unbiased.
+
+The reviewer prompt may use general review procedures, such as enumerating changed contracts, state transitions,
+error paths, resource lifetimes, and independent root causes. Prefer mechanism-oriented instructions over
+bug-class lists derived from benchmark misses.
+
+Current Martian set labels:
+
+- The original 3-case Sentry run is `smoke`.
+- `.tmp/martian-holdout-10-run-v1` and `.tmp/martian-holdout-10-run-root-causes-v1` are now `dev`, because their failures were inspected during prompt cleanup.
+- Create a new case selection before making the next unbiased holdout claim.
+
 The baseline review eval runner is deterministic. It replays saved reviewer-output JSON from `evals/saved-outputs`
 against context bundles in `evals/golden-prs`, then compares the validated findings with `evals/expected-findings`.
 Run it with `pnpm review:eval`; it also runs as part of `pnpm python:test`.
