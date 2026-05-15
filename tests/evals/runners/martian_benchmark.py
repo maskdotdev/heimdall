@@ -105,6 +105,7 @@ class MartianComparisonRow:
     judge_ms: int | None = None
     total_ms: int | None = None
     review_phase_ms: dict[str, int] | None = None
+    review_input_profile: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +211,7 @@ def run_martian_benchmark(
                 review_ms: int | None = None
                 judge_ms: int | None = None
                 review_phase_ms: dict[str, int] | None = None
+                review_input_profile: dict[str, int] | None = None
                 review_started: float | None = None
                 active_provider: Any = None
                 try:
@@ -230,6 +232,7 @@ def run_martian_benchmark(
                             try:
                                 result = ReviewEngine(case_provider).review(ReviewRequest(context_bundle=context_bundle))
                                 review_phase_ms = reviewer_phase_timing(case_provider)
+                                review_input_profile = reviewer_input_profile(case_provider)
                             finally:
                                 close_reviewer_provider(case_provider)
                     else:
@@ -238,6 +241,7 @@ def run_martian_benchmark(
                         active_provider = shared_provider
                         result = shared_engine.review(ReviewRequest(context_bundle=context_bundle))
                         review_phase_ms = reviewer_phase_timing(shared_provider)
+                        review_input_profile = reviewer_input_profile(shared_provider)
                     review_ms = elapsed_ms(review_started)
                     duration_ms = elapsed_ms(started)
                 except Exception as error:
@@ -245,8 +249,17 @@ def run_martian_benchmark(
                         review_ms = elapsed_ms(review_started)
                     if review_phase_ms is None and active_provider is not None:
                         review_phase_ms = reviewer_phase_timing(active_provider)
+                    if review_input_profile is None and active_provider is not None:
+                        review_input_profile = reviewer_input_profile(active_provider)
                     row = failed_row(backend, case.case_id, None, None, None, None, 0, len(case.golden_comments), elapsed_ms(started), error)
-                    row = replace(row, context_ms=context_ms, review_ms=review_ms, total_ms=elapsed_ms(started), review_phase_ms=review_phase_ms)
+                    row = replace(
+                        row,
+                        context_ms=context_ms,
+                        review_ms=review_ms,
+                        total_ms=elapsed_ms(started),
+                        review_phase_ms=review_phase_ms,
+                        review_input_profile=review_input_profile,
+                    )
                     rows.append(row)
                     write_error_artifacts(run_dir, backend, case, row)
                     continue
@@ -281,6 +294,7 @@ def run_martian_benchmark(
                         judge_ms=elapsed_ms(judge_started),
                         total_ms=elapsed_ms(started),
                         review_phase_ms=review_phase_ms,
+                        review_input_profile=review_input_profile,
                     )
                     rows.append(row)
                     write_error_artifacts(run_dir, backend, case, row)
@@ -303,6 +317,7 @@ def run_martian_benchmark(
                     judge_ms=judge_ms,
                     total_ms=elapsed_ms(started),
                     review_phase_ms=review_phase_ms,
+                    review_input_profile=review_input_profile,
                 )
                 rows.append(row)
                 write_case_artifacts(run_dir, backend, case, context_bundle, result.raw_output, list(result.findings), row, case_judgments if judge else None)
@@ -345,6 +360,17 @@ def reviewer_phase_timing(provider: Any) -> dict[str, int] | None:
         return None
     result: dict[str, int] = {}
     for key, value in timing.items():
+        if isinstance(key, str) and isinstance(value, int):
+            result[key] = value
+    return result or None
+
+
+def reviewer_input_profile(provider: Any) -> dict[str, int] | None:
+    profile = getattr(provider, "last_input_profile", None)
+    if not isinstance(profile, dict):
+        return None
+    result: dict[str, int] = {}
+    for key, value in profile.items():
         if isinstance(key, str) and isinstance(value, int):
             result[key] = value
     return result or None
@@ -957,6 +983,10 @@ def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
     for row in rows:
         for key, value in (row.review_phase_ms or {}).items():
             review_phase_ms[key] = review_phase_ms.get(key, 0) + value
+    review_input_profile: dict[str, int] = {}
+    for row in rows:
+        for key, value in (row.review_input_profile or {}).items():
+            review_input_profile[key] = review_input_profile.get(key, 0) + value
     return {
         "schemaVersion": "1.0.0",
         "caseCount": len(rows),
@@ -975,6 +1005,7 @@ def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
         "judgeMs": judge_ms,
         "totalMs": total_ms,
         "reviewPhaseMs": review_phase_ms,
+        "reviewInputProfile": review_input_profile,
     }
 
 

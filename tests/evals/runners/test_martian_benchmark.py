@@ -172,7 +172,15 @@ class MartianBenchmarkTests(unittest.TestCase):
             judgments=[{"candidateIndex": 0, "goldenIndex": 0, "sameIssue": True}],
         )
 
-        timed_row = replace(row, context_ms=3, review_ms=9, judge_ms=5, total_ms=17, review_phase_ms={"turnMs": 7, "parseMs": 1})
+        timed_row = replace(
+            row,
+            context_ms=3,
+            review_ms=9,
+            judge_ms=5,
+            total_ms=17,
+            review_phase_ms={"turnMs": 7, "parseMs": 1},
+            review_input_profile={"promptChars": 100, "changedFilesChars": 80},
+        )
         aggregate = aggregate_rows([timed_row])
 
         self.assertEqual(aggregate["truePositives"], 1)
@@ -183,6 +191,7 @@ class MartianBenchmarkTests(unittest.TestCase):
         self.assertEqual(aggregate["judgeMs"], 5)
         self.assertEqual(aggregate["totalMs"], 17)
         self.assertEqual(aggregate["reviewPhaseMs"], {"turnMs": 7, "parseMs": 1})
+        self.assertEqual(aggregate["reviewInputProfile"], {"promptChars": 100, "changedFilesChars": 80})
 
     def test_builds_and_parses_judge_output_for_all_pairs(self) -> None:
         pairs = [

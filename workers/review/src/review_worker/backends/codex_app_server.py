@@ -13,13 +13,14 @@ from typing import Any
 
 from contract_types import ModelMetadata, ReviewerOutput, from_json
 
-from review_worker.openai_provider import PROMPT_VERSION, build_prompt
+from review_worker.openai_provider import PROMPT_VERSION, build_prompt_with_context, prompt_input_profile
 from review_worker.ports import ReviewRequest
 
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "low"
 DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_MAX_REVIEWS_PER_PROCESS = 6
 JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 CODEX_PROMPT_MAX_FILES = 8
 CODEX_PROMPT_MAX_SNIPPETS = 12
@@ -32,6 +33,7 @@ class CodexAppServerConfig:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     cwd: str | None = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    max_reviews_per_process: int = DEFAULT_MAX_REVIEWS_PER_PROCESS
 
     @classmethod
     def from_env(cls) -> CodexAppServerConfig:
@@ -40,7 +42,15 @@ class CodexAppServerConfig:
         reasoning_effort = os.environ.get("HEIMDALL_CODEX_APP_SERVER_REASONING_EFFORT", DEFAULT_REASONING_EFFORT)
         cwd = os.environ.get("HEIMDALL_CODEX_APP_SERVER_CWD") or None
         timeout_seconds = float(os.environ.get("HEIMDALL_CODEX_APP_SERVER_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
-        return cls(command=tuple(command), model=model, reasoning_effort=reasoning_effort, cwd=cwd, timeout_seconds=timeout_seconds)
+        max_reviews_per_process = int(os.environ.get("HEIMDALL_CODEX_APP_SERVER_MAX_REVIEWS_PER_PROCESS", str(DEFAULT_MAX_REVIEWS_PER_PROCESS)))
+        return cls(
+            command=tuple(command),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            max_reviews_per_process=max_reviews_per_process,
+        )
 
 
 class CodexAppServerReviewerProvider:
@@ -48,6 +58,8 @@ class CodexAppServerReviewerProvider:
         self.config = config or CodexAppServerConfig.from_env()
         self.client: CodexAppServerClient | None = None
         self.last_timing: dict[str, int] | None = None
+        self.last_input_profile: dict[str, int] | None = None
+        self.reviews_on_client = 0
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
         client = self._client()
@@ -55,9 +67,12 @@ class CodexAppServerReviewerProvider:
             output = client.review(request)
         except Exception:
             self.last_timing = client.last_timing
+            self.last_input_profile = client.last_input_profile
             self.close()
             raise
+        self.reviews_on_client += 1
         self.last_timing = client.last_timing
+        self.last_input_profile = client.last_input_profile
         output.modelMetadata = output.modelMetadata or ModelMetadata()
         output.modelMetadata.provider = "codex-app-server"
         output.modelMetadata.model = self.config.model
@@ -65,20 +80,25 @@ class CodexAppServerReviewerProvider:
         return output
 
     def _client(self) -> CodexAppServerClient:
+        if self.client is not None and self.reviews_on_client >= self.config.max_reviews_per_process:
+            self.close()
         if self.client is None:
             self.client = CodexAppServerClient(self.config)
+            self.reviews_on_client = 0
         return self.client
 
     def close(self) -> None:
         if self.client is not None:
             self.client.close()
             self.client = None
+            self.reviews_on_client = 0
 
 
 class CodexAppServerAgenticReviewerProvider:
     def __init__(self, config: CodexAppServerConfig | None = None) -> None:
         self.config = config or CodexAppServerConfig.from_env()
         self.last_timing: dict[str, int] | None = None
+        self.last_input_profile: dict[str, int] | None = None
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
         if self.config.cwd is None:
@@ -86,16 +106,16 @@ class CodexAppServerAgenticReviewerProvider:
 
         client = CodexAppServerClient(self.config)
         try:
-            text = client.complete_text(
-                build_agentic_codex_review_prompt(request),
-                turn_options=read_only_repository_turn_options(self.config),
-            )
+            prompt, input_profile = build_agentic_codex_review_prompt_with_profile(request)
+            client.last_input_profile = input_profile
+            text = client.complete_text(prompt, turn_options=read_only_repository_turn_options(self.config))
             parse_started = time.monotonic()
             output = parse_reviewer_output(text)
             timing = dict(client.last_timing or {})
             timing["parseMs"] = elapsed_ms(parse_started)
             client.last_timing = timing
             self.last_timing = client.last_timing
+            self.last_input_profile = client.last_input_profile
         finally:
             client.close()
         output.modelMetadata = output.modelMetadata or ModelMetadata()
@@ -122,9 +142,12 @@ class CodexAppServerClient:
         self.report_process_start = True
         self.initialized = False
         self.last_timing: dict[str, int] | None = None
+        self.last_input_profile: dict[str, int] | None = None
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
-        text = self.complete_text(build_codex_review_prompt(request))
+        prompt, input_profile = build_codex_review_prompt_with_profile(request)
+        self.last_input_profile = input_profile
+        text = self.complete_text(prompt)
         parse_started = time.monotonic()
         try:
             return parse_reviewer_output(text)
@@ -286,7 +309,16 @@ class CodexAppServerClient:
 
 
 def build_codex_review_prompt(request: ReviewRequest) -> str:
-    return (
+    return build_codex_review_prompt_with_profile(request)[0]
+
+
+def build_codex_review_prompt_with_profile(request: ReviewRequest) -> tuple[str, dict[str, int]]:
+    prompt_build = build_prompt_with_context(
+        request,
+        max_files=CODEX_PROMPT_MAX_FILES,
+        max_snippets=CODEX_PROMPT_MAX_SNIPPETS,
+    )
+    prompt = (
         "You are the Codex backend for Heimdall's review worker. Review only the supplied Heimdall context bundle. "
         "Do not inspect or edit files. Return only one JSON object matching Heimdall's ReviewerOutput contract.\n"
         "Contract requirements:\n"
@@ -300,12 +332,18 @@ def build_codex_review_prompt(request: ReviewRequest) -> str:
         '- Evidence "kind" must be one of: "diff-line", "source-snippet", "scanner-signal", "dependency-edge", '
         '"test-signal", "review-standard", or "other". Use "diff-line" for changed diff lines; never use "changed_line".\n'
         '- Line locations must use objects like {"path":"app/routes.py","startLine":6}.\n\n'
-        f"{build_prompt(request, max_files=CODEX_PROMPT_MAX_FILES, max_snippets=CODEX_PROMPT_MAX_SNIPPETS)}"
+        f"{prompt_build.prompt}"
     )
+    return prompt, prompt_input_profile(prompt, prompt_build)
 
 
 def build_agentic_codex_review_prompt(request: ReviewRequest) -> str:
-    return (
+    return build_agentic_codex_review_prompt_with_profile(request)[0]
+
+
+def build_agentic_codex_review_prompt_with_profile(request: ReviewRequest) -> tuple[str, dict[str, int]]:
+    prompt_build = build_prompt_with_context(request)
+    prompt = (
         "You are the Codex backend for Heimdall's agentic review worker. Review the supplied Heimdall context bundle "
         "and use the current working directory as a read-only checkout of the repository under review. You may inspect "
         "files to understand changed code, nearby definitions, call sites, and directly related tests. First use the "
@@ -326,8 +364,9 @@ def build_agentic_codex_review_prompt(request: ReviewRequest) -> str:
         '- Evidence "kind" must be one of: "diff-line", "source-snippet", "scanner-signal", "dependency-edge", '
         '"test-signal", "review-standard", or "other". Use "diff-line" for changed diff lines; never use "changed_line".\n'
         '- Line locations must use objects like {"path":"app/routes.py","startLine":6} and must refer to changed files.\n\n'
-        f"{build_prompt(request)}"
+        f"{prompt_build.prompt}"
     )
+    return prompt, prompt_input_profile(prompt, prompt_build)
 
 
 def read_only_repository_turn_options(config: CodexAppServerConfig) -> dict[str, Any]:

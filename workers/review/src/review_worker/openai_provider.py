@@ -65,6 +65,13 @@ class OpenAICompatibleConfig:
         return cls(base_url=base_url, api_key=api_key, model=model)
 
 
+@dataclass(frozen=True, slots=True)
+class PromptBuild:
+    prompt: str
+    review_context: dict[str, Any]
+    context_json: str
+
+
 class OpenAICompatibleReviewerProvider:
     def __init__(self, config: OpenAICompatibleConfig, transport: Transport | None = None) -> None:
         self.config = config
@@ -114,6 +121,37 @@ def urlopen_transport(endpoint: str, headers: dict[str, str], payload: dict[str,
 
 
 def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, max_snippets: int = MAX_PROMPT_SNIPPETS) -> str:
+    return build_prompt_with_context(request, max_files=max_files, max_snippets=max_snippets).prompt
+
+
+def build_prompt_with_context(
+    request: ReviewRequest,
+    *,
+    max_files: int = MAX_PROMPT_FILES,
+    max_snippets: int = MAX_PROMPT_SNIPPETS,
+) -> PromptBuild:
+    review_context = build_review_context(request, max_files=max_files, max_snippets=max_snippets)
+    context_json = json.dumps(review_context, indent=2, sort_keys=True)
+    prompt = (
+        "Review the following JSON context.\n\n"
+        f"{context_json}\n\n"
+        "Output requirements:\n"
+        '- Return exactly one JSON object with keys "schemaVersion", "summary", "findings", and optional "modelMetadata".\n'
+        '- The "schemaVersion" value must be "1.0.0".\n'
+        "- Findings must include title, body, category, severity, confidence, and evidence.\n"
+        "- Evidence must include kind and summary, and should include location.path and location.startLine when tied to a changed line.\n"
+        "- Only report findings supported by the changedFiles, dependencyFrontier, relatedTests, scannerSignals, "
+        "or sourceSnippets above.\n"
+        "- Use dependencyFrontier and relatedTests as repository exploration evidence, but findings must still point to changed code.\n"
+        "- Check changed code for contract changes, state transitions, shared mutable state, persistence effects, external API effects, input validation, error paths, resource lifetimes, ordering assumptions, data-shape assumptions, and test assertions that no longer prove the changed behavior.\n"
+        "- Look for multiple independent root causes before returning. Do not collapse unrelated defects into one finding, and do not stop after the first valid finding when other changed hunks prove separate issues.\n"
+        "- Return an empty findings array when the context does not prove a concrete issue.\n"
+        "- Set modelMetadata to null; Heimdall fills provider metadata after parsing."
+    )
+    return PromptBuild(prompt=prompt, review_context=review_context, context_json=context_json)
+
+
+def build_review_context(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, max_snippets: int = MAX_PROMPT_SNIPPETS) -> dict[str, Any]:
     bundle = request.context_bundle
     ranked_files = rank_changed_files(list(bundle.diff.files))
     ranked_path_index = {file.path: index for index, file in enumerate(ranked_files)}
@@ -193,22 +231,71 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
         "scannerSignals": scanner_signals,
         "sourceSnippets": snippets,
     }
-    return (
-        "Review the following JSON context.\n\n"
-        f"{json.dumps(review_context, indent=2, sort_keys=True)}\n\n"
-        "Output requirements:\n"
-        '- Return exactly one JSON object with keys "schemaVersion", "summary", "findings", and optional "modelMetadata".\n'
-        '- The "schemaVersion" value must be "1.0.0".\n'
-        "- Findings must include title, body, category, severity, confidence, and evidence.\n"
-        "- Evidence must include kind and summary, and should include location.path and location.startLine when tied to a changed line.\n"
-        "- Only report findings supported by the changedFiles, dependencyFrontier, relatedTests, scannerSignals, "
-        "or sourceSnippets above.\n"
-        "- Use dependencyFrontier and relatedTests as repository exploration evidence, but findings must still point to changed code.\n"
-        "- Check changed code for contract changes, state transitions, shared mutable state, persistence effects, external API effects, input validation, error paths, resource lifetimes, ordering assumptions, data-shape assumptions, and test assertions that no longer prove the changed behavior.\n"
-        "- Look for multiple independent root causes before returning. Do not collapse unrelated defects into one finding, and do not stop after the first valid finding when other changed hunks prove separate issues.\n"
-        "- Return an empty findings array when the context does not prove a concrete issue.\n"
-        "- Set modelMetadata to null; Heimdall fills provider metadata after parsing."
-    )
+    return review_context
+
+
+def prompt_input_profile(prompt: str, build: PromptBuild) -> dict[str, int]:
+    review_context = build.review_context
+    changed_line_profile = changed_file_line_profile(review_context.get("changedFiles"))
+    return {
+        "promptChars": len(prompt),
+        "promptBytes": len(prompt.encode("utf-8")),
+        "reviewPromptChars": len(build.prompt),
+        "contextJsonChars": len(build.context_json),
+        "changedFilesChars": json_section_chars(review_context.get("changedFiles")),
+        "sourceSnippetsChars": json_section_chars(review_context.get("sourceSnippets")),
+        "dependencyFrontierChars": json_section_chars(review_context.get("dependencyFrontier")),
+        "relatedTestsChars": json_section_chars(review_context.get("relatedTests")),
+        "scannerSignalsChars": json_section_chars(review_context.get("scannerSignals")),
+        "includedChangedFileCount": int(review_context["limits"]["includedChangedFileCount"]),
+        "includedSourceSnippetCount": int(review_context["limits"]["includedSourceSnippetCount"]),
+        "includedRelatedSnippetCount": int(review_context["limits"]["includedRelatedSnippetCount"]),
+        "diffFileCount": int(review_context["limits"]["diffFileCount"]),
+        **changed_line_profile,
+    }
+
+
+def json_section_chars(value: Any) -> int:
+    return len(json.dumps(value, indent=2, sort_keys=True))
+
+
+def changed_file_line_profile(value: Any) -> dict[str, int]:
+    counts = {"changedLineCount": 0, "addedLineCount": 0, "deletedLineCount": 0, "contextLineCount": 0}
+    chars = {"changedLineChars": 0, "addedLineChars": 0, "deletedLineChars": 0, "contextLineChars": 0}
+    if not isinstance(value, list):
+        return {**counts, **chars}
+
+    for changed_file in value:
+        if not isinstance(changed_file, dict):
+            continue
+        hunks = changed_file.get("hunks")
+        if not isinstance(hunks, list):
+            continue
+        for hunk in hunks:
+            if not isinstance(hunk, dict):
+                continue
+            lines = hunk.get("lines")
+            if not isinstance(lines, list):
+                continue
+            for line in lines:
+                if not isinstance(line, dict):
+                    continue
+                kind = line.get("kind")
+                content = line.get("content")
+                if not isinstance(kind, str) or not isinstance(content, str):
+                    continue
+                counts["changedLineCount"] += 1
+                chars["changedLineChars"] += len(content)
+                if kind == "added":
+                    counts["addedLineCount"] += 1
+                    chars["addedLineChars"] += len(content)
+                elif kind == "deleted":
+                    counts["deletedLineCount"] += 1
+                    chars["deletedLineChars"] += len(content)
+                elif kind == "context":
+                    counts["contextLineCount"] += 1
+                    chars["contextLineChars"] += len(content)
+    return {**counts, **chars}
 
 
 def summarize_changed_file(changed_file: Any) -> dict[str, Any]:

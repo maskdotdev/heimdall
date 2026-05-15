@@ -90,6 +90,8 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertIn("turnMs", client.last_timing or {})
         self.assertIn("archiveMs", client.last_timing or {})
         self.assertIn("parseMs", client.last_timing or {})
+        self.assertIn("promptChars", client.last_input_profile or {})
+        self.assertIn("changedFilesChars", client.last_input_profile or {})
 
     def test_reviewer_provider_reuses_app_server_process(self) -> None:
         process = FakeProcess(
@@ -113,8 +115,10 @@ class CodexAppServerBackendTests(unittest.TestCase):
         with patch("review_worker.backends.codex_app_server.subprocess.Popen", return_value=process) as popen:
             first = provider.review(request())
             first_timing = dict(provider.last_timing or {})
+            first_profile = dict(provider.last_input_profile or {})
             second = provider.review(request())
             second_timing = dict(provider.last_timing or {})
+            second_profile = dict(provider.last_input_profile or {})
             provider.close()
 
         sent_messages = [json.loads(line) for line in process.stdin.lines]
@@ -125,10 +129,52 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertEqual(methods.count("thread/archive"), 2)
         self.assertEqual(first.summary, "One")
         self.assertEqual(second.summary, "Two")
+        self.assertGreater(first_profile["promptChars"], 0)
+        self.assertGreater(second_profile["promptChars"], 0)
         self.assertGreaterEqual(first_timing["processStartMs"], 0)
         self.assertEqual(second_timing["processStartMs"], 0)
         self.assertEqual(second_timing["initializeMs"], 0)
         self.assertTrue(process.terminated)
+
+    def test_reviewer_provider_rotates_app_server_after_configured_review_count(self) -> None:
+        first_process = FakeProcess(
+            [
+                {"id": 1, "result": {"userAgent": "test"}},
+                {"id": 2, "result": {"thread": {"id": "thr_1"}}},
+                {"id": 3, "result": {"turn": {"id": "turn_1"}}},
+                {"method": "item/agentMessage/delta", "params": {"itemId": "msg_1", "delta": '{"schemaVersion":"1.0.0","summary":"One","findings":[]}'}},
+                {"method": "thread/status/changed", "params": {"status": {"type": "idle"}}},
+                {"id": 4, "result": {}},
+            ]
+        )
+        second_process = FakeProcess(
+            [
+                {"id": 1, "result": {"userAgent": "test"}},
+                {"id": 2, "result": {"thread": {"id": "thr_2"}}},
+                {"id": 3, "result": {"turn": {"id": "turn_2"}}},
+                {"method": "item/agentMessage/delta", "params": {"itemId": "msg_2", "delta": '{"schemaVersion":"1.0.0","summary":"Two","findings":[]}'}},
+                {"method": "thread/status/changed", "params": {"status": {"type": "idle"}}},
+                {"id": 4, "result": {}},
+            ]
+        )
+        config = CodexAppServerConfig(
+            command=("codex", "app-server"),
+            model="test-model",
+            timeout_seconds=1,
+            max_reviews_per_process=1,
+        )
+        provider = CodexAppServerReviewerProvider(config)
+
+        with patch("review_worker.backends.codex_app_server.subprocess.Popen", side_effect=[first_process, second_process]) as popen:
+            first = provider.review(request())
+            second = provider.review(request())
+            provider.close()
+
+        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(first.summary, "One")
+        self.assertEqual(second.summary, "Two")
+        self.assertTrue(first_process.terminated)
+        self.assertTrue(second_process.terminated)
 
     def test_reviewer_provider_keeps_timing_when_review_fails(self) -> None:
         process = FakeProcess(
