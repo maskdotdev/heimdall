@@ -179,6 +179,10 @@ class CodexAppServerClient:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
 
 
 def build_codex_review_prompt(request: ReviewRequest) -> str:
