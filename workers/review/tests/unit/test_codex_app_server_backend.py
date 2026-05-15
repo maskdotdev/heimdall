@@ -34,6 +34,8 @@ class CodexAppServerBackendTests(unittest.TestCase):
         prompt = build_agentic_codex_review_prompt(request())
 
         self.assertIn("read-only checkout", prompt)
+        self.assertIn("dependencyFrontier", prompt)
+        self.assertIn("relatedTests", prompt)
         self.assertIn("Do not edit files", prompt)
         self.assertIn("Do not inspect benchmark goldens", prompt)
         self.assertIn('"changedFiles"', prompt)

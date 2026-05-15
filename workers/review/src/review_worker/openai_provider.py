@@ -26,7 +26,8 @@ MAX_PROMPT_SNIPPETS = 50
 SYSTEM_PROMPT = (
     "You are Heimdall's code reviewer. The API enforces the reviewer output JSON schema. "
     'schemaVersion must be exactly "1.0.0". Review only the changed files, changed hunks, source snippets, '
-    "scanner signals, review standards, and related tests provided in the request. Do not report issues that "
+    "dependency frontier, scanner signals, review standards, and related tests provided in the request. Do not report "
+    "issues that "
     "are merely possible, pre-existing, outside the supplied changed-code context, or unsupported by concrete "
     "evidence. Every finding must describe a real correctness, security, reliability, performance, "
     "maintainability, test, documentation, accessibility, style, or other issue that a maintainer could act on. "
@@ -142,6 +143,24 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
         }
         for signal in bundle.scannerSignals or []
     ]
+    dependency_frontier = [
+        {
+            "kind": item.kind,
+            "path": item.path,
+            "symbolName": item.symbolName,
+            "reason": item.reason,
+            "confidence": item.confidence,
+        }
+        for item in bundle.dependencyFrontier or []
+    ]
+    related_tests = [
+        {
+            "path": item.path,
+            "reason": item.reason,
+            "confidence": item.confidence,
+        }
+        for item in bundle.relatedTests or []
+    ]
     review_context = {
         "reviewRunId": bundle.reviewRunId,
         "changeRequest": {
@@ -156,9 +175,13 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
             "includedChangedFileCount": len(changed_files),
             "sourceSnippetCount": len(bundle.sourceSnippets or []),
             "includedSourceSnippetCount": len(snippets),
+            "dependencyFrontierCount": len(bundle.dependencyFrontier or []),
+            "relatedTestCount": len(bundle.relatedTests or []),
             "scannerSignalCount": len(bundle.scannerSignals or []),
         },
         "changedFiles": changed_files,
+        "dependencyFrontier": dependency_frontier,
+        "relatedTests": related_tests,
         "scannerSignals": scanner_signals,
         "sourceSnippets": snippets,
     }
@@ -170,7 +193,9 @@ def build_prompt(request: ReviewRequest, *, max_files: int = MAX_PROMPT_FILES, m
         '- The "schemaVersion" value must be "1.0.0".\n'
         "- Findings must include title, body, category, severity, confidence, and evidence.\n"
         "- Evidence must include kind and summary, and should include location.path and location.startLine when tied to a changed line.\n"
-        "- Only report findings supported by the changedFiles or sourceSnippets above.\n"
+        "- Only report findings supported by the changedFiles, dependencyFrontier, relatedTests, scannerSignals, "
+        "or sourceSnippets above.\n"
+        "- Use dependencyFrontier and relatedTests as repository exploration evidence, but findings must still point to changed code.\n"
         "- Check changed code for concrete runtime exceptions, missing null/None checks, authorization or permission regressions, ordering assumptions, validation mistakes, response contract changes, and data-shape mismatches.\n"
         "- Return an empty findings array when the context does not prove a concrete issue.\n"
         "- Set modelMetadata to null; Heimdall fills provider metadata after parsing."

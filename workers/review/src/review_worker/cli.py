@@ -7,7 +7,7 @@ import sys
 from contract_types import ChangeRequest, ContextBundle, Diff, from_json, to_jsonable
 
 from .backends import create_reviewer_provider
-from .context_builder import build_diff_context_bundle
+from .context_builder import DiffContextOptions, build_diff_context_bundle
 from .engine import ReviewEngine
 from .ports import ReviewRequest
 
@@ -23,6 +23,7 @@ def main() -> int:
             payload["reviewRunId"],
             from_json(ChangeRequest, payload["changeRequest"]),
             from_json(Diff, payload["diff"]),
+            DiffContextOptions(repository_root=os.environ.get("HEIMDALL_REVIEW_REPOSITORY_ROOT")),
         )
 
     result = ReviewEngine(provider).review(ReviewRequest(context_bundle=context_bundle))

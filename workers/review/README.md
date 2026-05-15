@@ -23,6 +23,12 @@ Select a backend with `HEIMDALL_REVIEW_PROVIDER`.
 - `openai-chat`: OpenAI-compatible Chat Completions backend with structured output schema enforcement.
 - `openai-compatible`: alias for `openai-chat`.
 - `codex-app-server`: experimental Codex app-server backend over stdio.
+- `codex-app-server-agentic`: experimental Codex app-server backend with a read-only repository checkout.
+
+When `HEIMDALL_REVIEW_REPOSITORY_ROOT` points to a checkout, the context builder adds bounded repository exploration
+evidence that every backend can use. It scans a capped set of source files for changed identifiers, adds related symbol
+snippets, records dependency frontier entries, and links directly related tests. Findings still need to point at changed
+code after validation.
 
 The `codex-app-server` backend starts `codex app-server`, initializes JSON-RPC, starts a thread, and asks Codex to
 return a Heimdall `ReviewerOutput` JSON object. Configure it with:

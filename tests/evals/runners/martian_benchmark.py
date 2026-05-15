@@ -30,7 +30,7 @@ from contract_types import (
 )
 from review_worker.backends import create_reviewer_provider
 from review_worker.backends.codex_app_server import CodexAppServerClient, CodexAppServerConfig
-from review_worker.context_builder import build_diff_context_bundle
+from review_worker.context_builder import DiffContextOptions, build_diff_context_bundle
 from review_worker.engine import ReviewEngine
 from review_worker.ports import ReviewRequest
 
@@ -196,7 +196,13 @@ def run_martian_benchmark(
                 continue
             started = time.monotonic()
             try:
-                context_bundle = context_bundle_for_case(case, diff_dir=diff_dir, cache_diff_dir=cache_diff_dir, fetch_diffs=fetch_diffs)
+                context_bundle = context_bundle_for_case(
+                    case,
+                    diff_dir=diff_dir,
+                    cache_diff_dir=cache_diff_dir,
+                    fetch_diffs=fetch_diffs,
+                    repository_root=(repo_roots or {}).get(case.case_id),
+                )
                 with reviewer_backend_environment(backend, case, repo_roots or {}):
                     result = ReviewEngine(create_reviewer_provider(backend)).review(ReviewRequest(context_bundle=context_bundle))
                 duration_ms = elapsed_ms(started)
@@ -362,7 +368,14 @@ def case_from_entry(entry: dict[str, Any], *, source_file: str | None) -> Martia
     )
 
 
-def context_bundle_for_case(case: MartianCase, *, diff_dir: Path | None, cache_diff_dir: Path | None = None, fetch_diffs: bool = False) -> ContextBundle:
+def context_bundle_for_case(
+    case: MartianCase,
+    *,
+    diff_dir: Path | None,
+    cache_diff_dir: Path | None = None,
+    fetch_diffs: bool = False,
+    repository_root: Path | None = None,
+) -> ContextBundle:
     diff_text = load_diff_text(case, diff_dir=diff_dir, cache_diff_dir=cache_diff_dir, fetch_diffs=fetch_diffs)
     repo = parse_github_pull_url(case.original_url or case.url)
     change_request = ChangeRequest(
@@ -395,7 +408,12 @@ def context_bundle_for_case(case: MartianCase, *, diff_dir: Path | None, cache_d
         base_sha=change_request.base.sha,
         head_sha=change_request.head.sha,
     )
-    return build_diff_context_bundle(review_run_id=f"run_martian_{case.case_id}", change_request=change_request, diff=diff)
+    return build_diff_context_bundle(
+        review_run_id=f"run_martian_{case.case_id}",
+        change_request=change_request,
+        diff=diff,
+        options=DiffContextOptions(repository_root=str(repository_root)) if repository_root is not None else None,
+    )
 
 
 def load_diff_text(case: MartianCase, *, diff_dir: Path | None, cache_diff_dir: Path | None, fetch_diffs: bool) -> str:

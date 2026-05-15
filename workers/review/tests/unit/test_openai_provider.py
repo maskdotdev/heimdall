@@ -160,6 +160,57 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIn('"ruleId": "python-eager-default-call"', prompt)
         self.assertIn("Python evaluates default arguments", prompt)
 
+    def test_prompt_includes_portable_repository_exploration_context(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from contract_types import ChangedFile, DiffHunk, DiffLine
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            (root / "src" / "caller.py").write_text(
+                "from src.service import load_account\n\nresult = load_account(user_id)\n",
+                encoding="utf-8",
+            )
+            (root / "tests" / "test_service.py").write_text(
+                "def test_load_account():\n    load_account(user_id)\n",
+                encoding="utf-8",
+            )
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="src/service.py",
+                            status="modified",
+                            additions=1,
+                            deletions=0,
+                            language="Python",
+                            hunks=[
+                                DiffHunk(
+                                    oldStart=1,
+                                    oldLines=0,
+                                    newStart=1,
+                                    newLines=1,
+                                    lines=[DiffLine(kind="added", newLine=1, content="def load_account(user_id):")],
+                                )
+                            ],
+                        )
+                    ]
+                ),
+                DiffContextOptions(repository_root=str(root)),
+            )
+
+        prompt = build_prompt(ReviewRequest(bundle))
+
+        self.assertIn('"dependencyFrontier"', prompt)
+        self.assertIn('"relatedTests"', prompt)
+        self.assertIn('"path": "src/caller.py"', prompt)
+        self.assertIn('"path": "tests/test_service.py"', prompt)
+
     def test_prompt_prioritizes_high_signal_changed_files_before_truncating(self) -> None:
         from contract_types import ChangedFile, DiffHunk, DiffLine
 

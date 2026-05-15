@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from contract_types import (
     ChangeRequest,
     ContextBundle,
     ContextLimits,
     Diff,
+    FrontierItem,
+    RelatedTestRef,
     ScannerSignal,
     RedactionSummary,
     SourceLocation,
     SourceSnippet,
 )
+
+from .repository_explorer import RepositoryExplorationOptions, explore_repository_context
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +24,11 @@ class DiffContextOptions:
     max_files: int = 50
     max_bytes: int = 200_000
     max_snippet_bytes: int = 40_000
+    repository_root: str | None = None
+    max_repository_files_scanned: int = 2_000
+    max_related_snippets: int = 12
+    max_related_tests: int = 8
+    max_related_bytes: int = 80_000
 
 
 def build_diff_context_bundle(
@@ -29,6 +39,8 @@ def build_diff_context_bundle(
 ) -> ContextBundle:
     opts = options or DiffContextOptions()
     snippets: list[SourceSnippet] = []
+    dependency_frontier: list[FrontierItem] = []
+    related_tests: list[RelatedTestRef] = []
     scanner_signals: list[ScannerSignal] = []
     used_bytes = 0
     truncated = False
@@ -65,6 +77,24 @@ def build_diff_context_bundle(
             used_bytes += encoded_size
             scanner_signals.extend(scanner_signals_for_hunk(diff.headSha, changed_file.path, hunk))
 
+    if opts.repository_root is not None:
+        exploration = explore_repository_context(
+            diff,
+            RepositoryExplorationOptions(
+                root=Path(opts.repository_root),
+                max_files_scanned=opts.max_repository_files_scanned,
+                max_related_snippets=opts.max_related_snippets,
+                max_related_tests=opts.max_related_tests,
+                max_related_bytes=opts.max_related_bytes,
+            ),
+        )
+        snippets.extend(exploration.source_snippets)
+        dependency_frontier.extend(exploration.dependency_frontier)
+        related_tests.extend(exploration.related_tests)
+        if exploration.truncated:
+            truncated = True
+            truncation_reasons.extend(exploration.truncation_reasons)
+
     if len(diff.files) > opts.max_files:
         truncated = True
         truncation_reasons.append("file-count-limit")
@@ -76,6 +106,8 @@ def build_diff_context_bundle(
         changeRequest=change_request,
         diff=diff,
         sourceSnippets=snippets,
+        dependencyFrontier=dependency_frontier or None,
+        relatedTests=related_tests or None,
         scannerSignals=scanner_signals or None,
         limits=ContextLimits(
             maxFiles=opts.max_files,

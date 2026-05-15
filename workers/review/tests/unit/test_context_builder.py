@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from contract_types import (
     ChangeRef,
@@ -98,6 +100,107 @@ class ContextBuilderTests(unittest.TestCase):
         rule_ids = [signal.ruleId for signal in bundle.scannerSignals or []]
         self.assertEqual(rule_ids, ["python-eager-default-call", "ordered-inputs-with-mapping-values", "nested-metadata-indexing"])
         self.assertEqual((bundle.scannerSignals or [])[0].location.path, "review.py")
+
+    def test_adds_bounded_repository_exploration_context_when_repo_root_is_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "app").mkdir()
+            (root / "tests").mkdir()
+            (root / "app" / "users.py").write_text(
+                "\n".join(
+                    [
+                        "from app.models import UserProfile",
+                        "",
+                        "def save_profile(profile: UserProfile):",
+                        "    return profile.persist()",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "tests" / "test_profiles.py").write_text(
+                "\n".join(
+                    [
+                        "from app.users import save_profile",
+                        "",
+                        "def test_save_profile():",
+                        "    assert save_profile(profile)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="app/profiles.py",
+                            status="modified",
+                            additions=1,
+                            deletions=0,
+                            language="Python",
+                            hunks=[
+                                DiffHunk(
+                                    oldStart=1,
+                                    oldLines=1,
+                                    newStart=1,
+                                    newLines=2,
+                                    lines=[
+                                        DiffLine(kind="context", oldLine=1, newLine=1, content="class UserProfile:"),
+                                        DiffLine(kind="added", newLine=2, content="    def save_profile(self):"),
+                                    ],
+                                )
+                            ],
+                        )
+                    ]
+                ),
+                DiffContextOptions(repository_root=str(root), max_related_snippets=4, max_related_tests=4),
+            )
+
+        related_paths = {snippet.location.path for snippet in bundle.sourceSnippets or []}
+        frontier_paths = {item.path for item in bundle.dependencyFrontier or []}
+        test_paths = {item.path for item in bundle.relatedTests or []}
+
+        self.assertIn("app/users.py", related_paths)
+        self.assertIn("tests/test_profiles.py", related_paths)
+        self.assertIn("app/users.py", frontier_paths)
+        self.assertIn("tests/test_profiles.py", test_paths)
+
+    def test_repository_exploration_marks_truncation_at_file_scan_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.py").write_text("def changed_symbol():\n    return 1\n", encoding="utf-8")
+            (root / "b.py").write_text("changed_symbol()\n", encoding="utf-8")
+
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="changed.py",
+                            status="modified",
+                            additions=1,
+                            deletions=0,
+                            language="Python",
+                            hunks=[
+                                DiffHunk(
+                                    oldStart=1,
+                                    oldLines=0,
+                                    newStart=1,
+                                    newLines=1,
+                                    lines=[DiffLine(kind="added", newLine=1, content="changed_symbol()")],
+                                )
+                            ],
+                        )
+                    ]
+                ),
+                DiffContextOptions(repository_root=str(root), max_repository_files_scanned=1),
+            )
+
+        self.assertTrue(bundle.limits.truncated)
+        self.assertIn("repository-file-scan-limit", bundle.limits.truncationReasons or [])
 
 
 def change_request() -> ChangeRequest:

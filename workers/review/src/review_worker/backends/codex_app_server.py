@@ -238,7 +238,8 @@ def build_agentic_codex_review_prompt(request: ReviewRequest) -> str:
     return (
         "You are the Codex backend for Heimdall's agentic review worker. Review the supplied Heimdall context bundle "
         "and use the current working directory as a read-only checkout of the repository under review. You may inspect "
-        "files to understand changed code, nearby definitions, call sites, and directly related tests. Do not edit files, "
+        "files to understand changed code, nearby definitions, call sites, and directly related tests. First use the "
+        "supplied dependencyFrontier, relatedTests, and sourceSnippets as the exploration seed. Do not edit files, "
         "publish comments, install dependencies, fetch remote resources, or run broad/slow test suites. Use short "
         "read-only commands such as git diff, rg, sed, and targeted test discovery, and stop exploring once the supplied "
         "diff and nearby repository context are enough to decide. Do not inspect benchmark goldens, expected findings, "

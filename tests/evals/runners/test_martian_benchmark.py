@@ -105,6 +105,34 @@ class MartianBenchmarkTests(unittest.TestCase):
         self.assertEqual(bundle.diff.files[0].path, "app/routes.py")
         self.assertTrue(bundle.sourceSnippets)
 
+    def test_builds_context_bundle_with_repository_exploration_when_repo_root_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            diff_dir = root / "diffs"
+            repo_root = root / "repo"
+            diff_dir.mkdir()
+            (repo_root / "app").mkdir(parents=True)
+            (repo_root / "tests").mkdir()
+            (diff_dir / f"{CASE_ID}.diff").write_text(DIFF_TEXT, encoding="utf-8")
+            (repo_root / "app" / "services.py").write_text(
+                "def get_profile(user_id):\n    return user_id\n",
+                encoding="utf-8",
+            )
+            (repo_root / "tests" / "test_routes.py").write_text(
+                "def test_profile():\n    get_profile(user_id)\n",
+                encoding="utf-8",
+            )
+
+            bundle = context_bundle_for_case(
+                martian_case(),
+                diff_dir=diff_dir,
+                fetch_diffs=False,
+                repository_root=repo_root,
+            )
+
+        self.assertTrue(bundle.dependencyFrontier)
+        self.assertTrue(bundle.relatedTests)
+
     def test_reads_cached_diff_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
