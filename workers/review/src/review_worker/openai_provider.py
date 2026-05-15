@@ -245,14 +245,8 @@ def select_prompt_snippets(snippets: list[Any], *, max_snippets: int) -> list[An
         return []
 
     related = [snippet for snippet in snippets if snippet.reason != "changed-file"]
-    if not related:
-        return snippets[:max_snippets]
-
-    related_budget = min(MAX_PROMPT_RELATED_SNIPPETS, max(max_snippets // 3, 1), len(related))
-    changed_budget = max_snippets - related_budget
-    selected = [snippet for snippet in snippets if snippet.reason == "changed-file"][:changed_budget]
-    selected.extend(select_related_prompt_snippets(related, max_snippets=max_snippets - len(selected)))
-    return selected
+    related_budget = min(MAX_PROMPT_RELATED_SNIPPETS, max_snippets, len(related))
+    return select_related_prompt_snippets(related, max_snippets=related_budget)
 
 
 def select_related_prompt_snippets(snippets: list[Any], *, max_snippets: int) -> list[Any]:

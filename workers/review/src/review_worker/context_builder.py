@@ -27,6 +27,8 @@ class DiffContextOptions:
     repository_root: str | None = None
     max_repository_files_scanned: int = 2_000
     max_related_snippets: int = 12
+    max_enclosing_symbol_snippets: int = 4
+    max_generic_related_symbol_snippets: int = 4
     max_related_tests: int = 8
     max_related_bytes: int = 80_000
 
@@ -84,6 +86,8 @@ def build_diff_context_bundle(
                 root=Path(opts.repository_root),
                 max_files_scanned=opts.max_repository_files_scanned,
                 max_related_snippets=opts.max_related_snippets,
+                max_enclosing_symbol_snippets=opts.max_enclosing_symbol_snippets,
+                max_generic_related_symbol_snippets=opts.max_generic_related_symbol_snippets,
                 max_related_tests=opts.max_related_tests,
                 max_related_bytes=opts.max_related_bytes,
             ),

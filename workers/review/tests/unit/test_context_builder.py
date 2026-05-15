@@ -247,6 +247,98 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertIn("def save_profile", enclosing.content)
         self.assertIn("class ProfileStatus", dependency.content)
 
+    def test_caps_generic_repository_context_without_dropping_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "app").mkdir()
+            (root / "lib").mkdir()
+            (root / "app" / "changed.py").write_text(
+                "\n".join(
+                    [
+                        "from app.models import WidgetPayload",
+                        "",
+                        "def process_widget(payload: WidgetPayload):",
+                        "    validate_widget(payload)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "app" / "models.py").write_text(
+                "\n".join(
+                    [
+                        "class WidgetPayload:",
+                        "    def __init__(self, value):",
+                        "        self.value = value",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            for name in ("a", "b", "c"):
+                (root / "lib" / f"{name}.py").write_text(
+                    f"print(process_widget)\nprint('generic {name}')\n",
+                    encoding="utf-8",
+                )
+
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="app/changed.py",
+                            status="modified",
+                            additions=1,
+                            deletions=0,
+                            language="Python",
+                            hunks=[
+                                DiffHunk(
+                                    oldStart=3,
+                                    oldLines=1,
+                                    newStart=3,
+                                    newLines=2,
+                                    lines=[
+                                        DiffLine(
+                                            kind="context",
+                                            oldLine=3,
+                                            newLine=3,
+                                            content="def process_widget(payload: WidgetPayload):",
+                                        ),
+                                        DiffLine(kind="added", newLine=4, content="    validate_widget(payload)"),
+                                    ],
+                                )
+                            ],
+                        )
+                    ]
+                ),
+                DiffContextOptions(
+                    repository_root=str(root),
+                    max_related_snippets=6,
+                    max_enclosing_symbol_snippets=1,
+                    max_generic_related_symbol_snippets=1,
+                ),
+            )
+
+        snippets = bundle.sourceSnippets or []
+        changed_symbol_snippets = [
+            snippet
+            for snippet in snippets
+            if snippet.location.path == "app/changed.py" and snippet.reason == "related-symbol"
+        ]
+        generic_symbol_snippets = [
+            snippet
+            for snippet in snippets
+            if snippet.location.path.startswith("lib/") and snippet.reason == "related-symbol"
+        ]
+        dependency_snippets = [
+            snippet
+            for snippet in snippets
+            if snippet.location.path == "app/models.py" and snippet.reason == "dependency"
+        ]
+
+        self.assertEqual(len(changed_symbol_snippets), 1)
+        self.assertEqual(len(generic_symbol_snippets), 1)
+        self.assertEqual(len(dependency_snippets), 1)
+
     def test_repository_exploration_marks_truncation_at_file_scan_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
