@@ -121,7 +121,6 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertEqual(turn_params["cwd"], "/repo")
         self.assertEqual(turn_params["effort"], DEFAULT_REASONING_EFFORT)
         self.assertEqual(turn_params["sandboxPolicy"]["type"], "readOnly")
-        self.assertEqual(turn_params["sandboxPolicy"]["access"]["readableRoots"], ["/repo"])
         self.assertEqual(output.modelMetadata.provider, "codex-app-server-agentic")
 
     def test_read_only_repository_turn_options_require_cwd(self) -> None:

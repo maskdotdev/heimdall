@@ -265,14 +265,7 @@ def read_only_repository_turn_options(config: CodexAppServerConfig) -> dict[str,
         "model": config.model,
         "effort": config.reasoning_effort,
         "approvalPolicy": "never",
-        "sandboxPolicy": {
-            "type": "readOnly",
-            "access": {
-                "type": "restricted",
-                "includePlatformDefaults": True,
-                "readableRoots": [config.cwd],
-            },
-        },
+        "sandboxPolicy": {"type": "readOnly"},
     }
 
 
