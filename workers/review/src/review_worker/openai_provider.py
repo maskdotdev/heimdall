@@ -20,6 +20,8 @@ from .reviewer_output_schema import reviewer_output_response_format
 Transport = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
 PROMPT_VERSION = "baseline-reviewer-v1"
 REVIEW_TEMPERATURE = 0.1
+MAX_PROMPT_FILES = 80
+MAX_PROMPT_SNIPPETS = 50
 SYSTEM_PROMPT = (
     "You are Heimdall's code reviewer. The API enforces the reviewer output JSON schema. "
     'schemaVersion must be exactly "1.0.0". Review only the changed files, changed hunks, source snippets, '
@@ -108,7 +110,7 @@ def urlopen_transport(endpoint: str, headers: dict[str, str], payload: dict[str,
 
 def build_prompt(request: ReviewRequest) -> str:
     bundle = request.context_bundle
-    changed_files = [summarize_changed_file(file) for file in bundle.diff.files[:20]]
+    changed_files = [summarize_changed_file(file) for file in bundle.diff.files[:MAX_PROMPT_FILES]]
     snippets = [
         {
             "path": snippet.location.path,
@@ -117,7 +119,7 @@ def build_prompt(request: ReviewRequest) -> str:
             "reason": snippet.reason,
             "content": snippet.content,
         }
-        for snippet in (bundle.sourceSnippets or [])[:10]
+        for snippet in (bundle.sourceSnippets or [])[:MAX_PROMPT_SNIPPETS]
     ]
     review_context = {
         "reviewRunId": bundle.reviewRunId,
@@ -129,6 +131,10 @@ def build_prompt(request: ReviewRequest) -> str:
         "limits": {
             "truncated": bundle.limits.truncated,
             "truncationReasons": bundle.limits.truncationReasons or [],
+            "diffFileCount": len(bundle.diff.files),
+            "includedChangedFileCount": len(changed_files),
+            "sourceSnippetCount": len(bundle.sourceSnippets or []),
+            "includedSourceSnippetCount": len(snippets),
         },
         "changedFiles": changed_files,
         "sourceSnippets": snippets,
@@ -142,6 +148,7 @@ def build_prompt(request: ReviewRequest) -> str:
         "- Findings must include title, body, category, severity, confidence, and evidence.\n"
         "- Evidence must include kind and summary, and should include location.path and location.startLine when tied to a changed line.\n"
         "- Only report findings supported by the changedFiles or sourceSnippets above.\n"
+        "- Check changed code for concrete runtime exceptions, missing null/None checks, authorization or permission regressions, ordering assumptions, validation mistakes, response contract changes, and data-shape mismatches.\n"
         "- Return an empty findings array when the context does not prove a concrete issue.\n"
         "- Set modelMetadata to null; Heimdall fills provider metadata after parsing."
     )
@@ -168,7 +175,7 @@ def summarize_changed_file(changed_file: Any) -> dict[str, Any]:
                         "content": line.content,
                     }
                     for line in hunk.lines
-                    if line.kind in ("context", "added")
+                    if line.kind in ("context", "added", "deleted")
                 ],
             }
             for hunk in changed_file.hunks

@@ -7,6 +7,7 @@ from review_worker.openai_provider import (
     OpenAICompatibleConfig,
     OpenAICompatibleReviewerProvider,
     ReviewerRefusalError,
+    build_prompt,
 )
 from review_worker.ports import ReviewRequest
 
@@ -82,6 +83,45 @@ class OpenAIProviderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ReviewerRefusalError, "refused"):
             provider.review(ReviewRequest(build_diff_context_bundle("run_1", change_request(), diff([]))))
+
+    def test_prompt_includes_deleted_lines_and_review_checklist(self) -> None:
+        from contract_types import ChangedFile, DiffHunk, DiffLine
+
+        bundle = build_diff_context_bundle(
+            "run_1",
+            change_request(),
+            diff(
+                [
+                    ChangedFile(
+                        path="app.py",
+                        status="modified",
+                        additions=1,
+                        deletions=1,
+                        language="Python",
+                        hunks=[
+                            DiffHunk(
+                                oldStart=1,
+                                oldLines=2,
+                                newStart=1,
+                                newLines=2,
+                                lines=[
+                                    DiffLine(kind="context", oldLine=1, newLine=1, content="def handle(value):"),
+                                    DiffLine(kind="deleted", oldLine=2, content="    return value or 0"),
+                                    DiffLine(kind="added", newLine=2, content="    return value.id"),
+                                ],
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        prompt = build_prompt(ReviewRequest(bundle))
+
+        self.assertIn('"kind": "deleted"', prompt)
+        self.assertIn("return value or 0", prompt)
+        self.assertIn("missing null/None checks", prompt)
+        self.assertIn('"includedChangedFileCount"', prompt)
 
 
 if __name__ == "__main__":
