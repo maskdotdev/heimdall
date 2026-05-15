@@ -172,7 +172,7 @@ class MartianBenchmarkTests(unittest.TestCase):
             judgments=[{"candidateIndex": 0, "goldenIndex": 0, "sameIssue": True}],
         )
 
-        timed_row = replace(row, context_ms=3, review_ms=9, judge_ms=5, total_ms=17)
+        timed_row = replace(row, context_ms=3, review_ms=9, judge_ms=5, total_ms=17, review_phase_ms={"turnMs": 7, "parseMs": 1})
         aggregate = aggregate_rows([timed_row])
 
         self.assertEqual(aggregate["truePositives"], 1)
@@ -182,6 +182,7 @@ class MartianBenchmarkTests(unittest.TestCase):
         self.assertEqual(aggregate["reviewMs"], 9)
         self.assertEqual(aggregate["judgeMs"], 5)
         self.assertEqual(aggregate["totalMs"], 17)
+        self.assertEqual(aggregate["reviewPhaseMs"], {"turnMs": 7, "parseMs": 1})
 
     def test_builds_and_parses_judge_output_for_all_pairs(self) -> None:
         pairs = [
@@ -232,6 +233,40 @@ class MartianBenchmarkTests(unittest.TestCase):
         self.assertEqual(rows[0].candidate_count, 1)
         self.assertEqual(rows[0].true_positives, 1)
         self.assertTrue(pairs_exist)
+
+    def test_run_martian_benchmark_reuses_non_agentic_provider(self) -> None:
+        second_url = "https://github.com/acme/payments/pull/102"
+        second_case_id = case_id_for_url(second_url)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            golden_dir = root / "golden_comments"
+            diff_dir = root / "diffs"
+            out_dir = root / "run"
+            golden_dir.mkdir()
+            diff_dir.mkdir()
+            write_json(
+                golden_dir / "payments.json",
+                [
+                    {
+                        "pr_title": "Use request parameter in profile lookup",
+                        "url": PULL_URL,
+                        "comments": [{"comment": "The fake reviewer produced deterministic finding output.", "severity": "Low"}],
+                    },
+                    {
+                        "pr_title": "Use request parameter in profile lookup again",
+                        "url": second_url,
+                        "comments": [{"comment": "The fake reviewer produced deterministic finding output.", "severity": "Low"}],
+                    },
+                ],
+            )
+            (diff_dir / f"{CASE_ID}.diff").write_text(DIFF_TEXT, encoding="utf-8")
+            (diff_dir / f"{second_case_id}.diff").write_text(DIFF_TEXT, encoding="utf-8")
+
+            with patch("martian_benchmark.create_reviewer_provider", return_value=FakeReviewerProvider()) as create_provider:
+                rows = run_martian_benchmark(["fake"], golden_dir=golden_dir, diff_dir=diff_dir, output_dir=out_dir, match_mode="lexical")
+
+        self.assertEqual(len(rows), 2)
+        create_provider.assert_called_once_with("fake")
 
     def test_agentic_martian_backend_requires_explicit_repo_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

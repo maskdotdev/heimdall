@@ -104,6 +104,7 @@ class MartianComparisonRow:
     review_ms: int | None = None
     judge_ms: int | None = None
     total_ms: int | None = None
+    review_phase_ms: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,94 +178,128 @@ def run_martian_benchmark(
     rows: list[MartianComparisonRow] = []
 
     for backend in backends:
-        for case in cases:
-            if max_run_seconds is not None and time.monotonic() - run_started >= max_run_seconds:
-                row = failed_row(
-                    backend,
-                    case.case_id,
-                    None,
-                    None,
-                    judge,
-                    None,
-                    0,
-                    len(case.golden_comments),
-                    elapsed_ms(run_started),
-                    TimeoutError(f"max run seconds exceeded before starting case: {max_run_seconds}"),
-                )
-                rows.append(row)
-                write_error_artifacts(run_dir, backend, case, row)
-                continue
-            existing = load_existing_row(run_dir, backend, case) if resume and not force else None
-            if existing is not None:
-                rows.append(existing)
-                continue
-            started = time.monotonic()
-            context_ms: int | None = None
-            review_ms: int | None = None
-            judge_ms: int | None = None
-            try:
-                context_started = time.monotonic()
-                context_bundle = context_bundle_for_case(
-                    case,
-                    diff_dir=diff_dir,
-                    cache_diff_dir=cache_diff_dir,
-                    fetch_diffs=fetch_diffs,
-                    repository_root=(repo_roots or {}).get(case.case_id),
-                )
-                context_ms = elapsed_ms(context_started)
-                review_started = time.monotonic()
-                with reviewer_backend_environment(backend, case, repo_roots or {}):
-                    result = ReviewEngine(create_reviewer_provider(backend)).review(ReviewRequest(context_bundle=context_bundle))
-                review_ms = elapsed_ms(review_started)
-                duration_ms = elapsed_ms(started)
-            except Exception as error:
-                row = failed_row(backend, case.case_id, None, None, None, None, 0, len(case.golden_comments), elapsed_ms(started), error)
-                row = replace(row, context_ms=context_ms, review_ms=review_ms, total_ms=elapsed_ms(started))
-                rows.append(row)
-                write_error_artifacts(run_dir, backend, case, row)
-                continue
+        shared_provider = None
+        shared_engine: ReviewEngine | None = None
+        try:
+            if backend not in AGENTIC_REVIEW_BACKENDS:
+                shared_provider = create_reviewer_provider(backend)
+                shared_engine = ReviewEngine(shared_provider)
+            for case in cases:
+                if max_run_seconds is not None and time.monotonic() - run_started >= max_run_seconds:
+                    row = failed_row(
+                        backend,
+                        case.case_id,
+                        None,
+                        None,
+                        judge,
+                        None,
+                        0,
+                        len(case.golden_comments),
+                        elapsed_ms(run_started),
+                        TimeoutError(f"max run seconds exceeded before starting case: {max_run_seconds}"),
+                    )
+                    rows.append(row)
+                    write_error_artifacts(run_dir, backend, case, row)
+                    continue
+                existing = load_existing_row(run_dir, backend, case) if resume and not force else None
+                if existing is not None:
+                    rows.append(existing)
+                    continue
+                started = time.monotonic()
+                context_ms: int | None = None
+                review_ms: int | None = None
+                judge_ms: int | None = None
+                review_phase_ms: dict[str, int] | None = None
+                try:
+                    context_started = time.monotonic()
+                    context_bundle = context_bundle_for_case(
+                        case,
+                        diff_dir=diff_dir,
+                        cache_diff_dir=cache_diff_dir,
+                        fetch_diffs=fetch_diffs,
+                        repository_root=(repo_roots or {}).get(case.case_id),
+                    )
+                    context_ms = elapsed_ms(context_started)
+                    review_started = time.monotonic()
+                    if backend in AGENTIC_REVIEW_BACKENDS:
+                        with reviewer_backend_environment(backend, case, repo_roots or {}):
+                            case_provider = create_reviewer_provider(backend)
+                            try:
+                                result = ReviewEngine(case_provider).review(ReviewRequest(context_bundle=context_bundle))
+                                review_phase_ms = reviewer_phase_timing(case_provider)
+                            finally:
+                                close_reviewer_provider(case_provider)
+                    else:
+                        if shared_engine is None or shared_provider is None:
+                            raise RuntimeError(f"reviewer provider was not initialized for backend {backend}")
+                        result = shared_engine.review(ReviewRequest(context_bundle=context_bundle))
+                        review_phase_ms = reviewer_phase_timing(shared_provider)
+                    review_ms = elapsed_ms(review_started)
+                    duration_ms = elapsed_ms(started)
+                except Exception as error:
+                    row = failed_row(backend, case.case_id, None, None, None, None, 0, len(case.golden_comments), elapsed_ms(started), error)
+                    row = replace(row, context_ms=context_ms, review_ms=review_ms, total_ms=elapsed_ms(started), review_phase_ms=review_phase_ms)
+                    rows.append(row)
+                    write_error_artifacts(run_dir, backend, case, row)
+                    continue
 
-            reviewer_provider = result.raw_output.modelMetadata.provider if result.raw_output.modelMetadata else None
-            reviewer_model = result.raw_output.modelMetadata.model if result.raw_output.modelMetadata else None
-            try:
-                judge_started = time.monotonic()
-                case_judgments = (
-                    judge_findings(case, list(result.findings), judge=judge, max_judge_pairs=max_judge_pairs)
-                    if judge
-                    else judgments.get(case.case_id, [])
+                reviewer_provider = result.raw_output.modelMetadata.provider if result.raw_output.modelMetadata else None
+                reviewer_model = result.raw_output.modelMetadata.model if result.raw_output.modelMetadata else None
+                try:
+                    judge_started = time.monotonic()
+                    case_judgments = (
+                        judge_findings(case, list(result.findings), judge=judge, max_judge_pairs=max_judge_pairs)
+                        if judge
+                        else judgments.get(case.case_id, [])
+                    )
+                    judge_ms = elapsed_ms(judge_started) if judge else 0
+                except Exception as error:
+                    row = failed_row(
+                        backend,
+                        case.case_id,
+                        reviewer_provider,
+                        reviewer_model,
+                        judge,
+                        None,
+                        len(result.findings),
+                        len(case.golden_comments),
+                        duration_ms,
+                        error,
+                    )
+                    row = replace(
+                        row,
+                        context_ms=context_ms,
+                        review_ms=review_ms,
+                        judge_ms=elapsed_ms(judge_started),
+                        total_ms=elapsed_ms(started),
+                        review_phase_ms=review_phase_ms,
+                    )
+                    rows.append(row)
+                    write_error_artifacts(run_dir, backend, case, row)
+                    continue
+                generated_judgments.extend(case_judgments if judge else [])
+                row = compare_martian_result(
+                    backend=backend,
+                    case=case,
+                    raw_output=result.raw_output,
+                    findings=list(result.findings),
+                    duration_ms=duration_ms,
+                    match_mode="judgments" if judge else match_mode,
+                    judgments=case_judgments,
+                    judge=judge,
                 )
-                judge_ms = elapsed_ms(judge_started) if judge else 0
-            except Exception as error:
-                row = failed_row(
-                    backend,
-                    case.case_id,
-                    reviewer_provider,
-                    reviewer_model,
-                    judge,
-                    None,
-                    len(result.findings),
-                    len(case.golden_comments),
-                    duration_ms,
-                    error,
+                row = replace(
+                    row,
+                    context_ms=context_ms,
+                    review_ms=review_ms,
+                    judge_ms=judge_ms,
+                    total_ms=elapsed_ms(started),
+                    review_phase_ms=review_phase_ms,
                 )
-                row = replace(row, context_ms=context_ms, review_ms=review_ms, judge_ms=elapsed_ms(judge_started), total_ms=elapsed_ms(started))
                 rows.append(row)
-                write_error_artifacts(run_dir, backend, case, row)
-                continue
-            generated_judgments.extend(case_judgments if judge else [])
-            row = compare_martian_result(
-                backend=backend,
-                case=case,
-                raw_output=result.raw_output,
-                findings=list(result.findings),
-                duration_ms=duration_ms,
-                match_mode="judgments" if judge else match_mode,
-                judgments=case_judgments,
-                judge=judge,
-            )
-            row = replace(row, context_ms=context_ms, review_ms=review_ms, judge_ms=judge_ms, total_ms=elapsed_ms(started))
-            rows.append(row)
-            write_case_artifacts(run_dir, backend, case, context_bundle, result.raw_output, list(result.findings), row, case_judgments if judge else None)
+                write_case_artifacts(run_dir, backend, case, context_bundle, result.raw_output, list(result.findings), row, case_judgments if judge else None)
+        finally:
+            close_reviewer_provider(shared_provider)
 
     if generated_judgments:
         write_json(run_dir / "judgments.json", {"matches": generated_judgments})
@@ -294,6 +329,25 @@ def reviewer_backend_environment(backend: str, case: MartianCase, repo_roots: di
             os.environ.pop("HEIMDALL_CODEX_APP_SERVER_CWD", None)
         else:
             os.environ["HEIMDALL_CODEX_APP_SERVER_CWD"] = previous_cwd
+
+
+def reviewer_phase_timing(provider: Any) -> dict[str, int] | None:
+    timing = getattr(provider, "last_timing", None)
+    if not isinstance(timing, dict):
+        return None
+    result: dict[str, int] = {}
+    for key, value in timing.items():
+        if isinstance(key, str) and isinstance(value, int):
+            result[key] = value
+    return result or None
+
+
+def close_reviewer_provider(provider: Any) -> None:
+    if provider is None:
+        return
+    close = getattr(provider, "close", None)
+    if callable(close):
+        close()
 
 
 def load_martian_cases(
@@ -891,6 +945,10 @@ def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
     review_ms = sum(row.review_ms or 0 for row in rows)
     judge_ms = sum(row.judge_ms or 0 for row in rows)
     total_ms = sum(row.total_ms or row.duration_ms for row in rows)
+    review_phase_ms: dict[str, int] = {}
+    for row in rows:
+        for key, value in (row.review_phase_ms or {}).items():
+            review_phase_ms[key] = review_phase_ms.get(key, 0) + value
     return {
         "schemaVersion": "1.0.0",
         "caseCount": len(rows),
@@ -908,6 +966,7 @@ def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
         "reviewMs": review_ms,
         "judgeMs": judge_ms,
         "totalMs": total_ms,
+        "reviewPhaseMs": review_phase_ms,
     }
 
 

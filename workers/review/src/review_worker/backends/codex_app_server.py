@@ -46,23 +46,38 @@ class CodexAppServerConfig:
 class CodexAppServerReviewerProvider:
     def __init__(self, config: CodexAppServerConfig | None = None) -> None:
         self.config = config or CodexAppServerConfig.from_env()
+        self.client: CodexAppServerClient | None = None
+        self.last_timing: dict[str, int] | None = None
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
-        client = CodexAppServerClient(self.config)
+        client = self._client()
         try:
             output = client.review(request)
-        finally:
-            client.close()
+        except Exception:
+            self.close()
+            raise
+        self.last_timing = client.last_timing
         output.modelMetadata = output.modelMetadata or ModelMetadata()
         output.modelMetadata.provider = "codex-app-server"
         output.modelMetadata.model = self.config.model
         output.modelMetadata.promptVersion = PROMPT_VERSION
         return output
 
+    def _client(self) -> CodexAppServerClient:
+        if self.client is None:
+            self.client = CodexAppServerClient(self.config)
+        return self.client
+
+    def close(self) -> None:
+        if self.client is not None:
+            self.client.close()
+            self.client = None
+
 
 class CodexAppServerAgenticReviewerProvider:
     def __init__(self, config: CodexAppServerConfig | None = None) -> None:
         self.config = config or CodexAppServerConfig.from_env()
+        self.last_timing: dict[str, int] | None = None
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
         if self.config.cwd is None:
@@ -70,12 +85,16 @@ class CodexAppServerAgenticReviewerProvider:
 
         client = CodexAppServerClient(self.config)
         try:
-            output = parse_reviewer_output(
-                client.complete_text(
-                    build_agentic_codex_review_prompt(request),
-                    turn_options=read_only_repository_turn_options(self.config),
-                )
+            text = client.complete_text(
+                build_agentic_codex_review_prompt(request),
+                turn_options=read_only_repository_turn_options(self.config),
             )
+            parse_started = time.monotonic()
+            output = parse_reviewer_output(text)
+            timing = dict(client.last_timing or {})
+            timing["parseMs"] = elapsed_ms(parse_started)
+            client.last_timing = timing
+            self.last_timing = client.last_timing
         finally:
             client.close()
         output.modelMetadata = output.modelMetadata or ModelMetadata()
@@ -89,6 +108,7 @@ class CodexAppServerClient:
     def __init__(self, config: CodexAppServerConfig) -> None:
         self.config = config
         self.next_id = 1
+        started = time.monotonic()
         self.process = subprocess.Popen(
             list(config.command),
             stdin=subprocess.PIPE,
@@ -97,14 +117,29 @@ class CodexAppServerClient:
             text=True,
             cwd=config.cwd,
         )
+        self.process_start_ms = elapsed_ms(started)
+        self.report_process_start = True
+        self.initialized = False
+        self.last_timing: dict[str, int] | None = None
 
     def review(self, request: ReviewRequest) -> ReviewerOutput:
-        return parse_reviewer_output(self.complete_text(build_codex_review_prompt(request)))
+        text = self.complete_text(build_codex_review_prompt(request))
+        parse_started = time.monotonic()
+        try:
+            return parse_reviewer_output(text)
+        finally:
+            timing = dict(self.last_timing or {})
+            timing["parseMs"] = elapsed_ms(parse_started)
+            self.last_timing = timing
 
     def complete_text(self, prompt: str, *, turn_options: dict[str, Any] | None = None) -> str:
         deadline = time.monotonic() + self.config.timeout_seconds
-        self.request("initialize", {"clientInfo": {"name": "heimdall", "title": "Heimdall", "version": "0.1.0"}}, deadline)
-        self.notify("initialized", {})
+        timing = {"processStartMs": self.process_start_ms if self.report_process_start else 0}
+        self.report_process_start = False
+        initialize_started = time.monotonic()
+        self.ensure_initialized(deadline)
+        timing["initializeMs"] = elapsed_ms(initialize_started)
+        thread_started = time.monotonic()
         thread_result = self.request(
             "thread/start",
             {
@@ -114,11 +149,25 @@ class CodexAppServerClient:
             },
             deadline,
         )
+        timing["threadStartMs"] = elapsed_ms(thread_started)
         thread_id = thread_result["thread"]["id"]
         try:
-            return self._complete_text_in_thread(prompt, thread_id, deadline, turn_options=turn_options)
+            turn_started = time.monotonic()
+            text = self._complete_text_in_thread(prompt, thread_id, deadline, turn_options=turn_options)
+            timing["turnMs"] = elapsed_ms(turn_started)
+            return text
         finally:
+            archive_started = time.monotonic()
             self.archive_thread(thread_id)
+            timing["archiveMs"] = elapsed_ms(archive_started)
+            self.last_timing = timing
+
+    def ensure_initialized(self, deadline: float) -> None:
+        if self.initialized:
+            return
+        self.request("initialize", {"clientInfo": {"name": "heimdall", "title": "Heimdall", "version": "0.1.0"}}, deadline)
+        self.notify("initialized", {})
+        self.initialized = True
 
     def _complete_text_in_thread(
         self,
@@ -355,3 +404,7 @@ def _thread_is_idle(params: Any) -> bool:
 
 def _combined_agent_text(parts: list[str], by_item: dict[str, str]) -> str:
     return "".join([*parts, *by_item.values()])
+
+
+def elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
