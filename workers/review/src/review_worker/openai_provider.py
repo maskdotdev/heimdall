@@ -14,6 +14,7 @@ from contract_types import (
 )
 
 from .ports import ReviewRequest
+from .context_ranking import rank_changed_files, rank_source_snippets
 from .reviewer_output_schema import reviewer_output_response_format
 
 
@@ -110,7 +111,9 @@ def urlopen_transport(endpoint: str, headers: dict[str, str], payload: dict[str,
 
 def build_prompt(request: ReviewRequest) -> str:
     bundle = request.context_bundle
-    changed_files = [summarize_changed_file(file) for file in bundle.diff.files[:MAX_PROMPT_FILES]]
+    ranked_files = rank_changed_files(list(bundle.diff.files))
+    ranked_path_index = {file.path: index for index, file in enumerate(ranked_files)}
+    changed_files = [summarize_changed_file(file) for file in ranked_files[:MAX_PROMPT_FILES]]
     snippets = [
         {
             "path": snippet.location.path,
@@ -119,7 +122,7 @@ def build_prompt(request: ReviewRequest) -> str:
             "reason": snippet.reason,
             "content": snippet.content,
         }
-        for snippet in (bundle.sourceSnippets or [])[:MAX_PROMPT_SNIPPETS]
+        for snippet in rank_source_snippets(list(bundle.sourceSnippets or []), ranked_path_index)[:MAX_PROMPT_SNIPPETS]
     ]
     review_context = {
         "reviewRunId": bundle.reviewRunId,

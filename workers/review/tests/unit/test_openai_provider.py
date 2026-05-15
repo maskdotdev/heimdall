@@ -1,9 +1,11 @@
 import json
 import unittest
 
-from review_worker.context_builder import build_diff_context_bundle
+from review_worker.context_builder import DiffContextOptions, build_diff_context_bundle
 from review_worker.openai_provider import (
+    MAX_PROMPT_FILES,
     PROMPT_VERSION,
+    REVIEW_TEMPERATURE,
     OpenAICompatibleConfig,
     OpenAICompatibleReviewerProvider,
     ReviewerRefusalError,
@@ -20,7 +22,7 @@ class OpenAIProviderTests(unittest.TestCase):
             self.assertEqual(endpoint, "https://llm.example.test/chat/completions")
             self.assertEqual(headers["authorization"], "Bearer test-key")
             self.assertEqual(payload["model"], "test-model")
-            self.assertEqual(payload["temperature"], 0.1)
+            self.assertEqual(payload["temperature"], REVIEW_TEMPERATURE)
             self.assertEqual(payload["response_format"]["type"], "json_schema")
             self.assertTrue(payload["response_format"]["json_schema"]["strict"])
             self.assertEqual(payload["response_format"]["json_schema"]["name"], "heimdall_reviewer_output")
@@ -69,7 +71,7 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual(output.findings[0].title, "Finding")
         self.assertEqual(output.modelMetadata.provider, "openai-compatible")
         self.assertEqual(output.modelMetadata.model, "test-model")
-        self.assertEqual(output.modelMetadata.temperature, 0.1)
+        self.assertEqual(output.modelMetadata.temperature, REVIEW_TEMPERATURE)
         self.assertEqual(output.modelMetadata.promptVersion, PROMPT_VERSION)
 
     def test_raises_clear_error_for_model_refusal(self) -> None:
@@ -122,6 +124,64 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIn("return value or 0", prompt)
         self.assertIn("missing null/None checks", prompt)
         self.assertIn('"includedChangedFileCount"', prompt)
+
+    def test_prompt_prioritizes_high_signal_changed_files_before_truncating(self) -> None:
+        from contract_types import ChangedFile, DiffHunk, DiffLine
+
+        low_signal_files = [
+            ChangedFile(
+                path=f"docs/generated_{index}.md",
+                status="modified",
+                additions=1,
+                deletions=0,
+                language="Markdown",
+                hunks=[
+                    DiffHunk(
+                        oldStart=1,
+                        oldLines=0,
+                        newStart=1,
+                        newLines=1,
+                        lines=[DiffLine(kind="added", newLine=1, content=f"Generated note {index}")],
+                    )
+                ],
+            )
+            for index in range(MAX_PROMPT_FILES)
+        ]
+        high_signal_file = ChangedFile(
+            path="src/app/api/auth_validator.py",
+            status="modified",
+            additions=1,
+            deletions=1,
+            language="Python",
+            hunks=[
+                DiffHunk(
+                    oldStart=10,
+                    oldLines=2,
+                    newStart=10,
+                    newLines=2,
+                    lines=[
+                        DiffLine(kind="deleted", oldLine=10, content="    token = state.get('token')"),
+                        DiffLine(kind="added", newLine=10, content="    token = state['token']"),
+                    ],
+                )
+            ],
+        )
+        bundle = build_diff_context_bundle(
+            "run_1",
+            change_request(),
+            diff([*low_signal_files, high_signal_file]),
+            DiffContextOptions(max_files=MAX_PROMPT_FILES + 1),
+        )
+
+        prompt = build_prompt(ReviewRequest(bundle))
+        review_context = json.loads(prompt.split("\n\n", 2)[1])
+
+        self.assertIn('"path": "src/app/api/auth_validator.py"', prompt)
+        self.assertIn("state['token']", prompt)
+        self.assertNotIn(
+            f"docs/generated_{MAX_PROMPT_FILES - 1}.md",
+            [file["path"] for file in review_context["changedFiles"]],
+        )
 
 
 if __name__ == "__main__":
