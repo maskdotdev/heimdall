@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -171,11 +172,16 @@ class MartianBenchmarkTests(unittest.TestCase):
             judgments=[{"candidateIndex": 0, "goldenIndex": 0, "sameIssue": True}],
         )
 
-        aggregate = aggregate_rows([row])
+        timed_row = replace(row, context_ms=3, review_ms=9, judge_ms=5, total_ms=17)
+        aggregate = aggregate_rows([timed_row])
 
         self.assertEqual(aggregate["truePositives"], 1)
         self.assertEqual(aggregate["precision"], 1.0)
         self.assertEqual(aggregate["recall"], 1.0)
+        self.assertEqual(aggregate["contextMs"], 3)
+        self.assertEqual(aggregate["reviewMs"], 9)
+        self.assertEqual(aggregate["judgeMs"], 5)
+        self.assertEqual(aggregate["totalMs"], 17)
 
     def test_builds_and_parses_judge_output_for_all_pairs(self) -> None:
         pairs = [

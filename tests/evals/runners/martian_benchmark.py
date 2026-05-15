@@ -8,7 +8,7 @@ import os
 import re
 import time
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -100,6 +100,10 @@ class MartianComparisonRow:
     recall: float | None
     duration_ms: int
     error: str | None = None
+    context_ms: int | None = None
+    review_ms: int | None = None
+    judge_ms: int | None = None
+    total_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +199,11 @@ def run_martian_benchmark(
                 rows.append(existing)
                 continue
             started = time.monotonic()
+            context_ms: int | None = None
+            review_ms: int | None = None
+            judge_ms: int | None = None
             try:
+                context_started = time.monotonic()
                 context_bundle = context_bundle_for_case(
                     case,
                     diff_dir=diff_dir,
@@ -203,11 +211,15 @@ def run_martian_benchmark(
                     fetch_diffs=fetch_diffs,
                     repository_root=(repo_roots or {}).get(case.case_id),
                 )
+                context_ms = elapsed_ms(context_started)
+                review_started = time.monotonic()
                 with reviewer_backend_environment(backend, case, repo_roots or {}):
                     result = ReviewEngine(create_reviewer_provider(backend)).review(ReviewRequest(context_bundle=context_bundle))
+                review_ms = elapsed_ms(review_started)
                 duration_ms = elapsed_ms(started)
             except Exception as error:
                 row = failed_row(backend, case.case_id, None, None, None, None, 0, len(case.golden_comments), elapsed_ms(started), error)
+                row = replace(row, context_ms=context_ms, review_ms=review_ms, total_ms=elapsed_ms(started))
                 rows.append(row)
                 write_error_artifacts(run_dir, backend, case, row)
                 continue
@@ -215,11 +227,13 @@ def run_martian_benchmark(
             reviewer_provider = result.raw_output.modelMetadata.provider if result.raw_output.modelMetadata else None
             reviewer_model = result.raw_output.modelMetadata.model if result.raw_output.modelMetadata else None
             try:
+                judge_started = time.monotonic()
                 case_judgments = (
                     judge_findings(case, list(result.findings), judge=judge, max_judge_pairs=max_judge_pairs)
                     if judge
                     else judgments.get(case.case_id, [])
                 )
+                judge_ms = elapsed_ms(judge_started) if judge else 0
             except Exception as error:
                 row = failed_row(
                     backend,
@@ -233,6 +247,7 @@ def run_martian_benchmark(
                     duration_ms,
                     error,
                 )
+                row = replace(row, context_ms=context_ms, review_ms=review_ms, judge_ms=elapsed_ms(judge_started), total_ms=elapsed_ms(started))
                 rows.append(row)
                 write_error_artifacts(run_dir, backend, case, row)
                 continue
@@ -247,6 +262,7 @@ def run_martian_benchmark(
                 judgments=case_judgments,
                 judge=judge,
             )
+            row = replace(row, context_ms=context_ms, review_ms=review_ms, judge_ms=judge_ms, total_ms=elapsed_ms(started))
             rows.append(row)
             write_case_artifacts(run_dir, backend, case, context_bundle, result.raw_output, list(result.findings), row, case_judgments if judge else None)
 
@@ -802,6 +818,7 @@ def failed_row(
         recall=None,
         duration_ms=duration_ms,
         error=f"{type(error).__name__}: {error}",
+        total_ms=duration_ms,
     )
 
 
@@ -870,6 +887,10 @@ def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
     false_negatives = sum(row.false_negatives or 0 for row in judged)
     candidates = sum(row.candidate_count for row in rows)
     goldens = sum(row.golden_count for row in rows)
+    context_ms = sum(row.context_ms or 0 for row in rows)
+    review_ms = sum(row.review_ms or 0 for row in rows)
+    judge_ms = sum(row.judge_ms or 0 for row in rows)
+    total_ms = sum(row.total_ms or row.duration_ms for row in rows)
     return {
         "schemaVersion": "1.0.0",
         "caseCount": len(rows),
@@ -883,6 +904,10 @@ def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
         "precision": true_positives / (true_positives + false_positives) if true_positives + false_positives else None,
         "recall": true_positives / (true_positives + false_negatives) if true_positives + false_negatives else None,
         "durationMs": sum(row.duration_ms for row in rows),
+        "contextMs": context_ms,
+        "reviewMs": review_ms,
+        "judgeMs": judge_ms,
+        "totalMs": total_ms,
     }
 
 
@@ -891,7 +916,25 @@ def write_run_metadata(run_dir: Path, metadata: MartianRunMetadata) -> None:
 
 
 def format_table(rows: list[MartianComparisonRow]) -> str:
-    headers = ["backend", "case", "reviewer", "judge", "candidates", "goldens", "tp", "fp", "fn", "precision", "recall", "ms", "error"]
+    headers = [
+        "backend",
+        "case",
+        "reviewer",
+        "judge",
+        "candidates",
+        "goldens",
+        "tp",
+        "fp",
+        "fn",
+        "precision",
+        "recall",
+        "ms",
+        "context",
+        "review",
+        "judge-ms",
+        "total",
+        "error",
+    ]
     body = [
         [
             row.backend,
@@ -906,6 +949,10 @@ def format_table(rows: list[MartianComparisonRow]) -> str:
             format_optional_float(row.precision),
             format_optional_float(row.recall),
             str(row.duration_ms),
+            format_optional_int(row.context_ms),
+            format_optional_int(row.review_ms),
+            format_optional_int(row.judge_ms),
+            format_optional_int(row.total_ms),
             row.error or "",
         ]
         for row in rows
