@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[3]
 EVALS_DIR = ROOT / "tests" / "evals"
 MARTIAN_RUNS_DIR = EVALS_DIR / "martian-runs"
 DEFAULT_MAX_JUDGE_PAIRS = 100
+AGENTIC_REVIEW_BACKENDS = {"codex-app-server-agentic"}
 HUNK_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_lines>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_lines>\d+))? @@(?P<header>.*)$")
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 STOPWORDS = {
@@ -121,6 +123,7 @@ class MartianRunMetadata:
     force: bool
     max_judge_pairs: int
     max_run_seconds: int | None
+    repo_roots: dict[str, str] | None = None
 
 
 def run_martian_benchmark(
@@ -139,6 +142,7 @@ def run_martian_benchmark(
     judge: str | None = None,
     max_judge_pairs: int = DEFAULT_MAX_JUDGE_PAIRS,
     max_run_seconds: int | None = None,
+    repo_roots: dict[str, Path] | None = None,
     resume: bool = True,
     force: bool = False,
 ) -> list[MartianComparisonRow]:
@@ -161,6 +165,7 @@ def run_martian_benchmark(
             force=force,
             max_judge_pairs=max_judge_pairs,
             max_run_seconds=max_run_seconds,
+            repo_roots={case_id: str(path) for case_id, path in repo_roots.items()} if repo_roots else None,
         ),
     )
     judgments = load_judgments(judgments_path) if judgments_path else {}
@@ -192,7 +197,8 @@ def run_martian_benchmark(
             started = time.monotonic()
             try:
                 context_bundle = context_bundle_for_case(case, diff_dir=diff_dir, cache_diff_dir=cache_diff_dir, fetch_diffs=fetch_diffs)
-                result = ReviewEngine(create_reviewer_provider(backend)).review(ReviewRequest(context_bundle=context_bundle))
+                with reviewer_backend_environment(backend, case, repo_roots or {}):
+                    result = ReviewEngine(create_reviewer_provider(backend)).review(ReviewRequest(context_bundle=context_bundle))
                 duration_ms = elapsed_ms(started)
             except Exception as error:
                 row = failed_row(backend, case.case_id, None, None, None, None, 0, len(case.golden_comments), elapsed_ms(started), error)
@@ -243,6 +249,29 @@ def run_martian_benchmark(
     write_json(run_dir / "summary.json", [asdict(row) for row in rows])
     write_json(run_dir / "aggregate.json", aggregate_rows(rows))
     return rows
+
+
+@contextlib.contextmanager
+def reviewer_backend_environment(backend: str, case: MartianCase, repo_roots: dict[str, Path]):
+    if backend not in AGENTIC_REVIEW_BACKENDS:
+        yield
+        return
+
+    repo_root = repo_roots.get(case.case_id)
+    if repo_root is None:
+        raise ValueError(f"{backend} requires --repo-root {case.case_id}=<clean-checkout>")
+    if not repo_root.is_dir():
+        raise ValueError(f"{backend} repo root does not exist or is not a directory: {repo_root}")
+
+    previous_cwd = os.environ.get("HEIMDALL_CODEX_APP_SERVER_CWD")
+    os.environ["HEIMDALL_CODEX_APP_SERVER_CWD"] = str(repo_root)
+    try:
+        yield
+    finally:
+        if previous_cwd is None:
+            os.environ.pop("HEIMDALL_CODEX_APP_SERVER_CWD", None)
+        else:
+            os.environ["HEIMDALL_CODEX_APP_SERVER_CWD"] = previous_cwd
 
 
 def load_martian_cases(
@@ -806,6 +835,16 @@ def load_existing_row(run_dir: Path, backend: str, case: MartianCase) -> Martian
     return MartianComparisonRow(**load_json(path))
 
 
+def parse_repo_roots(values: list[str]) -> dict[str, Path]:
+    repo_roots: dict[str, Path] = {}
+    for value in values:
+        case_id, separator, path = value.partition("=")
+        if not separator or not case_id or not path:
+            raise ValueError(f"--repo-root must use <case-id>=<path>: {value}")
+        repo_roots[case_id] = Path(path)
+    return repo_roots
+
+
 def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
     judged = [row for row in rows if row.true_positives is not None and row.false_positives is not None and row.false_negatives is not None]
     true_positives = sum(row.true_positives or 0 for row in judged)
@@ -991,6 +1030,12 @@ def main() -> int:
     parser.add_argument("--judge", choices=("codex-app-server",), help="Generate semantic judgments with an opt-in judge backend.")
     parser.add_argument("--max-judge-pairs", type=int, default=DEFAULT_MAX_JUDGE_PAIRS, help="Maximum candidate/golden pairs to judge per case.")
     parser.add_argument("--max-run-seconds", type=int, help="Stop scheduling new cases after this many wall-clock seconds.")
+    parser.add_argument(
+        "--repo-root",
+        action="append",
+        default=[],
+        help="Map a Martian case id to a clean repository checkout as <case-id>=<path>. Required for agentic review backends.",
+    )
     parser.add_argument("--force", action="store_true", help="Rerun cases even when successful comparison artifacts already exist.")
     parser.add_argument("--no-resume", action="store_true", help="Do not skip successful comparison artifacts in the output directory.")
     parser.add_argument("--out", type=Path, help="Output directory for run artifacts.")
@@ -1020,6 +1065,7 @@ def main() -> int:
         judge=args.judge,
         max_judge_pairs=args.max_judge_pairs,
         max_run_seconds=args.max_run_seconds,
+        repo_roots=parse_repo_roots(args.repo_root),
         resume=not args.no_resume,
         force=args.force,
     )

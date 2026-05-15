@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from contract_types import Finding, FindingEvidence, FindingValidation, ReviewerEvidence, ReviewerFinding, ReviewerOutput, SourceLocation
+from review_worker.fake_provider import FakeReviewerProvider
 from martian_benchmark import (
     MartianCase,
     MartianGoldenIssue,
@@ -19,6 +22,7 @@ from martian_benchmark import (
     format_table,
     load_martian_cases,
     parse_judge_output,
+    parse_repo_roots,
     parse_unified_diff,
     run_martian_benchmark,
     write_cached_diff,
@@ -195,6 +199,73 @@ class MartianBenchmarkTests(unittest.TestCase):
         self.assertEqual(rows[0].true_positives, 1)
         self.assertTrue(pairs_exist)
 
+    def test_agentic_martian_backend_requires_explicit_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            golden_dir = root / "golden_comments"
+            diff_dir = root / "diffs"
+            out_dir = root / "run"
+            golden_dir.mkdir()
+            diff_dir.mkdir()
+            write_json(
+                golden_dir / "payments.json",
+                [{"pr_title": "Use request parameter in profile lookup", "url": PULL_URL, "comments": [{"comment": "Expected issue"}]}],
+            )
+            (diff_dir / f"{CASE_ID}.diff").write_text(DIFF_TEXT, encoding="utf-8")
+
+            with patch("martian_benchmark.create_reviewer_provider") as create_provider:
+                rows = run_martian_benchmark(
+                    ["codex-app-server-agentic"],
+                    golden_dir=golden_dir,
+                    diff_dir=diff_dir,
+                    output_dir=out_dir,
+                    match_mode="lexical",
+                )
+
+        create_provider.assert_not_called()
+        self.assertIn("requires --repo-root", rows[0].error or "")
+
+    def test_agentic_martian_backend_sets_case_repo_root_for_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            golden_dir = root / "golden_comments"
+            diff_dir = root / "diffs"
+            repo_root = root / "clean-checkout"
+            out_dir = root / "run"
+            golden_dir.mkdir()
+            diff_dir.mkdir()
+            repo_root.mkdir()
+            write_json(
+                golden_dir / "payments.json",
+                [
+                    {
+                        "pr_title": "Use request parameter in profile lookup",
+                        "url": PULL_URL,
+                        "comments": [{"comment": "The fake reviewer produced deterministic finding output.", "severity": "Low"}],
+                    }
+                ],
+            )
+            (diff_dir / f"{CASE_ID}.diff").write_text(DIFF_TEXT, encoding="utf-8")
+
+            def create_provider(name: str):
+                self.assertEqual(name, "codex-app-server-agentic")
+                self.assertEqual(os.environ.get("HEIMDALL_CODEX_APP_SERVER_CWD"), str(repo_root))
+                return FakeReviewerProvider()
+
+            with patch("martian_benchmark.create_reviewer_provider", side_effect=create_provider):
+                rows = run_martian_benchmark(
+                    ["codex-app-server-agentic"],
+                    golden_dir=golden_dir,
+                    diff_dir=diff_dir,
+                    output_dir=out_dir,
+                    match_mode="lexical",
+                    repo_roots={CASE_ID: repo_root},
+                )
+
+        self.assertEqual(rows[0].backend, "codex-app-server-agentic")
+        self.assertNotIn("HEIMDALL_CODEX_APP_SERVER_CWD", os.environ)
+        self.assertEqual(rows[0].true_positives, 1)
+
     def test_run_martian_benchmark_resumes_successful_case_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -250,6 +321,12 @@ class MartianBenchmarkTests(unittest.TestCase):
             rows = run_martian_benchmark(["fake"], golden_dir=golden_dir, diff_dir=diff_dir, output_dir=out_dir, max_run_seconds=0)
 
         self.assertIn("max run seconds exceeded", rows[0].error or "")
+
+    def test_parse_repo_roots_requires_case_path_mapping(self) -> None:
+        self.assertEqual(parse_repo_roots(["case_1=/repo"])["case_1"], Path("/repo"))
+
+        with self.assertRaisesRegex(ValueError, "<case-id>=<path>"):
+            parse_repo_roots(["/repo"])
 
 
 def martian_case() -> MartianCase:
