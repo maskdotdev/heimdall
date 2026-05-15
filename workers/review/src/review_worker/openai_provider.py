@@ -312,12 +312,7 @@ def summarize_changed_file(changed_file: Any) -> dict[str, Any]:
                 "newStart": hunk.newStart,
                 "newLines": hunk.newLines,
                 "lines": [
-                    {
-                        "kind": line.kind,
-                        "oldLine": line.oldLine,
-                        "newLine": line.newLine,
-                        "content": line.content,
-                    }
+                    summarize_diff_line(line)
                     for line in hunk.lines
                     if line.kind in ("context", "added", "deleted")
                 ],
@@ -325,6 +320,18 @@ def summarize_changed_file(changed_file: Any) -> dict[str, Any]:
             for hunk in changed_file.hunks
         ],
     }
+
+
+def summarize_diff_line(line: Any) -> dict[str, Any]:
+    summary = {
+        "kind": line.kind,
+        "content": line.content,
+    }
+    if line.oldLine is not None:
+        summary["oldLine"] = line.oldLine
+    if line.newLine is not None:
+        summary["newLine"] = line.newLine
+    return summary
 
 
 def select_prompt_snippets(snippets: list[Any], *, max_snippets: int) -> list[Any]:

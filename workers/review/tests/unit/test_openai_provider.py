@@ -131,6 +131,12 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIn('"includedChangedFileCount"', prompt)
         self.assertIn('"scannerSignalCount"', prompt)
 
+        review_context = json.loads(prompt.split("\n\n", 2)[1])
+        lines = review_context["changedFiles"][0]["hunks"][0]["lines"]
+        self.assertEqual(lines[0], {"kind": "context", "oldLine": 1, "newLine": 1, "content": "def handle(value):"})
+        self.assertEqual(lines[1], {"kind": "deleted", "oldLine": 2, "content": "    return value or 0"})
+        self.assertEqual(lines[2], {"kind": "added", "newLine": 2, "content": "    return value.id"})
+
     def test_prompt_includes_scanner_signals(self) -> None:
         from contract_types import ChangedFile, DiffHunk, DiffLine
 
