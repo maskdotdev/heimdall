@@ -23,7 +23,6 @@ PROMPT_VERSION = "baseline-reviewer-v1"
 REVIEW_TEMPERATURE = 0.1
 MAX_PROMPT_FILES = 80
 MAX_PROMPT_SNIPPETS = 50
-MAX_PROMPT_CHANGED_SNIPPETS = 4
 MAX_PROMPT_RELATED_SNIPPETS = 16
 SYSTEM_PROMPT = (
     "You are Heimdall's code reviewer. The API enforces the reviewer output JSON schema. "
@@ -247,12 +246,12 @@ def select_prompt_snippets(snippets: list[Any], *, max_snippets: int) -> list[An
 
     related = [snippet for snippet in snippets if snippet.reason != "changed-file"]
     if not related:
-        return []
+        return snippets[:max_snippets]
 
-    related_budget = min(MAX_PROMPT_RELATED_SNIPPETS, max_snippets, len(related))
-    changed_budget = min(MAX_PROMPT_CHANGED_SNIPPETS, max_snippets - related_budget)
+    related_budget = min(MAX_PROMPT_RELATED_SNIPPETS, max(max_snippets // 3, 1), len(related))
+    changed_budget = max_snippets - related_budget
     selected = [snippet for snippet in snippets if snippet.reason == "changed-file"][:changed_budget]
-    selected.extend(select_related_prompt_snippets(related, max_snippets=related_budget))
+    selected.extend(select_related_prompt_snippets(related, max_snippets=max_snippets - len(selected)))
     return selected
 
 

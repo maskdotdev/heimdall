@@ -425,7 +425,7 @@ class OpenAIProviderTests(unittest.TestCase):
         review_context = json.loads(prompt.split("\n\n", 2)[1])
 
         self.assertEqual(len(review_context["changedFiles"]), 1)
-        self.assertEqual(len(review_context["sourceSnippets"]), 0)
+        self.assertEqual(len(review_context["sourceSnippets"]), 1)
 
 
 if __name__ == "__main__":
