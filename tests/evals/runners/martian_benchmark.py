@@ -457,8 +457,14 @@ def load_cases_from_benchmark_data(path: Path) -> list[MartianCase]:
         value.setdefault("url", url)
         value.setdefault("comments", value.get("golden_comments", []))
         value.setdefault("source_file", value.get("golden_source_file"))
+        if not is_supported_pull_request_url(value.get("original_url") or value.get("url")):
+            continue
         cases.append(case_from_entry(value, source_file=value.get("source_file")))
     return cases
+
+
+def is_supported_pull_request_url(value: object) -> bool:
+    return isinstance(value, str) and "/pull/" in value
 
 
 def case_from_entry(entry: dict[str, Any], *, source_file: str | None) -> MartianCase:

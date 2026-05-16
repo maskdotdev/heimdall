@@ -87,6 +87,29 @@ class MartianBenchmarkTests(unittest.TestCase):
         self.assertEqual(cases[0].case_id, CASE_ID)
         self.assertEqual(cases[0].source_repo, "payments")
 
+    def test_loads_only_pr_cases_from_martian_benchmark_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "benchmark_data.json"
+            write_json(
+                path,
+                {
+                    PULL_URL: {
+                        "pr_title": "Use request parameter in profile lookup",
+                        "source_repo": "payments",
+                        "golden_comments": [{"comment": "The request id is interpolated into SQL.", "severity": "High"}],
+                    },
+                    "https://github.com/acme/payments/commit/abc123": {
+                        "pr_title": "Unsupported commit case",
+                        "source_repo": "payments",
+                        "golden_comments": [{"comment": "Expected issue.", "severity": "Low"}],
+                    },
+                },
+            )
+
+            cases = load_martian_cases(benchmark_data=path)
+
+        self.assertEqual([case.case_id for case in cases], [CASE_ID])
+
     def test_parses_unified_diff_into_heimdall_diff_contract(self) -> None:
         diff = parse_unified_diff(DIFF_TEXT, diff_id="diff_1", change_request_id="cr_1", base_sha="0000000", head_sha="1111111")
 

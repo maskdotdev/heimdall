@@ -18,6 +18,7 @@
     "review:live": "PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 tests/evals/runners/live_review.py",
     "review:martian": "PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 tests/evals/runners/martian_benchmark.py",
     "review:martian:compare": "PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 tests/evals/runners/martian_compare_runs.py",
+    "review:martian:prepare-repos": "PYTHONPATH=contracts/generated/python:workers/review/src:tests/evals/runners python3 tests/evals/runners/prepare_martian_repos.py",
     "runtime:test": "pnpm api:test && pnpm python:test",
     "check": "pnpm contracts:check && pnpm runtime:typecheck && pnpm runtime:build && pnpm runtime:test"
   },
