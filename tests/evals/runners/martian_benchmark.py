@@ -131,6 +131,7 @@ class MartianRunMetadata:
     max_judge_pairs: int
     max_run_seconds: int | None
     repo_roots: dict[str, str] | None = None
+    repo_root_dir: str | None = None
     git_head: str | None = None
     reviewer_config: dict[str, str] | None = None
 
@@ -152,10 +153,12 @@ def run_martian_benchmark(
     max_judge_pairs: int = DEFAULT_MAX_JUDGE_PAIRS,
     max_run_seconds: int | None = None,
     repo_roots: dict[str, Path] | None = None,
+    repo_root_dir: Path | None = None,
     resume: bool = True,
     force: bool = False,
 ) -> list[MartianComparisonRow]:
     cases = load_martian_cases(golden_dir=golden_dir, benchmark_data=benchmark_data, case_ids=case_ids, limit=limit)
+    resolved_repo_roots = resolve_case_repo_roots(cases, explicit_roots=repo_roots or {}, repo_root_dir=repo_root_dir)
     run_dir = output_dir or MARTIAN_RUNS_DIR / time.strftime("%Y%m%d-%H%M%S")
     run_started = time.monotonic()
     write_run_metadata(
@@ -174,7 +177,8 @@ def run_martian_benchmark(
             force=force,
             max_judge_pairs=max_judge_pairs,
             max_run_seconds=max_run_seconds,
-            repo_roots={case_id: str(path) for case_id, path in repo_roots.items()} if repo_roots else None,
+            repo_roots={case_id: str(path) for case_id, path in resolved_repo_roots.items()} or None,
+            repo_root_dir=str(repo_root_dir) if repo_root_dir else None,
             git_head=git_head(),
             reviewer_config=safe_reviewer_config(),
         ),
@@ -226,12 +230,12 @@ def run_martian_benchmark(
                         diff_dir=diff_dir,
                         cache_diff_dir=cache_diff_dir,
                         fetch_diffs=fetch_diffs,
-                        repository_root=(repo_roots or {}).get(case.case_id),
+                        repository_root=resolved_repo_roots.get(case.case_id),
                     )
                     context_ms = elapsed_ms(context_started)
                     review_started = time.monotonic()
                     if backend in AGENTIC_REVIEW_BACKENDS:
-                        with reviewer_backend_environment(backend, case, repo_roots or {}):
+                        with reviewer_backend_environment(backend, case, resolved_repo_roots):
                             case_provider = create_reviewer_provider(backend)
                             active_provider = case_provider
                             try:
@@ -973,6 +977,25 @@ def parse_repo_roots(values: list[str]) -> dict[str, Path]:
     return repo_roots
 
 
+def resolve_case_repo_roots(
+    cases: list[MartianCase],
+    *,
+    explicit_roots: dict[str, Path],
+    repo_root_dir: Path | None,
+) -> dict[str, Path]:
+    repo_roots = dict(explicit_roots)
+    if repo_root_dir is None:
+        return repo_roots
+
+    for case in cases:
+        if case.case_id in repo_roots:
+            continue
+        candidate = repo_root_dir / case.case_id
+        if candidate.is_dir():
+            repo_roots[case.case_id] = candidate
+    return repo_roots
+
+
 def aggregate_rows(rows: list[MartianComparisonRow]) -> dict[str, Any]:
     judged = [row for row in rows if row.true_positives is not None and row.false_positives is not None and row.false_negatives is not None]
     true_positives = sum(row.true_positives or 0 for row in judged)
@@ -1224,6 +1247,11 @@ def main() -> int:
         default=[],
         help="Map a Martian case id to a clean repository checkout as <case-id>=<path>. Required for agentic review backends.",
     )
+    parser.add_argument(
+        "--repo-root-dir",
+        type=Path,
+        help="Directory containing clean repository checkouts named by Martian case id. Explicit --repo-root values take precedence.",
+    )
     parser.add_argument("--force", action="store_true", help="Rerun cases even when successful comparison artifacts already exist.")
     parser.add_argument("--no-resume", action="store_true", help="Do not skip successful comparison artifacts in the output directory.")
     parser.add_argument("--out", type=Path, help="Output directory for run artifacts.")
@@ -1254,6 +1282,7 @@ def main() -> int:
         max_judge_pairs=args.max_judge_pairs,
         max_run_seconds=args.max_run_seconds,
         repo_roots=parse_repo_roots(args.repo_root),
+        repo_root_dir=args.repo_root_dir,
         resume=not args.no_resume,
         force=args.force,
     )

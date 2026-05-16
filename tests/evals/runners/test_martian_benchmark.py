@@ -25,6 +25,7 @@ from martian_benchmark import (
     parse_judge_output,
     parse_repo_roots,
     parse_unified_diff,
+    resolve_case_repo_roots,
     run_martian_benchmark,
     write_cached_diff,
 )
@@ -406,6 +407,28 @@ class MartianBenchmarkTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "<case-id>=<path>"):
             parse_repo_roots(["/repo"])
+
+    def test_resolve_case_repo_roots_maps_existing_case_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inferred = root / CASE_ID
+            explicit = root / "explicit"
+            inferred.mkdir()
+            explicit.mkdir()
+
+            resolved = resolve_case_repo_roots(
+                [martian_case()],
+                explicit_roots={},
+                repo_root_dir=root,
+            )
+            explicit_resolved = resolve_case_repo_roots(
+                [martian_case()],
+                explicit_roots={CASE_ID: explicit},
+                repo_root_dir=root,
+            )
+
+        self.assertEqual(resolved[CASE_ID], inferred)
+        self.assertEqual(explicit_resolved[CASE_ID], explicit)
 
 
 def martian_case() -> MartianCase:
