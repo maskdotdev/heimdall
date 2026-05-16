@@ -283,6 +283,67 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertIn("def save_profile", enclosing.content)
         self.assertIn("class ProfileStatus", dependency.content)
 
+    def test_repository_exploration_ignores_low_signal_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "app").mkdir()
+            (root / "app" / "a_noise.py").write_text(
+                "\n".join(
+                    [
+                        "def unrelated(event, error):",
+                        "    return event or error",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "app" / "handler.py").write_text(
+                "\n".join(
+                    [
+                        "def handle_payment_failure(event, error):",
+                        "    return notify_billing(event, error)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            bundle = build_diff_context_bundle(
+                "run_1",
+                change_request(),
+                diff(
+                    [
+                        ChangedFile(
+                            path="app/payments.py",
+                            status="modified",
+                            additions=1,
+                            deletions=0,
+                            language="Python",
+                            hunks=[
+                                DiffHunk(
+                                    oldStart=1,
+                                    oldLines=2,
+                                    newStart=1,
+                                    newLines=3,
+                                    lines=[
+                                        DiffLine(kind="context", oldLine=1, newLine=1, content="def process_payment(event, error):"),
+                                        DiffLine(kind="context", oldLine=2, newLine=2, content="    matched = events.find(event)"),
+                                        DiffLine(kind="added", newLine=3, content="    return handle_payment_failure(event, error)"),
+                                    ],
+                                )
+                            ],
+                        )
+                    ]
+                ),
+                DiffContextOptions(repository_root=str(root), max_related_snippets=1, max_related_tests=1),
+            )
+
+        related_paths = [
+            snippet.location.path
+            for snippet in bundle.sourceSnippets or []
+            if snippet.reason in {"dependency", "related-symbol"}
+        ]
+
+        self.assertEqual(related_paths, ["app/handler.py"])
+
     def test_repository_exploration_marks_truncation_at_file_scan_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
