@@ -63,6 +63,37 @@ class MartianCompareRunsTests(unittest.TestCase):
         self.assertIn("-20", markdown)
         self.assertIn("-300", markdown)
 
+    def test_compare_runs_reports_overlap_when_case_sets_differ(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = root / "baseline"
+            candidate = root / "candidate"
+            write_run(
+                baseline,
+                case_rows=[
+                    case_row("case_a", candidates=1, goldens=1, tp=1, fp=0, fn=0, turn_ms=100, prompt_chars=1000),
+                    case_row("baseline_only", candidates=1, goldens=1, tp=1, fp=0, fn=0, turn_ms=50, prompt_chars=500),
+                ],
+            )
+            write_run(
+                candidate,
+                case_rows=[
+                    case_row("case_a", candidates=2, goldens=1, tp=1, fp=1, fn=0, turn_ms=80, prompt_chars=700),
+                    case_row("candidate_only", candidates=3, goldens=3, tp=0, fp=3, fn=3, turn_ms=500, prompt_chars=5000),
+                ],
+            )
+
+            report = compare_runs(baseline, candidate, backend="codex-app-server")
+            markdown = render_markdown(report)
+
+        self.assertFalse(report["caseSet"]["sameCases"])
+        self.assertEqual(report["caseSet"]["overlapCount"], 1)
+        self.assertEqual(report["caseSet"]["baselineOnly"], ["baseline_only"])
+        self.assertEqual(report["caseSet"]["candidateOnly"], ["candidate_only"])
+        self.assertEqual(report["overlapAggregateDelta"]["falsePositives"]["delta"], 1)
+        self.assertIn("compared common-case overlap", markdown)
+        self.assertIn("Raw aggregate deltas are omitted", markdown)
+
 
 def write_run(
     run_dir: Path,

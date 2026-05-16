@@ -33,7 +33,10 @@ def compare_runs(baseline_dir: Path, candidate_dir: Path, *, backend: str | None
     candidate_backend = resolve_backend_dir(candidate_dir, backend)
     baseline_cases = load_cases(baseline_backend)
     candidate_cases = load_cases(candidate_backend)
-    case_ids = sorted(set(baseline_cases) | set(candidate_cases))
+    baseline_case_ids = set(baseline_cases)
+    candidate_case_ids = set(candidate_cases)
+    shared_case_ids = baseline_case_ids & candidate_case_ids
+    case_ids = sorted(baseline_case_ids | candidate_case_ids)
     deltas = [
         compare_case(case_id, baseline_cases.get(case_id), candidate_cases.get(case_id))
         for case_id in case_ids
@@ -47,7 +50,12 @@ def compare_runs(baseline_dir: Path, candidate_dir: Path, *, backend: str | None
         "baseline": run_summary(baseline_dir),
         "candidate": run_summary(candidate_dir),
         "backend": candidate_backend.name,
+        "caseSet": case_set_summary(baseline_case_ids, candidate_case_ids),
         "aggregateDelta": aggregate_delta(load_optional_json(baseline_dir / "aggregate.json"), load_optional_json(candidate_dir / "aggregate.json")),
+        "overlapAggregateDelta": aggregate_delta(
+            aggregate_cases(baseline_cases, shared_case_ids),
+            aggregate_cases(candidate_cases, shared_case_ids),
+        ),
         "cases": [case_delta_to_json(delta) for delta in deltas],
     }
 
@@ -164,6 +172,60 @@ def aggregate_delta(baseline: dict[str, Any] | None, candidate: dict[str, Any] |
     return result
 
 
+def case_set_summary(baseline_case_ids: set[str], candidate_case_ids: set[str]) -> dict[str, Any]:
+    baseline_only = sorted(baseline_case_ids - candidate_case_ids)
+    candidate_only = sorted(candidate_case_ids - baseline_case_ids)
+    return {
+        "baselineCount": len(baseline_case_ids),
+        "candidateCount": len(candidate_case_ids),
+        "overlapCount": len(baseline_case_ids & candidate_case_ids),
+        "baselineOnly": baseline_only,
+        "candidateOnly": candidate_only,
+        "sameCases": not baseline_only and not candidate_only,
+    }
+
+
+def aggregate_cases(cases: dict[str, RunCase], case_ids: set[str]) -> dict[str, Any] | None:
+    rows = [cases[case_id].row for case_id in sorted(case_ids) if case_id in cases]
+    if not rows:
+        return None
+
+    candidate_count = sum_int(rows, "candidate_count")
+    true_positives = sum_int(rows, "true_positives")
+    false_positives = sum_int(rows, "false_positives")
+    false_negatives = sum_int(rows, "false_negatives")
+    return {
+        "schemaVersion": "1.0.0",
+        "caseCount": len(rows),
+        "errorCount": sum(1 for row in rows if row.get("error")),
+        "candidateCount": candidate_count,
+        "goldenCount": sum_int(rows, "golden_count"),
+        "truePositives": true_positives,
+        "falsePositives": false_positives,
+        "falseNegatives": false_negatives,
+        "precision": true_positives / (true_positives + false_positives) if true_positives + false_positives else 0.0,
+        "recall": true_positives / (true_positives + false_negatives) if true_positives + false_negatives else 0.0,
+        "reviewMs": sum_int(rows, "review_ms"),
+        "judgeMs": sum_int(rows, "judge_ms"),
+        "durationMs": sum_int(rows, "duration_ms"),
+        "reviewPhaseMs": {"turnMs": sum_nested_int(rows, "review_phase_ms", "turnMs")},
+        "reviewInputProfile": {"promptChars": sum_nested_int(rows, "review_input_profile", "promptChars")},
+    }
+
+
+def sum_int(rows: list[dict[str, Any]], key: str) -> int:
+    return sum(int(value) for row in rows if isinstance((value := row.get(key)), int))
+
+
+def sum_nested_int(rows: list[dict[str, Any]], key: str, nested_key: str) -> int:
+    total = 0
+    for row in rows:
+        value = row.get(key)
+        if isinstance(value, dict) and isinstance(value.get(nested_key), int):
+            total += int(value[nested_key])
+    return total
+
+
 def classify_case(row: dict[str, Any] | None) -> str:
     if row is None:
         return "missing"
@@ -239,11 +301,26 @@ def case_delta_to_json(delta: CaseDelta) -> dict[str, Any]:
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    aggregate = report["aggregateDelta"]
+    case_set = report.get("caseSet") if isinstance(report.get("caseSet"), dict) else {}
+    same_cases = case_set.get("sameCases") is True
+    aggregate = report["aggregateDelta"] if same_cases else report["overlapAggregateDelta"]
     lines = [
         f"# Martian Run Comparison",
         "",
         f"- Backend: `{report['backend']}`",
+    ]
+    if not same_cases:
+        lines.extend(
+            [
+                "- Case set: compared common-case overlap "
+                f"({case_set.get('overlapCount', 0)} shared, "
+                f"{len(case_set.get('baselineOnly', []))} baseline-only, "
+                f"{len(case_set.get('candidateOnly', []))} candidate-only).",
+                "- Raw aggregate deltas are omitted from the headline because the run slices differ.",
+            ]
+        )
+    lines.extend(
+        [
         metric_line("Precision", aggregate["precision"]),
         metric_line("Recall", aggregate["recall"]),
         metric_line("F1", aggregate["f1"]),
@@ -256,7 +333,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "| Case | Class | TP | FP | FN | Turn ms | Prompt chars |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
-    ]
+        ]
+    )
     for case in report["cases"]:
         delta = case["delta"]
         lines.append(
