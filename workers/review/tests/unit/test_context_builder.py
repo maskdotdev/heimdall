@@ -101,6 +101,42 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(rule_ids, ["python-eager-default-call", "ordered-inputs-with-mapping-values", "nested-metadata-indexing"])
         self.assertEqual((bundle.scannerSignals or [])[0].location.path, "review.py")
 
+    def test_adds_python_scanner_signal_for_mutated_copy_original_use(self) -> None:
+        bundle = build_diff_context_bundle(
+            "run_1",
+            change_request(),
+            diff(
+                [
+                    ChangedFile(
+                        path="review.py",
+                        status="modified",
+                        additions=4,
+                        deletions=0,
+                        language="Python",
+                        hunks=[
+                            DiffHunk(
+                                oldStart=1,
+                                oldLines=0,
+                                newStart=1,
+                                newLines=4,
+                                lines=[
+                                    DiffLine(kind="added", newLine=1, content="config = monitor.config.copy()"),
+                                    DiffLine(kind="added", newLine=2, content='config["schedule_type"] = monitor.get_schedule_type_display()'),
+                                    DiffLine(kind="added", newLine=3, content="return {"),
+                                    DiffLine(kind="added", newLine=4, content='    "config": monitor.config,'),
+                                ],
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        signal = next(signal for signal in bundle.scannerSignals or [] if signal.ruleId == "mutated-copy-original-used")
+
+        self.assertEqual(signal.location.path, "review.py")
+        self.assertEqual(signal.location.startLine, 4)
+
     def test_adds_bounded_repository_exploration_context_when_repo_root_is_provided(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

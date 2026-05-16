@@ -156,6 +156,42 @@ class ReviewEngineTests(unittest.TestCase):
         self.assertEqual(result.raw_output.findings[0].title, "Guard nested metadata before indexing")
         self.assertEqual(result.findings[0].evidence[0].kind, "scanner-signal")
 
+    def test_promotes_mutated_copy_original_use_signal_when_model_misses_it(self) -> None:
+        bundle = build_diff_context_bundle(
+            "run_1",
+            change_request(),
+            diff(
+                [
+                    ChangedFile(
+                        path="review.py",
+                        status="modified",
+                        additions=4,
+                        deletions=0,
+                        language="Python",
+                        hunks=[
+                            DiffHunk(
+                                oldStart=1,
+                                oldLines=0,
+                                newStart=1,
+                                newLines=4,
+                                lines=[
+                                    DiffLine(kind="added", newLine=1, content="config = monitor.config.copy()"),
+                                    DiffLine(kind="added", newLine=2, content='config["schedule_type"] = monitor.get_schedule_type_display()'),
+                                    DiffLine(kind="added", newLine=3, content="return {"),
+                                    DiffLine(kind="added", newLine=4, content='    "config": monitor.config,'),
+                                ],
+                            )
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        result = ReviewEngine(EmptyReviewerProvider()).review(ReviewRequest(bundle))
+
+        self.assertEqual(result.raw_output.findings[0].title, "Use the mutated copy instead of the original object")
+        self.assertEqual(result.findings[0].evidence[0].kind, "scanner-signal")
+
 
 class EmptyReviewerProvider:
     def review(self, request: ReviewRequest) -> ReviewerOutput:

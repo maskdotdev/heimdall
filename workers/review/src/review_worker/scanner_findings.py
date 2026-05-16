@@ -3,7 +3,7 @@ from __future__ import annotations
 from contract_types import ContextBundle, ReviewerEvidence, ReviewerFinding, ReviewerOutput, ScannerSignal, SourceLocation
 
 
-PROMOTED_SCANNER_RULE_IDS = {"nested-metadata-indexing", "ordered-inputs-with-mapping-values"}
+PROMOTED_SCANNER_RULE_IDS = {"mutated-copy-original-used", "nested-metadata-indexing", "ordered-inputs-with-mapping-values"}
 
 
 def add_scanner_fallback_findings(context_bundle: ContextBundle, output: ReviewerOutput) -> ReviewerOutput:
@@ -51,6 +51,28 @@ def _finding_from_signal(signal: ScannerSignal) -> ReviewerFinding:
                 ),
             ],
             suggestedFix="Read each metadata level with type checks or safe accessors before comparing nested values.",
+        )
+    if signal.ruleId == "mutated-copy-original-used":
+        return ReviewerFinding(
+            title="Use the mutated copy instead of the original object",
+            body=(
+                "The changed code creates a copy, mutates that copy, and then uses the original object in the returned "
+                "value or payload. The mutation is therefore ignored by callers, so the new display or normalization "
+                "logic has no effect."
+            ),
+            category="correctness",
+            severity=signal.severity,
+            confidence="high",
+            location=location,
+            evidence=[
+                ReviewerEvidence(kind="scanner-signal", summary=signal.message, location=location),
+                ReviewerEvidence(
+                    kind="diff-line",
+                    summary="The changed line uses the original object after a copied value was mutated.",
+                    location=location,
+                ),
+            ],
+            suggestedFix="Use the mutated copy in the returned value or payload, or remove the unused copy.",
         )
     return ReviewerFinding(
         title="Mapping values can be paired with the wrong ordered input",

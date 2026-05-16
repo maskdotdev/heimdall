@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,9 @@ from contract_types import (
 )
 
 from .repository_explorer import RepositoryExplorationOptions, explore_repository_context
+
+
+COPY_ASSIGN_RE = re.compile(r"^\s*(?P<copy>[A-Za-z_]\w*)\s*=\s*(?P<source>[A-Za-z_][\w.]*)\.copy\(\)\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,11 +129,34 @@ def scanner_signals_for_hunk(commit_sha: str, path: str, hunk) -> list[ScannerSi
         return []
 
     signals: list[ScannerSignal] = []
+    copied_mappings: dict[str, tuple[str, SourceLocation]] = {}
+    mutated_copies: set[str] = set()
     for line in hunk.lines:
         if line.kind != "added" or line.newLine is None:
             continue
         content = line.content.strip()
         location = SourceLocation(path=path, startLine=line.newLine, endLine=line.newLine, commitSha=commit_sha)
+        copy_match = COPY_ASSIGN_RE.match(line.content)
+        if copy_match is not None and copy_match.group("copy") == copy_match.group("source").rsplit(".", 1)[-1]:
+            copied_mappings[copy_match.group("copy")] = (copy_match.group("source"), location)
+            continue
+        for copy_name in copied_mappings:
+            if content.startswith(f"{copy_name}["):
+                mutated_copies.add(copy_name)
+        for copy_name, (source_expression, copy_location) in copied_mappings.items():
+            if copy_name in mutated_copies and _uses_original_after_mutating_copy(content, source_expression):
+                signals.append(
+                    ScannerSignal(
+                        tool="custom",
+                        ruleId="mutated-copy-original-used",
+                        severity="medium",
+                        message=(
+                            "The changed code mutates a copy but later uses the original object. Use the mutated copy "
+                            "when returning or building the payload, or remove the unused copy."
+                        ),
+                        location=location,
+                    )
+                )
         if _has_eager_default_call(content):
             signals.append(
                 ScannerSignal(
@@ -181,3 +208,9 @@ def _zips_mapping_values_with_ordered_inputs(content: str) -> bool:
 
 def _indexes_nested_metadata(content: str) -> bool:
     return ".metadata[" in content and content.count("[") >= 2
+
+
+def _uses_original_after_mutating_copy(content: str, source_expression: str) -> bool:
+    if source_expression not in content:
+        return False
+    return content.startswith("return ") or f": {source_expression}" in content or f":{source_expression}" in content
