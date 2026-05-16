@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.request
 from dataclasses import asdict, dataclass, replace
@@ -130,6 +131,8 @@ class MartianRunMetadata:
     max_judge_pairs: int
     max_run_seconds: int | None
     repo_roots: dict[str, str] | None = None
+    git_head: str | None = None
+    reviewer_config: dict[str, str] | None = None
 
 
 def run_martian_benchmark(
@@ -172,6 +175,8 @@ def run_martian_benchmark(
             max_judge_pairs=max_judge_pairs,
             max_run_seconds=max_run_seconds,
             repo_roots={case_id: str(path) for case_id, path in repo_roots.items()} if repo_roots else None,
+            git_head=git_head(),
+            reviewer_config=safe_reviewer_config(),
         ),
     )
     judgments = load_judgments(judgments_path) if judgments_path else {}
@@ -1174,6 +1179,26 @@ def write_json(path: Path, value: Any) -> None:
 
 def elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def git_head() -> str | None:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def safe_reviewer_config() -> dict[str, str]:
+    keys = (
+        "HEIMDALL_CODEX_APP_SERVER_MODEL",
+        "HEIMDALL_CODEX_APP_SERVER_REASONING_EFFORT",
+        "HEIMDALL_CODEX_APP_SERVER_MAX_REVIEWS_PER_PROCESS",
+        "HEIMDALL_CODEX_APP_SERVER_PROMPT_MAX_FILES",
+        "HEIMDALL_CODEX_APP_SERVER_PROMPT_MAX_SNIPPETS",
+        "HEIMDALL_CODEX_APP_SERVER_LARGE_PROMPT_CHAR_THRESHOLD",
+        "HEIMDALL_CODEX_APP_SERVER_LARGE_PROMPT_MAX_FILES",
+    )
+    return {key: value for key in keys if (value := os.environ.get(key)) is not None}
 
 
 def main() -> int:

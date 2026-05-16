@@ -367,10 +367,11 @@ class MartianBenchmarkTests(unittest.TestCase):
             first_rows = run_martian_benchmark(["fake"], golden_dir=golden_dir, diff_dir=diff_dir, output_dir=out_dir, match_mode="lexical")
             (diff_dir / f"{CASE_ID}.diff").write_text("not a diff", encoding="utf-8")
             resumed_rows = run_martian_benchmark(["fake"], golden_dir=golden_dir, diff_dir=diff_dir, output_dir=out_dir, match_mode="lexical")
-            metadata_exists = (out_dir / "run-metadata.json").exists()
+            metadata = json.loads((out_dir / "run-metadata.json").read_text(encoding="utf-8"))
 
         self.assertEqual(first_rows, resumed_rows)
-        self.assertTrue(metadata_exists)
+        self.assertIn("git_head", metadata)
+        self.assertIn("reviewer_config", metadata)
 
     def test_judge_pair_guardrail_runs_before_model_call(self) -> None:
         with self.assertRaisesRegex(ValueError, "exceeds --max-judge-pairs"):
